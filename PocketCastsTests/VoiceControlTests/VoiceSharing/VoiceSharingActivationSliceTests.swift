@@ -128,6 +128,10 @@ final class VoiceSharingActivationSliceTests: XCTestCase {
         withCoordinator { coordinator in
             if VoiceSharingFirebaseApp.existing() != nil { return } // named present: covered below
             VoiceSharingFirebaseApp.lastPolicyRefreshOutcome = nil
+            // The exchange defers at launch, before this path: it needs an account lifecycle, and a
+            // process with no session, none readable, and none settled has none to settle under.
+            VoiceSharingSessionGeneration.shared.ensureLifecycle()
+            defer { VoiceSharingSessionGeneration.shared.clear() }
             let done = expectation(description: "exchange completes")
             VoiceSharingFirebaseApp.performPolicyExchange(coordinator: coordinator) { fresh in
                 XCTAssertFalse(fresh)
@@ -150,6 +154,10 @@ final class VoiceSharingActivationSliceTests: XCTestCase {
             }
             defer { VoiceSharingFirebaseApp.policyFetchActor = nil }
             VoiceSharingFirebaseApp.lastPolicyRefreshOutcome = nil
+            // The exchange defers at launch, before this path: it needs an account lifecycle, and a
+            // process with no session, none readable, and none settled has none to settle under.
+            VoiceSharingSessionGeneration.shared.ensureLifecycle()
+            defer { VoiceSharingSessionGeneration.shared.clear() }
             let done = expectation(description: "exchange completes")
             VoiceSharingFirebaseApp.performPolicyExchange(coordinator: coordinator) { fresh in
                 XCTAssertFalse(fresh)

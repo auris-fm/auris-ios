@@ -40,6 +40,7 @@ final class VoiceSharingRestoredSessionTests: XCTestCase {
         }
         let settlements = Cell(0)
         coordinator.initiateIdentityRecoveryRefresh = { settlements.mutate({ $0 += 1 }) }
+        coordinator.settledAccountIdentityProvider = { "account-A" }
 
         coordinator.startRestoredSessionRetry()
         // Let at least one poll tick run (the host is signed out, so it keeps polling).
@@ -49,7 +50,8 @@ final class VoiceSharingRestoredSessionTests: XCTestCase {
         if ticks.value > 0 { waitUp.fulfill() }
         wait(for: [waitUp], timeout: 2)
 
-        // A normal login notification settling the identity:
+        // A normal login notification settling the identity (observed, not derived):
+        coordinator.observedLoginChange = true
         coordinator.handleLoginStateDidChange(signedIn: true)
         XCTAssertEqual(settlements.value, 1, "the login settles exactly once")
         let ticksAtSettlement = ticks.value
@@ -74,17 +76,17 @@ final class VoiceSharingRestoredSessionTests: XCTestCase {
         coordinator.restoredSessionAuthReadable = { readable }
         coordinator.settledAccountIdentityProvider = { "account-A" }
 
-        // The poll settles the restored session late.
+        // The restored session settles through the ONE path that can prove a sign-in: an observed
+        // login change. The poll keeps carrying debt but never settles on derived state.
         coordinator.startRestoredSessionRetry()
-        let deadline = Date().addingTimeInterval(2)
-        while settlements.value == 0 && Date() < deadline {
-            if !readable { readable = true }
-            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
-        }
-        XCTAssertEqual(settlements.value, 1, "the late-restored session settles exactly once")
+        readable = true
+        coordinator.observedLoginChange = true
+        coordinator.handleLoginStateDidChange(signedIn: true)
+        XCTAssertEqual(settlements.value, 1, "the restored session settles exactly once")
 
         // A login notification for the SAME account lands afterwards (production shape:
         // some other observer posts .userLoginDidChange while signed in).
+        coordinator.observedLoginChange = true
         coordinator.handleLoginStateDidChange(signedIn: true)
         XCTAssertEqual(settlements.value, 1,
                        "a repeat settlement for the same account must not begin a new lifecycle")
@@ -99,94 +101,194 @@ final class VoiceSharingRestoredSessionTests: XCTestCase {
         var account: String? = "account-A"
         coordinator.settledAccountIdentityProvider = { account }
         coordinator.restoredSessionAuthReadable = { true }
+        coordinator.observedLoginChange = true
 
         coordinator.handleLoginStateDidChange(signedIn: true)
         XCTAssertEqual(settlements.value, 1)
         coordinator.handleLoginStateDidChange(signedIn: true) // duplicate notification
         XCTAssertEqual(settlements.value, 1, "duplicate settlement for the same session is a no-op")
 
-        account = "account-B" // real account switch
+        account = "account-B" // real account switch, announced by a login change
+        coordinator.observedLoginChange = true
         coordinator.handleLoginStateDidChange(signedIn: true)
         XCTAssertEqual(settlements.value, 2, "a genuinely different account settles again")
     }
 
-    /// (e) Sign-out while restoration is pending: the lifecycle clears, the pending poll
-    /// remains the late-coverage, and a later settle for the new account still lands exactly
-    /// once.
+    /// (e) Sign-out while restoration is pending, then the new account's login notification
+    /// settles exactly once: a pending restoration must not be able to publish a lifecycle for
+    /// the new session on its own.
     func test_signOutWhileRestorationPending_thenNewAccountSettles() {
         let coordinator = makeCoordinator()
         let settlements = Cell(0)
         coordinator.initiateIdentityRecoveryRefresh = { settlements.mutate { $0 += 1 } }
-        var readable = false
         var account: String? = nil
-        coordinator.restoredSessionAuthReadable = { readable }
         coordinator.settledAccountIdentityProvider = { account }
 
-        coordinator.startRestoredSessionRetry() // polling while unreadable
-        // Sign-out arrives while restoration is still pending.
-        coordinator.handleLoginStateDidChange(signedIn: false)
+        let invalidate = coordinator.installIdentityInvalidation(startupAuthReadable: { false })
+        defer { invalidate() }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05)) // restoration debt pending
 
-        // Later the session becomes readable, for a new account.
-        readable = true
-        account = "account-B"
-        let deadline = Date().addingTimeInterval(2)
-        while settlements.value == 0 && Date() < deadline {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
-        }
+        coordinator.handleLoginStateDidChange(signedIn: false) // sign-out while pending
+        account = "account-B"                                  // a different account signs in
+        coordinator.observedLoginChange = true
+        coordinator.handleLoginStateDidChange(signedIn: true)
         XCTAssertEqual(settlements.value, 1,
-                       "the pending poll must still settle after a pending sign-out, exactly once")
+                       "the new account settles exactly once after a pending restoration")
     }
 
-    /// (f) SAME ACCOUNT, NEW SESSION settles again (reviewer on 59371aaf7): the settlement
-    /// key must be account+session, not account alone. Here the identity provider changes the
-    /// session digest while the account stays "account-A" — the red shape is the old
-    /// account-only key, which suppressed the second settlement.
+    /// (f) SAME ACCOUNT, NEW SESSION settles again (reviewer on 59371aaf7 + spec: account id alone
+    /// must not suppress refresh after a real session change). On iOS a session ends through the
+    /// signed-out transition, which clears the settled key AND the lifecycle; the next observed
+    /// login for the SAME account then settles again. Red shape: a dedupe without a session boundary
+    /// answers "same account, no-op" for a fresh session.
+    ///
+    /// Not keyed on `committedAuthenticationID` (reviewer direction), MEASURED in this tree:
+    /// `TokenHelper.acquireToken` runs `beginAuthentication(explicit: false)` then
+    /// `commitAuthentication` on EVERY renewal (TokenHelper.swift:95,122; ServerSettings.swift:533),
+    /// so the committed id changes at every expiry — that key would re-settle a LIVE session on
+    /// renewal, which control (f2) forbids.
     func test_sameAccountNewSession_settlesAgain() {
         let coordinator = makeCoordinator()
         let settlements = Cell(0)
         coordinator.initiateIdentityRecoveryRefresh = { settlements.mutate { $0 += 1 } }
-        var sessionDigest = "digest-1"
-        coordinator.settledAccountIdentityProvider = { "account-A|\(sessionDigest)" }
-        coordinator.restoredSessionAuthReadable = { true }
+        coordinator.settledAccountIdentityProvider = { "account-A" }
+        coordinator.observedLoginChange = true
 
-        coordinator.handleLoginStateDidChange(signedIn: true)
+        coordinator.handleLoginStateDidChange(signedIn: true) // session 1
         XCTAssertEqual(settlements.value, 1)
 
-        sessionDigest = "digest-2" // session rotation, same account
-        coordinator.handleLoginStateDidChange(signedIn: true)
+        // Session 1 ends through the app's own sign-out producer, then the SAME account signs in.
+        let invalidate = coordinator.installIdentityInvalidation(startupAuthReadable: { false })
+        defer { invalidate() }
+        NotificationCenter.default.post(name: .serverUserWillBeSignedOut, object: nil)
+        coordinator.handleLoginStateDidChange(signedIn: false) // session 1 ends
+        coordinator.observedLoginChange = true                // the new session's login change
+        coordinator.handleLoginStateDidChange(signedIn: true)  // session 2, SAME account
         XCTAssertEqual(settlements.value, 2,
                        "a new session for the SAME account must settle again, not dedupe away")
     }
 
-    /// (g) The PRODUCTION identity key is account+session (it carries a session digest), not a
-    /// bare account id. The host has stored credentials, so the default provider resolves.
-    func test_productionIdentityKey_includesSessionDigest() throws {
+    /// (f2) A renewal inside a live session must NOT re-settle: renewals re-commit credentials and
+    /// can re-post a login notification, but no session boundary occurs. This is the control that
+    /// rejects keying settlement on the committed authentication id.
+    func test_tokenRenewalWithinLiveSession_doesNotResettle() {
         let coordinator = makeCoordinator()
-        let identity = coordinator.settledAccountIdentityProvider()
-        guard let identity else {
-            throw XCTSkip("host holds no stored credential; key shape unverifiable here")
-        }
-        XCTAssertTrue(identity.contains("|"),
-                      "the production key must bind the session (account|digest), got bare account")
+        let settlements = Cell(0)
+        coordinator.initiateIdentityRecoveryRefresh = { settlements.mutate { $0 += 1 } }
+        coordinator.settledAccountIdentityProvider = { "account-A" }
+        coordinator.observedLoginChange = true
+
+        coordinator.handleLoginStateDidChange(signedIn: true)
+        XCTAssertEqual(settlements.value, 1)
+        coordinator.handleLoginStateDidChange(signedIn: true) // renewal, same live session
+        coordinator.handleLoginStateDidChange(signedIn: true)
+        XCTAssertEqual(settlements.value, 1,
+                       "a renewal inside a live session must not replace the settled lifecycle")
     }
 
     /// (h) UNREADABLE identity defers settlement — no placeholder key, no side effects
-    /// (reviewer on 59371aaf7: do not substitute "unknown-account"). A later readable
-    /// identity settles normally.
+    /// (reviewer on 59371aaf7). Once the owner identity publishes, the settlement lands.
     func test_unreadableIdentity_defersSettlement() {
         let coordinator = makeCoordinator()
         let settlements = Cell(0)
         coordinator.initiateIdentityRecoveryRefresh = { settlements.mutate { $0 += 1 } }
-        var identity: String? = nil
-        coordinator.settledAccountIdentityProvider = { identity }
-        coordinator.restoredSessionAuthReadable = { true }
+        var account: String? = nil
+        coordinator.settledAccountIdentityProvider = { account }
+        coordinator.observedLoginChange = true
 
         coordinator.handleLoginStateDidChange(signedIn: true)
         XCTAssertEqual(settlements.value, 0, "an unreadable identity must not settle")
 
-        identity = "account-A|digest-1"
+        account = "account-A"
         coordinator.handleLoginStateDidChange(signedIn: true)
         XCTAssertEqual(settlements.value, 1, "and settles once it becomes readable")
+    }
+
+    /// (h2) REVIEWER FINDING on `4035a1ebf`: auth readable with an UNREADABLE identity used to
+    /// "settle and return" on a settlement that had deferred, stopping the poll while claiming a
+    /// later tick would land it. The poll must keep asking. It cannot settle on its own, either:
+    /// every state a tick can read survives sign-out, so a poll-driven settlement mints a lifecycle
+    /// for a session nobody established in this process.
+    func test_pollNeverSettlesAPubliclyReadableSession() {
+        let coordinator = makeCoordinator()
+        let settlements = Cell(0)
+        coordinator.initiateIdentityRecoveryRefresh = { settlements.mutate { $0 += 1 } }
+        let ticks = Cell(0)
+        coordinator.restoredSessionRetryDelay = { ticks.mutate { $0 += 1 }; return 0.01 }
+        coordinator.restoredSessionAuthReadable = { true } // auth readable from the start
+        let invalidate = coordinator.installIdentityInvalidation(startupAuthReadable: { false })
+        defer { invalidate() }
+
+        var account: String? = nil
+        coordinator.settledAccountIdentityProvider = { account }
+        coordinator.startRestoredSessionRetry()
+        let deadline = Date().addingTimeInterval(1.5)
+        while ticks.value < 8 && Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+        // Give the tick the most generous reading: a published account identity AND auth readable.
+        account = "account-A"
+        let settleWindow = Date().addingTimeInterval(0.5)
+        while Date() < settleWindow { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+        // Red state to catch: the poll itself clearing the restoration debt — i.e. calling
+        // `cancelRestoredSessionRetry()`. That is the ONLY observable a tick can affect on its own
+        // (any settlement attempt is gated by the process-level observed-login requirement, which is
+        // asserted by the two controls above). So: is the poll still running after these ticks?
+        let ticksBefore = ticks.value
+        let window = Date().addingTimeInterval(0.3)
+        while Date() < window { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+        XCTAssertEqual(settlements.value, 0, "no settlement came from the poll")
+        XCTAssertGreaterThan(ticks.value, ticksBefore,
+                             "the poll must still be ticking: it never clears its own debt")
+    }
+
+    /// (j) SPEC: a stored session the app can already read gives the process a lifecycle at startup
+    /// (the pre-existing cold-start contract). It must NOT settle: neither the account key nor the
+    /// app-global lifecycle proves this process observed a sign-in, and both survive sign-out.
+    func test_readableAtStartup_providesALifecycleWithoutSettling() {
+        let coordinator = makeCoordinator()
+        let settlements = Cell(0)
+        coordinator.initiateIdentityRecoveryRefresh = { settlements.mutate { $0 += 1 } }
+        coordinator.settledAccountIdentityProvider = { "account-A" }
+        coordinator.restoredSessionAuthReadable = { true }
+
+        VoiceSharingSessionGeneration.shared.clear()
+        let invalidate = coordinator.installIdentityInvalidation(startupAuthReadable: { true })
+        defer { invalidate(); VoiceSharingSessionGeneration.shared.clear() }
+
+        XCTAssertNotNil(VoiceSharingSessionGeneration.shared.currentGeneration(),
+                        "a readable stored session still gives the process a lifecycle to act under")
+        XCTAssertEqual(settlements.value, 0,
+                       "but it settles nothing: no sign-in was observed in this process")
+    }
+
+    /// (k) The sign-out race: an account that signed out WHILE its stored session was still readable
+    /// must not be re-settled by the startup derivation. Red shape: settle-at-startup on derived
+    /// state, which re-settled the departed account and began a fresh lifecycle for it.
+    func test_signedOutAccount_isNotSettledByTheStartupDerivation() {
+        let coordinator = makeCoordinator()
+        let settlements = Cell(0)
+        coordinator.initiateIdentityRecoveryRefresh = { settlements.mutate { $0 += 1 } }
+        coordinator.settledAccountIdentityProvider = { "account-A" }
+        coordinator.restoredSessionAuthReadable = { true }
+
+        // Startup/activation derivation (no observed login) must settle NOTHING: the account key is
+        // process-global and would otherwise resurrect an account that signs out later.
+        coordinator.handleLoginStateDidChange(signedIn: true)
+        XCTAssertEqual(settlements.value, 0, "startup derivation settles nothing")
+
+        // The observed login settles it exactly once.
+        coordinator.observedLoginChange = true
+        coordinator.handleLoginStateDidChange(signedIn: true)
+        XCTAssertEqual(settlements.value, 1)
+        coordinator.handleLoginStateDidChange(signedIn: false) // account A signs out
+        XCTAssertNil(VoiceSharingSessionGeneration.shared.currentGeneration(), "sign-out ends the lifecycle")
+
+        // A LATER derivation over the still-readable stored session (startup/activation) must not
+        // resurrect the departed account.
+        coordinator.handleLoginStateDidChange(signedIn: true)
+        XCTAssertEqual(settlements.value, 1,
+                       "a derivation without an observed login must not re-settle the departed account")
     }
 
     /// (i) DUPLICATE settlement must not disturb enrollment authority
@@ -219,7 +321,8 @@ final class VoiceSharingRestoredSessionTests: XCTestCase {
         let coordinator = makeCoordinator(enrollmentStore: store)
         let settlements = Cell(0)
         coordinator.initiateIdentityRecoveryRefresh = { settlements.mutate { $0 += 1 } }
-        coordinator.settledAccountIdentityProvider = { "account-A|digest-1" }
+        coordinator.observedLoginChange = true
+        coordinator.settledAccountIdentityProvider = { "account-A" }
 
         // Settle FIRST: the settlement transition resets the store and rotates its fences, so
         // the authoritative projection must be read under the SETTLED lifecycle (a projection
