@@ -1,0 +1,45 @@
+OWNER SIM: allowance/allocation artefact state, read-only pre-check
+Simulator 13EB57ED-99BB-4C6F-B855-D31E96028D57, app fm.auris, installed build bb72d3c4c.
+No launch, no UI action, no write. Nothing was installed, seeded, or signed in.
+Purpose: establish what Merlin's first visit will exercise, BEFORE the visit, so the
+observation is interpretable rather than attributed after the fact (android 074f7a38, spec
+246f7daa: absence after a change, with no before-state, cannot be attributed to the change).
+
+CONTAINER
+  F82E786B-B407-4351-A49B-02ADAB78D1B7
+  Note: this is NOT the container recorded in earlier receipts (310E15C7). That is expected -
+  simctl install rotates the data container - and is not evidence about the credential.
+
+WHAT WAS FOUND, AND WHAT IT IS NOT
+  `tmp/allowance-provisioner-<uuid>/` exists, three instances, each holding
+  requests/<sha>.request and usage/<sha>/22222222-2222-4222-8222-222222222222/claim.lock.
+  The UUID `22222222-2222-4222-8222-222222222222` is a placeholder, and the only writer of a
+  path containing "allowance-provisioner" is
+  PocketCastsTests/.../VoiceSharingCaptureAllowanceProvisionerTests.swift:147.
+
+  => These are TEST-HARNESS artefacts, written by the test host into a simulator that is SHARED
+     with the owner app. They are NOT app records and NOT evidence of provisioning.
+
+  This is the same contamination class as the shared `debug_log` (see OWNER-SIM-READONLY-STATE.txt),
+  now in a second location. Any future read of the owner container must exclude test-host output;
+  "found an allowance directory" here would have been a false positive.
+
+THE APP'S OWN STORE
+  Library/Application Support/VoiceContributions/ EXISTS and is EMPTY (created 04:24, no entries).
+  VoiceSharingUploadQueue.swift:227 is its only writer.
+
+CONCLUSION (narrow, and the only claim made here)
+  On this install no contribution/allowance record has been written by the app. So Merlin's
+  first visit is a FIRST-ALLOCATION path: not a retry, not a resumed epoch, not a replay.
+  That changes what to watch for - the first account-route request should be an
+  ALLOWANCE request carrying a fresh request id, and the server should answer `200 issued`.
+
+  NOT claimed: that provisioning is broken, that anything was deleted, or anything about what
+  the install did to prior data. No pre-update baseline for this record exists, so the install
+  is neither implicated nor exculpated.
+
+NOT OBSERVED
+  Whether a voice-sharing session (account + enrollment epoch) is currently established. The
+  app-launch evidence in OWNER-SIM-INPLACE-UPDATE.txt shows `provision skipped: no account
+  identity`, which is consistent with a signed-out session, but session state itself was not
+  re-read here and the build is frozen - I am not launching it to find out.
