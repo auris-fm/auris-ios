@@ -120,15 +120,21 @@ final class VoiceSharingCaptureAllowance: VoiceSharingCaptureAdmitting {
     private let ledger: VoiceSharingCaptureLedger
     /// Memory-only current authority. Missing production values/window return nil before storage work.
     private let currentAuthorization: () -> VoiceSharingCaptureAuthorization?
+    /// Told when a charge is refused for lack of capacity. Consumption happens between policy exchanges,
+    /// so this is the only way capture keeps going without waiting for a lease turnover.
+    private let capacityExhausted: () -> Void
     private let worker = DispatchQueue(label: "fm.auris.voicesharing.capture-allowance", qos: .utility)
     private let lock = NSLock()
     private var generation: UInt64 = 0
     private var preparing = false
     private var token: VoiceSharingCaptureAuthorization?
 
-    init(ledger: VoiceSharingCaptureLedger, currentAuthorization: @escaping () -> VoiceSharingCaptureAuthorization?) {
+    init(ledger: VoiceSharingCaptureLedger,
+         currentAuthorization: @escaping () -> VoiceSharingCaptureAuthorization?,
+         capacityExhausted: @escaping () -> Void = {}) {
         self.ledger = ledger
         self.currentAuthorization = currentAuthorization
+        self.capacityExhausted = capacityExhausted
     }
 
     func take(for stamp: VoiceSharingCaptureStamp) -> VoiceSharingCaptureReservation? {
@@ -156,7 +162,12 @@ final class VoiceSharingCaptureAllowance: VoiceSharingCaptureAdmitting {
             defer { self.lock.unlock() }
             self.preparing = false
             guard charged, let authority, self.generation == startedGeneration,
-                  self.currentAuthorization() == authority else { return }
+                  self.currentAuthorization() == authority else {
+                // A refusal WITH an authority in hand is a capacity refusal: the batch has no
+                // reservations left. Nothing else here is a request for another allocation.
+                if !charged, authority != nil { self.lock.unlock(); self.capacityExhausted(); self.lock.lock() }
+                return
+            }
             self.token = authority
         }
     }

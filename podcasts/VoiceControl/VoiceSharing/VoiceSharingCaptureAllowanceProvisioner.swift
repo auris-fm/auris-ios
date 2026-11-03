@@ -23,6 +23,11 @@ final class VoiceSharingCaptureAllowanceProvisioner {
     /// Where the CURRENT allocation request identity is persisted, per account and enrollment epoch.
     private let requestIdentityRoot: URL
     private let synchronize: (URL, Bool) throws -> Void
+    /// Serializes demand-driven refreshes off the caller's thread; one at a time, coalesced.
+    private let refreshQueue = DispatchQueue(label: "fm.auris.capture-allowance.refresh")
+    private let demandLock = NSLock()
+    private var demandRefreshInFlight = false
+    private var demandRefreshPending = false
 
     private let lock = NSLock()
     /// Serializes request-identity creation; distinct from `lock`, which guards the installed response.
@@ -30,6 +35,9 @@ final class VoiceSharingCaptureAllowanceProvisioner {
     private var installedResponse: VoiceSharingCaptureAllowanceResponse?
     /// The account the installed response belongs to; an account switch invalidates.
     private var installedAccount: String?
+    /// The request identity the installed response answered, so a stale verdict cannot clear a newer
+    /// installation that merely shares its enrollment epoch.
+    private var installedRequestID: String?
     /// The batch and window each persisted identity was last issued for, so exhaustion can be judged
     /// against the accounting of THAT batch rather than the newest one.
     private var issuedBatchByRequestID: [String: String] = [:]
@@ -169,6 +177,7 @@ final class VoiceSharingCaptureAllowanceProvisioner {
         lock.lock()
         installedResponse = nil
         installedAccount = nil
+        installedRequestID = nil
         lock.unlock()
     }
 
@@ -264,19 +273,57 @@ final class VoiceSharingCaptureAllowanceProvisioner {
         discardRequestIDLocked(account: account, epoch: epoch)
     }
 
-    /// A verdict for a SUPERSEDED accounting window answers a question nobody is waiting on any more.
-    /// Whatever is installed now belongs to a newer window, so the old verdict must not clear it.
-    private func clearSupersededInstallation(epoch: String) {
+    /// Clears the installation ONLY when it still belongs to the request that was just answered, and
+    /// does the test and the clear under one hold of the lock.
+    ///
+    /// Comparing enrollment epochs is not enough: a delayed old-window refusal and the newer
+    /// installation it must not disturb normally share the same enrollment epoch, so an epoch test
+    /// clears exactly the installation it was meant to protect. The identity is what actually advances;
+    /// a newer installation belongs to a different request identity.
+    private func clearInstallation(ifBelongingTo requestID: String) {
         lock.lock()
-        let installedEpoch = installedResponse?.enrollmentEpoch
-        lock.unlock()
-        guard installedEpoch == nil || installedEpoch == epoch else { return }
-        clearInstallation()
+        defer { lock.unlock() }
+        guard installedRequestID == requestID else { return }
+        installedResponse = nil
+        installedAccount = nil
+        installedRequestID = nil
     }
 
     private func discardRequestIDLocked(account: String, epoch: String) {
         try? FileManager.default.removeItem(at: fileURL(account: account, epoch: epoch))
         try? FileManager.default.removeItem(at: bindingURL(account: account, epoch: epoch))
+    }
+
+    /// DEMAND-DRIVEN entry: the collector calls this when its own ledger refuses a charge because the
+    /// installed batch has no capacity left. Consumption and local expiry both happen independently of
+    /// the policy lease, so a policy-exchange-only driver leaves capture with no producer until the
+    /// lease turns over — potentially hours.
+    ///
+    /// Bounded and deduplicated: at most one refresh runs at a time, and a call arriving while one runs
+    /// is coalesced into a single follow-up rather than queued per capture attempt.
+    func noteCapacityExhausted() {
+        refreshQueue.async { [weak self] in
+            guard let self else { return }
+            self.demandLock.lock()
+            if self.demandRefreshInFlight {
+                self.demandRefreshPending = true
+                self.demandLock.unlock()
+                return
+            }
+            self.demandRefreshInFlight = true
+            self.demandLock.unlock()
+            Task {
+                var again = true
+                while again {
+                    await self.provision()
+                    self.demandLock.lock()
+                    again = self.demandRefreshPending
+                    self.demandRefreshPending = false
+                    if !again { self.demandRefreshInFlight = false }
+                    self.demandLock.unlock()
+                }
+            }
+        }
     }
 
     /// Sync read for the collector's admission path (`currentAuthorization`).
@@ -328,8 +375,6 @@ final class VoiceSharingCaptureAllowanceProvisioner {
             return
         }
         let outcome = await client.perform(request)
-        // The window this response ANSWERS, which for a refusal is the one the request was sent under.
-        let answeredEpoch = epoch
         switch outcome {
         case .accepted(let response):
             guard let verifiedFirstProvisioning = VoiceSharingCaptureProvisioningAuthority(
@@ -372,6 +417,7 @@ final class VoiceSharingCaptureAllowanceProvisioner {
             lock.lock()
             installedResponse = response
             installedAccount = account
+            installedRequestID = requestID
             issuedBatchByRequestID[requestID] = response.batchID
             issuedWindowByRequestID[requestID] = response.windowID
             lock.unlock()
@@ -398,7 +444,7 @@ final class VoiceSharingCaptureAllowanceProvisioner {
                 log("capture allowance: server unavailable; keeping the current identity and installation")
                 return
             }
-            clearSupersededInstallation(epoch: answeredEpoch)
+            clearInstallation(ifBelongingTo: requestID)
             log("capture allowance REFUSED: \(refusal)")
         case .unavailable:
             // Unreachable server proves nothing about the batch; the identity is kept.
