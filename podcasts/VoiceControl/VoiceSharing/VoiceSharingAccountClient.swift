@@ -333,8 +333,7 @@ final class VoiceSharingAccountClient {
     private func op_body(of operation: DeletionOperation) -> [String: Any] { operation.body }
 
     private func makeRequest(path: String, method: String, body: [String: Any]?) async -> URLRequest? {
-        let base = baseURLProvider()
-        guard !base.isEmpty, let url = URL(string: base + path) else { return nil }
+        guard let url = VoiceSharingOrigin.url(origin: baseURLProvider(), path: path) else { return nil }
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.timeoutInterval = Self.defaultTimeoutSeconds

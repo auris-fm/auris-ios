@@ -140,9 +140,7 @@ final class VoiceSharingUploadTransport {
     /// The endpoint this transport will use, or nil when configuration is missing. Nil is NOT
     /// defaulted to something plausible: an unconfigured build must not upload anywhere.
     var endpoint: URL? {
-        let base = baseURLProvider()
-        guard !base.isEmpty else { return nil }
-        return URL(string: base + Self.uploadPath)
+        VoiceSharingOrigin.url(origin: baseURLProvider(), path: Self.uploadPath)
     }
 
     /// Executes an already-built request. Returns the wire answer; never throws.
