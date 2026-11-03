@@ -33,6 +33,107 @@ final class VoiceSharingRestoredSessionTests: XCTestCase {
         return coordinator
     }
 
+    /// REVIEWER (`cfcfab6f`) shape, found on this lane by measurement: the retry tick guarded with
+    /// `restoredSessionAuthReadable()` (SyncManager.isUserLoggedIn()) before asking the ONE
+    /// settlement decision, and those are different conditions. The cold-restore case is exactly
+    /// where they part - a readable credential can name an account via `storedAccountIdentity()`
+    /// while that defaults key is empty - so the tick declined while the entry point it guards
+    /// would have settled.
+    ///
+    /// Polarity matters for what this bug IS: the Android form (gate admits, work declines) produces
+    /// a repeated-acquisition loop. Here the gate declines and the work is never consulted, so
+    /// nothing is attempted and nothing is acquired - a liveness bug, invisible to the server
+    /// because nothing is ever sent.
+    ///
+    /// Driven THROUGH THE TICK, not through `settleFromOwnerReadiness()`: a control that calls the
+    /// entry point directly cannot see a bug that lives in its guard, which is how the earlier probe
+    /// and the fix differ.
+    func test_retryTick_settlesFromReadableStoredCredential_whenTheNarrowAuthFlagIsFalse() {
+        let coordinator = makeCoordinator()
+        let settlements = Cell(0)
+        coordinator.initiateIdentityRecoveryRefresh = { settlements.mutate { $0 += 1 } }
+
+        // PRODUCTION defaults deliberately NOT stubbed, because reviewer (bd0766db) showed the
+        // production cold path is narrower than an injected probe suggests: the default
+        // `ownerCredentialIsPresent` is `committedAccountIdentity() != nil || isUserLoggedIn()`,
+        // so with no commit and logged-in false the entry point ALSO refuses before reading the
+        // stored identity. Stubbing it to `true` would manufacture a state production may not
+        // reach, and the control would then prove only that the tick delegates in a fixture.
+        //
+        // So this control asserts the CONSEQUENCE OF DELEGATION in state we can actually produce:
+        // no commit, credential present and readable, narrow flag false. Whether the production
+        // cold process reaches that state is reported separately, as reviewer asked - fixture
+        // disagreement and production reachability are distinct claims.
+        coordinator.ownerAccountIdentityProvider = { nil }
+        coordinator.ownerCredentialIsPresent = { true }
+        coordinator.storedCredentialIdentityProvider = { "account-A" }
+        coordinator.restoredSessionAuthReadable = { false }
+        coordinator.restoredSessionRetryDelay = { 0.01 }
+
+        VoiceSharingSessionGeneration.shared.clear()
+        coordinator.startRestoredSessionRetry()
+        let deadline = Date().addingTimeInterval(1.0)
+        while settlements.value == 0 && Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+
+        XCTAssertEqual(settlements.value, 1,
+                       "the tick must delegate, not decide: a readable stored credential settles "
+                       + "even while the narrow syncing-email flag is false")
+        XCTAssertEqual(coordinator.settledAccountIdentityForTesting, "account-A",
+                       "and settles on the account the credential actually names")
+        VoiceSharingSessionGeneration.shared.clear()
+    }
+
+    /// REVIEWER (`bd0766db`): production reachability, measured separately from the fixture claim
+    /// above. With the REAL default providers - no injected presence - and a signed-out process, the
+    /// entry point refuses before it can read any stored identity, which is what keeps removal of
+    /// the tick gate safe on a cold start. This pins that refusal so the previous control cannot be
+    /// read as evidence about production.
+    func test_productionDefaults_coldSignedOutProcess_settlesNothingThroughTheTick() {
+        let coordinator = makeCoordinator()
+        let settlements = Cell(0)
+        coordinator.initiateIdentityRecoveryRefresh = { settlements.mutate { $0 += 1 } }
+        // Real defaults for every identity provider; only the loop's timing is injected.
+        coordinator.restoredSessionAuthReadable = { false }
+        coordinator.restoredSessionRetryDelay = { 0.01 }
+
+        VoiceSharingSessionGeneration.shared.clear()
+        coordinator.startRestoredSessionRetry()
+        let deadline = Date().addingTimeInterval(0.4)
+        while Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+
+        XCTAssertEqual(settlements.value, 0,
+                       "production defaults on a signed-out cold process: the entry point refuses "
+                       + "before reading a stored identity, so the tick settles nothing")
+        XCTAssertNil(coordinator.settledAccountIdentityForTesting)
+        VoiceSharingSessionGeneration.shared.clear()
+    }
+
+    /// The gate existed for a reason: a signed-out process must NOT settle from stale
+    /// process-global state. Removing it is only safe because the decision guards itself -
+    /// `storedAccountIdentity()` reports nothing without a refresh token in the Keychain. This
+    /// control pins that the replacement preserves the old guard's purpose.
+    func test_retryTick_stillSettlesNothingWhenNoCredentialIsReadable() {
+        let coordinator = makeCoordinator()
+        let settlements = Cell(0)
+        coordinator.initiateIdentityRecoveryRefresh = { settlements.mutate { $0 += 1 } }
+        coordinator.ownerAccountIdentityProvider = { nil }
+        coordinator.ownerCredentialIsPresent = { false }
+        coordinator.storedCredentialIdentityProvider = { nil }
+        coordinator.restoredSessionAuthReadable = { true }
+        coordinator.restoredSessionRetryDelay = { 0.01 }
+
+        VoiceSharingSessionGeneration.shared.clear()
+        coordinator.startRestoredSessionRetry()
+        let deadline = Date().addingTimeInterval(0.4)
+        while Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+
+        XCTAssertEqual(settlements.value, 0,
+                       "nothing readable to present => no settlement, however long the poll runs")
+        VoiceSharingSessionGeneration.shared.clear()
+    }
+
     /// (a) After a login settles, the poll must STOP ticking. Each attempt schedules by asking the
     /// delay provider, so tick continuation is observable as that counter advancing. With the
     /// cancel-on-settlement removed, the poll keeps ticking past the settlement and the counter
