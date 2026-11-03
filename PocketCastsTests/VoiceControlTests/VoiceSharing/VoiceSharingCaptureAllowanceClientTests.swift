@@ -52,6 +52,9 @@ final class VoiceSharingCaptureAllowanceClientTests: XCTestCase {
         XCTAssertTrue(response.stillValid(monotonicNowMS: 69_999))
         XCTAssertFalse(response.stillValid(monotonicNowMS: 70_000),
                        "delayed installation is judged against the original deadline")
+        XCTAssertFalse(response.stillValid(monotonicNowMS: 9_999),
+                       "a backward clock read cannot restore validity before the original start")
+        XCTAssertFalse(response.stillValid(monotonicNowMS: -1))
         XCTAssertEqual(response.disposition, VoiceSharingCaptureAllowanceDisposition.issued)
         XCTAssertEqual(response.validForMSRemaining, 58_500, "interval is anchored to the request-start instant")
         XCTAssertEqual(response.batchID, batchA)
@@ -180,6 +183,16 @@ final class VoiceSharingCaptureAllowanceClientTests: XCTestCase {
 
     private let requestID = "11111111-1111-4111-8111-111111111111"
 
+    /// Polls (cancellation is asynchronous) up to 2 s for the flag.
+    private func waitForFlag(_ flag: @escaping () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline {
+            if flag() { return true }
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        return flag()
+    }
+
     private func makeRequest() -> VoiceSharingCaptureAllowanceRequest {
         VoiceSharingCaptureAllowanceRequest(requestID: requestID, enrollmentEpoch: "epoch-1")!
     }
@@ -232,12 +245,18 @@ final class VoiceSharingCaptureAllowanceClientTests: XCTestCase {
                 let http = HTTPURLResponse(url: request.url!, statusCode: 200,
                                            httpVersion: nil, headerFields: nil)!
                 client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
-                // 24 chunks × 512 B = 12 KiB — far beyond the 8 KiB envelope bound.
-                for _ in 0..<24 {
-                    Self.loaded += VoiceSharingCaptureAllowanceClientTests.oversizedChunk.count
-                    client?.urlProtocol(self, didLoad: VoiceSharingCaptureAllowanceClientTests.oversizedChunk)
+                // PACED delivery: chunks beyond the 8 KiB bound are held pending so the
+                // consumer's stop at bound+1 is observable — later chunks must never load.
+                DispatchQueue.global().async { [weak self] in
+                    for index in 0..<24 {
+                        guard let self, !Self.cancelled else { return } // stopLoading halts delivery
+                        Self.loaded += VoiceSharingCaptureAllowanceClientTests.oversizedChunk.count
+                        self.client?.urlProtocol(self, didLoad: VoiceSharingCaptureAllowanceClientTests.oversizedChunk)
+                        Thread.sleep(forTimeInterval: 0.002)
+                        _ = index
+                    }
+                    self?.client?.urlProtocolDidFinishLoading(self!)
                 }
-                client?.urlProtocolDidFinishLoading(self)
             }
             override func stopLoading() { Self.cancelled = true }
         }
@@ -252,8 +271,45 @@ final class VoiceSharingCaptureAllowanceClientTests: XCTestCase {
             sessionIdentity: { "gen-A" })
         let outcome = await client.perform(makeRequest())
         XCTAssertEqual(outcome, .unavailable, "oversized envelope must refuse")
-        XCTAssertTrue(Stub2.cancelled,
-                      "exceeding the bound must stop the connection, not consume the stream")
+        XCTAssertTrue(waitForFlag { Stub2.cancelled },
+                      "exceeding the bound must stop the connection")
+        XCTAssertLessThan(Stub2.loaded, 24 * 512,
+                          "cancellation must stop further delivery before all chunks load")
+    }
+
+    func test_transport_errorStatus_oversizedBody_isBounded() async {
+        final class Stub3: URLProtocol {
+            static var cancelled = false
+            override class func canInit(with request: URLRequest) -> Bool { true }
+            override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+            override func startLoading() {
+                let http = HTTPURLResponse(url: request.url!, statusCode: 410,
+                                           httpVersion: nil, headerFields: nil)!
+                client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
+                DispatchQueue.global().async { [weak self] in
+                    for _ in 0..<24 {
+                        guard let self, !Self.cancelled else { return }
+                        self.client?.urlProtocol(self, didLoad: VoiceSharingCaptureAllowanceClientTests.oversizedChunk)
+                        Thread.sleep(forTimeInterval: 0.002)
+                    }
+                    self?.client?.urlProtocolDidFinishLoading(self!)
+                }
+            }
+            override func stopLoading() { Self.cancelled = true }
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [Stub3.self]
+        Stub3.cancelled = false
+        let client = VoiceSharingCaptureAllowanceClient(
+            baseURLProvider: { "https://api.example.test" },
+            tokenProvider: StubTokens(),
+            session: URLSession(configuration: config),
+            sessionIdentity: { "gen-A" })
+        let outcome = await client.perform(makeRequest())
+        // The bounded read still classifies the STATUS (captured before the body) while the
+        // oversized body itself is never fully buffered — the task is explicitly cancelled.
+        XCTAssertEqual(outcome, .refused(.windowExpired))
+        XCTAssertTrue(waitForFlag { Stub3.cancelled })
     }
 
     // MARK: Disposition-driven provisioning connection (reviewer 80ef8b5f.5)
@@ -285,8 +341,26 @@ final class VoiceSharingCaptureAllowanceClientTests: XCTestCase {
             account: "acct", response: issued, consent: consent))
         XCTAssertTrue(ledger.charge(admission), "issued batch admits and charges durably")
 
-        // REPLAYED against the now-INTACT ledger: reopens it, keeps the usage (charged state).
-        XCTAssertTrue(ledger.charge(admission), "replayed refresh reopens the existing ledger with existing usage")
+        // REPLAYED against the now-INTACT ledger: the second admission derives from the
+        // PARSED REPLAYED response itself and reopens the ledger with existing usage.
+        let replayedAdmission = try XCTUnwrap(VoiceSharingCaptureAllowanceInstallation.admissionAuthority(
+            account: "acct", response: replayed, consent: consent))
+        XCTAssertTrue(ledger.charge(replayedAdmission),
+                      "replayed refresh reopens the existing ledger with existing usage")
+
+        // A LOWERED max_clip_bytes binds admission independently of duration (both limits).
+        let byteCapped = try XCTUnwrap(VoiceSharingCaptureAllowanceResponse(
+            json: makeBody(requestID: requestID, overrides: ["__remove__": "", "max_clip_bytes": 2_044]),
+            expectedRequestID: requestID, expectedEnrollmentEpoch: "epoch-1",
+            requestStartMonotonicMS: 0, elapsedMS: 0))
+        let capped = try XCTUnwrap(VoiceSharingCaptureAllowanceInstallation.admissionAuthority(
+            account: "acct", response: byteCapped, consent: consent))
+        XCTAssertEqual(capped.limits.clipSamples, (2_044 - 44) / 2,
+                       "samples derive from the BYTE ceiling (2 B/sample + 44 B header), not just duration")
+        XCTAssertEqual(capped.limits.reservationBytes,
+                       UInt64(capped.limits.clipSamples * 2 + 44 + capped.limits.metadataBytes))
+        // …and the real ledger charges under the capped reservation.
+        XCTAssertTrue(ledger.charge(capped))
     }
 
     func test_replayedResponse_cannotReprovisionAfterLedgerLoss() throws {
