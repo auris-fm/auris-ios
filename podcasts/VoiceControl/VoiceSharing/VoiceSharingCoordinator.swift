@@ -426,8 +426,26 @@ final class VoiceSharingCoordinator {
             queue: .main
         ) { [weak self] _ in
             guard let self else { return }
-            self.observedLoginChange = true
             self.handleLoginStateDidChange()
+        }
+        // The credential OWNER's commit, which is the only completion a passive restoration has:
+        // `TokenHelper.acquireToken` commits on every renewal AND on a silent refresh-token restore,
+        // and it posts no notification (measured; TokenHelper.swift:95,122). Registered through the
+        // package's public seam, because TokenHelper is internal to PocketCastsServer.
+        //
+        // It is a READINESS signal, not an identity: renewal commits and login commits look alike
+        // from here, and the commit id changes on both. So the callback re-derives; it never assumes
+        // a login. `credentialCommitRevision` keeps a burst of commits to one re-derivation.
+        ServerSettings.credentialCommitObserver = { [weak self] in
+            guard let self else { return }
+            // The owner fires inside `commitAuthentication`, on whatever context committed and with
+            // its lock released. Release it again immediately: the derivation hops to the main queue
+            // (the same context a login notification arrives on), and must hold no owner state.
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.credentialCommitRevision += 1
+                self.credentialCommitDidOccur()
+            }
         }
         identityObservers = [willSignOut, loginChanged]
         identityCenter = center
@@ -443,26 +461,20 @@ final class VoiceSharingCoordinator {
         // itself and settle the launch state.
         let readableAtStartup = startupAuthReadable
         if readableAtStartup() {
-            // A stored session the app can already read gives the process a lifecycle to act under
-            // — the pre-existing contract for a cold start into an account that is signed in.
-            //
-            // It is NOT proof that a sign-in happened in this process. The settlement key and the
-            // app-global lifecycle are both process-global and survive sign-out, so settling here
-            // would re-settle an account that signed out while the session was still readable, and
-            // could mint a lifecycle for an inherited session nobody established. This path
-            // therefore REFUSES to settle (see the startup guard in handleLoginStateDidChange) until
-            // a real `.userLoginDidChange` has been observed in this instance.
-            VoiceSharingSessionGeneration.shared.ensureLifecycle()
-            handleLoginStateDidChange(signedIn: true)
+            // A COLD RESTORED SESSION: the stored session is readable before any login notification
+            // can exist for it, and nothing posts `.userLoginDidChange` for a session that predates
+            // the process. The credential owner's commit is what makes the account readable, so this
+            // is the same derivation a commit uses — through the same code path, so a cold restore
+            // and a later readability cannot drift apart (spec 2026-11-03, reviewer on 466576407).
+            settleFromOwnerReadiness()
         } else {
-            // The stored session is not readable yet. The app publishes NO completion for a passive
-            // restoration (verified: TokenHelper's passive renewal commits without a notification;
-            // the one launching restore, AppDelegate+Analytics.retrieveUserIdIfNeeded, only runs for
-            // a params-era session with no userId and posts only in that case), and the credential
-            // owner is internal to PocketCastsServer, so voice sharing cannot observe the commit.
-            // The poll is therefore not a restoration detector — it is an inventory-timer: it
-            // carries this debt until the process observes a login and, like the startup path, it
-            // never settles on its own (reviewer on 4035a1ebf).
+            // The stored session is not readable yet. Two things finish a restoration from here and
+            // either may win: the credential owner's commit (the normal case — it is what makes the
+            // account readable) and this poll, which exists for the state-readability gap the README
+            // of this path describes: for a short window the app can read a session the owner has not
+            // yet committed inside this process, and nothing would ever derive from it. The poll
+            // therefore asks the SAME derivation the commit uses, at a bounded cadence, and settles
+            // nothing by itself.
             startRestoredSessionRetry()
         }
         return invalidate
@@ -507,15 +519,14 @@ final class VoiceSharingCoordinator {
         let generation = restoredSessionPollGeneration
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, self.restoredSessionPollGeneration == generation else { return }
-            // The tick does NOT settle. Every state it can read is process-global: auth readable
-            // AND a settlement identity still does not establish that THIS process observed a
-            // sign-in — both survive sign-out, and the app-global lifecycle may be a relic of a
-            // session that ended. A tick that settled on them minted a lifecycle for a session
-            // nobody established (and re-settled a departed account), which is the mistake this
-            // path exists to avoid. With no observable credential-commit connection, the tick only
-            // KEEPS the debt; settlement comes from an observed login.
+            // The tick settles nothing on its own: every state it can read is process-global and
+            // survives sign-out, so "readable" alone would mint a lifecycle for a session nobody
+            // established and re-settle a departed account. It asks the OWNER whether a credential
+            // for the currently readable session is committed IN THIS PROCESS, and that answer —
+            // not the tick — decides. A tick that finds no answer keeps the debt (reviewer on
+            // 4035a1ebf: a tick must never be able to clear its own debt).
             if self.restoredSessionAuthReadable() {
-                FileLog.shared.addMessage("[VoiceSharing] restored session readable, but no credential connection: keeping debt")
+                self.settleFromOwnerReadiness()
             }
             // Back off 5x after the fast restore window (~ the old bound's coverage).
             let base = self.restoredSessionRetryDelay()
@@ -536,30 +547,17 @@ final class VoiceSharingCoordinator {
     /// idempotence key for settlement (see handleLoginStateDidChange).
     private var settledAccountIdentity: String?
 
-    /// Called when an observed login is waiting on the account owner's identity. Clears the lifecycle
-    /// so nothing can begin work under a session that has not been settled, and lifts the policy fence
-    /// so the recovery refresh can install once the identity lands.
-    private func deferIdentityForPendingLogin() {
-        VoiceSharingSessionGeneration.shared.clear()
-        policy.invalidateForIdentityChange()
-    }
+    /// Bumped by every credential commit so a burst (a login commits, then the first renewal)
+    /// re-derives once instead of twice.
+    internal var credentialCommitRevision = 0
 
-    /// True once a login change has been observed in this process. The settlement key and the
-    /// app-global lifecycle both survive sign-out, so they cannot establish that a sign-in
-    /// happened here; this can. Not an identity, and not a cache of one.
-    var observedLoginChange = false
-
-    /// True once the startup settlement decision has run in this instance. Settable so a control can
-    /// state that its process already launched (the producer-sequence controls do).
-    var startupSettlementRan = false
-
-    /// Injectable so controls can name accounts. Production: the auth owner's account id when the
-    /// app publishes one (ServerSettings.userId, nil in current sessions); settlement does NOT
-    /// depend on it — the OBSERVED login transition is the identity proof, this only refines which
-    /// account it was, so a different account can never be deduped away.
-    var settledAccountIdentityProvider: () -> String? = {
-        guard let userId = ServerSettings.userId, !userId.isEmpty else { return nil }
-        return userId
+    /// The account identity the owner reports for the CURRENTLY committed credential, or nil when
+    /// nothing is committed (signed out) or the owner cannot answer. Production reads the package
+    /// seam; controls name accounts. This is a real account/session identity — stable across
+    /// renewals of the same account, different for a different one, and nil when there is none, so
+    /// "unknown owner" can never be deduped against a known one.
+    var ownerAccountIdentityProvider: () -> String? = {
+        ServerSettings.committedAccountIdentity()?.uuidString
     }
 
     /// Re-derives the lifecycle from authoritative auth state rather than trusting the notification that
@@ -569,74 +567,57 @@ final class VoiceSharingCoordinator {
         // DIAGNOSTIC (temporary): silent transitions are what made "the session exists for sync but
         // voice sharing reads anonymous" unreadable for an hour.
         FileLog.shared.addMessage("[VoiceSharing] identity changed: signedIn=\(signedIn)")
-        let startupCall = !startupSettlementRan
-        startupSettlementRan = true
         if signedIn {
-            // IDEMPOTENT SETTLEMENT, decided BEFORE any side effect (reviewer on 59371aaf7):
-            // `enrollmentStore.transitionToAccount` bumps the operation generation and resets state
-            // unconditionally, so deduping after it cleared the enrollment authority and then
-            // skipped the refresh that would restore it.
-            //
-            // Two conditions gate a settlement, and both are needed:
-            //  1. This process OBSERVED a login change. The account key and the app-global
-            //     lifecycle are process-global and outlive sign-out, so neither proves a sign-in
-            //     happened here — a startup/poll derivation over stored state proves nothing.
-            //  2. The account key differs from the settled one. Repeated notifications for the same
-            //     account are no-ops.
-            // A NEW SESSION for the same account needs no third condition: it arrives through a
-            // sign-out that clears the key, so it settles again (control (f)). Keying on
-            // TokenHelper's committed-authentication id instead (reviewer direction) would be
-            // wrong here — measured: acquireToken re-commits on EVERY renewal
-            // (TokenHelper.swift:95,122), so each expiry would re-settle a live session
-            // (control (f2)).
-            guard observedLoginChange else {
-                FileLog.shared.addMessage("[VoiceSharing] identity settlement refused: no login change observed in this process")
-                return
-            }
-            // The login this process OBSERVED is the identity proof. ServerSettings.userId is a
-            // legacy field that is nil in current sessions (verified in the test host and at launch
-            // in the app's own startup log), so requiring it would defer every settlement forever.
-            var settledIdentity = settledAccountIdentityProvider()
-            if settledIdentity == nil, !startupCall {
-                settledIdentity = "observed-login"
-            }
-            guard let account = settledIdentity else {
-                // The observed login is still pending: the account owner has not published its
-                // identity yet, and the deferred settlement must not be lost — keep the event. Until
-                // it settles, nothing may act under a lifecycle derived from anything else.
-                // A process that already has a lifecycle (a cold start into a readable session) keeps
-                // it: the fence is already raised by the ordinary identity-change path, and clearing
-                // here would leave a signed-in account with no session at all — the launch defect this
-                // settlement path was built to remove.
-                FileLog.shared.addMessage("[VoiceSharing] identity settlement deferred: identity unreadable")
-                if VoiceSharingSessionGeneration.shared.currentGeneration() == nil {
-                    deferIdentityForPendingLogin()
-                }
-                return
-            }
-            // The observed login is CONSUMED by the settlement that uses it: one event may settle at
-            // most one identity, so a later derivation over unchanged stored state cannot spend it
-            // again (e.g. re-settling an account that signed out afterwards). EXCEPT at startup: the
-            // activation runs BEFORE the stored session is readable and legitimately defers to the
-            // login notification that is already in flight in real sign-ins.
-            if !startupCall { observedLoginChange = false }
-            if account == settledAccountIdentity {
-                FileLog.shared.addMessage("[VoiceSharing] identity settlement: same account, no-op")
-                return
-            }
-            settledAccountIdentity = account
-            // A login settlement cancels the poll (see the comment below).
-            cancelRestoredSessionRetry()
-            enrollmentStore.transitionToAccount(signedIn: true)
-            VoiceSharingSessionGeneration.shared.beginNewLifecycle()
-            identityBecameReadable()
+            settleFromOwnerReadiness()
         } else {
-            settledAccountIdentity = nil
-            enrollmentStore.transitionToAccount(signedIn: false)
-            VoiceSharingSessionGeneration.shared.clear()
-            policy.invalidateForIdentityChange()
-            consentGateLost()
+            endSession()
         }
+    }
+
+    /// The ONE settlement decision. Every producer — an observed login, the credential owner's
+    /// commit, a poll tick, a cold start into a readable session — asks this and nothing else, so no
+    /// two of them can disagree about what an identity is (reviewer on 466576407).
+    ///
+    /// It settles on READINESS reported by the credential owner: an account identity for a
+    /// credential committed in THIS process. That is what makes a passive restoration (no login
+    /// notification exists for a session that predates the process) reach the projection/capture
+    /// decision, and it is stable across renewals, so a renewal does not reset an unchanged
+    /// lifecycle.
+    func settleFromOwnerReadiness() {
+        // The account identity and the commit generation are read under the owner's own lock, so
+        // the comparison and the decision belong to one instant.
+        guard let identity = ownerAccountIdentityProvider(), !identity.isEmpty else {
+            // Nothing committed: signed out, or the owner is mid-write. KEEP the current lifecycle
+            // — a renewal momentarily disowning nothing must not strand a live session — and keep
+            // the debt so the next tick or commit settles it.
+            FileLog.shared.addMessage("[VoiceSharing] identity settlement deferred: owner reports no committed credential")
+            return
+        }
+        if identity == settledAccountIdentity {
+            FileLog.shared.addMessage("[VoiceSharing] identity settlement: same account, no-op")
+            return
+        }
+        FileLog.shared.addMessage("[VoiceSharing] identity settled from owner readiness")
+        settledAccountIdentity = identity
+        cancelRestoredSessionRetry()
+        enrollmentStore.transitionToAccount(signedIn: true)
+        VoiceSharingSessionGeneration.shared.beginNewLifecycle()
+        identityBecameReadable()
+    }
+
+    /// The credential owner reported a completed commit: the lock is released and the account this
+    /// process can act for may have changed. Re-derives; never assumes a login.
+    private func credentialCommitDidOccur() {
+        guard SyncManager.isUserLoggedIn() else { return }
+        settleFromOwnerReadiness()
+    }
+
+    private func endSession() {
+        settledAccountIdentity = nil
+        enrollmentStore.transitionToAccount(signedIn: false)
+        VoiceSharingSessionGeneration.shared.clear()
+        policy.invalidateForIdentityChange()
+        consentGateLost()
     }
 
     private func removeAllIdentityObservers() {
