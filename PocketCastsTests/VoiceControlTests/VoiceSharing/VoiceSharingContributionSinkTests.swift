@@ -829,6 +829,64 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         XCTAssertEqual(queue.readyEntries().count, 0)
     }
 
+    /// REVIEWER (expanded review of the swept-in dependency set): the allowance's OWN deadline was
+    /// not enforced at admission. `valid_for_ms` is an independent lifetime from the policy lease, and
+    /// the only expiry watcher scheduled the POLICY deadline — so a short allowance stayed usable
+    /// after its own deadline while policy was still live, as long as nothing had refreshed it yet.
+    ///
+    /// The controls: capture admits before the deadline, and REFUSES at the boundary with the very
+    /// same installed authority, without any timer firing.
+    /// Lock-protected monotonic reading a control can step.
+    private final class MonotonicStep {
+        private let lock = NSLock()
+        private var stored: Int
+        init(_ initial: Int) { stored = initial }
+        var value: Int { lock.lock(); defer { lock.unlock() }; return stored }
+        func set(_ next: Int) { lock.lock(); stored = next; lock.unlock() }
+    }
+
+    func test_allowanceExpiry_refusesAtCaptureBoundaryWithoutATimer() throws {
+        let policy = VoiceSharingPolicy(clock: StubMonotonicClock(time: 1_000),
+            readRemoteSwitch: { .valid(true) }, isAccountEnrolled: { true })
+        policy.identityBecameReadable()
+        XCTAssertNotNil(policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart()))
+        let limits = try XCTUnwrap(VoiceSharingCaptureLimits(dailyRecords: 1, dailyBytes: 100_000,
+            compiledRecordsCeiling: 1, compiledBytesCeiling: 100_000, clipSamples: 16,
+            metadataBytes: VoiceSharingUploadQueue.maxMetadataBytes, compiledClipSamples: 16,
+            compiledMetadataBytes: VoiceSharingUploadQueue.maxMetadataBytes))
+        let stamp = VoiceSharingCaptureStamp(session: "sess-1", epoch: "epoch-1", policyGeneration: policy.currentLeaseGeneration)
+        // Deadline at 5 s of monotonic time; the control steps the clock across it explicitly.
+        let batch = "22222222-2222-4222-8222-222222222222"
+        let authority = try XCTUnwrap(VoiceSharingCaptureAuthorization(
+            account: "synthetic", establishedWindow: "window", batchId: batch, limits: limits,
+            consent: stamp, deadlineMonotonicMS: 5_000))
+        let ledgerRoot = root.deletingLastPathComponent().appendingPathComponent("usage-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: ledgerRoot) }
+        XCTAssertTrue(VoiceSharingCaptureLedger(root: ledgerRoot).provision(.init(
+            verifiedFirstProvisioningAccount: "synthetic", establishedWindow: "window", batchId: batch)!))
+        let clock = MonotonicStep(4_000)
+        let owner = VoiceSharingCaptureAllowance(ledger: .init(root: ledgerRoot),
+                                                 currentAuthorization: { authority },
+                                                 monotonicNowMS: { clock.value })
+        owner.requestPreparation()
+        owner.waitForPreparationForTesting()
+        XCTAssertNotNil(owner.take(for: stamp), "an allowance inside its deadline admits")
+
+        // Re-arm the same token, then step past the deadline. Nothing refreshes, nothing expires,
+        // no timer fires: only admission can see it.
+        owner.requestPreparation()
+        owner.waitForPreparationForTesting()
+        clock.set(5_000)
+        XCTAssertNil(owner.take(for: stamp),
+                     "capture must refuse at the allowance's own deadline, even with policy still live")
+        // The refusal is the DEADLINE, not the step: the authority is still installed, still the
+        // current one, and still live for policy — only the allowance lifetime ended.
+        XCTAssertTrue(authority.isLive(atMonotonicMS: 4_999),
+                      "the same authority would still admit one millisecond earlier")
+        XCTAssertEqual(authority.deadlineMonotonicMS, 5_000, "and that is the deadline it carries")
+        XCTAssertFalse(authority.isLive(atMonotonicMS: 5_000), "and it is past its own deadline")
+    }
+
     func test_dailyCaptureChargeSurvivesReadyQueueDrainAndRestart() throws {
         let policy = VoiceSharingPolicy(clock: StubMonotonicClock(time: 1_000),
             readRemoteSwitch: { .valid(true) }, isAccountEnrolled: { true })
