@@ -231,7 +231,7 @@ struct VoiceSharingCaptureAllowanceClient {
     /// Per-INVOCATION cancellation state, created BEFORE the task exists: a cancellation
     /// that arrives before binding is remembered and applied at bind time. No static
     /// state: cancelling A never touches B.
-    private final class Handle {
+    final class Handle {
         private let lock = NSLock()
         private var task: URLSessionTask?
         private var cancelled = false
@@ -276,8 +276,8 @@ struct VoiceSharingCaptureAllowanceClient {
         var data = Data()
         var boundExceeded = false
         var finished = false
-        weak var task: URLSessionTask?
-        weak var owningSession: URLSession?
+        var task: URLSessionTask?
+        var owningSession: URLSession?
 
         init(limit: Int, continuation: CheckedContinuation<(Data, HTTPURLResponse, Bool), Error>, handle: Handle) {
             self.limit = limit
@@ -298,8 +298,9 @@ struct VoiceSharingCaptureAllowanceClient {
             self.continuation = nil
             if !finished { finished = true }
             resumeLock.unlock()
+            let session = owningSession
             task = nil
-            owningSession?.finishTasksAndInvalidate()
+            session?.finishTasksAndInvalidate()
             owningSession = nil
             guard let continuation else { return }
             switch result {
