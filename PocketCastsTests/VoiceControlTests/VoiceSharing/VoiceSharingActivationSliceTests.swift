@@ -78,19 +78,36 @@ final class VoiceSharingActivationSliceTests: XCTestCase {
     /// The policy flag reads through the NAMED app when it exists and falls back to
     /// the default-app read when it does not — the extraction behavior is otherwise
     /// identical (same key, same default-false handling).
-    func test_flagReadRoutesThroughNamedAppWithoutChangingTheScalar() {
+    func test_flagReadFailsClosedWithoutNamedAppAndRoutesNamedAppWhenPresent() {
         // The coordinator's remote scalar is exactly the one owned key.
         XCTAssertEqual(Constants.RemoteParams.voiceSharingEnabled, "voice_sharing_enabled")
-        // The routing helper exposes the same app-selection seam the coordinator uses.
-        let app = VoiceSharingCoordinator.policyFirebaseApp()
-        // When no named app is configured in this test process, routing must fall
-        // back to the default app (or nil before any Firebase exists) — never a
-        // crash and never a fabricated value.
+        // FAIL CLOSED (reviewer 9440ce71): with no named secondary app the policy
+        // has NO authority — nil app, never the default app, and the SDK read
+        // yields a non-remote value (local default false), never another
+        // project's enabled flag.
         if VoiceSharingFirebaseApp.existing() == nil {
-            XCTAssertEqual(app?.name, FirebaseApp.app()?.name)
+            XCTAssertNil(VoiceSharingCoordinator.policyFirebaseApp(),
+                         "policy must not fall back to the default app")
         } else {
-            XCTAssertEqual(app?.name, VoiceSharingFirebaseApp.appName)
+            XCTAssertEqual(VoiceSharingCoordinator.policyFirebaseApp()?.name,
+                           VoiceSharingFirebaseApp.appName)
         }
+    }
+
+    /// Freshness binds to the SAME named authority: the coordinator's default
+    /// last-fetch reader answers nil when the named app is absent (never the
+    /// default app's fetch time), and the named app's fetch/activate path runs on
+    /// its own RemoteConfig instance.
+    func test_freshnessReaderBindsToTheNamedAuthorityOnly() {
+        let reader = VoiceSharingCoordinator().lastFetchTime()
+        if VoiceSharingFirebaseApp.existing() == nil {
+            XCTAssertNil(reader, "no named authority ⇒ no freshness claim")
+        }
+        // The named refresh path completes without touching the default app;
+        // with no named app it completes(false) synchronously-ish.
+        let expectation = expectation(description: "refresh completes once")
+        VoiceSharingFirebaseApp.refreshPolicy { _ in expectation.fulfill() }
+        waitForExpectations(timeout: 10)
     }
 }
 

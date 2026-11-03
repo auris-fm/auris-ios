@@ -1,4 +1,5 @@
 import FirebaseCore
+import FirebaseRemoteConfig
 import Foundation
 import PocketCastsUtils
 
@@ -36,5 +37,32 @@ enum VoiceSharingFirebaseApp {
         FirebaseApp.configure(name: appName, options: options)
         FileLog.shared.addMessage("[VoiceSharing] secondary Firebase app configured")
         return existing() ?? FirebaseApp.app(name: appName)
+    }
+
+    /// Fetch + activate the policy scalar on the NAMED app's RemoteConfig — the same
+    /// instance the value/freshness reads use (reviewer 9440ce71: value, fetch,
+    /// activation, status and time bind to one authority). Never touches the default
+    /// app's RemoteConfig. Completion fires exactly once with activate-outcome.
+    static func refreshPolicy(expiration: TimeInterval = 3600,
+                              completion: ((Bool) -> Void)? = nil) {
+        guard let named = existing() else {
+            FileLog.shared.addMessage("[VoiceSharing] policy refresh skipped: secondary app absent")
+            completion?(false)
+            return
+        }
+        let config = RemoteConfig.remoteConfig(app: named)
+        config.fetch(withExpirationDuration: expiration) { status, error in
+            if let error {
+                FileLog.shared.addMessage("[VoiceSharing] policy fetch failed: \(error.localizedDescription)")
+                completion?(false)
+                return
+            }
+            config.activate { activated, error in
+                if let error {
+                    FileLog.shared.addMessage("[VoiceSharing] policy activate failed: \(error.localizedDescription)")
+                }
+                completion?(activated)
+            }
+        }
     }
 }
