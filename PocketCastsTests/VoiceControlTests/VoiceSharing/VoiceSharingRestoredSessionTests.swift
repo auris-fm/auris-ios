@@ -289,7 +289,7 @@ final class VoiceSharingRestoredSessionTests: XCTestCase {
         // STORED identity is named here exactly as the real owner would report it (a digest of the
         // stored account); what is absent is only the in-process COMMIT this process never observed.
         coordinator.ownerCredentialIsPresent = { true }
-        coordinator.storedCredentialIdentityProvider = { "stored:account-A" }
+        coordinator.storedCredentialIdentityProvider = { "account-A" }
         coordinator.restoredSessionAuthReadable = { true }
 
         VoiceSharingSessionGeneration.shared.clear()
@@ -299,6 +299,52 @@ final class VoiceSharingRestoredSessionTests: XCTestCase {
         XCTAssertEqual(settlements.value, 1,
                        "a cold start with a stored credential must settle from readable state, not from an observed commit")
         XCTAssertNotNil(VoiceSharingSessionGeneration.shared.currentGeneration())
+    }
+
+    /// REVIEWER (`d23c3f613`): the cold fallback and the committed provider must name one account with
+    /// ONE string. My earlier revision namespaced the stored form as "stored:<digest>" while the
+    /// committed form returned the bare digest, so the first renewal commit after a cold start looked
+    /// like a DIFFERENT account: lifecycle restarted, enrollment authority reset, in-flight work lost,
+    /// and a fresh allowance request issued under an unchanged epoch.
+    ///
+    /// The assertion is the TRANSITION, not the string: settle cold, then commit the SAME account as a
+    /// renewal and prove nothing settles again.
+    func test_coldSettlement_thenRenewalCommitOfTheSameAccount_settlesOnce() {
+        let coordinator = makeCoordinator()
+        let settlements = Cell(0)
+        coordinator.initiateIdentityRecoveryRefresh = { settlements.mutate { $0 += 1 } }
+        // BOTH sides read ONE source of truth (the owner), exactly as production does: a cold start
+        // asks the stored form, a commit asks the committed form, and whether these two agree is the
+        // entire subject of this control. Giving them separate fixtures made it unable to notice a
+        // divergence - the first version passed with the "stored:" prefix restored.
+        let storedDigest = Cell(UUID(uuidString: "11111111-2222-3333-4444-555555555555")!)
+        let committedDigest = Cell<UUID?>(nil)
+        coordinator.storedCredentialIdentityProvider = {
+            VoiceSharingCoordinator.storedIdentity(from: storedDigest.value)
+        }
+        coordinator.ownerAccountIdentityProvider = {
+            VoiceSharingCoordinator.committedIdentity(from: committedDigest.value)
+        }
+        coordinator.ownerCredentialIsPresent = { true }
+        coordinator.restoredSessionAuthReadable = { true }
+
+        VoiceSharingSessionGeneration.shared.clear()
+        let invalidate = coordinator.installIdentityInvalidation(startupAuthReadable: { true })
+        defer { invalidate(); VoiceSharingSessionGeneration.shared.clear() }
+
+        XCTAssertEqual(settlements.value, 1,
+                       "premise: the cold start settled from the stored credential")
+        let generation = VoiceSharingSessionGeneration.shared.currentGeneration()
+        XCTAssertNotNil(generation, "premise: and it holds a lifecycle")
+
+        // The SAME account now commits — what `credentialCommitObserver` reports on every renewal.
+        committedDigest.mutate { $0 = storedDigest.value }
+        coordinator.credentialCommitDidOccur()
+
+        XCTAssertEqual(settlements.value, 1,
+                       "a renewal of the SAME account must not settle again - the two namings must agree")
+        XCTAssertEqual(VoiceSharingSessionGeneration.shared.currentGeneration(), generation,
+                       "and the lifecycle must not be restarted under it")
     }
 
     /// The other side of the same rule: readable-by-injection is not a credential. With nothing

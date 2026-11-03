@@ -600,14 +600,13 @@ final class VoiceSharingCoordinator {
         // cold restore deferred forever). The fallback is therefore the READABLE credential, not a
         // remembered commit: a state you can read, not an event you may have missed. It is reached
         // only when the committed identity is absent, so a live commit always wins.
-        let present = ownerCredentialIsPresent()
-        let fallback = storedCredentialIdentityProvider()
-        let coldFallback = !present ? nil : fallback
-        guard let identity = ownerAccountIdentityProvider() ?? coldFallback, !identity.isEmpty else {
+        let identity = ownerAccountIdentityProvider()
+            ?? (ownerCredentialIsPresent() ? storedCredentialIdentityProvider() : nil)
+        guard let identity, !identity.isEmpty else {
             // Nothing to act for: signed out, or the owner is mid-write. KEEP the current lifecycle
             // — a renewal momentarily disowning nothing must not strand a live session — and keep
             // the debt so the next tick or commit settles it.
-            FileLog.shared.addMessage("[VoiceSharing] identity settlement deferred: owner reports no committed credential (present=\(ownerCredentialIsPresent()) committed=\(ownerAccountIdentityProvider() ?? "nil") fallback=\(Self.storedCredentialIdentityFallback() ?? "nil"))")
+            FileLog.shared.addMessage("[VoiceSharing] identity settlement deferred: no readable owner credential (present=\(ownerCredentialIsPresent()))")
             return
         }
         if identity == settledAccountIdentity {
@@ -629,18 +628,35 @@ final class VoiceSharingCoordinator {
     }
 
     /// Identity of the credential already stored for this account (a COLD start, or a credential that
-    /// became present without a commit this process observed). Uses the owner's own account half and
-    /// is namespaced as "stored" so a stored identity and a committed identity for the SAME account
-    /// both settle exactly once: the committed form is preferred, and the stored one only fills in.
+    /// became present without a commit this process observed).
+    ///
+    /// It is the SAME value the committed path reports — the owner's account digest and nothing else
+    /// (reviewer, `d23c3f613`). An earlier revision namespaced this as "stored:<digest>"; that made the
+    /// same account compare unequal to itself, so the first renewal commit after a cold start read as
+    /// a DIFFERENT account and reset the lifecycle, enrollment authority and in-flight work. Two ways
+    /// of naming one account must produce one string, or the difference is eventually read as an event.
     static func storedCredentialIdentityFallback() -> String? {
-        guard let account = ServerSettings.storedAccountIdentity()?.uuidString else { return nil }
-        return "stored:" + account
+        storedIdentity(from: ServerSettings.storedAccountIdentity())
     }
+
+    /// The account's identity as the COLD path names it.
+    static func storedIdentity(from stored: UUID?) -> String? { stored?.uuidString }
+
+    /// The account's identity as the COMMITTED path names it. Both live here, one function apart, so
+    /// any divergence between them is a one-line change that a single control can see.
+    static func committedIdentity(from committed: UUID?) -> String? { committed?.uuidString }
 
     /// The credential owner reported a completed commit: the lock is released and the account this
     /// process can act for may have changed. Re-derives; never assumes a login.
-    private func credentialCommitDidOccur() {
-        guard SyncManager.isUserLoggedIn() else { return }
+    /// The credential owner reported a completed commit: the lock is released and the account this
+    /// process can act for may have changed. Re-derives; never assumes a login.
+    ///
+    /// There is deliberately NO `isUserLoggedIn()` gate here (reviewer on `d23c3f613`). That check
+    /// reads `ServerSettings.syncingEmail()`, which is itself nil while an incomplete credential write
+    /// is in flight — so a commit observer gated on it could be silenced by the very commit it exists
+    /// to observe. The decision belongs to `settleFromOwnerReadiness()`, which asks the owner for an
+    /// identity: no identity, no settlement.
+    func credentialCommitDidOccur() {
         settleFromOwnerReadiness()
     }
 
