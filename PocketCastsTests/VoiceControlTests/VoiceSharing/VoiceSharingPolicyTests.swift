@@ -1214,6 +1214,10 @@ final class VoiceSharingPolicyTests: XCTestCase {
         coordinator.expiryScheduler = { _, _ in scheduled = true }
         var refreshInitiated = false
         coordinator.initiateIdentityRecoveryRefresh = { refreshInitiated = true }
+        // The re-login settles through the OWNER's readiness, as it does in production. This control
+        // names the account the owner reports rather than committing credentials into the test host's
+        // Keychain; what it asserts about is the transition, not the owner's own digest.
+        coordinator.ownerAccountIdentityProvider = { "owner-account" }
 
         // A fenced state first: an identity transition raises the fence, so installs are refused.
         coordinator.policy.invalidateForIdentityChange()

@@ -599,6 +599,24 @@ public extension ServerSettings {
         }
     }
 
+    /// The account the STORED credential belongs to, readable without any commit having happened in
+    /// this process — the COLD-START question. `committedAccountIdentity()` answers "a commit happened
+    /// in this process"; this answers "there is a credential I could present right now". A restored
+    /// session needs the second, and it must not depend on an event it may have missed.
+    ///
+    /// Nil unless a credential is actually present (a refresh token in the Keychain), so a
+    /// signed-out device reports nothing even if stale defaults linger.
+    static func storedAccountIdentity() -> UUID? {
+        authenticationLock.withLock {
+            guard !UserDefaults.standard.bool(forKey: incompleteCredentialWriteKey) else { return nil }
+            guard let refresh = try? KeychainHelper.string(for: ServerConstants.Values.refreshTokenKey),
+                  !refresh.isEmpty else { return nil }
+            let account = accountKey(uuid: userId, email: syncingEmail())
+            guard account != "|" else { return nil }
+            return uuidV5(namespace: identityNamespace, name: account)
+        }
+    }
+
     /// `uuid|email` — what the commit wrote, nothing read back later.
     private static func accountKey(uuid: String?, email: String?) -> String {
         let id = uuid?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
