@@ -199,11 +199,14 @@ struct VoiceSharingCaptureAllowanceClient {
         urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         guard sessionIdentity() == identity else { return .unavailable }
         do {
-            let (data, http) = try await Self.boundedRead(
+            let bounded = try await Self.boundedRead(
                 urlRequest, session: session, limit: VoiceSharingCaptureAllowanceResponse.maximumEnvelopeBytes)
             guard sessionIdentity() == identity else { return .unavailable }
-            let elapsed = monotonicNowMS() - start
-            guard elapsed >= 0 else { return .unavailable } // backward clock cannot extend validity
+            let data = bounded.data
+            let http = bounded.http
+            if bounded.exceeded, http.statusCode == 200 { return .unavailable }
+            let (elapsed, elapsedOverflow) = monotonicNowMS().subtractingReportingOverflow(start)
+            guard !elapsedOverflow, elapsed >= 0 else { return .unavailable } // backward/invalid clock refuses
             switch http.statusCode {
             case 200:
                 guard let validated = VoiceSharingCaptureAllowanceResponse(
@@ -223,64 +226,127 @@ struct VoiceSharingCaptureAllowanceClient {
         }
     }
 
-    enum TransportBound: Error { case oversizedOrIncomplete }
+    enum TransportBound: Error { case oversizedOrIncomplete, cancelled }
 
-    /// A delegate-driven bounded read for EVERY status: the delegate appends at most
-    /// limit+1 bytes and EXPLICITLY cancels the session task when the bound is exceeded
-    /// (early exits terminate the transfer — the stream is never fully consumed).
+    /// A delegate-driven bounded read for EVERY status. The delegate appends at most
+    /// limit+1 bytes (a single large chunk is capped, never buffered whole) and EXPLICITLY
+    /// cancels the session task when the bound is exceeded. The delegate session is
+    /// invalidated on every completion path; caller cancellation cancels the task.
     private static func boundedRead(_ request: URLRequest, session: URLSession,
-                                    limit: Int) async throws -> (Data, HTTPURLResponse) {
-        final class Delegate: NSObject, URLSessionDataDelegate {
-            let limit: Int
-            var response: HTTPURLResponse?
-            var data = Data()
-            var boundExceeded = false
-            var continuation: CheckedContinuation<(Data, HTTPURLResponse), Error>?
-            var onBoundExceeded: (() -> Void)?
-            init(limit: Int) { self.limit = limit }
-            func finish() {
-                continuation?.resume(returning: (data, response ?? HTTPURLResponse(url: URL(string: "https://invalid.invalid")!, statusCode: 0, httpVersion: nil, headerFields: nil)!))
-                continuation = nil
+                                    limit: Int) async throws -> (data: Data, http: HTTPURLResponse, exceeded: Bool) {
+        try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<(Data, HTTPURLResponse, Bool), Error>) in
+                let delegate = Delegate(limit: limit, continuation: continuation)
+                let queue = OperationQueue()
+                let delegateSession = URLSession(configuration: session.configuration, delegate: delegate, delegateQueue: queue)
+                let task = delegateSession.dataTask(with: request)
+                delegate.bind(task: task, session: delegateSession)
+                task.resume()
             }
-            func urlSession(_: URLSession, dataTask _: URLSessionDataTask,
-                            didReceive response: URLResponse,
-                            completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
-                self.response = response as? HTTPURLResponse
-                completionHandler(.allow)
+        }, onCancel: {
+            Delegate.sharedCancellation?.cancelTask()
+        })
+    }
+
+    private final class Delegate: NSObject, URLSessionDataDelegate {
+        /// Cross-task handle for caller cancellation (weak to the task itself).
+        static var sharedCancellation: Handle?
+
+        final class Handle {
+            private let lock = NSLock()
+            private var task: URLSessionTask?
+            func bind(_ task: URLSessionTask) { lock.lock(); self.task = task; lock.unlock() }
+            func cancelTask() { lock.lock(); task?.cancel(); lock.unlock() }
+        }
+
+        let limit: Int
+        var continuation: CheckedContinuation<(Data, HTTPURLResponse, Bool), Error>?
+        let resumeLock = NSLock()
+        var response: HTTPURLResponse?
+        var data = Data()
+        var boundExceeded = false
+        var finished = false
+        weak var task: URLSessionTask?
+        weak var owningSession: URLSession?
+        let handle = Handle()
+
+        init(limit: Int, continuation: CheckedContinuation<(Data, HTTPURLResponse, Bool), Error>) {
+            self.limit = limit
+            self.continuation = continuation
+            Self.sharedCancellation = handle
+        }
+
+        func bind(task: URLSessionTask, session: URLSession) {
+            self.task = task
+            self.owningSession = session
+            handle.bind(task)
+        }
+
+        /// Resumes EXACTLY once; breaks retained closures and invalidates the session.
+        private func settle(_ result: Result<(Data, HTTPURLResponse, Bool), Error>) {
+            resumeLock.lock()
+            let continuation = self.continuation
+            self.continuation = nil
+            if !finished {
+                finished = true
+                Self.sharedCancellation = nil
             }
-            func urlSession(_: URLSession, dataTask _: URLSessionDataTask, didReceive received: Data) {
-                guard !boundExceeded else { return }
-                data.append(received)
-                if data.count > limit {
-                    boundExceeded = true
-                    onBoundExceeded?() // explicitly terminate the transfer
-                    finish() // bound exceeded: stop consuming, refuse — never buffer the rest
-                }
-            }
-            func urlSession(_: URLSession, task _: URLSessionTask, didCompleteWithError error: Error?) {
-                guard !boundExceeded, let continuation = continuation else {
-                    self.continuation = nil
-                    return
-                }
-                self.continuation = nil
-                if let error { continuation.resume(throwing: error) } else { finish2(continuation) }
-            }
-            private func finish2(_ continuation: CheckedContinuation<(Data, HTTPURLResponse), Error>) {
-                guard let response else {
-                    continuation.resume(throwing: TransportBound.oversizedOrIncomplete)
-                    return
-                }
-                continuation.resume(returning: (data, response))
+            resumeLock.unlock()
+            task = nil
+            owningSession?.finishTasksAndInvalidate()
+            owningSession = nil
+            guard let continuation else { return }
+            switch result {
+            case .success(let value): continuation.resume(returning: value)
+            case .failure(let error): continuation.resume(throwing: error)
             }
         }
-        return try await withCheckedThrowingContinuation { continuation in
-            let delegate = Delegate(limit: limit)
-            delegate.continuation = continuation
-            let queue = OperationQueue()
-            let delegateSession = URLSession(configuration: session.configuration, delegate: delegate, delegateQueue: queue)
-            let task = delegateSession.dataTask(with: request)
-            delegate.onBoundExceeded = { task.cancel() }
-            task.resume()
+
+        private func fallbackResponse() -> HTTPURLResponse {
+            HTTPURLResponse(url: URL(string: "https://invalid.invalid")!, statusCode: 0,
+                            httpVersion: nil, headerFields: nil)!
+        }
+
+        func urlSession(_: URLSession, dataTask _: URLSessionDataTask,
+                        didReceive response: URLResponse,
+                        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+            self.response = response as? HTTPURLResponse
+            completionHandler(.allow)
+        }
+
+        func urlSession(_: URLSession, dataTask _: URLSessionDataTask, didReceive received: Data) {
+            resumeLock.lock()
+            guard !finished else { resumeLock.unlock(); return }
+            // Append only the REMAINING allowance up to limit+1: a single huge chunk is
+            // capped, never buffered whole. The status captured BEFORE the body still
+            // classifies; the bounded body itself is only parsed for 200.
+            let allowance = limit + 1 - data.count
+            if received.count > allowance {
+                data.append(received.prefix(max(allowance, 0)))
+                boundExceeded = true
+                resumeLock.unlock()
+                task?.cancel() // explicitly terminate the transfer
+                settle(.success((data, response ?? fallbackResponse(), true)))
+                return
+            }
+            data.append(received)
+            resumeLock.unlock()
+        }
+
+        func urlSession(_: URLSession, task _: URLSessionTask, didCompleteWithError error: Error?) {
+            if (error as? URLError)?.code == .cancelled {
+                settle(.failure(TransportBound.cancelled))
+                return
+            }
+            if let error {
+                settle(.failure(error))
+                return
+            }
+            guard let response = response else {
+                settle(.failure(TransportBound.oversizedOrIncomplete))
+                return
+            }
+            settle(.success((data, response, false)))
         }
     }
 }
