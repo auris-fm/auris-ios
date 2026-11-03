@@ -375,17 +375,17 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         VoiceSharingCoordinator.setSharedForTesting(coordinator)
         defer { VoiceSharingCoordinator.resetSharedForTesting() }
 
-        // Production subscription: AppDelegate -> installIdentityInvalidation on the DEFAULT center,
-        // which is where SyncManager posts its account notifications.
+        discountStartupShape(coordinator)
+        // Then the production subscription: AppDelegate -> installIdentityInvalidation on the
+        // DEFAULT center, which is where SyncManager posts its account notifications.
         let appDelegate = AppDelegate()
         appDelegate.setupVoiceSharingIdentityInvalidation()
 
         // A client built with PRODUCTION DEFAULTS — no injected identity closure at all.
         let client = VoiceSharingAccountClient(tokenProvider: tokens, session: session)
-        // Hermetic start: whatever earlier tests left, this test establishes its own lifecycle first —
-        // exactly what a login does — and then lets the app's sign-out path end it.
+        // Establish honestly: signed-in state + the notification a login produces. (No manual
+        // `clear()`: the installed observers are the sequence under test.)
         VoiceSharingSessionGeneration.shared.clear()
-        // Establish honestly: signed-in state + the notification a login produces.
         let priorEmail = ServerSettings.syncingEmail()
         ServerSettings.setSyncingEmail(email: "supersede-control@example.test")
         defer {
@@ -428,6 +428,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         )
         VoiceSharingCoordinator.setSharedForTesting(coordinator)
         defer { VoiceSharingCoordinator.resetSharedForTesting() }
+        discountStartupShape(coordinator)
         AppDelegate().setupVoiceSharingIdentityInvalidation()
 
         // Signed in for real, through the app's own setter, then establish a lifecycle via the same
@@ -541,13 +542,17 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         )
         VoiceSharingCoordinator.setSharedForTesting(coordinator)
         defer { VoiceSharingCoordinator.resetSharedForTesting() }
+        // A real process runs its startup derivation BEFORE any login notification (AppDelegate
+        // activation precedes sign-in); these controls drive that same order.
+        coordinator.installIdentityInvalidation(startupAuthReadable: { false })
         let appDelegate = AppDelegate()
         appDelegate.setupVoiceSharingIdentityInvalidation()
 
         // Start from signed-out: the point is that a login CREATES a lifecycle, not what preceded it.
+        // The app's own ALREADY-INSTALLED observer runs on SignOutHelper's trailing post too, so a
+        // manual `clear()` would mask the sequence it just logged; let the observable state alone say.
         SignOutHelper.signout()
         RunLoop.current.run(until: Date().addingTimeInterval(0.4))
-        VoiceSharingSessionGeneration.shared.clear()
         XCTAssertNil(VoiceSharingSessionGeneration.shared.currentGeneration(), "control sanity: signed out")
 
         // A real sign-in sets the credential BEFORE posting, which is exactly what makes this case differ
@@ -566,6 +571,15 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         guard let client = Optional(VoiceSharingAccountClient(tokenProvider: tokens, session: session)) else { return }
         XCTAssertNotNil(client.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r7"),
                         "after a login there IS a session to act under")
+    }
+
+
+    /// These controls drive the sign-in/sign-out PRODUCER sequence. A real process runs its startup
+    /// settlement decision first (activation precedes any login), which is what makes the observed
+    /// login the sole settlement trigger; without it the fixture's first derivation would be
+    /// mistaken for that startup decision.
+    private func discountStartupShape(_ coordinator: VoiceSharingCoordinator) {
+        coordinator.startupSettlementRan = true
     }
 
     // MARK: - Review round 7 additions: same-account relogin, GET guarding, numeric bridging
