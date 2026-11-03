@@ -255,9 +255,10 @@ final class VoiceSharingCoordinator {
             FileLog.shared.addMessage("[VoiceSharing] activation settlement: lookup superseded")
             return
         }
-        let client = accountClient ?? VoiceSharingAccountClient(
-            tokenProvider: CloudTokenProviderRouter.provider(), membershipStore: enrollmentStore)
-        guard let fetched = await client.fetchProjection() else {
+        let client = accountClient ?? CloudTokenProviderRouter.voiceSharingProvider().map {
+            VoiceSharingAccountClient(tokenProvider: $0, membershipStore: enrollmentStore)
+        }
+        guard let client, let fetched = await client.fetchProjection() else {
             FileLog.shared.addMessage("[VoiceSharing] activation settlement: projection fetch failed")
             return
         }
