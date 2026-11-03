@@ -519,15 +519,22 @@ final class VoiceSharingCoordinator {
         let generation = restoredSessionPollGeneration
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, self.restoredSessionPollGeneration == generation else { return }
-            // The tick settles nothing on its own: every state it can read is process-global and
-            // survives sign-out, so "readable" alone would mint a lifecycle for a session nobody
-            // established and re-settle a departed account. It asks the OWNER whether a credential
-            // for the currently readable session is committed IN THIS PROCESS, and that answer —
-            // not the tick — decides. A tick that finds no answer keeps the debt (reviewer on
-            // 4035a1ebf: a tick must never be able to clear its own debt).
-            if self.restoredSessionAuthReadable() {
-                self.settleFromOwnerReadiness()
-            }
+            // The tick DELEGATES; it does not decide. It previously guarded with
+            // `restoredSessionAuthReadable()` (SyncManager.isUserLoggedIn(), a syncing-email read)
+            // before asking `settleFromOwnerReadiness()`, and those are different conditions: the
+            // readable credential can name an account through `storedAccountIdentity()` while that
+            // defaults key is empty, which is the whole cold-restore case. Measured: with a stored
+            // credential present and the old gate false, the poll settled nothing while the same
+            // entry point called directly settled once — the gate decided, and it decided wrong.
+            //
+            // Nothing is lost by asking the owner directly. `settleFromOwnerReadiness()` is
+            // idempotent (it dedupes on `settledAccountIdentity`), keeps its own debt when the owner
+            // is silent (reviewer on 4035a1ebf: a tick must never clear its own debt), and cannot
+            // mint a lifecycle from stale process-global state: `storedAccountIdentity()` reports
+            // nothing unless a refresh token is actually in the Keychain, so a signed-out device
+            // still settles nothing. The old gate was a second, narrower predicate guarding a
+            // decision that already guards itself — reviewer's cfcfab6f shape.
+            self.settleFromOwnerReadiness()
             // Back off 5x after the fast restore window (~ the old bound's coverage).
             let base = self.restoredSessionRetryDelay()
             let next = attempt < 20 ? base : base * 5
