@@ -15,7 +15,8 @@ final class VoiceSharingCaptureAllowanceProvisionerTests: XCTestCase {
 
     private func makeBody(requestID: String, epoch: String = "epoch-1",
                           disposition: String = "issued", batch: String? = nil,
-                          validForMS: Int = 60_000, policyGeneration: Int? = nil) -> Data {
+                          validForMS: Int = 60_000, policyGeneration: Int? = nil,
+                          records: Int = 4) -> Data {
         let object: [String: Any] = [
             "schema_version": 1,
             "request_id": requestID,
@@ -24,8 +25,8 @@ final class VoiceSharingCaptureAllowanceProvisionerTests: XCTestCase {
             "enrollment_epoch": epoch,
             "disposition": disposition,
             "valid_for_ms": 60_000,
-            "batch_max_records": 4,
-            "batch_max_bytes": 4 * 1_985_580,
+            "batch_max_records": records,
+            "batch_max_bytes": records * 1_985_580,
             "max_clip_ms": 60_000,
             "max_clip_bytes": 1_920_044,
             "max_metadata_bytes": 65_536,
@@ -284,14 +285,64 @@ final class VoiceSharingCaptureAllowanceProvisionerTests: XCTestCase {
         XCTAssertEqual(charged, 4, "the batch's four reservations are consumed")
         let exhausted = VoiceSharingCaptureProvisioningAuthority(
             verifiedFirstProvisioningAccount: "acct-1", establishedWindow: window, batchId: batchA)!
-        XCTAssertTrue(testLedger.isExhausted(exhausted),
+        XCTAssertTrue(testLedger.isExhausted(exhausted, caps: .init(records: 4, bytes: 4 * 1_985_580)),
                       "fully consumed durable accounting IS the exhaustion proof")
+        // A batch the server capped LOWER is spent sooner: the proof uses the batch's own caps.
+        XCTAssertTrue(testLedger.isExhausted(exhausted, caps: .init(records: 2, bytes: 2 * 1_985_580)),
+                      "exhaustion is judged against the caps THIS batch was issued with")
+        XCTAssertFalse(testLedger.isExhausted(exhausted, caps: .init(records: 5, bytes: 5 * 1_985_580)),
+                       "an unknown or larger cap is not evidence of exhaustion")
 
         Self.replyDisposition = "replayed"
         let next = provisioner(client: echo)
         await next.provision()
         XCTAssertNotEqual(Self.lastSentRequestID, first,
                           "proven exhaustion must mint a new allocation identity")
+    }
+
+    /// Exhaustion must advance WITHIN one process: production calls `provision()` from the live
+    /// exchange, not from a restart, so an installed-but-spent batch must not short-circuit the call.
+    func test_sameProcessExhaustion_advancesWithoutARestart() async {
+        let echo = client(replies: { request in
+            let id = Self.requestIDInBody(request) ?? ""
+            guard Self.replyDisposition == "replayed" else { return (200, self.makeBody(requestID: id)) }
+            return (200, self.makeBody(requestID: id, disposition: "replayed"))
+        })
+        let p = provisioner(client: echo)
+        await p.provision()
+        let first = Self.lastSentRequestID
+        guard let authority = p.currentAuthorization() else { return XCTFail("the issued batch must install") }
+        var charged = 0
+        while testLedger.charge(authority) { charged += 1 }
+        XCTAssertEqual(charged, 4)
+        // The SAME provisioner, still holding the spent installation.
+        Self.replyDisposition = "replayed"
+        await p.provision()
+        XCTAssertNotEqual(Self.lastSentRequestID, first,
+                          "a spent batch must advance in-process, not only after a restart")
+    }
+
+    /// A granted batch capped BELOW the compiled ceiling is proved exhausted at its own caps.
+    func test_lowerCappedBatch_provesExhaustionAtItsOwnCaps() async {
+        let echo = client(replies: { request in
+            let id = Self.requestIDInBody(request) ?? ""
+            guard Self.replyDisposition == "replayed" else {
+                return (200, self.makeBody(requestID: id, records: 2))
+            }
+            return (200, self.makeBody(requestID: id, disposition: "replayed", records: 2))
+        })
+        await provisioner(client: echo).provision()
+        let first = Self.lastSentRequestID
+        let installing = provisioner(client: echo)
+        await installing.provision()
+        guard let authority = installing.currentAuthorization() else { return XCTFail("batch must install") }
+        var charged = 0
+        while testLedger.charge(authority) { charged += 1 }
+        XCTAssertEqual(charged, 2, "a two-capture grant admits two captures")
+        Self.replyDisposition = "replayed"
+        await provisioner(client: echo).provision()
+        XCTAssertNotEqual(Self.lastSentRequestID, first,
+                          "a 1-3 capture batch must be provable exhausted at its own caps")
     }
 
     /// A batch with captures left never mints, however many times it is reopened.
