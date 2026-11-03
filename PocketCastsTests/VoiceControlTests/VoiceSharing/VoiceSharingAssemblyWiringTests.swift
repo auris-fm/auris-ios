@@ -8,6 +8,26 @@ import XCTest
 /// What these prove (spec 18:38Z): no request leaves without eligibility AND a credential; the
 /// receipt-before-release discipline holds through the production composition; revocation cannot
 /// be overridden by a successor or a late response.
+/// The one production predicate the construction control needs, named rather than re-implemented.
+private enum VoiceSharingProviderForControl {
+    static func sharing(aurisBaseURL: String) -> (any CloudTokenProviding)? {
+        CloudTokenProviderRouter.voiceSharingProvider(aurisBaseURL: aurisBaseURL)
+    }
+}
+
+/// Minimal audio-session stand-in: the construction control does not start audio.
+private final class NoopAudioSession: AudioSessionControlling {
+    var isActive: Bool { false }
+    var currentOutputs: [AudioPort] { [] }
+    var currentInputs: [AudioPort] { [] }
+    var availableInputs: [AudioPort] { [] }
+    func configureInputCapableSession() throws {}
+    func setSessionActive(_ active: Bool) throws {}
+    func selectPreferredInput(uid: String) throws {}
+    func clearPreferredInput() {}
+    func restorePlaybackCategory() {}
+}
+
 final class VoiceSharingAssemblyWiringTests: XCTestCase {
     private var root: URL!
 
@@ -21,6 +41,42 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
 
     override func tearDownWithError() throws {
         try? FileManager.default.removeItem(at: root)
+    }
+
+    /// REVIEWER (`86360d9e1`): my missing-origin controls proved the ALLOWANCE CLIENT refuses without
+    /// an origin. They did not prove the thing that matters operationally — that ordinary Voice
+    /// Control still works in a build with sharing unconfigured. The earlier revision returned nil
+    /// from `buildVoiceControlService`, which disabled the whole feature (spec's own regression
+    /// finding on `b658801c6`); that is a one-line mistake away ever since.
+    ///
+    /// So: construct the service for real, with sharing unconfigured, and assert BOTH halves —
+    /// the service exists, and sharing is the only thing that is unavailable.
+    func test_unconfiguredSharingOrigin_stillBuildsOrdinaryVoiceControlService() throws {
+        let suite = "vs-nosharing-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        // No origin anywhere: not in defaults, not in the build default.
+        let config = CloudConfig(defaults: defaults, buildDefaultGatewayURL: "")
+
+        // The assembly resolves sharing through the process-wide `CloudConfig.shared`, so the
+        // control has to move THAT value; passing a local config would leave production reading an
+        // origin from somewhere else and the assertion would be about the fixture. Restored after.
+        let shared = UserDefaults.standard
+        let previous = shared.object(forKey: CloudConfig.baseURLKey)
+        shared.set("", forKey: CloudConfig.baseURLKey)
+        defer {
+            if let previous { shared.set(previous, forKey: CloudConfig.baseURLKey) }
+            else { shared.removeObject(forKey: CloudConfig.baseURLKey) }
+        }
+        XCTAssertEqual(CloudConfig.shared.configuredOrigin, "", "premise: sharing is unconfigured")
+        XCTAssertNil(VoiceSharingProviderForControl.sharing(aurisBaseURL: CloudConfig.shared.configuredOrigin),
+                     "sharing selects no credential without an origin")
+
+        let service = VoiceControlAssembly().buildVoiceControlService(
+            audioSession: NoopAudioSession(),
+            cloudConfig: config)
+        XCTAssertNotNil(service,
+                        "ordinary Voice Control must be constructed regardless of sharing configuration")
     }
 
     /// Mirrors the production wiring in VoiceControlAssembly with an intercepted session and an
