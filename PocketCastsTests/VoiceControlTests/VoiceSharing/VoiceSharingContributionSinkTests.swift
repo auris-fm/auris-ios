@@ -844,10 +844,10 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
             metadataBytes: VoiceSharingUploadQueue.maxMetadataBytes, compiledClipSamples: 16,
             compiledMetadataBytes: VoiceSharingUploadQueue.maxMetadataBytes))
         let stamp = VoiceSharingCaptureStamp(session: "sess-1", epoch: "epoch-1", policyGeneration: policy.currentLeaseGeneration)
-        let authority = try XCTUnwrap(VoiceSharingCaptureAuthorization(account: "synthetic", establishedWindow: "one", limits: limits, consent: stamp))
+        let authority = try XCTUnwrap(VoiceSharingCaptureAuthorization(account: "synthetic", establishedWindow: "one", batchId: "11111111-1111-4111-8111-111111111111", limits: limits, consent: stamp))
         let ledgerRoot = root.deletingLastPathComponent().appendingPathComponent("usage-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: ledgerRoot) }
-        XCTAssertTrue(VoiceSharingCaptureLedger(root: ledgerRoot).provision(.init(verifiedFirstProvisioningAccount: "synthetic", establishedWindow: "one")!))
+        XCTAssertTrue(VoiceSharingCaptureLedger(root: ledgerRoot).provision(.init(verifiedFirstProvisioningAccount: "synthetic", establishedWindow: "one", batchId: "11111111-1111-4111-8111-111111111111")!))
         let owner = VoiceSharingCaptureAllowance(ledger: .init(root: ledgerRoot), currentAuthorization: { authority })
         owner.requestPreparation()
         owner.waitForPreparationForTesting()

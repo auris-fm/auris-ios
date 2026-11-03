@@ -237,13 +237,13 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
         let limits = try XCTUnwrap(VoiceSharingCaptureLimits(dailyRecords: 1, dailyBytes: 100_000,
             compiledRecordsCeiling: 1, compiledBytesCeiling: 100_000,
             clipSamples: 16, metadataBytes: 128, compiledClipSamples: 16, compiledMetadataBytes: 128))
-        let authority = try XCTUnwrap(VoiceSharingCaptureAuthorization(account: "synthetic", establishedWindow: "one",
+        let authority = try XCTUnwrap(VoiceSharingCaptureAuthorization(account: "synthetic", establishedWindow: "one", batchId: "11111111-1111-4111-8111-111111111111",
             limits: limits, consent: .init(session: "gen-A", epoch: "epoch-1", policyGeneration: policy.currentLeaseGeneration)))
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let entered = DispatchSemaphore(value: 0)
         let release = DispatchSemaphore(value: 0)
-        XCTAssertTrue(VoiceSharingCaptureLedger(root: root).provision(.init(verifiedFirstProvisioningAccount: "synthetic", establishedWindow: "one")!))
+        XCTAssertTrue(VoiceSharingCaptureLedger(root: root).provision(.init(verifiedFirstProvisioningAccount: "synthetic", establishedWindow: "one", batchId: "11111111-1111-4111-8111-111111111111")!))
         let allowance = VoiceSharingCaptureAllowance(ledger: .init(root: root, barrier: { phase in
             if phase == .intentDurable {
                 entered.signal()
