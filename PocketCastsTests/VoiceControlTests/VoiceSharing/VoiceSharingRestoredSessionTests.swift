@@ -270,6 +270,57 @@ final class VoiceSharingRestoredSessionTests: XCTestCase {
                         "and it acts under a lifecycle")
     }
 
+    /// REVIEWER (gap 3 on `bf335f109`): the commit hook only observes commits that happen in THIS
+    /// process, and both committed-state fields start nil. A COLD start into an already-readable
+    /// stored session therefore deferred until some later credential exchange — the passive
+    /// restoration stayed unclosed exactly where it matters. My earlier cold-start control hid this
+    /// by injecting an owner identity.
+    ///
+    /// This one drives the real cold path: no call to `commitAuthentication`, no injected identity.
+    /// The owner reports no committed credential (nothing has committed in this process); the process
+    /// starts with READABLE auth state (a stored credential to present). That is enough to settle.
+    func test_coldStartWithStoredCredential_settlesWithoutAnyCommitInThisProcess() {
+        let coordinator = makeCoordinator()
+        let settlements = Cell(0)
+        coordinator.initiateIdentityRecoveryRefresh = { settlements.mutate { $0 += 1 } }
+        // Nothing has committed in this process…
+        coordinator.ownerAccountIdentityProvider = { nil }
+        // …but a credential is present and readable, which is what cold readiness is about. The
+        // STORED identity is named here exactly as the real owner would report it (a digest of the
+        // stored account); what is absent is only the in-process COMMIT this process never observed.
+        coordinator.ownerCredentialIsPresent = { true }
+        coordinator.storedCredentialIdentityProvider = { "stored:account-A" }
+        coordinator.restoredSessionAuthReadable = { true }
+
+        VoiceSharingSessionGeneration.shared.clear()
+        let invalidate = coordinator.installIdentityInvalidation(startupAuthReadable: { true })
+        defer { invalidate(); VoiceSharingSessionGeneration.shared.clear() }
+
+        XCTAssertEqual(settlements.value, 1,
+                       "a cold start with a stored credential must settle from readable state, not from an observed commit")
+        XCTAssertNotNil(VoiceSharingSessionGeneration.shared.currentGeneration())
+    }
+
+    /// The other side of the same rule: readable-by-injection is not a credential. With nothing
+    /// committed AND nothing present, a cold start must not mint a lifecycle on an assumption.
+    func test_coldStartWithNothingToPresent_settlesNothing() {
+        let coordinator = makeCoordinator()
+        let settlements = Cell(0)
+        coordinator.initiateIdentityRecoveryRefresh = { settlements.mutate { $0 += 1 } }
+        coordinator.ownerAccountIdentityProvider = { nil }
+        coordinator.ownerCredentialIsPresent = { false }
+        coordinator.storedCredentialIdentityProvider = { nil }
+        coordinator.restoredSessionAuthReadable = { true }
+
+        VoiceSharingSessionGeneration.shared.clear()
+        let invalidate = coordinator.installIdentityInvalidation(startupAuthReadable: { true })
+        defer { invalidate(); VoiceSharingSessionGeneration.shared.clear() }
+
+        XCTAssertEqual(settlements.value, 0,
+                       "no credential to present means nothing to settle, however readable the session looks")
+        XCTAssertNil(VoiceSharingSessionGeneration.shared.currentGeneration())
+    }
+
     /// (k) The sign-out race, re-stated for owner readiness: an account that is no longer the
     /// committed one is never resurrected. The owner reports NOTHING once signed out, so a later
     /// derivation over a still-readable stored session settles nothing.

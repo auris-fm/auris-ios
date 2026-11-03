@@ -29,6 +29,10 @@ final class VoiceSharingCaptureAllowanceProvisioner {
     private var demandRefreshInFlight = false
     private var demandRefreshPending = false
 
+    /// Monotonic milliseconds, matching the admission path's clock. Injectable so a control can step
+    /// an installed allowance past its deadline without waiting.
+    var monotonicNowMS: () -> Int = { Int(ProcessInfo.processInfo.systemUptime * 1000) }
+
     private let lock = NSLock()
     /// Serializes request-identity creation; distinct from `lock`, which guards the installed response.
     private let identityLock = NSLock()
@@ -166,7 +170,12 @@ final class VoiceSharingCaptureAllowanceProvisioner {
     /// When the binding for the installed request is missing or belongs to a different request, the
     /// pending replacement is unproven, so no usable capacity is claimed and the retry proceeds.
     private func hasUsableInstallation() -> Bool {
-        guard currentAuthorization() != nil else { return false }
+        // An installation past its own allowance deadline is NOT usable, even though it is present and
+        // its ledger still has capacity: nothing can be admitted under it. Short-circuiting here left
+        // the expired installation in place, so the demand refresh the refusal wakes did nothing and
+        // capture stayed closed until the next policy exchange.
+        guard let installed = currentAuthorization(), installed.isLive(atMonotonicMS: monotonicNowMS())
+        else { return false }
         guard let account = accountProvider(), let epoch = enrollmentEpochProvider(),
               let binding = existingBinding(account: account, epoch: epoch),
               let installedID = installedRequestIdentity(), binding.requestID == installedID,

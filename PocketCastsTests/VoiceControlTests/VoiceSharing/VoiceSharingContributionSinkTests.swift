@@ -7,6 +7,15 @@ import XCTest
 /// its production recovery/readiness authority — not a stub.
 final class VoiceSharingContributionSinkTests: XCTestCase {
     private var root: URL!
+
+    /// Lock-protected monotonic reading a control can step.
+    private final class MonotonicStep {
+        private let lock = NSLock()
+        private var stored: Int
+        init(_ initial: Int) { stored = initial }
+        var value: Int { lock.lock(); defer { lock.unlock() }; return stored }
+        func set(_ next: Int) { lock.lock(); stored = next; lock.unlock() }
+    }
     private var queue: VoiceSharingUploadQueue!
     private let samples: [Float] = [0, 0.25, -0.5, 0.99, -1, 0.5]
     private var enabled = true
@@ -832,59 +841,99 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
     /// REVIEWER (expanded review of the swept-in dependency set): the allowance's OWN deadline was
     /// not enforced at admission. `valid_for_ms` is an independent lifetime from the policy lease, and
     /// the only expiry watcher scheduled the POLICY deadline — so a short allowance stayed usable
-    /// after its own deadline while policy was still live, as long as nothing had refreshed it yet.
+    /// after its own deadline while policy was still live.
     ///
-    /// The controls: capture admits before the deadline, and REFUSES at the boundary with the very
-    /// same installed authority, without any timer firing.
-    /// Lock-protected monotonic reading a control can step.
-    private final class MonotonicStep {
-        private let lock = NSLock()
-        private var stored: Int
-        init(_ initial: Int) { stored = initial }
-        var value: Int { lock.lock(); defer { lock.unlock() }; return stored }
-        func set(_ next: Int) { lock.lock(); stored = next; lock.unlock() }
-    }
-
+    /// REVIEWER (on `bf335f109`, gap 1): the first version of this control granted ONE record, so its
+    /// second `take` failed on ledger exhaustion whatever the deadline did, and two direct `isLive`
+    /// assertions were carrying the evidence. This version grants spare capacity and asserts the
+    /// PRODUCTION admission result on both sides of the boundary.
     func test_allowanceExpiry_refusesAtCaptureBoundaryWithoutATimer() throws {
         let policy = VoiceSharingPolicy(clock: StubMonotonicClock(time: 1_000),
             readRemoteSwitch: { .valid(true) }, isAccountEnrolled: { true })
         policy.identityBecameReadable()
         XCTAssertNotNil(policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart()))
-        let limits = try XCTUnwrap(VoiceSharingCaptureLimits(dailyRecords: 1, dailyBytes: 100_000,
-            compiledRecordsCeiling: 1, compiledBytesCeiling: 100_000, clipSamples: 16,
+        // THREE records and ample bytes: capacity is never the reason for a refusal here, so the
+        // only thing that can refuse the third capture is the deadline.
+        let limits = try XCTUnwrap(VoiceSharingCaptureLimits(dailyRecords: 3, dailyBytes: 900_000,
+            compiledRecordsCeiling: 4, compiledBytesCeiling: 4 * 1_985_580, clipSamples: 16,
             metadataBytes: VoiceSharingUploadQueue.maxMetadataBytes, compiledClipSamples: 16,
             compiledMetadataBytes: VoiceSharingUploadQueue.maxMetadataBytes))
         let stamp = VoiceSharingCaptureStamp(session: "sess-1", epoch: "epoch-1", policyGeneration: policy.currentLeaseGeneration)
-        // Deadline at 5 s of monotonic time; the control steps the clock across it explicitly.
         let batch = "22222222-2222-4222-8222-222222222222"
         let authority = try XCTUnwrap(VoiceSharingCaptureAuthorization(
             account: "synthetic", establishedWindow: "window", batchId: batch, limits: limits,
             consent: stamp, deadlineMonotonicMS: 5_000))
         let ledgerRoot = root.deletingLastPathComponent().appendingPathComponent("usage-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: ledgerRoot) }
-        XCTAssertTrue(VoiceSharingCaptureLedger(root: ledgerRoot).provision(.init(
+        let ledger = VoiceSharingCaptureLedger(root: ledgerRoot)
+        XCTAssertTrue(ledger.provision(.init(
             verifiedFirstProvisioningAccount: "synthetic", establishedWindow: "window", batchId: batch)!))
         let clock = MonotonicStep(4_000)
-        let owner = VoiceSharingCaptureAllowance(ledger: .init(root: ledgerRoot),
+        var producerWakes = 0
+        let owner = VoiceSharingCaptureAllowance(ledger: ledger,
                                                  currentAuthorization: { authority },
+                                                 capacityExhausted: { producerWakes += 1 },
                                                  monotonicNowMS: { clock.value })
+
+        // A capture INSIDE the allowance: admitted through the real admission path.
         owner.requestPreparation()
         owner.waitForPreparationForTesting()
         XCTAssertNotNil(owner.take(for: stamp), "an allowance inside its deadline admits")
+        // Capacity is provably left over: this is what makes the next refusal about the deadline.
+        XCTAssertTrue(ledger.charge(authority), "control precondition: batch capacity remains")
 
-        // Re-arm the same token, then step past the deadline. Nothing refreshes, nothing expires,
-        // no timer fires: only admission can see it.
+        // PAST the deadline, with capacity still available and no refresh in between.
         owner.requestPreparation()
         owner.waitForPreparationForTesting()
         clock.set(5_000)
+        let wakes = producerWakes
         XCTAssertNil(owner.take(for: stamp),
-                     "capture must refuse at the allowance's own deadline, even with policy still live")
-        // The refusal is the DEADLINE, not the step: the authority is still installed, still the
-        // current one, and still live for policy — only the allowance lifetime ended.
-        XCTAssertTrue(authority.isLive(atMonotonicMS: 4_999),
-                      "the same authority would still admit one millisecond earlier")
-        XCTAssertEqual(authority.deadlineMonotonicMS, 5_000, "and that is the deadline it carries")
-        XCTAssertFalse(authority.isLive(atMonotonicMS: 5_000), "and it is past its own deadline")
+                     "the production admission must refuse at the allowance's own deadline")
+        XCTAssertGreaterThan(producerWakes, wakes,
+                             "and refusing an expired allowance must wake the producer, which replays the allocation")
+        // The refusal is the DEADLINE: the same authority is live one millisecond earlier.
+        XCTAssertTrue(authority.isLive(atMonotonicMS: 4_999))
+        XCTAssertEqual(authority.deadlineMonotonicMS, 5_000)
+    }
+
+    /// REVIEWER (gap 2), stated as the rule it comes from: **no ledger capacity is consumed by an
+    /// admission that could not have been granted.** An installed authority that has expired must not
+    /// charge the batch during preparation, and preparing again must not quietly eat the batch.
+    func test_expiredAuthority_consumesNoLedgerCapacityDuringPreparation() throws {
+        let stampTokens = try XCTUnwrap(VoiceSharingCaptureLimits(dailyRecords: 2, dailyBytes: 200_000,
+            compiledRecordsCeiling: 2, compiledBytesCeiling: 200_000, clipSamples: 16,
+            metadataBytes: VoiceSharingUploadQueue.maxMetadataBytes, compiledClipSamples: 16,
+            compiledMetadataBytes: VoiceSharingUploadQueue.maxMetadataBytes))
+        let stamp = VoiceSharingCaptureStamp(session: "sess-1", epoch: "epoch-1", policyGeneration: 1)
+        let batch = "33333333-3333-4333-8333-333333333333"
+        let authority = try XCTUnwrap(VoiceSharingCaptureAuthorization(
+            account: "synthetic", establishedWindow: "window", batchId: batch, limits: stampTokens,
+            consent: stamp, deadlineMonotonicMS: 5_000))
+        let ledgerRoot = root.deletingLastPathComponent().appendingPathComponent("usage-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: ledgerRoot) }
+        let ledger = VoiceSharingCaptureLedger(root: ledgerRoot)
+        XCTAssertTrue(ledger.provision(.init(
+            verifiedFirstProvisioningAccount: "synthetic", establishedWindow: "window", batchId: batch)!))
+        let clock = MonotonicStep(5_001) // already past the deadline
+        var producerWakes = 0
+        let owner = VoiceSharingCaptureAllowance(ledger: ledger,
+                                                 currentAuthorization: { authority },
+                                                 capacityExhausted: { producerWakes += 1 },
+                                                 monotonicNowMS: { clock.value })
+
+        for _ in 0..<5 {
+            owner.requestPreparation()
+            owner.waitForPreparationForTesting()
+            XCTAssertNil(owner.take(for: stamp), "an expired allowance admits nothing")
+        }
+        // Five preparations against an expired authority must leave the batch UNTOUCHED. Before the
+        // fix each of them charged a record and then refused at admission.
+        // The batch must be untouched: a two-record batch still admits TWO captures afterwards.
+        XCTAssertTrue(ledger.charge(authority), "control precondition: the batch still has its capacity")
+        XCTAssertTrue(ledger.charge(authority), "both records of the untouched batch are still there")
+        XCTAssertFalse(ledger.charge(authority),
+                       "and it is exactly the granted capacity: five expired preparations consumed none")
+        XCTAssertGreaterThanOrEqual(producerWakes, 1, "and it must ask the producer for another allocation")
     }
 
     func test_dailyCaptureChargeSurvivesReadyQueueDrainAndRestart() throws {

@@ -162,8 +162,14 @@ final class VoiceSharingCaptureAllowance: VoiceSharingCaptureAdmitting {
         token = nil
         // A batch past its own allowance deadline never admits, even while policy is still live and
         // even though the installed authority compares equal (it is the SAME batch).
-        guard prepared.isLive(atMonotonicMS: monotonicNowMS()),
-              prepared.consent == stamp, currentAuthorization() == prepared else { return nil }
+        let live = prepared.isLive(atMonotonicMS: monotonicNowMS())
+        guard live, prepared.consent == stamp, currentAuthorization() == prepared else {
+            // An EXPIRED authority that still matched everything else is not a spent batch: it is an
+            // allowance that ran out, and only the producer can replace it. Refusing without waking it
+            // would leave capture closed until the next policy exchange.
+            if !live { capacityExhausted() }
+            return nil
+        }
         return .init(clipSamples: prepared.limits.clipSamples, metadataBytes: prepared.limits.metadataBytes)
     }
 
@@ -176,14 +182,22 @@ final class VoiceSharingCaptureAllowance: VoiceSharingCaptureAdmitting {
         worker.async { [weak self] in
             guard let self else { return }
             let authority = self.currentAuthorization()
-            if authority == nil {
-                // No installed authority: capture is refused, and the producer is the only thing that
-                // can change that. Without this, an expired allowance waits for the next policy
-                // exchange — potentially hours — before it can be refreshed.
+            // ONE RULE: no ledger capacity is consumed by an admission that could not have been
+            // granted. An installed authority past its own allowance deadline is exactly that case —
+            // it would charge the batch and then refuse at `take`, silently burning capacity. So the
+            // lifetime check comes BEFORE the durable charge, and an expired allowance is a request
+            // for another allocation like any other refusal: the producer is woken, and the resulting
+            // refresh REUSES the persisted request identity, so the replay costs no new batch.
+            let live = authority.map { $0.isLive(atMonotonicMS: self.monotonicNowMS()) } ?? false
+            if !live {
+                // No installed authority, or one whose allowance interval has ended: capture is
+                // refused, and the producer is the only thing that can change that. Without this, an
+                // expired allowance waits for the next policy exchange — potentially hours — before it
+                // can be refreshed.
                 self.capacityExhausted()
             }
             // Validation precedes ledger creation, lock acquisition, and every durable charge.
-            let charged = authority.map { self.ledger.charge($0) } ?? false
+            let charged = live ? (authority.map { self.ledger.charge($0) } ?? false) : false
             self.lock.lock()
             defer { self.lock.unlock() }
             self.preparing = false

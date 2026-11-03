@@ -560,6 +560,17 @@ final class VoiceSharingCoordinator {
         ServerSettings.committedAccountIdentity()?.uuidString
     }
 
+    /// Whether the owner holds a credential this process could PRESENT right now, independent of
+    /// whether it committed one while this process was running. This is what cold start needs: the
+    /// question there is not "did a commit happen in this process" (an event that may have been
+    /// missed entirely, or that happened in an earlier launch) but "is there a stored credential to
+    /// present". Deriving from the readable credential removes the process-lifetime problem instead
+    /// of working around it, and leaves the commit hook to cover only the LATER case it is good at:
+    /// a credential that became available after startup.
+    var ownerCredentialIsPresent: () -> Bool = {
+        ServerSettings.committedAccountIdentity() != nil || SyncManager.isUserLoggedIn()
+    }
+
     /// Re-derives the lifecycle from authoritative auth state rather than trusting the notification that
     /// prompted it. Split out so a composition test can drive the real producer sequence and still assert
     /// the decision, and so `SignOutHelper`'s trailing post cannot be mistaken for a sign-in.
@@ -584,13 +595,19 @@ final class VoiceSharingCoordinator {
     /// decision, and it is stable across renewals, so a renewal does not reset an unchanged
     /// lifecycle.
     func settleFromOwnerReadiness() {
-        // The account identity and the commit generation are read under the owner's own lock, so
-        // the comparison and the decision belong to one instant.
-        guard let identity = ownerAccountIdentityProvider(), !identity.isEmpty else {
-            // Nothing committed: signed out, or the owner is mid-write. KEEP the current lifecycle
+        // COLD vs LATER. In this process nothing may have committed yet even though a stored session
+        // is perfectly usable (reviewer on `bf335f109`: both committed-state fields start nil, so a
+        // cold restore deferred forever). The fallback is therefore the READABLE credential, not a
+        // remembered commit: a state you can read, not an event you may have missed. It is reached
+        // only when the committed identity is absent, so a live commit always wins.
+        let present = ownerCredentialIsPresent()
+        let fallback = storedCredentialIdentityProvider()
+        let coldFallback = !present ? nil : fallback
+        guard let identity = ownerAccountIdentityProvider() ?? coldFallback, !identity.isEmpty else {
+            // Nothing to act for: signed out, or the owner is mid-write. KEEP the current lifecycle
             // — a renewal momentarily disowning nothing must not strand a live session — and keep
             // the debt so the next tick or commit settles it.
-            FileLog.shared.addMessage("[VoiceSharing] identity settlement deferred: owner reports no committed credential")
+            FileLog.shared.addMessage("[VoiceSharing] identity settlement deferred: owner reports no committed credential (present=\(ownerCredentialIsPresent()) committed=\(ownerAccountIdentityProvider() ?? "nil") fallback=\(Self.storedCredentialIdentityFallback() ?? "nil"))")
             return
         }
         if identity == settledAccountIdentity {
@@ -603,6 +620,21 @@ final class VoiceSharingCoordinator {
         enrollmentStore.transitionToAccount(signedIn: true)
         VoiceSharingSessionGeneration.shared.beginNewLifecycle()
         identityBecameReadable()
+    }
+
+    /// The identity of the credential already STORED for this account (the cold-start answer).
+    /// Injectable for the same reason as the owner identity: controls name accounts.
+    var storedCredentialIdentityProvider: () -> String? = {
+        VoiceSharingCoordinator.storedCredentialIdentityFallback()
+    }
+
+    /// Identity of the credential already stored for this account (a COLD start, or a credential that
+    /// became present without a commit this process observed). Uses the owner's own account half and
+    /// is namespaced as "stored" so a stored identity and a committed identity for the SAME account
+    /// both settle exactly once: the committed form is preferred, and the stored one only fills in.
+    static func storedCredentialIdentityFallback() -> String? {
+        guard let account = ServerSettings.storedAccountIdentity()?.uuidString else { return nil }
+        return "stored:" + account
     }
 
     /// The credential owner reported a completed commit: the lock is released and the account this
