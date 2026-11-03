@@ -46,9 +46,14 @@ final class VoiceSharingCaptureAllowanceClientTests: XCTestCase {
         let json = makeBody(requestID: "11111111-1111-4111-8111-111111111111")
         let response = try XCTUnwrap(VoiceSharingCaptureAllowanceResponse(
             json: json, expectedRequestID: "11111111-1111-4111-8111-111111111111",
-            expectedEnrollmentEpoch: "epoch-1", elapsedMS: 1_500))
+            expectedEnrollmentEpoch: "epoch-1", requestStartMonotonicMS: 10_000, elapsedMS: 1_500))
+        XCTAssertEqual(response.deadlineMonotonicMS, 70_000,
+                       "the ORIGINAL deadline is retained, not re-anchored at parse time")
+        XCTAssertTrue(response.stillValid(monotonicNowMS: 69_999))
+        XCTAssertFalse(response.stillValid(monotonicNowMS: 70_000),
+                       "delayed installation is judged against the original deadline")
         XCTAssertEqual(response.disposition, VoiceSharingCaptureAllowanceDisposition.issued)
-        XCTAssertEqual(response.validForMS, 58_500, "interval is anchored to the request-start instant")
+        XCTAssertEqual(response.validForMSRemaining, 58_500, "interval is anchored to the request-start instant")
         XCTAssertEqual(response.batchID, batchA)
     }
 
@@ -56,8 +61,13 @@ final class VoiceSharingCaptureAllowanceClientTests: XCTestCase {
         let json = makeBody(requestID: "11111111-1111-4111-8111-111111111111", validFor: 1_000)
         XCTAssertNil(VoiceSharingCaptureAllowanceResponse(
             json: json, expectedRequestID: "11111111-1111-4111-8111-111111111111",
-            expectedEnrollmentEpoch: "epoch-1", elapsedMS: 1_000),
+            expectedEnrollmentEpoch: "epoch-1", requestStartMonotonicMS: 10_000, elapsedMS: 1_000),
             "an interval already elapsed must never install authority")
+        // A backward clock must refuse, never extend validity.
+        XCTAssertNil(VoiceSharingCaptureAllowanceResponse(
+            json: json, expectedRequestID: "11111111-1111-4111-8111-111111111111",
+            expectedEnrollmentEpoch: "epoch-1", requestStartMonotonicMS: 10_000, elapsedMS: -5),
+            "negative elapsed (clock moved backward) must refuse")
     }
 
     func test_echoMismatch_andOversizedValues_refuse() {
@@ -65,11 +75,11 @@ final class VoiceSharingCaptureAllowanceClientTests: XCTestCase {
         // Wrong echoed request/epoch: not the answer to THIS request.
         XCTAssertNil(VoiceSharingCaptureAllowanceResponse(
             json: makeBody(requestID: requestID, epoch: "epoch-OTHER"),
-            expectedRequestID: requestID, expectedEnrollmentEpoch: "epoch-1", elapsedMS: 0))
+            expectedRequestID: requestID, expectedEnrollmentEpoch: "epoch-1", requestStartMonotonicMS: 0, elapsedMS: 0))
         XCTAssertNil(VoiceSharingCaptureAllowanceResponse(
             json: makeBody(requestID: requestID, epoch: "epoch-1"),
             expectedRequestID: "99999999-9999-4999-8999-999999999999",
-            expectedEnrollmentEpoch: "epoch-1", elapsedMS: 0))
+            expectedEnrollmentEpoch: "epoch-1", requestStartMonotonicMS: 0, elapsedMS: 0))
         // Ceiling-raising values clamp by refusal — never accepted.
         for (key, value) in [("max_clip_ms", 61_000), ("max_clip_bytes", 1_920_045),
                              ("max_metadata_bytes", 65_537), ("valid_for_ms", 300_001),
@@ -77,7 +87,7 @@ final class VoiceSharingCaptureAllowanceClientTests: XCTestCase {
             let json = makeBody(requestID: requestID, overrides: ["__remove__": "", key: value])
             XCTAssertNil(VoiceSharingCaptureAllowanceResponse(
                 json: json, expectedRequestID: requestID,
-                expectedEnrollmentEpoch: "epoch-1", elapsedMS: 0),
+                expectedEnrollmentEpoch: "epoch-1", requestStartMonotonicMS: 0, elapsedMS: 0),
                 "\(key) above the compiled ceiling must refuse")
         }
         // Invalid opaque identifiers.
@@ -85,20 +95,37 @@ final class VoiceSharingCaptureAllowanceClientTests: XCTestCase {
             let json = makeBody(requestID: requestID, overrides: ["__remove__": "", key: value])
             XCTAssertNil(VoiceSharingCaptureAllowanceResponse(
                 json: json, expectedRequestID: requestID,
-                expectedEnrollmentEpoch: "epoch-1", elapsedMS: 0))
+                expectedEnrollmentEpoch: "epoch-1", requestStartMonotonicMS: 0, elapsedMS: 0))
         }
+        // Booleans posing as numbers must be rejected (NSNUMBERS bridge too freely).
+        for key in ["schema_version", "valid_for_ms", "batch_max_records", "max_clip_ms",
+                    "max_clip_bytes", "max_metadata_bytes", "batch_max_bytes"] {
+            let json = makeBody(requestID: requestID, overrides: ["__remove__": "", key: true])
+            XCTAssertNil(VoiceSharingCaptureAllowanceResponse(
+                json: json, expectedRequestID: requestID,
+                expectedEnrollmentEpoch: "epoch-1", requestStartMonotonicMS: 0, elapsedMS: 0),
+                "\(key) as a JSON boolean must refuse")
+        }
+        // Floats posing as integers must be rejected too.
+        let float = makeBody(requestID: requestID, overrides: ["__remove__": "", "valid_for_ms": 1000.5])
+        XCTAssertNil(VoiceSharingCaptureAllowanceResponse(
+            json: float, expectedRequestID: requestID,
+            expectedEnrollmentEpoch: "epoch-1", requestStartMonotonicMS: 0, elapsedMS: 0))
         // Unknown disposition.
         let json = makeBody(requestID: requestID, disposition: "gifted")
         XCTAssertNil(VoiceSharingCaptureAllowanceResponse(
             json: json, expectedRequestID: requestID,
-            expectedEnrollmentEpoch: "epoch-1", elapsedMS: 0))
+            expectedEnrollmentEpoch: "epoch-1", requestStartMonotonicMS: 0, elapsedMS: 0))
     }
 
     // MARK: Transport
 
-    private func stubbedClient(replies: @escaping (URLRequest) -> (Int, Data)) -> VoiceSharingCaptureAllowanceClient {
+    private func stubbedClient(replies: @escaping (URLRequest) -> (Int, Data),
+                               monotonicNowMS: @escaping () -> Int = { 0 }) -> VoiceSharingCaptureAllowanceClient {
         final class Stub: URLProtocol {
             static var reply: ((URLRequest) -> (Int, Data))?
+            /// Incremental delivery control: each element is loaded as its own chunk.
+            static var chunks: ((URLRequest) -> (Int, [Data]))?
             static var seen: [URLRequest] = []
             override class func canInit(with request: URLRequest) -> Bool { true }
             override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -122,11 +149,17 @@ final class VoiceSharingCaptureAllowanceClientTests: XCTestCase {
                 var mutable = request
                 mutable.httpBody = body
                 Self.seen[Self.seen.count - 1] = mutable
-                let (status, data) = Self.reply!(mutable)
+                let (status, payload): (Int, [Data])
+                if let chunks = Self.chunks {
+                    (status, payload) = chunks(mutable)
+                } else {
+                    let (singleStatus, single) = Self.reply!(mutable)
+                    (status, payload) = (singleStatus, [single])
+                }
                 let http = HTTPURLResponse(url: request.url!, statusCode: status,
                                            httpVersion: nil, headerFields: nil)!
                 client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
-                client?.urlProtocol(self, didLoad: data)
+                for chunk in payload { client?.urlProtocol(self, didLoad: chunk) }
                 client?.urlProtocolDidFinishLoading(self)
             }
             override func stopLoading() {}
@@ -134,12 +167,14 @@ final class VoiceSharingCaptureAllowanceClientTests: XCTestCase {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [Stub.self]
         Stub.reply = replies
+        Stub.chunks = nil
         Stub.seen = []
         let client = VoiceSharingCaptureAllowanceClient(
             baseURLProvider: { "https://api.example.test" },
             tokenProvider: StubTokens(),
             session: URLSession(configuration: config),
-            sessionIdentity: { "gen-A" })
+            sessionIdentity: { "gen-A" },
+            monotonicNowMS: monotonicNowMS)
         return client
     }
 
@@ -168,7 +203,7 @@ final class VoiceSharingCaptureAllowanceClientTests: XCTestCase {
     }
 
     func test_transport_refusals_classify() async {
-        for (status, body, expected) in [(409, #"{"error":"capture_window_expired"}"#, VoiceSharingCaptureAllowanceClient.VoiceSharingCaptureAllowanceRefusal.windowExpired),
+        for (status, body, expected) in [(410, "{}", VoiceSharingCaptureAllowanceClient.VoiceSharingCaptureAllowanceRefusal.windowExpired),
                                           (409, #"{"error":"request_conflict"}"#, VoiceSharingCaptureAllowanceClient.VoiceSharingCaptureAllowanceRefusal.requestConflict),
                                           (429, "{}", VoiceSharingCaptureAllowanceClient.VoiceSharingCaptureAllowanceRefusal.exhausted),
                                           (403, "{}", VoiceSharingCaptureAllowanceClient.VoiceSharingCaptureAllowanceRefusal.retiredEnrollment),
@@ -183,10 +218,106 @@ final class VoiceSharingCaptureAllowanceClientTests: XCTestCase {
         XCTAssertEqual(oversized, .unavailable)
     }
 
+    /// Incremental oversized delivery: bytes arrive in small chunks totaling > 8 KiB. The
+    /// bounded read must stop at limit+1 and return unavailable — never buffer, never parse.
+    static let oversizedChunk = Data(repeating: 0x61, count: 512)
+
+    func test_transport_incrementalOversizedDelivery_refusesWithoutBuffering() async {
+        final class Stub2: URLProtocol {
+            static var loaded = 0
+            static var cancelled = false
+            override class func canInit(with request: URLRequest) -> Bool { true }
+            override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+            override func startLoading() {
+                let http = HTTPURLResponse(url: request.url!, statusCode: 200,
+                                           httpVersion: nil, headerFields: nil)!
+                client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
+                // 24 chunks × 512 B = 12 KiB — far beyond the 8 KiB envelope bound.
+                for _ in 0..<24 {
+                    Self.loaded += VoiceSharingCaptureAllowanceClientTests.oversizedChunk.count
+                    client?.urlProtocol(self, didLoad: VoiceSharingCaptureAllowanceClientTests.oversizedChunk)
+                }
+                client?.urlProtocolDidFinishLoading(self)
+            }
+            override func stopLoading() { Self.cancelled = true }
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [Stub2.self]
+        Stub2.loaded = 0
+        Stub2.cancelled = false
+        let client = VoiceSharingCaptureAllowanceClient(
+            baseURLProvider: { "https://api.example.test" },
+            tokenProvider: StubTokens(),
+            session: URLSession(configuration: config),
+            sessionIdentity: { "gen-A" })
+        let outcome = await client.perform(makeRequest())
+        XCTAssertEqual(outcome, .unavailable, "oversized envelope must refuse")
+        XCTAssertTrue(Stub2.cancelled,
+                      "exceeding the bound must stop the connection, not consume the stream")
+    }
+
+    // MARK: Disposition-driven provisioning connection (reviewer 80ef8b5f.5)
+
+    func test_issuedResponse_provisionsThroughTheRealLedgerPath_replayedNeverDoes() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let ledger = VoiceSharingCaptureLedger(root: root)
+        let issued = try XCTUnwrap(VoiceSharingCaptureAllowanceResponse(
+            json: makeBody(requestID: requestID, disposition: "issued"),
+            expectedRequestID: requestID, expectedEnrollmentEpoch: "epoch-1",
+            requestStartMonotonicMS: 0, elapsedMS: 0))
+        let replayed = try XCTUnwrap(VoiceSharingCaptureAllowanceResponse(
+            json: makeBody(requestID: requestID, disposition: "replayed"),
+            expectedRequestID: requestID, expectedEnrollmentEpoch: "epoch-1",
+            requestStartMonotonicMS: 0, elapsedMS: 0))
+        let consent = VoiceSharingCaptureStamp(session: "gen-A", epoch: "epoch-1", policyGeneration: 1)
+
+        // REPLAYED against a MISSING ledger: no provisioning path exists for it — burned.
+        XCTAssertNil(VoiceSharingCaptureAllowanceInstallation.provisioningAuthority(
+            account: "acct", response: replayed),
+            "replayed cannot establish a replacement zero-usage ledger")
+
+        // ISSUED provisions through the REAL ledger.
+        let provision = try XCTUnwrap(VoiceSharingCaptureAllowanceInstallation.provisioningAuthority(
+            account: "acct", response: issued))
+        XCTAssertTrue(ledger.provision(provision))
+        let admission = try XCTUnwrap(VoiceSharingCaptureAllowanceInstallation.admissionAuthority(
+            account: "acct", response: issued, consent: consent))
+        XCTAssertTrue(ledger.charge(admission), "issued batch admits and charges durably")
+
+        // REPLAYED against the now-INTACT ledger: reopens it, keeps the usage (charged state).
+        XCTAssertTrue(ledger.charge(admission), "replayed refresh reopens the existing ledger with existing usage")
+    }
+
+    func test_replayedResponse_cannotReprovisionAfterLedgerLoss() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let ledger = VoiceSharingCaptureLedger(root: root)
+        let replayed = try XCTUnwrap(VoiceSharingCaptureAllowanceResponse(
+            json: makeBody(requestID: requestID, disposition: "replayed"),
+            expectedRequestID: requestID, expectedEnrollmentEpoch: "epoch-1",
+            requestStartMonotonicMS: 0, elapsedMS: 0))
+        let consent = VoiceSharingCaptureStamp(session: "gen-A", epoch: "epoch-1", policyGeneration: 1)
+        XCTAssertNil(VoiceSharingCaptureAllowanceInstallation.provisioningAuthority(
+            account: "acct", response: replayed))
+        let admission = VoiceSharingCaptureAllowanceInstallation.admissionAuthority(
+            account: "acct", response: replayed, consent: consent)
+        // Even when a caller fabricates an authority, the MISSING ledger refuses ordinary admission.
+        if let admission {
+            XCTAssertFalse(ledger.charge(admission), "lost ledger burns the batch")
+        }
+    }
+
     func test_transport_elapsedInterval_neverAccepts() async {
-        let client = stubbedClient { _ in (200, self.makeBody(requestID: self.requestID, validFor: 100)) }
-        let outcome = await client.perform(makeRequest(), elapsedMS: { 200 })
-        XCTAssertEqual(outcome, .unavailable, "transit time cannot extend the server interval")
+        final class Clock { var now = 0 }
+        let clock = Clock()
+        let client = stubbedClient(replies: { _ in
+            clock.now = 300 // response ARRIVAL past the interval end
+            return (200, self.makeBody(requestID: self.requestID, validFor: 100))
+        }, monotonicNowMS: { clock.now })
+        let outcome = await client.perform(makeRequest()) // request start: clock.now == 0
+        XCTAssertEqual(outcome, VoiceSharingCaptureAllowanceClient.Outcome.unavailable,
+                       "transit time cannot extend the server interval")
     }
 
     // MARK: Per-batch ledger composition
