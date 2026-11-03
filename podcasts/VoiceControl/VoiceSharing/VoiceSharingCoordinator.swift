@@ -389,6 +389,7 @@ final class VoiceSharingCoordinator {
         removeAllIdentityObservers()
         let invalidate: () -> Void = { [weak self] in
             guard let self else { return }
+            self.cancelRestoredSessionRetry()
             self.policy.invalidateForIdentityChange()
         }
         // Sign-out: end the lifecycle so nothing begun under it can run, and fence policy installs until the
@@ -457,30 +458,54 @@ final class VoiceSharingCoordinator {
     /// refused for want of a lifecycle, and deferred to "identity recovery" — which also never
     /// fired. An enrolled, consented account therefore captured nothing, silently, until a later
     /// process start happened to observe a readable session. This asks the state directly.
-    private var restoredSessionRetry: DispatchWorkItem?
+    /// Monotonic poll generation: incrementing it invalidates every pending attempt. A
+    /// DispatchWorkItem cannot capture itself for cancellation, and a generation check is the
+    /// same staleness guard without the self-reference.
+    private var restoredSessionPollGeneration = 0
+
+    /// Injectable delay between restored-session attempts so controls run the real
+    /// loop without real seconds. Production: 1 second.
+    var restoredSessionRetryDelay: () -> TimeInterval = { 1.0 }
+
+    /// Injectable auth-state reader so controls drive the real poll loop under a known
+    /// signed-out state (the test host's defaults carry a syncing email, so the
+    /// process-global `SyncManager.isUserLoggedIn()` is signed IN there). Production: the
+    /// same SyncManager read, unchanged.
+    var restoredSessionAuthReadable: () -> Bool = { SyncManager.isUserLoggedIn() }
 
     func startRestoredSessionRetry() {
-        restoredSessionRetry?.cancel()
-        // Bounded: a process may legitimately run signed out, and an unbounded poll would keep asking
-        // forever. 20 attempts covers the session-restore window; past it, a later sign-in arrives
-        // through `.userLoginDidChange` as it always did, so nothing is lost by stopping.
-        attemptRestoredSessionRetry(remaining: 20)
+        restoredSessionPollGeneration += 1
+        // Polls WHILE SIGNED OUT, then settles once. A hard attempt bound leaves a session that
+        // restores late (slow network, large sync) permanently unsettled: nothing ever posts
+        // `.userLoginDidChange` for a session that predates the process, so stopping the poll
+        // means no settlement, ever. The poll reads a defaults-backed flag and backs off to a
+        // 5-second cadence after the fast restore window, which is negligible for a signed-out
+        // process; any settlement (poll or notification) cancels it (reviewer 30630d31).
+        attemptRestoredSessionRetry(delay: restoredSessionRetryDelay(), attempt: 0)
     }
 
-    private func attemptRestoredSessionRetry(remaining: Int) {
-        guard remaining > 0 else { return }
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            if SyncManager.isUserLoggedIn() {
-                self.restoredSessionRetry = nil
+    private func attemptRestoredSessionRetry(delay: TimeInterval, attempt: Int) {
+        let generation = restoredSessionPollGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, self.restoredSessionPollGeneration == generation else { return }
+            if self.restoredSessionAuthReadable() {
                 FileLog.shared.addMessage("[VoiceSharing] restored session became readable; settling identity")
                 self.handleLoginStateDidChange(signedIn: true)
                 return
             }
-            self.attemptRestoredSessionRetry(remaining: remaining - 1)
+            // Back off 5x after the fast restore window (~ the old bound's coverage).
+            let base = self.restoredSessionRetryDelay()
+            let next = attempt < 20 ? base : base * 5
+            self.attemptRestoredSessionRetry(delay: next, attempt: attempt + 1)
         }
-        restoredSessionRetry = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)
+    }
+
+    /// Cancels any pending restored-session attempt. EVERY settlement goes through
+    /// `handleLoginStateDidChange`, so this is the single choke point that stops the poll from
+    /// firing after a normal login notification settled the identity - its next tick otherwise
+    /// began a new lifecycle and superseded the first login's in-flight work (reviewer 30630d31).
+    private func cancelRestoredSessionRetry() {
+        restoredSessionPollGeneration += 1
     }
 
     /// Re-derives the lifecycle from authoritative auth state rather than trusting the notification that
@@ -492,6 +517,12 @@ final class VoiceSharingCoordinator {
         FileLog.shared.addMessage("[VoiceSharing] identity changed: signedIn=\(signedIn)")
         enrollmentStore.transitionToAccount(signedIn: signedIn)
         if signedIn {
+            // A login settlement cancels the poll. A pending poll tick after a normal login
+            // notification settled the identity must not re-derive and supersede the settled
+            // lifecycle (reviewer 30630d31). The SIGNED-OUT branch deliberately leaves a running
+            // poll alone: its ticks only settle when auth state says signed in, so it remains
+            // the coverage for a session that restores late without any notification.
+            cancelRestoredSessionRetry()
             VoiceSharingSessionGeneration.shared.beginNewLifecycle()
             identityBecameReadable()
         } else {

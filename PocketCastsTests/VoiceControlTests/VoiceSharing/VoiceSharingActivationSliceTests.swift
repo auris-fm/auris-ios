@@ -69,7 +69,7 @@ final class VoiceSharingActivationSliceTests: XCTestCase {
     /// a launch crash (mirrors the AppDelegate stub-guard).
     func test_missingOrInvalidPlistYieldsNilWithoutCrash() {
         // Test isolation: remove any named app a prior control in this suite configured.
-        VoiceSharingFirebaseApp.existing()?.delete { _ in }
+        TestSupport.deleteVoiceSharingAppSync()
         XCTAssertNil(VoiceSharingFirebaseApp.configure(plistPath: "/nonexistent/plist.plist"))
         let junk = TestSupport.makeJunkFile()
         defer { try? FileManager.default.removeItem(atPath: junk) }
@@ -233,8 +233,20 @@ final class VoiceSharingActivationSliceTests: XCTestCase {
             ])
         defer { VoiceSharingStubProtocol.replies.removeAll() }
 
+        // No delete here: the Firebase app is configured once by the provenance control that
+        // sorts before this one. DELETING AND RECREATING the same app name makes FirebaseApp
+        // hand back a half-configured instance whose RemoteConfig component throws
+        // (googleAppID "missing"), so the suite creates the app once and reuses it.
         let firApp = try XCTUnwrap(
             VoiceSharingFirebaseApp.configure(plistPath: TestSupport.makeVoiceSharingPlist()))
+        // CAUSE OF THE LONG-STANDING BASELINE FAILURE (found while writing the provenance
+        // control): performPolicyExchange DEFERS with completion(false) when the process-wide
+        // session registry has no lifecycle, which is its state in the test host — so the
+        // stubbed fetch/activate actors were never consulted and every install assertion
+        // failed. Arming the lifecycle is not a bypass: the production path reaches this point
+        // only once the account lifecycle exists.
+        VoiceSharingSessionGeneration.shared.ensureLifecycle()
+        defer { VoiceSharingSessionGeneration.shared.clear() }
         let advanced = LockedFlag()
         let originalFreshness = coordinator.lastFetchTimeProvider
         coordinator.lastFetchTimeProvider = { advanced.value ? Date() : nil }
@@ -249,7 +261,7 @@ final class VoiceSharingActivationSliceTests: XCTestCase {
         defer {
             VoiceSharingFirebaseApp.policyFetchActor = nil
             VoiceSharingFirebaseApp.policyActivateActor = nil
-            VoiceSharingFirebaseApp.existing()?.delete { _ in }
+            TestSupport.deleteVoiceSharingAppSync()
         }
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [VoiceSharingStubProtocol.self]
@@ -285,6 +297,102 @@ final class VoiceSharingActivationSliceTests: XCTestCase {
 
         XCTAssertTrue(coordinator.policy.permitsCollection,
                       "enabled switch + enrolled account + fresh lease ⇒ collection permitted")
+    }
+
+    /// ACTIVATION PROVENANCE (reviewer 30630d31 finding 1): on a FIRST fetch the active
+    /// config value is still the local DEFAULT until `activate` applies the fetched data.
+    /// Reading the value's source before activation therefore rejected a successful first
+    /// fetch with the old provenance. The stub fetches nothing; the provenance actor answers
+    /// FALSE before the activation handler runs and TRUE after — exactly what a real first
+    /// fetch/activate pair produces. With the pre-activation read restored, this exchange
+    /// settles NO lease and the control fails.
+    func test_exchangeFirstFetchProvenanceIsReadAfterActivationApplies() async throws {
+        // DELETION AT END (see helper): a fire-and-forget delete raced the next control's
+        // configure — the same name was recreated mid-deletion and FirebaseApp handed back a
+        // half-configured instance whose RemoteConfig component throws (googleAppID "missing").
+        let firApp = try XCTUnwrap(
+            VoiceSharingFirebaseApp.configure(plistPath: TestSupport.makeVoiceSharingPlist()))
+        // The exchange refuses to even fetch without an account lifecycle; the process-wide
+        // registry has none in the test host, so arm one (and clear it after).
+        VoiceSharingSessionGeneration.shared.ensureLifecycle()
+        defer { VoiceSharingSessionGeneration.shared.clear() }
+
+        let store = VoiceSharingEnrollmentStore(sessionIdentityProvider: { "gen-A" })
+        store.setLocalOptIn(true)
+        let coordinator = VoiceSharingCoordinator(
+            clock: StubMonotonicClock(time: 1_000),
+            lastFetchTime: { nil },
+            valueSource: { VoiceSharingCoordinator.RemoteValueSource(
+                data: Data("true".utf8), sourceIsRemote: true) },
+            enrollmentStore: store)
+        coordinator.expiryScheduler = { _, _ in }
+        coordinator.policy.identityBecameReadable()
+
+        VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] = .init(
+            status: 200,
+            body: [
+                "schema_version": 1,
+                "membership_revision": "r1",
+                "plan": "pro",
+                "voice_sharing_enrolled": true,
+                "withdrawal_state": "active",
+                "enrollment_epoch": "e1" as Any,
+                "accepted_disclosure_version": "voice-sharing-v1" as Any,
+            ])
+        defer { VoiceSharingStubProtocol.replies.removeAll() }
+
+        let advanced = LockedFlag()
+        let originalFreshness = coordinator.lastFetchTimeProvider
+        coordinator.lastFetchTimeProvider = { advanced.value ? Date() : nil }
+        defer { coordinator.lastFetchTimeProvider = originalFreshness }
+
+        let activationApplied = LockedFlag()
+        let provenanceReads = LockedCounter()
+        final class Box { var list: [Bool] = [] }; let provenanceValues = Box()
+        let activateCalls = LockedCounter()
+        VoiceSharingFirebaseApp.policyFetchActor = { _, handler in
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) {
+                advanced.set(true)
+                handler(.success, nil as Error?)
+            }
+        }
+        VoiceSharingFirebaseApp.policyActivateActor = { handler in
+            activateCalls.increment()
+            activationApplied.set(true) // activation applies fetched data to the active config
+            handler(true, nil)
+        }
+        VoiceSharingFirebaseApp.policyValueProvenanceActor = {
+            provenanceReads.increment()
+            let v = activationApplied.value
+            provenanceValues.list.append(v)
+            return v
+        }
+        defer {
+            VoiceSharingFirebaseApp.policyFetchActor = nil
+            VoiceSharingFirebaseApp.policyActivateActor = nil
+            VoiceSharingFirebaseApp.policyValueProvenanceActor = nil
+        }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [VoiceSharingStubProtocol.self]
+        let client = VoiceSharingAccountClient(
+            baseURLProvider: { "https://api.example.test" },
+            tokenProvider: StubTokens(),
+            session: URLSession(configuration: config),
+            sessionIdentity: { "gen-A" },
+            membershipStore: store)
+
+        let settled = expectation(description: "exchange settles")
+        VoiceSharingFirebaseApp.performPolicyExchange(
+            coordinator: coordinator, accountClient: client) { fresh in
+                XCTAssertTrue(fresh,
+                              "a first fetch whose activation succeeds must install: provenance "
+                              + "is read AFTER activation applied the fetched value")
+                settled.fulfill()
+        }
+        await fulfillment(of: [settled], timeout: 10)
+        XCTAssertTrue(store.currentEffectiveEnrolled,
+                      "the settled lease must carry the authoritative membership")
     }
 
     /// PRODUCTION ENTRY control (reviewer 45479ac1): the connected identity-recovery
@@ -325,6 +433,14 @@ private final class LockedFlag {
     init(value: Bool = false) { stored = value }
 }
 
+/// Lock-protected counter for cross-thread control observation.
+private final class LockedCounter {
+    private let lock = NSLock()
+    private var n = 0
+    var value: Int { lock.lock(); defer { lock.unlock() }; return n }
+    func increment() { lock.lock(); n += 1; lock.unlock() }
+}
+
 /// Trust-on-first-use stub credential, mirroring AccountClientTests' provider.
 private final class StubTokens: CloudTokenProviding {
     func token() async -> String? { "test-bearer" }
@@ -348,6 +464,16 @@ private enum TestSupport {
         let data = try PropertyListSerialization.data(fromPropertyList: dict, format: .xml, options: 0)
         try data.write(to: URL(fileURLWithPath: path))
         return path
+    }
+
+    /// Deletes the named app SYNCHRONOUSLY. The old fire-and-forget delete let the next
+    /// configure recreate the name mid-deletion, producing a half-configured app whose
+    /// RemoteConfig component throws.
+    static func deleteVoiceSharingAppSync() {
+        guard let app = VoiceSharingFirebaseApp.existing() else { return }
+        let sem = DispatchSemaphore(value: 0)
+        app.delete { _ in sem.signal() }
+        _ = sem.wait(timeout: .now() + 10)
     }
 
     static func makeJunkFile() -> String {
