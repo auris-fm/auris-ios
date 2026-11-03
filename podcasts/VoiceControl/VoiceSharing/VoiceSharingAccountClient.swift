@@ -1,5 +1,6 @@
 import Foundation
 import PocketCastsServer
+import PocketCastsUtils
 
 /// Client for the Go-owned voice-sharing account routes (spec `270dfa5b`).
 ///
@@ -78,9 +79,15 @@ final class VoiceSharingAccountClient {
         // response — otherwise a sign-out that lands while we are fetching would apply the previous
         // account's projection.
         // Captured at the same instant as the lifecycle: the fence value this read is issued under.
-        guard let readToken = membershipStore.projectionToken() else { return nil }
+        guard let readToken = membershipStore.projectionToken() else {
+            FileLog.shared.addMessage("[VoiceSharing] projection GET skipped: no projection token (store fence absent)")
+            return nil
+        }
         let identityAtStart = readToken.lifecycleGeneration
-        guard let request = await makeRequest(path: Self.projectionPath, method: "GET", body: nil) else { return nil }
+        guard let request = await makeRequest(path: Self.projectionPath, method: "GET", body: nil) else {
+            FileLog.shared.addMessage("[VoiceSharing] projection GET not issued: empty base URL or no credential from token provider")
+            return nil
+        }
         guard sessionIdentity() == identityAtStart else { return nil }
         do {
             let (data, response) = try await session.data(for: request)
@@ -92,8 +99,21 @@ final class VoiceSharingAccountClient {
                 let rejected = request.value(forHTTPHeaderField: "Authorization")?.replacingOccurrences(of: "Bearer ", with: "")
                 await tokenProvider.handleUnauthorized(rejectedToken: rejected)
             }
-            guard http.statusCode == 200 else { return nil }
-            guard let projection = Self.decodeProjection(data) else { return nil }
+            guard http.statusCode == 200 else {
+                // Bounded diagnostic: status + the structured error code only — never raw body text.
+                var code = "<none>"
+                if let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                   let c = object["code"] as? String { code = String(c.prefix(100)) }
+                // Correlation identifier only (reviewer a7712cfc / spec a4aacfc3): the edge ray, if any,
+                // ties this attempt to gateway/edge logs. Never a verdict on the producing layer.
+                let ray = String((http.value(forHTTPHeaderField: "cf-ray") ?? "-").prefix(64))
+                FileLog.shared.addMessage("[VoiceSharing] projection GET failed: status \(http.statusCode), code: \(code), cf-ray: \(ray)")
+                return nil
+            }
+            guard let projection = Self.decodeProjection(data) else {
+                FileLog.shared.addMessage("[VoiceSharing] projection GET: 200 rejected by strict decode at field: \(Self.decodeRejectionReason(data) ?? "unknown")")
+                return nil
+            }
             return FetchedProjection(membership: projection, issuedUnder: readToken)
         } catch {
             return nil
@@ -383,6 +403,30 @@ final class VoiceSharingAccountClient {
             acceptedDisclosureVersion: disclosure,
             withdrawalState: withdrawal
         )
+    }
+
+    /// Bounded decode diagnostic: names the FIRST field-level guard the body failed (reviewer 9642916c:
+    /// log field identity, never raw body text). Returns nil when the body decodes cleanly.
+    static func decodeRejectionReason(_ data: Data) -> String? {
+        guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return "not-a-json-object" }
+        guard Self.isExactInteger(object[Field.schemaVersion], 1) else { return Field.schemaVersion }
+        if Self.nonEmptyString(object[Field.membershipRevision]) == nil { return Field.membershipRevision }
+        if Self.nonEmptyString(object[Field.plan]) == nil { return Field.plan }
+        if VoiceSharingMembership.Plan(rawValue: object[Field.plan] as? String ?? "") == nil { return "\(Field.plan)-enum" }
+        if Self.strictBool(object[Field.enrolled]) == nil { return Field.enrolled }
+        if Self.nonEmptyString(object[Field.withdrawalState]) == nil { return Field.withdrawalState }
+        if VoiceSharingMembership.WithdrawalState(rawValue: object[Field.withdrawalState] as? String ?? "") == nil { return "\(Field.withdrawalState)-enum" }
+        switch object[Field.epoch] {
+        case nil, is NSNull: break
+        case let e as String where !e.trimmingCharacters(in: .whitespaces).isEmpty: break
+        default: return Field.epoch
+        }
+        switch object[Field.acceptedDisclosure] {
+        case nil, is NSNull: break
+        case let d as String where !d.trimmingCharacters(in: .whitespaces).isEmpty: break
+        default: return Field.acceptedDisclosure
+        }
+        return nil
     }
 
     /// Exact integer match. `intValue` truncates (1.5 → 1) and `as? Int` bridges a Bool, so both are

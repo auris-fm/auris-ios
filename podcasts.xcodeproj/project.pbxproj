@@ -24,6 +24,7 @@
 /* End PBXAggregateTarget section */
 
 /* Begin PBXBuildFile section */
+		4A2F8A022F0302AA00E7A002 /* VoiceSharingFirebase.plist in Resources */ = {isa = PBXBuildFile; fileRef = 4A2F8A012F0302AA00E7A001 /* VoiceSharingFirebase.plist */; };
 		0C364CA72FAB8BAA00B46BDA /* MiniPlayerLongPressPreviewViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C364CA62FAB8BAA00B46BDA /* MiniPlayerLongPressPreviewViewController.swift */; };
 		0C52E9EA2FFD8D9B00C2B9D1 /* TroubleshootingViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C52E9E92FFD8D9B00C2B9D1 /* TroubleshootingViewModel.swift */; };
 		0C52E9EC2FFD8DAD00C2B9D1 /* TroubleshootingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C52E9EB2FFD8DAD00C2B9D1 /* TroubleshootingView.swift */; };
@@ -1929,6 +1930,7 @@
 		871975870906424F8C3C70B0 /* Modules */ = {isa = PBXFileReference; lastKnownFileType = wrapper; path = Modules; sourceTree = SOURCE_ROOT; };
 		8B087FC829DC976F0027EAE5 /* PodcastImage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PodcastImage.swift; sourceTree = "<group>"; };
 		8B10E78528D908A900702C54 /* GoogleService-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "GoogleService-Info.plist"; sourceTree = "<group>"; };
+		4A2F8A012F0302AA00E7A001 /* VoiceSharingFirebase.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "VoiceSharingFirebase.plist"; sourceTree = "<group>"; };
 		8B15E7212AD050EE0077F45A /* DMSans.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = DMSans.ttf; sourceTree = "<group>"; };
 		8B17365B298D47B10057E893 /* ca */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = ca; path = ca.lproj/Intents.strings; sourceTree = "<group>"; };
 		8B17365C298D47B10057E893 /* ca */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = ca; path = ca.lproj/Localizable.strings; sourceTree = "<group>"; };
@@ -5411,6 +5413,7 @@
 				404A080924E4C78000308722 /* SceneDelegate.swift */,
 				8B317B9F28906A8900A26A13 /* main.swift */,
 				BD2063301B5351D500DBB592 /* podcasts-Bridging-Header.h */,
+				4A2F8A012F0302AA00E7A001 /* VoiceSharingFirebase.plist */,
 				BD056F0E1F6F8BE300AF8260 /* Main.storyboard */,
 				BD40D7BC19C1A08D00FB8023 /* Launch Screen.xib */,
 				460C375026D83171008B3609 /* Resources */,
@@ -6823,6 +6826,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				4A2F8A022F0302AA00E7A002 /* VoiceSharingFirebase.plist in Resources */,
 				BD12928622F7CCC9004608A6 /* AppIcon-Electric-Blue83.5x83.5@2x~ipad.png in Resources */,
 				BD12928722F7CCC9004608A6 /* AppIcon-Electric-Blue20x20@2x.png in Resources */,
 				BDA002F11F7B318B00DCB4AE /* AppIcon-Round40x40@3x.png in Resources */,
