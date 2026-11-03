@@ -1,4 +1,5 @@
 import XCTest
+import PocketCastsUtils
 @testable import PocketCastsServer
 
 final class SessionAuthenticationTests: XCTestCase {
@@ -100,6 +101,53 @@ final class SessionAuthenticationTests: XCTestCase {
         let failing = try XCTUnwrap(ServerSettings.beginAuthentication(email: "c@example.com"))
         XCTAssertFalse(commit(response(uuid: "account-c"), failing, alwaysFail: true))
         XCTAssertEqual(completions, 2, "a rejected write is not a completion")
+    }
+
+    /// REVIEWER (`d23c3f613`): the cold-readiness control injected a stored identity into the
+    /// coordinator, which proves the coordinator's wiring but not the seam it reads in production.
+    /// This one exercises the real `ServerSettings` reader against actually-stored credentials, and
+    /// asserts the distinction the whole cold path exists for:
+    ///
+    ///  * a credential that is STORED but was never committed in this process must report a stored
+    ///    identity and NO committed identity — the cold-start answer is readable state, not an event;
+    ///  * the committed form and the stored form must be THE SAME STRING for the same account, because
+    ///    the first renewal commit after a cold start is otherwise read as a different account;
+    ///  * with no stored credential there is nothing to present.
+    func testStoredCredentialIdentityIsReadableWithoutACommit_andMatchesTheCommittedForm() throws {
+        // Start from a device with NOTHING to present. The test host's Keychain is shared and dirty
+        // from other suites, so this needs an explicit clear, not an assumption about its contents.
+        ServerSettings.clearAuthentication(defaults: defaults)
+        XCTAssertNil(ServerSettings.committedAccountIdentity(),
+                     "premise: a cold start has no committed identity to report")
+        XCTAssertNil(ServerSettings.storedAccountIdentity(),
+                     "premise: with nothing stored there is nothing to present")
+
+        // A credential that IS stored: the exact state a cold start resumes from — a readable
+        // refresh token AND the email it belongs to, with still no commit in this process. Both must
+        // be present, because they are the two halves the identity hashes; with either one missing the
+        // device genuinely cannot say which account it could act for, and must not guess.
+        ServerSettings.setSyncingEmail(email: "b@example.com")
+        try KeychainHelper.save(string: "restored-refresh",
+                                key: ServerConstants.Values.refreshTokenKey,
+                                accessibility: kSecAttrAccessibleAfterFirstUnlock)
+        XCTAssertNil(ServerSettings.committedAccountIdentity(),
+                     "premise: storing a credential is not a commit")
+        let cold = try XCTUnwrap(ServerSettings.storedAccountIdentity(),
+                                 "a stored credential is readable state, so cold readiness can settle on it")
+
+        // Now the process commits the SAME account (a restoration's first token exchange).
+        let attempt = try XCTUnwrap(ServerSettings.beginAuthentication(explicit: false))
+        XCTAssertTrue(commit(response(), attempt))
+        let committed = try XCTUnwrap(ServerSettings.committedAccountIdentity())
+
+        XCTAssertEqual(committed, cold,
+                       "the stored and committed namings of one account must be one string, or the "
+                       + "commit looks like an account transition and resets the session lifecycle")
+
+        // Signing out leaves nothing to present.
+        ServerSettings.clearAuthentication(defaults: defaults)
+        XCTAssertNil(ServerSettings.storedAccountIdentity(),
+                     "a signed-out device has nothing to present, whatever the defaults once said")
     }
 
     func testLatestRegisteredLoginWinsEvenWhenFirstResponseArrivesLast() throws {
