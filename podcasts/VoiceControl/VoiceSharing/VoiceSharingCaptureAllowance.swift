@@ -213,6 +213,11 @@ final class VoiceSharingCaptureLedger {
     private enum Failure: Error { case unavailable }
     /// One bounded process-wide exclusion also covers separate opens/instances; flock adds process isolation.
     private static let processLock = NSLock()
+
+    /// The compiled per-batch ceilings. The ledger never stores a capacity the day did not grant, and a
+    /// response may only lower it, so exhaustion is judged against the compiled ceiling: a batch that
+    /// consumed four records is spent regardless of what a later replay advertises.
+    static let compiledLimits: (records: UInt64, bytes: UInt64) = (4, UInt64(4 * 1_985_580))
     private static let maximumDocumentBytes = 8 * 1024
     private let root: URL
     private let synchronize: (URL, Bool) throws -> Void
@@ -240,15 +245,39 @@ final class VoiceSharingCaptureLedger {
     /// the caller must then establish one explicitly, because a REPLAY of a batch whose accounting was
     /// lost must refuse rather than fabricate a full fresh allowance.
     func adoptExisting(_ authority: VoiceSharingCaptureProvisioningAuthority) -> Bool {
-        guard Self.processLock.try() else { return false }
-        defer { Self.processLock.unlock() }
         let directory = root.appendingPathComponent(authority.accountDigest, isDirectory: true)
             .appendingPathComponent(authority.batchId, isDirectory: true)
         var info = stat()
         guard lstat(directory.path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR else { return false }
-        // `limits == nil` with an existing ledger re-opens it, settling any interrupted transaction and
-        // confirming its identity, without adding a record.
+        // `limits == nil` re-opens the ledger, settling any interrupted transaction and confirming its
+        // identity, without adding a record. `access` owns the process lock; taking it here as well
+        // would make every adoption fail against its own lock.
         return access(authority, limits: nil)
+    }
+
+    /// True only when this device's durable accounting for the batch is intact and fully consumed.
+    /// This is the client-side proof of exhaustion the allocation rules require before asking the
+    /// server for another batch: the server keeps no per-batch usage record, so a replayed `200` shows
+    /// the same caps however much of the batch was spent, and only this ledger can prove the batch is
+    /// used up. Any doubt — no ledger, corrupt accounting, an interrupted transaction — answers false,
+    /// because minting on doubt reserves capacity that is never used.
+    func isExhausted(_ authority: VoiceSharingCaptureProvisioningAuthority) -> Bool {
+        guard Self.processLock.try() else { return false }
+        defer { Self.processLock.unlock() }
+        let directory = root.appendingPathComponent(authority.accountDigest, isDirectory: true)
+            .appendingPathComponent(authority.batchId, isDirectory: true)
+        // An `intent.json` means a charge is still in flight: its outcome is unproven, so nothing is
+        // proven exhausted either. A SETTLED usage legitimately keeps the last transaction id, so the
+        // usage field is not evidence of an interruption — only the intent file is.
+        guard let names = try? boundedNames(directory), !names.contains("intent.json") else { return false }
+        let allowed: Set<String> = ["init.lock", "claim.lock", "genesis.json", "usage.json"]
+        guard names.isSubset(of: allowed), names.contains("usage.json"), names.contains("genesis.json"),
+              let genesis = try? read(Genesis.self, from: directory.appendingPathComponent("genesis.json")),
+              let usage = try? read(Usage.self, from: directory.appendingPathComponent("usage.json")),
+              genesis.established, matches(genesis.identity, authority), usage.identity == genesis.identity,
+              usage.records > 0 else { return false }
+        let (recordCeiling, byteCeiling) = Self.compiledLimits
+        return usage.records >= recordCeiling || usage.bytes >= byteCeiling
     }
 
     private func access<Scope: VoiceSharingCaptureAccountScope>(
@@ -490,7 +519,10 @@ final class VoiceSharingCaptureLedger {
         try synchronize(directory, true)
     }
 
-    private static func sync(_ url: URL, _ directory: Bool) throws {
+    /// Durable synchronization of a file or a directory entry. Shared with the allocation request
+    /// identity so both are written with the same guarantee: a crash after the server charged us must
+    /// never lose the identity that charge belongs to.
+    static func sync(_ url: URL, _ directory: Bool) throws {
         let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW)
         guard descriptor >= 0 else { throw Failure.unavailable }
         defer { close(descriptor) }

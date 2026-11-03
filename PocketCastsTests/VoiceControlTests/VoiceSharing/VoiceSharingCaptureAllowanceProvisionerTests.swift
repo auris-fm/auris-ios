@@ -15,7 +15,7 @@ final class VoiceSharingCaptureAllowanceProvisionerTests: XCTestCase {
 
     private func makeBody(requestID: String, epoch: String = "epoch-1",
                           disposition: String = "issued", batch: String? = nil,
-                          validForMS: Int = 60_000) -> Data {
+                          validForMS: Int = 60_000, policyGeneration: Int? = nil) -> Data {
         let object: [String: Any] = [
             "schema_version": 1,
             "request_id": requestID,
@@ -111,7 +111,7 @@ final class VoiceSharingCaptureAllowanceProvisionerTests: XCTestCase {
                 return VoiceSharingCaptureStamp(session: sess, epoch: epoch() ?? "",
                                                 policyGeneration: policyGeneration())
             },
-            ledger: VoiceSharingCaptureLedger(root: ledgerRoot),
+            ledger: testLedger,
             requestIdentityRoot: requestRoot,
             log: { Self.logs.append($0) })
     }
@@ -120,7 +120,16 @@ final class VoiceSharingCaptureAllowanceProvisionerTests: XCTestCase {
     /// restart/replay/missing-ledger behaviour is proven on the real ledger, not a stub.
     private var testRoot: URL!
     private var ledgerRoot: URL { testRoot.appendingPathComponent("usage") }
-    private var ledger: VoiceSharingCaptureLedger { VoiceSharingCaptureLedger(root: ledgerRoot) }
+    private var ledger: VoiceSharingCaptureLedger { testLedger }
+    /// A real ledger over the same durable root; `barrier` lets a control stop the four-capture budget
+    /// exactly where it wants to observe the exhaustion proof.
+    private var testLedger = VoiceSharingCaptureLedger(
+        root: FileManager.default.temporaryDirectory, barrier: { _ in })
+
+    private func makeLedger(barrier: @escaping (VoiceSharingCaptureLedger.Barrier) throws -> Void = { _ in })
+        -> VoiceSharingCaptureLedger {
+        VoiceSharingCaptureLedger(root: ledgerRoot, barrier: barrier)
+    }
     private var requestRoot: URL { testRoot.appendingPathComponent("requests") }
 
     override func tearDown() {
@@ -133,6 +142,7 @@ final class VoiceSharingCaptureAllowanceProvisionerTests: XCTestCase {
         testRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("allowance-provisioner-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: testRoot, withIntermediateDirectories: true)
+        testLedger = VoiceSharingCaptureLedger(root: ledgerRoot, barrier: { _ in })
         Self.logs = []
         Self.staticRequestID = requestID
         Self.replyDisposition = "issued"
@@ -206,42 +216,119 @@ final class VoiceSharingCaptureAllowanceProvisionerTests: XCTestCase {
     }
     // MARK: - Allocation reuse across restarts (spec a6d71a42)
 
-    /// The request identity is persisted, so a RESTART replays it instead of minting a new one. The
-    /// stub echoes back whatever request id it was sent, which is what the server does for a replay.
+    /// The request identity is persisted, so a RESTART replays it instead of minting a new one, and the
+    /// stub answers `replayed` — the disposition the real server returns for a stored request id — so
+    /// this can only pass through the ADOPTION path, not the provisioning fallback.
     func test_restart_replaysThePersistedAllocationRequest() async {
         let echo = client(replies: { request in
             let id = Self.requestIDInBody(request) ?? ""
-            return (200, self.makeBody(requestID: id))
+            guard Self.replyDisposition == "replayed" else { return (200, self.makeBody(requestID: id)) }
+            return (200, self.makeBody(requestID: id, disposition: "replayed"))
         })
         await provisioner(client: echo).provision()
         let first = Self.lastSentRequestID
         XCTAssertNotNil(first)
 
-        // A second provisioner over the SAME durable roots is a fresh process.
-        await provisioner(client: echo).provision()
+        Self.replyDisposition = "replayed"
+        let restart = provisioner(client: echo)
+        await restart.provision()
         XCTAssertEqual(Self.lastSentRequestID, first,
                        "a restart must replay the persisted request identity, not mint a new one")
+        XCTAssertNotNil(restart.currentAuthorization(),
+                        "a replayed batch with intact accounting must install by ADOPTION")
+        XCTAssertTrue(Self.logs.contains { $0.contains("replayed") },
+                      "the restart must go through the replay path: \(Self.logs)")
     }
 
-    /// A refresh must reuse the batch this device already accounts for: its usage survives the
-    /// restart, so the four-capture budget is shared rather than reset.
+    /// A restart replays the SAME identity and reopens the SAME accounting: usage survives, so the
+    /// batch's four captures are shared across process lifetimes rather than reset by each launch.
     func test_refresh_adoptsExistingLedger_andUsageSurvivesTheRestart() async {
+        let echo = client(replies: { request in
+            let id = Self.requestIDInBody(request) ?? ""
+            guard Self.replyDisposition == "replayed" else { return (200, self.makeBody(requestID: id)) }
+            return (200, self.makeBody(requestID: id, disposition: "replayed"))
+        })
+        await provisioner(client: echo).provision()
+        let first = Self.lastSentRequestID
+        Self.replyDisposition = "replayed"
+        // A restart adopts the batch and its usage: the ledger is reopened, never re-initialized.
+        let restart = provisioner(client: echo)
+        await restart.provision()
+        XCTAssertEqual(Self.lastSentRequestID, first, "a restart replays the persisted identity")
+        XCTAssertNotNil(restart.currentAuthorization(), "the replayed batch installs by ADOPTION")
+        XCTAssertTrue(Self.logs.contains { $0.contains("replayed") },
+                      "the restart must go through the replay path, not the issued fallback: \(Self.logs)")
+    }
+
+    /// PROVEN exhaustion is the one client-side trigger that mints a new allocation identity: when the
+    /// durable ledger for the current batch is intact and fully consumed, the client persists a new
+    /// request ID so the server can charge another batch against the day's remaining budget. This is
+    /// what keeps the client from being capped at four captures a day.
+    func test_provenExhaustion_mintsANewAllocationIdentity() async {
+        let echo = client(replies: { request in
+            let id = Self.requestIDInBody(request) ?? ""
+            guard Self.replyDisposition == "replayed" else { return (200, self.makeBody(requestID: id)) }
+            return (200, self.makeBody(requestID: id, disposition: "replayed"))
+        })
+        await provisioner(client: echo).provision()
+        let first = Self.lastSentRequestID
+        XCTAssertNotNil(first)
+        // Consume the batch exactly as production does: through the ledger's own durable charge path.
+        let installing = provisioner(client: echo)
+        await installing.provision()
+        guard let authority = installing.currentAuthorization() else {
+            return XCTFail("the issued batch must install")
+        }
+        var charged = 0
+        while testLedger.charge(authority) { charged += 1 }
+        XCTAssertEqual(charged, 4, "the batch's four reservations are consumed")
+        let exhausted = VoiceSharingCaptureProvisioningAuthority(
+            verifiedFirstProvisioningAccount: "acct-1", establishedWindow: window, batchId: batchA)!
+        XCTAssertTrue(testLedger.isExhausted(exhausted),
+                      "fully consumed durable accounting IS the exhaustion proof")
+
+        Self.replyDisposition = "replayed"
+        let next = provisioner(client: echo)
+        await next.provision()
+        XCTAssertNotEqual(Self.lastSentRequestID, first,
+                          "proven exhaustion must mint a new allocation identity")
+    }
+
+    /// A batch with captures left never mints, however many times it is reopened.
+    func test_unconsumedBatch_neverMintsANewIdentity() async {
+        let echo = client(replies: { request in
+            let id = Self.requestIDInBody(request) ?? ""
+            guard Self.replyDisposition == "replayed" else { return (200, self.makeBody(requestID: id)) }
+            return (200, self.makeBody(requestID: id, disposition: "replayed"))
+        })
+        await provisioner(client: echo).provision()
+        let first = Self.lastSentRequestID
+        Self.replyDisposition = "replayed"
+        for _ in 0..<3 { await provisioner(client: echo).provision() }
+        XCTAssertEqual(Self.lastSentRequestID, first,
+                       "an unconsumed batch must keep its identity: a new one reserves capacity never used")
+    }
+
+    /// A response that fails LOCAL admission is not server-confirmed expiry. It must not discard the
+    /// identity: the server has already charged that batch, so re-requesting with a fresh identity
+    /// would buy a second allocation. The refresh simply retries the same identity.
+    func test_notAdmissibleResponse_keepsTheIdentity() async {
+        var policyGeneration = 7
         let echo = client(replies: { request in
             let id = Self.requestIDInBody(request) ?? ""
             return (200, self.makeBody(requestID: id))
         })
-        /// One process lifetime: provision (issuing or replaying), then admit one capture.
-        func lifetime() async -> Bool {
-            let p = provisioner(client: echo)
-            await p.provision()
-            guard let authority = p.currentAuthorization() else { return false }
-            return ledger.charge(authority)
-        }
-        var admitted = 0
-        for _ in 0..<6 where await lifetime() { admitted += 1 }
-        print("RT admitted=\(admitted)")
-        XCTAssertEqual(admitted, 4,
-                       "usage is durable across restarts: four captures per batch, not four per launch")
+        let seed = provisioner(client: echo, policyGeneration: { policyGeneration })
+        await seed.provision()
+        let first = Self.lastSentRequestID
+        XCTAssertNotNil(first)
+
+        // The consent stamp moves between request and install: authority no longer matches.
+        policyGeneration = 8
+        await provisioner(client: echo, policyGeneration: { 7 }).provision()
+        let afterLocalFailure = Self.lastSentRequestID
+        XCTAssertEqual(afterLocalFailure, first,
+                       "a locally inadmissible response must replay the same identity, not mint one")
     }
 
     /// A REPLAY whose ledger is missing refuses: it must never recreate unused capacity. The server
