@@ -123,6 +123,10 @@ final class VoiceSharingCoordinator {
             if self.policy.revokeIfLeaseExpired(
                 generation: target.generation, deadline: target.deadline) {
                 self.consentGateLost()
+                // Normal lease renewal (reviewer 3154e29f): an expired lease refreshes
+                // through the SAME complete exchange as launch/identity recovery. No-op
+                // default; the production entry connects it to the named exchange.
+                self.leaseRenewalAfterExpiry()
             }
         }
     }
@@ -310,6 +314,9 @@ final class VoiceSharingCoordinator {
 
     /// SDK bookkeeping accessors, exposed as functions so call sites read as intent.
     func nowForFreshnessCheck() -> Date { nowProvider() }
+    /// Exchange-seam accessor (activation slice): the policy fetch token captured
+    /// BEFORE a named fetch, for callers settling through policyRefreshAfterActivation.
+    func policyTokenForFetchStart() -> VoiceSharingPolicy.FetchToken { policy.tokenForFetchStart() }
     func lastFetchTime() -> Date? { lastFetchTimeProvider() }
 
     /// Freshness predicate used by the production bridge. Requires BOTH:
@@ -441,6 +448,12 @@ final class VoiceSharingCoordinator {
     /// entry point touches Firebase and must be wired where Firebase is configured (VoiceControlAssembly),
     /// not from a default property initializer a test can trip over.
     var initiateIdentityRecoveryRefresh: () -> Void = {}
+    /// Injectable so tests drive the real sequence. NO-OP by default, because the production fetch
+    /// entry point touches Firebase and must be wired where Firebase is configured (VoiceControlAssembly),
+    /// not from a default property initializer a test can trip over.
+    /// Normal lease-renewal entry (reviewer 3154e29f): invoked after a lease-expiry revocation so
+    /// renewal uses the same complete exchange as launch/identity recovery.
+    var leaseRenewalAfterExpiry: () -> Void = {}
 
     func identityBecameReadable() {
         policy.identityBecameReadable()

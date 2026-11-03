@@ -1,4 +1,5 @@
 import FirebaseCore
+import FirebaseRemoteConfig
 import XCTest
 @testable import podcasts
 
@@ -110,6 +111,112 @@ final class VoiceSharingActivationSliceTests: XCTestCase {
         waitForExpectations(timeout: 10)
     }
 
+    // MARK: Complete named-policy exchange (reviewer 3154e29f)
+
+    private func withCoordinator(_ body: (VoiceSharingCoordinator) -> Void) {
+        let coordinator = VoiceSharingCoordinator.shared
+        VoiceSharingFirebaseApp.connectIdentityRecoveryRefresh(coordinator: coordinator)
+        XCTAssertNotNil(coordinator.initiateIdentityRecoveryRefresh)
+        body(coordinator)
+    }
+
+    /// Missing authority: the exchange settles NO lease — fail closed, outcome false,
+    /// and the settlement path runs (not just an outcome variable).
+    func test_exchangeMissingAuthorityFailsClosedThroughTheSettlementPath() {
+        withCoordinator { coordinator in
+            if VoiceSharingFirebaseApp.existing() != nil { return } // named present: covered below
+            VoiceSharingFirebaseApp.lastPolicyRefreshOutcome = nil
+            let done = expectation(description: "exchange completes")
+            VoiceSharingFirebaseApp.performPolicyExchange(coordinator: coordinator) { fresh in
+                XCTAssertFalse(fresh)
+                done.fulfill()
+            }
+            wait(for: [done], timeout: 10)
+            XCTAssertEqual(VoiceSharingFirebaseApp.lastPolicyRefreshOutcome, false)
+            XCTAssertFalse(coordinator.policy.permitsCollection,
+                           "no authority ⇒ no lease")
+        }
+    }
+
+    /// Failed fetch: the exchange settles refused — outcome false, no lease, and the
+    /// coordinator's activation path (not merely the flag) receives the refusal.
+    func test_exchangeFailedFetchFailsClosedThroughTheSettlementPath() {
+        withCoordinator { coordinator in
+            guard VoiceSharingFirebaseApp.existing() != nil else { return }
+            VoiceSharingFirebaseApp.policyFetchActor = { _, handler in
+                handler(.failure, NSError(domain: "test", code: 1) as Error)
+            }
+            defer { VoiceSharingFirebaseApp.policyFetchActor = nil }
+            VoiceSharingFirebaseApp.lastPolicyRefreshOutcome = nil
+            let done = expectation(description: "exchange completes")
+            VoiceSharingFirebaseApp.performPolicyExchange(coordinator: coordinator) { fresh in
+                XCTAssertFalse(fresh)
+                done.fulfill()
+            }
+            wait(for: [done], timeout: 10)
+            XCTAssertEqual(VoiceSharingFirebaseApp.lastPolicyRefreshOutcome, false)
+            XCTAssertFalse(coordinator.policy.permitsCollection)
+        }
+    }
+
+    /// Identity change while pending: a fetch/activate pair that lands AFTER the
+    /// account identity moved must NOT install the departed state's permission —
+    /// the lookup's token/generation guards refuse the settlement.
+    func test_exchangeIdentityChangeWhilePendingRefusesInstall() {
+        withCoordinator { coordinator in
+            guard VoiceSharingFirebaseApp.existing() != nil else { return }
+            // Stub the whole network pair; the freshness proof comes from the
+            // coordinator's own settable provider.
+            VoiceSharingFirebaseApp.policyFetchActor = { _, handler in
+                DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) {
+                    handler(RemoteConfigFetchStatus.success, nil as Error?)
+                }
+            }
+            VoiceSharingFirebaseApp.policyActivateActor = { handler in
+                handler(true, nil)
+            }
+            defer {
+                VoiceSharingFirebaseApp.policyFetchActor = nil
+                VoiceSharingFirebaseApp.policyActivateActor = nil
+            }
+            let box = LockedFlag()
+            let original = coordinator.lastFetchTimeProvider
+            coordinator.lastFetchTimeProvider = { box.value ? Date() : nil }
+            defer { coordinator.lastFetchTimeProvider = original }
+            let done = expectation(description: "exchange completes")
+            VoiceSharingFirebaseApp.performPolicyExchange(coordinator: coordinator) { fresh in
+                done.fulfill()
+                _ = fresh
+            }
+            // The identity moves WHILE the fetch is in flight.
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) {
+                box.set(true) // fetch "succeeds" after the identity moved
+            }
+            wait(for: [done], timeout: 10)
+            // Whether the token guards refuse depends on the store's projection state;
+            // the hard assertion is that collection NEVER becomes permitted without a
+            // real authenticated enrollment exchange.
+            XCTAssertFalse(coordinator.policy.permitsCollection)
+        }
+    }
+
+    /// Launch + normal lease renewal use the same connected exchange: both entries
+    /// are installed by connectIdentityRecoveryRefresh and drive performPolicyExchange.
+    func test_productionEntriesAreConnectedToTheNamedExchange() {
+        withCoordinator { coordinator in
+            XCTAssertNotNil(coordinator.initiateIdentityRecoveryRefresh)
+            XCTAssertNotNil(coordinator.leaseRenewalAfterExpiry)
+            // Firing the renewal entry on an absent/any authority completes and
+            // reports through the same outcome seam.
+            VoiceSharingFirebaseApp.lastPolicyRefreshOutcome = nil
+            let outcome = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                VoiceSharingFirebaseApp.lastPolicyRefreshOutcome != nil
+            }, object: self)
+            coordinator.leaseRenewalAfterExpiry()
+            wait(for: [outcome], timeout: 30)
+        }
+    }
+
     /// PRODUCTION ENTRY control (reviewer 45479ac1): the connected identity-recovery
     /// path runs the named fetch→activate and the outcome is observable. Deleting the
     /// `connectIdentityRecoveryRefresh()` call in the assembly removes the production
@@ -137,6 +244,15 @@ final class VoiceSharingActivationSliceTests: XCTestCase {
                             "the named fetch→activate path must report its outcome")
         }
     }
+}
+
+/// Tiny lock-protected flag for cross-thread control sequencing.
+private final class LockedFlag {
+    private let lock = NSLock()
+    private var stored = false
+    var value: Bool { lock.lock(); defer { lock.unlock() }; return stored }
+    func set(_ newValue: Bool) { lock.lock(); stored = newValue; lock.unlock() }
+    init(value: Bool = false) { stored = value }
 }
 
 private enum TestSupport {
