@@ -48,6 +48,13 @@ enum VoiceSharingFirebaseApp {
     /// Injectable activate actor for controls (paired with `policyFetchActor`).
     static var policyActivateActor: ((@escaping (Bool, Error?) -> Void) -> Void)?
 
+    /// Injectable provenance actor for controls (paired with `policyActivateActor`):
+    /// when set, replaces the active-config value-source read. Nil (production)
+    /// reads the named config live - INSIDE the activation completion (reviewer
+    /// 30630d31: activation is the step that applies fetched data to the active
+    /// config, so a first fetch's value reads `.default` until activate runs).
+    static var policyValueProvenanceActor: (() -> Bool)?
+
     /// Fetch + activate the policy scalar on the NAMED app's RemoteConfig — the same
     /// instance the value/freshness reads use (reviewer 9440ce71: value, fetch,
     /// activation, status and time bind to one authority). Never touches the default
@@ -137,10 +144,18 @@ enum VoiceSharingFirebaseApp {
             let activate: (@escaping (Bool, Error?) -> Void) -> Void =
                 policyActivateActor ?? { handler in config.activate { activated, error in handler(activated, error) } }
             FileLog.shared.addMessage("[VoiceSharing] policy fetch settled: status=\(status.rawValue) error=\(error.map { String(describing: type(of: $0)) } ?? "none")")
-            // Read the value's own provenance BEFORE judging the exchange: a local, non-remote
-            // value is exactly the stale read the freshness rule exists to reject.
-            let valueIsRemote = config.configValue(forKey: Constants.RemoteParams.voiceSharingEnabled).source == .remote
+            let readProvenance = { () -> Bool in
+                Self.policyValueProvenanceActor?()
+                    ?? (config.configValue(forKey: Constants.RemoteParams.voiceSharingEnabled).source == .remote)
+            }
             activate { sdkActivated, activationError in
+                // Read the value's own provenance INSIDE the activation completion: activation
+                // is the step that applies fetched data to the active config, so on a FIRST
+                // fetch the active value is still the local default until activate runs.
+                // Reading it before activation rejected a successful first fetch with the old
+                // provenance (reviewer 30630d31). A local, non-remote value remains exactly
+                // the stale read the freshness rule rejects - the point is to read AFTER apply.
+                let valueIsRemote = readProvenance()
                 // The only path that may install: an activate without error, a REMOTE-sourced
                 // value, and the SDK's own freshness bookkeeping having advanced past this
                 // exchange's start.
