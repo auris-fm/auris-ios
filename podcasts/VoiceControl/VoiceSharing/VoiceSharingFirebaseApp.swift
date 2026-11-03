@@ -1,6 +1,7 @@
 import FirebaseCore
 import FirebaseRemoteConfig
 import Foundation
+import PocketCastsServer
 import PocketCastsUtils
 
 /// The named secondary Firebase app for Voice Sharing (2026-11-03 activation slice).
@@ -90,20 +91,36 @@ enum VoiceSharingFirebaseApp {
                                       expiration: TimeInterval = 0,
                                       accountClient: VoiceSharingAccountClient? = nil,
                                       completion: ((Bool) -> Void)? = nil) {
-        // Settlement evidence captured BEFORE any network work.
-        let lookup = coordinator.beginEnrollmentLookup()
-        let policyToken = coordinator.policyTokenForFetchStart()
-        let fetchStartedAt = coordinator.nowForFreshnessCheck()
-        let sdkTimeBeforeFetch = coordinator.lastFetchTime()
+        // Settlement evidence captured BEFORE any network work (see the lifecycle note below).
         guard let named = existing() else {
             FileLog.shared.addMessage("[VoiceSharing] policy exchange skipped: secondary app absent")
             lastPolicyRefreshOutcome = false
             coordinator.policyRefreshAfterActivation(freshActivationSucceeded: false,
-                                                     fetchToken: policyToken)
+                                                     fetchToken: coordinator.policyTokenForFetchStart())
             completion?(false)
             return
         }
+        // At LAUNCH the account is not yet readable — the app restores its session a moment after
+        // the exchange begins — so no lifecycle can exist yet, and a lookup taken now is refused by
+        // the settle path's own guard (`lookupIsCurrent` requires a projection token), before any
+        // network work. That guard exists so an account transition cannot install the departed
+        // account's permission; at launch there is nothing yet to be stale against. So the settle
+        // step runs when the lookup itself is validity-checked: no lifecycle → the fetch is deferred
+        // to the identity-recovery path, which runs once the account becomes readable. This is the
+        // honest reading of the guard, not a bypass of it.
+        if VoiceSharingSessionGeneration.shared.currentGeneration() == nil {
+            FileLog.shared.addMessage("[VoiceSharing] policy exchange deferred: no account lifecycle yet")
+            completion?(false)
+            return
+        }
+        let lookup = coordinator.beginEnrollmentLookup()
+        let policyToken = coordinator.policyTokenForFetchStart()
+        let fetchStartedAt = coordinator.nowForFreshnessCheck()
+        let sdkTimeBeforeFetch = coordinator.lastFetchTime()
         let config = RemoteConfig.remoteConfig(app: named)
+        // DIAGNOSTIC (temporary): the named exchange returned without ever settling, so watch the
+        // raw SDK status and the freshness bookkeeping the settle path judges it by.
+        FileLog.shared.addMessage("[VoiceSharing] policy exchange starting: expiration=\(Int(expiration))s sdkLastFetch=\(String(describing: sdkTimeBeforeFetch))")
         let fetch: (TimeInterval, @escaping (RemoteConfigFetchStatus, Error?) -> Void) -> Void =
             policyFetchActor ?? { exp, handler in
                 config.fetch(withExpirationDuration: exp, completionHandler: handler)
@@ -119,13 +136,28 @@ enum VoiceSharingFirebaseApp {
             }
             let activate: (@escaping (Bool, Error?) -> Void) -> Void =
                 policyActivateActor ?? { handler in config.activate { activated, error in handler(activated, error) } }
-            activate { _, activationError in
-                // The only path that may install: a fresh fetch AND an activate without
-                // error, with the SDK's own freshness bookkeeping having advanced.
-                let didActivate = activationError == nil
+            FileLog.shared.addMessage("[VoiceSharing] policy fetch settled: status=\(status.rawValue) error=\(error.map { String(describing: type(of: $0)) } ?? "none")")
+            // Read the value's own provenance BEFORE judging the exchange: a local, non-remote
+            // value is exactly the stale read the freshness rule exists to reject.
+            let valueIsRemote = config.configValue(forKey: Constants.RemoteParams.voiceSharingEnabled).source == .remote
+            activate { sdkActivated, activationError in
+                // The only path that may install: an activate without error, a REMOTE-sourced
+                // value, and the SDK's own freshness bookkeeping having advanced past this
+                // exchange's start.
+                //
+                // `sdkActivated == false` with no error is Firebase saying "nothing to APPLY", and
+                // with expiration 0 that is the normal result of a fetch served from its cache —
+                // the config was already current, so no change is applied and the SDK reports that
+                // honestly. Judging install on it therefore turned a successful exchange into
+                // "no fresh activation", and the lease never installed: a consented capture was
+                // refused by a gate with no user-visible cause. Freshness below is the real proof
+                // that a live fetch→activate happened; the value's own `.remote` source is the
+                // second guard against a stale local read.
+                let didActivate = activationError == nil && valueIsRemote
                 let provedFreshExchange = coordinator.lastFetchAdvancedPast(
                     fetchStartedAt, previousSDKTime: sdkTimeBeforeFetch)
                 let fresh = didActivate && provedFreshExchange
+                FileLog.shared.addMessage("[VoiceSharing] policy exchange settled: sdkActivated=\(sdkActivated) error=\(activationError == nil ? "none" : String(describing: type(of: activationError!))) fetchAdvanced=\(provedFreshExchange) valueRemote=\(valueIsRemote) installing=\(fresh)")
                 Task {
                     await coordinator.completeActivationWithEnrollment(
                         freshActivationSucceeded: fresh, lookup: lookup, accountClient: accountClient)

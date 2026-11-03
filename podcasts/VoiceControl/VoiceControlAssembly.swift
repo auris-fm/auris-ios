@@ -268,6 +268,12 @@ class VoiceControlAssembly {
         let contributionCollector = VoiceSharingCollector(
             policy: VoiceSharingCoordinator.shared.policy,
             captureAllowance: captureAllowance,
+            // CONNECTED CAPTURE ENTRY, second half (2026-11-03): admission ALSO requires the
+            // completion wait limit — a nil limit closes the gate before the allowance is ever
+            // consulted (collector: `guard outcomeWaitLimit != nil`). Without this the provisioned
+            // allowance is real but unreachable: consent live, allowance issued, zero captures.
+            outcomeWaitLimit: VoiceSharingCollector.OutcomeWaitLimit(
+                milliseconds: 15_000, ceilingMilliseconds: 15_000),
             sink: { event in
                 contributionSink.handle(event)
             }

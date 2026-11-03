@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import PocketCastsUtils
 
 /// The Voice Sharing settings surface, BUILT DISABLED (round 69).
 ///
@@ -21,7 +22,18 @@ import Combine
 /// values and are not editable.
 final class VoiceSharingSettingsModel {
     /// Compiled switch. `false` in every shipped build until the owner approves activation.
-    static let surfaceEnabled = false
+    /// STAGING/DEBUG BUILDS ONLY (scope 2026-11-03, reviewer 02d45284 / spec 7dcb3a53 +
+    /// ec6b2151): the consented-recording staging verification needs the disclosure/opt-in
+    /// surface, gated on the SAME `-D STAGING` condition the sync staging endpoints use —
+    /// release/production builds compile `false` with no flip-back step to remember.
+    /// Explicit opt-in and every policy/enrollment/allowance/headset check stay intact.
+    static let surfaceEnabled: Bool = {
+        #if STAGING
+            return true
+        #else
+            return false
+        #endif
+    }()
 
     struct ContributionStatus: Equatable {
         /// Whether the queue's own state could be DETERMINED. `unknown` is a first-class state, not
@@ -683,6 +695,10 @@ final class VoiceSharingAccountModel: ObservableObject {
         store.setLocalOptIn(true)
         guard let sent = begin(), let operation = client.beginEnrollment(
             acceptedDisclosureVersion: disclosureVersion, expectedMembershipRevision: revision) else {
+            // Diagnostic (spec c3f8fcb4): name WHY enrollment could not begin — the two guards above
+            // are silent, and "unsupported_disclosure" from the server is indistinguishable from a
+            // local precondition failure without this line.
+            FileLog.shared.addMessage("[VoiceSharing] enrollment not begun: disclosureVersion=\(disclosureVersion) revision=\(store.currentAuthoritativeState?.membership.membershipRevision ?? "none")")
             membershipStatus = .unavailable
             busy = false
             return
@@ -761,7 +777,9 @@ final class VoiceSharingAccountModel: ObservableObject {
             mutation = nil // Never replay conflicted opt-in against a newer revision.
             membershipStatus = .conflict
         case .unauthorized: membershipStatus = .unauthorized
-        case .refused(let reason): mutation = nil; membershipStatus = .refused(reason)
+        case .refused(let reason):
+            FileLog.shared.addMessage("[VoiceSharing] enrollment refused by server: \(reason)")
+            mutation = nil; membershipStatus = .refused(reason)
         case .unavailableBackend: membershipStatus = withdrawing ? .withdrawalUnconfirmed : .unavailable
         case .refusedStaleSession:
             storeChanged()

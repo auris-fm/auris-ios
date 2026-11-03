@@ -220,11 +220,30 @@ final class VoiceSharingCollector {
     /// Called WITHOUT `lock` held. Returns the epoch when collection is permitted, so the value frozen into
     /// the capture is the same one that authorized it.
     private func permittedEpoch() -> String? {
-        guard outcomeWaitLimit != nil, policy.permitsCollection else { return nil }
+        // DIAGNOSTIC (temporary, this build only): the gate is silent, so "consent is live but
+        // nothing was captured" is indistinguishable from three different refusals.
+        guard outcomeWaitLimit != nil else {
+            FileLog.shared.addMessage("[VoiceSharing] gate closed: no outcome wait limit")
+            return nil
+        }
+        guard policy.permitsCollection else {
+            FileLog.shared.addMessage("[VoiceSharing] gate closed: policy does not permit collection")
+            return nil
+        }
         let state = membership()
         // Unknown membership (no projection accepted this session) is NOT permission. Stale likewise.
-        guard state.hasAuthoritativeProjection, state.effectiveEnrolled else { return nil }
-        guard let epoch = epochProvider(), !epoch.isEmpty else { return nil }
+        guard state.hasAuthoritativeProjection else {
+            FileLog.shared.addMessage("[VoiceSharing] gate closed: no authoritative projection")
+            return nil
+        }
+        guard state.effectiveEnrolled else {
+            FileLog.shared.addMessage("[VoiceSharing] gate closed: not enrolled")
+            return nil
+        }
+        guard let epoch = epochProvider(), !epoch.isEmpty else {
+            FileLog.shared.addMessage("[VoiceSharing] gate closed: no enrollment epoch")
+            return nil
+        }
         return epoch
     }
 

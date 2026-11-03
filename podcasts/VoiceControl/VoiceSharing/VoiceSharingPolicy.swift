@@ -1,4 +1,5 @@
 import Foundation
+import PocketCastsUtils
 
 /// The validated, immutable client snapshot of the Voice Sharing remote switch.
 ///
@@ -185,9 +186,13 @@ final class VoiceSharingPolicy {
         guard pendingIdentityFence == 0,
               fetchToken.identityGeneration == identityGenerationCounter,
               generationNowAtStart == identityGenerationCounter
-        else { lock.unlock(); return nil }
+        else {
+            FileLog.shared.addMessage("[VoiceSharing] policy install refused: fence=\(pendingIdentityFence) tokenGeneration=\(fetchToken.identityGeneration) current=\(identityGenerationCounter) startGeneration=\(generationNowAtStart)")
+            lock.unlock(); return nil
+        }
         switch value {
         case .unavailable:
+            FileLog.shared.addMessage("[VoiceSharing] policy install refused: remote value unavailable")
             installed = nil
             leaseGeneration += 1
             lock.unlock()
@@ -411,9 +416,21 @@ final class VoiceSharingPolicy {
         let snapshot = installed
         let fenced = pendingIdentityFence > 0
         lock.unlock()
-        guard let snapshot, !fenced else { return false }
+        guard let snapshot else {
+            FileLog.shared.addMessage("[VoiceSharing] policy refuses: no installed snapshot")
+            return false
+        }
+        guard !fenced else {
+            FileLog.shared.addMessage("[VoiceSharing] policy refuses: identity fence pending")
+            return false
+        }
         // Re-check identity NOW instead of trusting the value folded into the snapshot: a
         // withdrawal or account switch between install and this read must not keep collecting.
-        return snapshot.enabledRemotely && clock.now() < snapshot.leaseExpiresAt && isAccountEnrolled()
+        let now = clock.now()
+        let enrolled = isAccountEnrolled()
+        if !(snapshot.enabledRemotely && now < snapshot.leaseExpiresAt && enrolled) {
+            FileLog.shared.addMessage("[VoiceSharing] policy refuses: enabledRemotely=\(snapshot.enabledRemotely) leaseValid=\(now < snapshot.leaseExpiresAt) enrolled=\(enrolled)")
+        }
+        return snapshot.enabledRemotely && now < snapshot.leaseExpiresAt && enrolled
     }
 }

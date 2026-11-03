@@ -2,6 +2,7 @@ import Foundation
 import Firebase
 import PocketCastsServer
 import FirebaseRemoteConfig
+import PocketCastsUtils
 import FirebaseAnalytics
 
 /// Composition point for the Voice Sharing feature on iOS.
@@ -227,10 +228,15 @@ final class VoiceSharingCoordinator {
     }
 
     private func lookupIsCurrent(_ lookup: EnrollmentLookup) -> Bool {
-        lookup.generation == enrollmentLookupGeneration
-            && lookup.projectionToken != nil
-            && lookup.projectionToken == enrollmentStore.projectionToken()
-            && lookup.policyToken == policy.tokenForFetchStart()
+        // DIAGNOSTIC (temporary): a superseded lookup is silent, and it is the difference between
+        // "no identity" and "identity moved under the exchange" — two very different bugs.
+        let current = enrollmentStore.projectionToken()
+        if lookup.generation != enrollmentLookupGeneration || lookup.projectionToken == nil
+            || lookup.projectionToken != current || lookup.policyToken != policy.tokenForFetchStart() {
+            FileLog.shared.addMessage("[VoiceSharing] lookup superseded: gen=\(lookup.generation)/\(enrollmentLookupGeneration) lookupToken=\(lookup.projectionToken == nil ? "nil" : "set") currentToken=\(current == nil ? "nil" : "set") tokensEqual=\(lookup.projectionToken == current) policyTokenEqual=\(lookup.policyToken == policy.tokenForFetchStart())")
+            return false
+        }
+        return true
     }
 
     /// Production activation completion: authoritative membership must be read before renewing
@@ -240,12 +246,21 @@ final class VoiceSharingCoordinator {
         lookup: EnrollmentLookup,
         accountClient: VoiceSharingAccountClient? = nil
     ) async {
-        guard freshActivationSucceeded else { return }
+        guard freshActivationSucceeded else {
+            FileLog.shared.addMessage("[VoiceSharing] activation settlement: no fresh activation")
+            return
+        }
         let mayFetch = enrollmentLookupLock.withLock { lookupIsCurrent(lookup) }
-        guard mayFetch else { return }
+        guard mayFetch else {
+            FileLog.shared.addMessage("[VoiceSharing] activation settlement: lookup superseded")
+            return
+        }
         let client = accountClient ?? VoiceSharingAccountClient(
             tokenProvider: CloudTokenProviderRouter.provider(), membershipStore: enrollmentStore)
-        guard let fetched = await client.fetchProjection() else { return }
+        guard let fetched = await client.fetchProjection() else {
+            FileLog.shared.addMessage("[VoiceSharing] activation settlement: projection fetch failed")
+            return
+        }
 
         let changed: Bool = enrollmentLookupLock.withLock {
             guard lookupIsCurrent(lookup), fetched.issuedUnder == lookup.projectionToken else { return false }
@@ -284,10 +299,12 @@ final class VoiceSharingCoordinator {
         freshActivationSucceeded: Bool,
         fetchToken: VoiceSharingPolicy.FetchToken
     ) {
-        policy.refreshAfterActivation(
+        FileLog.shared.addMessage("[VoiceSharing] policy refresh called: fresh=\(freshActivationSucceeded)")
+        let installed = policy.refreshAfterActivation(
             freshActivationSucceeded: freshActivationSucceeded,
             fetchToken: fetchToken
         )
+        FileLog.shared.addMessage("[VoiceSharing] policy refresh returned: installed=\(installed != nil)")
         // If the refresh observed the gate closed (switch off, account not enrolled, install
         // refused), any audio the collector still holds is consentless — purge now.
         if !policy.permitsCollection { consentGateLost() }
@@ -411,17 +428,67 @@ final class VoiceSharingCoordinator {
         identityCenter = center
         // Cold start into an already-signed-in account: there is no login notification for a session that
         // predates this process, so installation itself must give the app a lifecycle to act under.
+        //
+        // MISSING CONNECTION (spec c3f8fcb4, 2026-11-03): this runs BEFORE the stored session is
+        // readable, so `isUserLoggedIn()` is false, `ensureLifecycle()` never ran, and the launch
+        // policy exchange was refused for want of a lifecycle — it then deferred to "identity
+        // recovery", which only fires on a login NOTIFICATION this process never receives. Result:
+        // an enrolled, consented account whose capture gate stayed closed until the next launch had
+        // a readable session, with no log line explaining any of it. So: register for the transition
+        // itself and settle the launch state.
         if SyncManager.isUserLoggedIn() {
             VoiceSharingSessionGeneration.shared.ensureLifecycle()
+        } else {
+            // The stored session is not readable yet. Settle it by asking the auth state until it
+            // answers, rather than waiting for a notification this app never posts for a session
+            // that predates the process.
+            startRestoredSessionRetry()
         }
         return invalidate
     }
 
 
+    // MARK: - Restored-session settlement (spec c3f8fcb4, 2026-11-03)
+
+    /// A process that starts with a stored session has NO login event to react to: the account is
+    /// restored asynchronously by the sync layer, and nothing posts `.userLoginDidChange` for it.
+    /// Before this, the launch policy exchange ran while `isUserLoggedIn()` was still false, was
+    /// refused for want of a lifecycle, and deferred to "identity recovery" — which also never
+    /// fired. An enrolled, consented account therefore captured nothing, silently, until a later
+    /// process start happened to observe a readable session. This asks the state directly.
+    private var restoredSessionRetry: DispatchWorkItem?
+
+    func startRestoredSessionRetry() {
+        restoredSessionRetry?.cancel()
+        // Bounded: a process may legitimately run signed out, and an unbounded poll would keep asking
+        // forever. 20 attempts covers the session-restore window; past it, a later sign-in arrives
+        // through `.userLoginDidChange` as it always did, so nothing is lost by stopping.
+        attemptRestoredSessionRetry(remaining: 20)
+    }
+
+    private func attemptRestoredSessionRetry(remaining: Int) {
+        guard remaining > 0 else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            if SyncManager.isUserLoggedIn() {
+                self.restoredSessionRetry = nil
+                FileLog.shared.addMessage("[VoiceSharing] restored session became readable; settling identity")
+                self.handleLoginStateDidChange(signedIn: true)
+                return
+            }
+            self.attemptRestoredSessionRetry(remaining: remaining - 1)
+        }
+        restoredSessionRetry = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)
+    }
+
     /// Re-derives the lifecycle from authoritative auth state rather than trusting the notification that
     /// prompted it. Split out so a composition test can drive the real producer sequence and still assert
     /// the decision, and so `SignOutHelper`'s trailing post cannot be mistaken for a sign-in.
     func handleLoginStateDidChange(signedIn: Bool = SyncManager.isUserLoggedIn()) {
+        // DIAGNOSTIC (temporary): silent transitions are what made "the session exists for sync but
+        // voice sharing reads anonymous" unreadable for an hour.
+        FileLog.shared.addMessage("[VoiceSharing] identity changed: signedIn=\(signedIn)")
         enrollmentStore.transitionToAccount(signedIn: signedIn)
         if signedIn {
             VoiceSharingSessionGeneration.shared.beginNewLifecycle()

@@ -18,7 +18,14 @@ struct VoiceSharingMembership: Equatable {
     let withdrawalState: WithdrawalState
 
     enum Plan: String { case free, pro }
-    enum WithdrawalState: String { case active, withdrawn, notEnrolled }
+    enum WithdrawalState: String {
+        // Explicit server wire values (fix 2026-11-03): implicit Swift rawValues are camelCase
+        // ("notEnrolled"), but the server publishes snake_case ("not_enrolled") — the mismatch
+        // made every real projection fail strict decode, reading as "unknown state".
+        case active = "active"
+        case withdrawn = "withdrawn"
+        case notEnrolled = "not_enrolled"
+    }
 
     /// A missing/unknown projection is NOT enrolled: parsing failure yields this rather than throwing, so
     /// callers cannot accidentally treat garbage as permission.
