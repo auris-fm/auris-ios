@@ -1,3 +1,7 @@
+WITHDRAWN IN PART - see evidence/OWNER-SIM-ALLOWANCE-PRECHECK-CORRECTION.txt
+The store path in this file is wrong and the "never written" claim overreaches.
+The contamination finding stands.
+
 OWNER SIM: allowance/allocation artefact state, read-only pre-check
 Simulator 13EB57ED-99BB-4C6F-B855-D31E96028D57, app fm.auris, installed build bb72d3c4c.
 No launch, no UI action, no write. Nothing was installed, seeded, or signed in.
