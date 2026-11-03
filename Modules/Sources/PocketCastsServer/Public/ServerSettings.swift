@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import PocketCastsUtils
 
 public class ServerSettings {
@@ -439,6 +440,11 @@ public extension ServerSettings {
     private static var authenticationGeneration = 0
     private static var explicitAuthentication: UUID?
     private static var committedAuthentication: UUID?
+    /// The account the COMMITTED credential belongs to, captured by `commitAuthentication` from the
+    /// values it actually wrote (never re-read later: a legacy `userId` backfill in another observer
+    /// can populate `ServerSettings.userId` after a params-era login, and re-reading would make the
+    /// same session look like a different account).
+    private static var committedAccount: String?
     private static let incompleteCredentialWriteKey = "AurisIncompleteCredentialWrite"
 
     private static var passwordSessionMigration: (generation: Int, retryAfter: Date, inFlight: Bool)?
@@ -490,7 +496,8 @@ public extension ServerSettings {
                                      read: (String) throws -> String? = { try KeychainHelper.string(for: $0) },
                                      write: ((String?, String) -> Bool)? = nil,
                                      defaults: UserDefaults = .standard) -> Bool {
-        authenticationLock.withLock {
+        var didCommit = false
+        _ = authenticationLock.withLock { () -> Bool in
             guard attempt.generation == authenticationGeneration else {
                 FileLog.shared.addMessage("Authentication response rejected: superseded request")
                 return false
@@ -527,12 +534,20 @@ public extension ServerSettings {
                 }
             }
             if attempt.explicit { defaults.set(uuid, forKey: ServerConstants.UserDefaults.userId) }
+            // Captured from what this commit WROTE, not re-read afterwards.
+            committedAccount = Self.accountKey(uuid: uuid, email: email)
             defaults.set(false, forKey: incompleteCredentialWriteKey)
             authenticationGeneration += 1
             explicitAuthentication = nil
             committedAuthentication = attempt.id
+            didCommit = true
             return true
         }
+        // OUTSIDE the lock, on the caller's context: an observer that reads committed state would
+        // otherwise deadlock on `authenticationLock`. The commit itself is already complete and
+        // durable here, so this reports a fact rather than joining the transaction.
+        if didCommit { credentialCommitObserver?() }
+        return didCommit
     }
 
     /// Nonblocking observation for a notification reentry control; never waits on a failed lock.
@@ -544,6 +559,69 @@ public extension ServerSettings {
 
     static func committedAuthenticationID() -> UUID? {
         authenticationLock.withLock { committedAuthentication }
+    }
+
+    /// A completion hook for "a credential commit has finished and its lock is released".
+    ///
+    /// This is the only completion a PASSIVE restoration has: `TokenHelper.acquireToken` commits on
+    /// every renewal and on a silent refresh-token restore, and posts no notification of its own.
+    /// Voice sharing cannot observe the commit directly because `TokenHelper` is internal to this
+    /// module, so the owner publishes it here.
+    ///
+    /// Contract for the implementer (mine, `VoiceSharingCoordinator`):
+    /// * Called on the main queue, AFTER `commitAuthentication` returned and released
+    ///   `authenticationLock`, so the callback may read the committed state without deadlocking.
+    /// * Fires for EVERY commit, including renewals of an unchanged account. It is a readiness
+    ///   signal, NOT a login signal and NOT an identity: the commit id changes on both, so a
+    ///   consumer must derive identity from `committedAccountIdentity()` and keep an unchanged
+    ///   session's lifecycle intact.
+    /// * Never called for a rejected or rolled-back commit.
+    public static var credentialCommitObserver: (() -> Void)?
+
+    /// The ACCOUNT the committed credential belongs to, as an opaque hash of (`uuid|email`).
+    ///
+    /// STABLE across renewals and across a sign-out/sign-in of the same account; different for a
+    /// different account. That combination is the point: a consumer derives its lifecycle from it,
+    /// so a renewal (which re-commits the same account on every token expiry) is a no-op, while a
+    /// genuinely different account is never deduped away.
+    ///
+    /// Deliberately NOT `committedAuthenticationID()`: that id is re-minted by every commit,
+    /// renewals included, so on its own it would read each renewal as a new account.
+    /// A same-account RE-LOGIN is told apart from a renewal by the signed-out transition between
+    /// them (which drops this to nil), not by a generation here.
+    ///
+    /// The hash means no email and no credential leaves this module, and it is deterministic across
+    /// processes.
+    static func committedAccountIdentity() -> UUID? {
+        authenticationLock.withLock {
+            guard committedAuthentication != nil, let account = committedAccount else { return nil }
+            return uuidV5(namespace: identityNamespace, name: account)
+        }
+    }
+
+    /// `uuid|email` — what the commit wrote, nothing read back later.
+    private static func accountKey(uuid: String?, email: String?) -> String {
+        let id = uuid?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let mail = email?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        return "\(id)|\(mail)"
+    }
+
+    /// Stable namespace for the account hash (a UUID v5 namespace, not a secret).
+    private static let identityNamespace = UUID(uuidString: "6F9619FF-8B86-D011-B42D-00C04FC964FF")!
+
+
+    /// Deterministic (RFC 4122 v5) UUID over SHA-1 of the namespace + name: no secret material, and
+    /// the same account yields the same identity in any process.
+    private static func uuidV5(namespace: UUID, name: String) -> UUID {
+        var bytes = withUnsafeBytes(of: namespace.uuid) { Array($0) }
+        bytes.append(contentsOf: Array(name.utf8))
+        var digest = [UInt8](Insecure.SHA1.hash(data: Data(bytes)))
+        digest[6] = (digest[6] & 0x0F) | 0x50
+        digest[8] = (digest[8] & 0x3F) | 0x80
+        return UUID(uuid: (digest[0], digest[1], digest[2], digest[3],
+                           digest[4], digest[5], digest[6], digest[7],
+                           digest[8], digest[9], digest[10], digest[11],
+                           digest[12], digest[13], digest[14], digest[15]))
     }
 
     @discardableResult
@@ -572,6 +650,7 @@ public extension ServerSettings {
             authenticationGeneration += 1
             explicitAuthentication = nil
             committedAuthentication = nil
+            committedAccount = nil
             defaults.set(true, forKey: incompleteCredentialWriteKey)
             action()
             return AuthenticationAttempt(generation: authenticationGeneration, email: nil, uuid: nil, explicit: false)

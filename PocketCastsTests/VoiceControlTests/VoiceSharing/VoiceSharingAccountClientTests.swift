@@ -375,7 +375,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         VoiceSharingCoordinator.setSharedForTesting(coordinator)
         defer { VoiceSharingCoordinator.resetSharedForTesting() }
 
-        discountStartupShape(coordinator)
+        nameTheOwnerAccount(coordinator)
         // Then the production subscription: AppDelegate -> installIdentityInvalidation on the
         // DEFAULT center, which is where SyncManager posts its account notifications.
         let appDelegate = AppDelegate()
@@ -428,7 +428,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         )
         VoiceSharingCoordinator.setSharedForTesting(coordinator)
         defer { VoiceSharingCoordinator.resetSharedForTesting() }
-        discountStartupShape(coordinator)
+        nameTheOwnerAccount(coordinator)
         AppDelegate().setupVoiceSharingIdentityInvalidation()
 
         // Signed in for real, through the app's own setter, then establish a lifecycle via the same
@@ -519,6 +519,9 @@ final class VoiceSharingAccountClientTests: XCTestCase {
             else { ServerSettings.setSyncingEmail(email: nil) }
         }
         XCTAssertTrue(SyncManager.isUserLoggedIn(), "control sanity: the app believes it is signed in")
+        // The app's composition owns the coordinator instance; name the owner on it, since these
+        // controls never commit through `TokenHelper` (that would write real credentials).
+        coordinator.ownerAccountIdentityProvider = { "owner-account" }
 
         // The app's composition point runs on activation.
         let appDelegate = AppDelegate()
@@ -545,6 +548,10 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         // A real process runs its startup derivation BEFORE any login notification (AppDelegate
         // activation precedes sign-in); these controls drive that same order.
         coordinator.installIdentityInvalidation(startupAuthReadable: { false })
+        // The credential owner: these controls never commit through `TokenHelper` (that would write
+        // real credentials), so the owner's reported account is named here. What they assert about is
+        // the SEQUENCE — a sign-in settles, a sign-out ends it — not the owner's own digest.
+        coordinator.ownerAccountIdentityProvider = { "owner-account" }
         let appDelegate = AppDelegate()
         appDelegate.setupVoiceSharingIdentityInvalidation()
 
@@ -574,12 +581,17 @@ final class VoiceSharingAccountClientTests: XCTestCase {
     }
 
 
-    /// These controls drive the sign-in/sign-out PRODUCER sequence. A real process runs its startup
-    /// settlement decision first (activation precedes any login), which is what makes the observed
-    /// login the sole settlement trigger; without it the fixture's first derivation would be
-    /// mistaken for that startup decision.
-    private func discountStartupShape(_ coordinator: VoiceSharingCoordinator) {
-        coordinator.startupSettlementRan = true
+    /// These controls drive the sign-in/sign-out PRODUCER sequence, so settlement must read the
+    /// owner's committed credential exactly as production does. The test host's Keychain does not
+    /// hold a committed credential for these fixtures, so the owner is named here instead of being
+    /// faked into one: what the controls assert about is the SEQUENCE (a login settles, a sign-out
+    /// ends it), not the owner's own digest.
+    /// Names the account the credential owner reports. It deliberately does NOT go nil on sign-out:
+    /// in production the owner reports nothing once the credential is invalidated, and these
+    /// controls drive sign-out through `SignOutHelper` without invalidating credentials — so binding
+    /// presence to the legacy `userId` would test the fixture's bookkeeping instead of the sequence.
+    private func nameTheOwnerAccount(_ coordinator: VoiceSharingCoordinator) {
+        coordinator.ownerAccountIdentityProvider = { "owner-account" }
     }
 
     // MARK: - Review round 7 additions: same-account relogin, GET guarding, numeric bridging
