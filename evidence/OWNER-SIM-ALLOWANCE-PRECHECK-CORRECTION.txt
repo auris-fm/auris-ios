@@ -1,0 +1,41 @@
+CORRECTION to OWNER-SIM-ALLOWANCE-STATE-PRECHECK.txt (87a5b7657)
+
+Two errors in that receipt. The conclusion survives both, but the reasoning and one claim
+did not, and I am correcting rather than quietly reusing it.
+
+ERROR 1 - I CHECKED THE WRONG DIRECTORY.
+  I read Application Support/VoiceContributions/ and treated it as the allowance store. It is
+  not: VoiceContributions is the UPLOAD QUEUE root (VoiceSharingUploadQueue.swift:227).
+  The allowance stores are, per VoiceControlAssembly.swift:265,284:
+    ledger:      Application Support/CaptureUsage
+    identity:    Application Support/CaptureRequests
+  Both ARE absent on this container - verified directly. So the observation that matters was
+  never actually taken in 87a5b7657; I inferred it from a neighbouring directory.
+
+ERROR 2 - "HAS NEVER BEEN WRITTEN BY THE APP ON THIS INSTALL" OVERREACHES (@reviewer d806ac92).
+  An empty (or absent) directory establishes CURRENT ABSENCE, not "never written". The
+  container has rotated at least once (310E15C7 -> E102D48E -> F82E786B across installs), so
+  an earlier container could have held a record I cannot see. Absence now does not date the
+  absence. Correct statement: no allowance record is present in the current container.
+
+ALSO WITHDRAWN - the prediction "first request should be an `issued` and the server should
+  answer 200 issued". @reviewer is right that an absent record does not establish request
+  order or the response: authentication, projection, consent and eligibility still decide
+  whether a request can be made at all, let alone granted. The baseline says nothing about
+  what the first request will be, only that nothing is present to resume from.
+
+WHAT STANDS
+  No allowance record is present in the current container. So IF a request is made, it is not
+  resuming a persisted identity from this container - which is the only inference I am entitled
+  to, and it is conditional on a request happening at all.
+
+WHAT WAS RIGHT IN 87a5b7657
+  The test-host contamination finding is unaffected: tmp/allowance-provisioner-<uuid>/ is
+  written by VoiceSharingCaptureAllowanceProvisionerTests.swift:147 with a placeholder account,
+  and "found an allowance directory" would have been a false positive. That stands and is why
+  the check needed to name exact paths rather than pattern-match names.
+
+METHOD NOTE
+  I pattern-matched on "allowance" and reported a conclusion about the allowance store without
+  reading the wiring that decides where that store lives. The verification I ran afterwards -
+  VoiceControlAssembly.swift:265/284 - took one grep and would have prevented both errors.
