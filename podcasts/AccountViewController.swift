@@ -192,6 +192,10 @@ extension AccountViewController {
         let local = localModel()
         let account = accountModel?() ?? VoiceSharingAccountModel(
             client: VoiceSharingAccountClient(tokenProvider: CloudTokenProviderRouter.provider()),
+            // Activation slice (2026-11-03): the production disclosure token. Before this line
+            // the init default was nil and the surface rendered `disclosureUnavailable` —
+            // enrollment could never start. The token is the exact server-supported string.
+            disclosureVersion: VoiceSharingDisclosure.productionVersion,
             purgeLocal: local.map { model in { model.deletePendingRecordingsOnThisDevice() } })
         return VoiceSharingAccountController(accountModel: account, localModel: local, surfaceEnabled: surfaceEnabled)
     }

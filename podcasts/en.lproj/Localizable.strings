@@ -6774,3 +6774,6 @@
 "voice_sharing_account_withdrawal_pending" = "Sharing is stopped locally. Server withdrawal is not yet confirmed.";
 "voice_sharing_account_deletion_pending" = "Deletion request acknowledged and pending. This does not confirm removal.";
 "voice_sharing_account_cleanup_unresolved" = "Some pending recordings could not be confirmed removed. Sharing has stopped locally; try cleanup again.";
+
+"voice_sharing_disclosure_title" = "Share voice recordings with auris";
+"voice_sharing_disclosure_body" = "With your permission, auris shares voice recordings, your spoken text and the actions you take with our team so we can improve speech recognition. Background speech captured during a voice conversation may be included. Recordings are kept for one year and then deleted. You can withdraw at any time in Settings, and you can delete your recordings separately at any time.";

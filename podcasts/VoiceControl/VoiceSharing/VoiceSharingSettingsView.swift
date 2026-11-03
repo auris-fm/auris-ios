@@ -234,7 +234,11 @@ struct VoiceSharingAccountView: View {
                         Button(L10n.voiceSharingAccountConfirmDisclosure) { enroll(confirmed: true) }
                         Button(L10n.cancel, role: .cancel) { enroll(confirmed: false) }
                     } message: {
-                        Text(L10n.voiceSharingAccountPurpose + " " + L10n.voiceSharingAccountBackgroundSpeech)
+                        // Activation slice: the disclosure dialog carries the FULL truthful
+                        // body (sharing scope, purpose, background speech, one-year retention,
+                        // withdrawal, separate deletion) — no infrastructure or limit names.
+                        Text(VoiceSharingDisclosure.englishBody
+                             ?? (L10n.voiceSharingAccountPurpose + " " + L10n.voiceSharingAccountBackgroundSpeech))
                     }
                 // Local stop is available even while enrollment or refresh is waiting.
                 Button(L10n.voiceSharingAccountWithdraw, role: .destructive) {

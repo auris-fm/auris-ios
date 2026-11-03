@@ -162,6 +162,11 @@ class VoiceControlAssembly {
         // recognition pipeline.
         let queueRoot = VoiceSharingUploadQueue.defaultRootDirectory()
         try? FileManager.default.createDirectory(at: queueRoot, withIntermediateDirectories: true)
+        // ACTIVATION SLICE (2026-11-03): configure the NAMED secondary Firebase app so the
+        // policy's remote scalar reads from the dedicated auris-fm registration. The default
+        // app and its consumers are untouched; a missing/invalid bundled plist degrades to
+        // nil and the coordinator falls back to the default-app read (existing behavior).
+        _ = VoiceSharingFirebaseApp.configure()
         // PER-ENTRY IDENTITY BINDING (reviewer fd6b8036 / spec fe99ec96): the queue compares each
         // entry's own durable enrollment epoch against this LIVE read at admission, so a surviving
         // entry from a previous epoch cannot ride a newer process into an upload — and a new entry
