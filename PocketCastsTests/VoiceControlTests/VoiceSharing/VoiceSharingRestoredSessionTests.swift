@@ -514,6 +514,8 @@ final class VoiceSharingRestoredSessionTests: XCTestCase {
             previousObserver?()
             DispatchQueue.main.async { renewalObserved.fulfill() }
         }
+        // Restored as soon as this renewal has been observed, NOT at function exit: leaving this
+        // single-fulfil wrapper installed through the second renewal fulfils this expectation twice.
         defer { ServerSettings.credentialCommitObserver = previousObserver }
         let attempt = try XCTUnwrap(ServerSettings.beginAuthentication(explicit: false))
         XCTAssertTrue(ServerSettings.commitAuthentication(
@@ -522,6 +524,34 @@ final class VoiceSharingRestoredSessionTests: XCTestCase {
             for: attempt, password: "p"))
         // The observer hops to the main queue; let it run, since settlement must also happen there.
         wait(for: [renewalObserved], timeout: 5)
+        ServerSettings.credentialCommitObserver = previousObserver
+
+        // IN-FLIGHT WORK (reviewer on 87a020511): start a membership operation under the settled
+        // session, then let a REAL renewal land while that operation is outstanding. The store's
+        // fence decides - if a renewal bumps the operation generation or rotates the lifecycle,
+        // the in-flight read is superseded and its answer can never be applied.
+        store.setLocalOptIn(false)                     // a LOCAL change: bumps operation generation
+        let staleOperation = try XCTUnwrap(store.projectionToken(),
+                                            "premise: an operation can be issued under the settled session")
+        store.setLocalOptIn(true)                      // the user opts back in: a second in-flight op
+        let inFlight = try XCTUnwrap(store.projectionToken())
+        XCTAssertNotEqual(staleOperation.operationGeneration, inFlight.operationGeneration,
+                          "premise: the two operations are distinguishable, so supersession is observable")
+
+        // A RENEWAL of the SAME account, through the real hook, lands while `inFlight` is outstanding.
+        // Chains to the COORDINATOR's own observer (now back in place), so this renewal goes through
+        // production settlement and reports through this expectation's hop.
+        let secondRenewal = expectation(description: "second renewal reported")
+        ServerSettings.credentialCommitObserver = {
+            previousObserver?()
+            DispatchQueue.main.async { secondRenewal.fulfill() }
+        }
+        let secondAttempt = try XCTUnwrap(ServerSettings.beginAuthentication(explicit: false))
+        XCTAssertTrue(ServerSettings.commitAuthentication(
+            AuthenticationResponse(token: "renewed-2", uuid: "renewal-account", email: "b@example.com",
+                                   refreshToken: "renewed-refresh-2"),
+            for: secondAttempt, password: "p"))
+        wait(for: [secondRenewal], timeout: 5)
 
         XCTAssertEqual(settlements.value, 1,
                        "a renewal must not settle again - it is the same account")
@@ -529,6 +559,15 @@ final class VoiceSharingRestoredSessionTests: XCTestCase {
                       "and it must not reset the settled enrollment authority")
         XCTAssertEqual(VoiceSharingSessionGeneration.shared.currentGeneration(), generation,
                        "nor replace the lifecycle the projection was applied under")
+        XCTAssertEqual(store.projectionToken()?.operationGeneration, inFlight.operationGeneration,
+                       "nor supersede an operation already in flight")
+        // The store's lifecycle is what governs the fence, and this fixture pins it to a literal;
+        // comparing it against the process-wide `VoiceSharingSessionGeneration` would be comparing
+        // two different things and failing for a reason that has nothing to do with the renewal.
+        XCTAssertEqual(store.projectionToken()?.lifecycleGeneration, inFlight.lifecycleGeneration,
+                       "the in-flight operation's lifecycle must still be the settled one")
+        XCTAssertTrue(store.apply(authoritative: membership, readUnder: inFlight),
+                      "so the in-flight operation's answer can still be applied")
     }
 
     /// (b) The poll must survive past the old 20-attempt bound: a session that restores late is
