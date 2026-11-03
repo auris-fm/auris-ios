@@ -88,6 +88,7 @@ enum VoiceSharingFirebaseApp {
     /// is rejected by the lookup's token/generation guards inside the settlement.
     static func performPolicyExchange(coordinator: VoiceSharingCoordinator = .shared,
                                       expiration: TimeInterval = 0,
+                                      accountClient: VoiceSharingAccountClient? = nil,
                                       completion: ((Bool) -> Void)? = nil) {
         // Settlement evidence captured BEFORE any network work.
         let lookup = coordinator.beginEnrollmentLookup()
@@ -127,7 +128,7 @@ enum VoiceSharingFirebaseApp {
                 let fresh = didActivate && provedFreshExchange
                 Task {
                     await coordinator.completeActivationWithEnrollment(
-                        freshActivationSucceeded: fresh, lookup: lookup)
+                        freshActivationSucceeded: fresh, lookup: lookup, accountClient: accountClient)
                     lastPolicyRefreshOutcome = fresh
                     completion?(fresh)
                 }
