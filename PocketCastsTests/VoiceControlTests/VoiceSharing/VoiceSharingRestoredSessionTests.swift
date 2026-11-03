@@ -33,12 +33,15 @@ final class VoiceSharingRestoredSessionTests: XCTestCase {
         return coordinator
     }
 
-    /// REVIEWER (`cfcfab6f`) shape, found on this lane by measurement: the retry tick guarded with
-    /// `restoredSessionAuthReadable()` (SyncManager.isUserLoggedIn()) before asking the ONE
-    /// settlement decision, and those are different conditions. The cold-restore case is exactly
-    /// where they part - a readable credential can name an account via `storedAccountIdentity()`
-    /// while that defaults key is empty - so the tick declined while the entry point it guards
-    /// would have settled.
+    /// REVIEWER (`cfcfab6f`) shape, found on this lane: the retry tick guarded with
+    /// `restoredSessionAuthReadable()` (SyncManager.isUserLoggedIn(), which requires a non-empty
+    /// `syncingEmail()`) before asking the ONE settlement decision, and those read DIFFERENT
+    /// Keychain keys - the gate reads `syncingEmailKey`, while the decision can settle on
+    /// `storedAccountIdentity()`, which reads the refresh token and accepts a userId with no email.
+    /// So the gate could decline while the entry point it guards would have settled.
+    ///
+    /// Reachability of that state in production is NOT established here (reviewer `d9bd9e03`): the
+    /// state below is supplied by injected providers.
     ///
     /// Polarity matters for what this bug IS: the Android form (gate admits, work declines) produces
     /// a repeated-acquisition loop. Here the gate declines and the work is never consulted, so
@@ -53,17 +56,17 @@ final class VoiceSharingRestoredSessionTests: XCTestCase {
         let settlements = Cell(0)
         coordinator.initiateIdentityRecoveryRefresh = { settlements.mutate { $0 += 1 } }
 
-        // PRODUCTION defaults deliberately NOT stubbed, because reviewer (bd0766db) showed the
-        // production cold path is narrower than an injected probe suggests: the default
-        // `ownerCredentialIsPresent` is `committedAccountIdentity() != nil || isUserLoggedIn()`,
-        // so with no commit and logged-in false the entry point ALSO refuses before reading the
-        // stored identity. Stubbing it to `true` would manufacture a state production may not
-        // reach, and the control would then prove only that the tick delegates in a fixture.
+        // Three of the identity providers ARE replaced below (owner account, presence, stored
+        // identity): this control drives a FIXTURE state, and says so. Reviewer (bd0766db) showed
+        // why that matters: replacing `ownerCredentialIsPresent` with `{ true }` removes the very
+        // conjunct whose presence is the question, so the disagreeing state becomes reachable in
+        // the test while remaining unreachable in production.
         //
-        // So this control asserts the CONSEQUENCE OF DELEGATION in state we can actually produce:
-        // no commit, credential present and readable, narrow flag false. Whether the production
-        // cold process reaches that state is reported separately, as reviewer asked - fixture
-        // disagreement and production reachability are distinct claims.
+        // What the control therefore establishes, and nothing wider: WHEN a readable stored
+        // credential and a false narrow flag coexist, the tick delegates and settles. That is the
+        // consequence of the delegation fix. Production reachability of that state is a SEPARATE,
+        // OPEN question - see the default-provider control below, which is itself only an
+        // observation about the host it runs on.
         coordinator.ownerAccountIdentityProvider = { nil }
         coordinator.ownerCredentialIsPresent = { true }
         coordinator.storedCredentialIdentityProvider = { "account-A" }
@@ -85,11 +88,16 @@ final class VoiceSharingRestoredSessionTests: XCTestCase {
         VoiceSharingSessionGeneration.shared.clear()
     }
 
-    /// REVIEWER (`bd0766db`): production reachability, measured separately from the fixture claim
-    /// above. With the REAL default providers - no injected presence - and a signed-out process, the
-    /// entry point refuses before it can read any stored identity, which is what keeps removal of
-    /// the tick gate safe on a cold start. This pins that refusal so the previous control cannot be
-    /// read as evidence about production.
+    /// REVIEWER (`d9bd9e03`): this is the subtlest scope limit in the change. The control below uses
+    /// the real default providers, but it does NOT establish that the host it runs on is signed out
+    /// - it inherits whatever credential state the test host happens to carry, and only overrides
+    /// the poll's timing. So a nil result here is an OBSERVATION ABOUT THAT HOST, not a general
+    /// statement about production reachability. A test whose result depends on the machine's
+    /// leftover credential state is reporting the machine.
+    ///
+    /// It is kept because the observation is still worth pinning: on a host with no readable
+    /// credential, delegation settles nothing however long the poll runs. It must not be cited as
+    /// evidence about the production cold path.
     func test_productionDefaults_coldSignedOutProcess_settlesNothingThroughTheTick() {
         let coordinator = makeCoordinator()
         let settlements = Cell(0)
