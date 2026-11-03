@@ -598,6 +598,11 @@ final class VoiceSharingCoordinator {
     /// notification exists for a session that predates the process) reach the projection/capture
     /// decision, and it is stable across renewals, so a renewal does not reset an unchanged
     /// lifecycle.
+    /// Stands in for "the credential supplier" a readiness check must NOT call. The control counts
+    /// invocations; production leaves it nil and nothing calls it. It exists so the cost of a
+    /// predicate is observable, not so that production can acquire here.
+    var credentialAcquisitionForTesting: (() -> Void)?
+
     func settleFromOwnerReadiness() {
         // COLD vs LATER. In this process nothing may have committed yet even though a stored session
         // is perfectly usable (reviewer on `bf335f109`: both committed-state fields start nil, so a
