@@ -289,6 +289,9 @@ final class VoiceSharingUploader {
               receipt.recordSHA256 == expected.recordSHA256 else {
             return unknownOutcome(entry: entry, lease: lease, attempt: attempt, reason: "receipt identity mismatch")
         }
+        // VERIFICATION EVIDENCE (reviewer 360ede39): log the accepted receipt's identifiers so a
+        // drain can be reconciled against the server's object storage and byte accounting.
+        FileLog.shared.addMessage("[VoiceSharing] upload ACCEPTED capture=\(receipt.captureID) receipt=\(receipt.receiptID) sha256=\(receipt.recordSHA256) status=\(receipt.status == .accepted ? "accepted" : "duplicate")")
         do {
             try queue.applyAttemptResult(entry, lease: lease, outcome: .delivered)
         } catch VoiceSharingUploadQueue.PrepareError.resultStale {
