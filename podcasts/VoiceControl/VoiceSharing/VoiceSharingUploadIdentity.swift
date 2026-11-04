@@ -11,14 +11,16 @@ struct VoiceSharingUploadIdentity: Equatable {
     /// Account scope the entry belongs to, as the queue/entry owner recorded it.
     let accountScope: String
     /// Server-issued enrollment epoch the entry was captured under.
+    /// PROVENANCE (spec 4afc6e43): stamped on the record and carried to the server. Never compared
+    /// to decide whether an entry may be sent — that is the account's decision.
     let enrollmentEpoch: String
 
-    /// Both components must be present: an unknown account or epoch is not an identity.
+    /// The ACCOUNT must be present: an entry with no owner cannot be attributed. The epoch is
+    /// provenance and may be absent — an empty string records that it was unknown at capture time
+    /// (spec 4afc6e43), and the entry still travels.
     init?(accountScope: String?, enrollmentEpoch: String?) {
-        guard let accountScope, !accountScope.isEmpty,
-              let enrollmentEpoch, !enrollmentEpoch.isEmpty
-        else { return nil }
+        guard let accountScope, !accountScope.isEmpty else { return nil }
         self.accountScope = accountScope
-        self.enrollmentEpoch = enrollmentEpoch
+        self.enrollmentEpoch = enrollmentEpoch ?? ""
     }
 }

@@ -147,7 +147,11 @@ final class VoiceSharingCollectorTests: XCTestCase {
     }
 
 
-    func test_missingEpoch_retainsZeroSamplesAndEvents() {
+    /// THE EPOCH IS PROVENANCE (spec 4afc6e43): an unknown epoch no longer refuses admission. The
+    /// capture still happens, and the record carries an empty epoch so the server can see it was
+    /// unknown at capture time. Refusing here would discard audio the user consented to contribute
+    /// because a server-issued token had not landed yet.
+    func test_missingEpoch_stillCollectsAndStampsTheRecordEmpty() {
         activateLease()
         let collector = makeCollector()
         enrolledState(true)
@@ -157,11 +161,14 @@ final class VoiceSharingCollectorTests: XCTestCase {
         let th = [Float](repeating: 1, count: 3_200)
         collector.appendSamples(th, reportedTotal: 3_200)
         collector.speechCompleted(th, context: collector.currentCaptureContextForTesting)
-        XCTAssertEqual(snapshot(), [], "records key on the epoch; without one nothing is attributable")
+        XCTAssertFalse(snapshot().isEmpty, "consent is the admission decision; a missing epoch is not a refusal")
+        XCTAssertEqual(snapshot().first?.enrollmentEpoch, "",
+                       "the record states the epoch was unknown, rather than claiming one")
 
         epoch = "epoch-1"
         collector.speechStarted(confirmationFrameSamples: 320)
-        XCTAssertFalse(snapshot().isEmpty, "control: restoring the epoch makes the same path collect")
+        XCTAssertEqual(snapshot().last?.enrollmentEpoch, "epoch-1",
+                       "control: a known epoch is stamped as provenance when present")
     }
 
     // MARK: - Real bounded PCM retention (blocker 1)

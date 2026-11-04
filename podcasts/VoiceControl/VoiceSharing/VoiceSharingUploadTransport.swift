@@ -171,7 +171,9 @@ final class VoiceSharingUploadTransport {
         // a single byte leaves; A's bytes are never sent under B's credential. Checking after the
         // response cannot repair a disclosure, so this runs at the launch boundary.
         if let fence = identityFence, let admitted = admittedIdentity {
-            guard let live = fence(), live == admitted else { return .transportFailure }
+            // ACCOUNT BINDING (spec 4afc6e43): A's bytes must not leave under B's account. The
+            // provenance epoch is not compared — a re-enrollment moves it without changing the owner.
+            guard let live = fence(), live.accountScope == admitted.accountScope else { return .transportFailure }
         }
         var request = built
         if let allowance = networkAllowance {
@@ -198,7 +200,9 @@ final class VoiceSharingUploadTransport {
         // and the request fully built, the LAST read before `receive` launches must still see the
         // admitted snapshot.
         if let fence = identityFence, let admitted = admittedIdentity {
-            guard let live = fence(), live == admitted else { return .transportFailure }
+            // ACCOUNT BINDING (spec 4afc6e43): A's bytes must not leave under B's account. The
+            // provenance epoch is not compared — a re-enrollment moves it without changing the owner.
+            guard let live = fence(), live.accountScope == admitted.accountScope else { return .transportFailure }
         }
 
         guard !Task.isCancelled, networkFence?() ?? true else { return .transportFailure }

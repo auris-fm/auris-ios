@@ -818,18 +818,21 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         XCTAssertEqual(queue.readyEntries().count, 0)
     }
 
-    func test_missingOrInvalidOutcomeLimitClosesAdmissionBeforeRetainingAudio() {
+    /// `OutcomeWaitLimit` still refuses a nonsense value (spec 4afc6e43 keeps the timeout a fixed
+    /// annotation deadline), but its ABSENCE is no longer an admission gate: the collector admits
+    /// and retains audio on consent alone. This control used to assert the retired readiness gate.
+    func test_invalidOutcomeLimitIsRejectedButItsAbsenceNoLongerClosesAdmission() {
         XCTAssertNil(VoiceSharingCollector.OutcomeWaitLimit(milliseconds: 0, ceilingMilliseconds: 100))
         XCTAssertNil(VoiceSharingCollector.OutcomeWaitLimit(milliseconds: -1, ceilingMilliseconds: 100))
         XCTAssertNil(VoiceSharingCollector.OutcomeWaitLimit(milliseconds: Int.max, ceilingMilliseconds: 100))
         XCTAssertNil(VoiceSharingCollector.OutcomeWaitLimit(milliseconds: 101, ceilingMilliseconds: 100))
         XCTAssertNil(VoiceSharingCollector.OutcomeWaitLimit(milliseconds: 25))
         let collector = deadlineCollector(OutcomeScheduler(), limit: nil)
-        XCTAssertNil(collector.speechStarted(confirmationFrameSamples: samples.count))
+        let context = collector.speechStarted(confirmationFrameSamples: samples.count)
+        XCTAssertNotNil(context, "consent alone admits; a missing annotation deadline does not refuse")
         collector.appendSamples(samples)
-        XCTAssertEqual(collector.retainedSampleCountForTesting, 0)
-        drain()
-        XCTAssertEqual(queue.readyEntries().count, 0)
+        XCTAssertEqual(collector.retainedSampleCountForTesting, samples.count,
+                       "the audio is retained, not discarded for want of a deadline")
     }
 
     /// REVIEWER (expanded review of the swept-in dependency set): the allowance's OWN deadline was

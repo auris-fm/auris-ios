@@ -254,8 +254,11 @@ final class VoiceSharingUploader {
     /// establish an identity (nil) is NOT a match: an unknown live identity cannot confirm a stale
     /// one, so the fence holds.
     private func isIdentityCurrent(_ admitted: VoiceSharingUploadIdentity) -> Bool {
+        // ACCOUNT BINDING (spec 4afc6e43): the identity that must still hold is the ACCOUNT — A's
+        // bytes never leave under B. The provenance epoch is not compared: a re-enrollment moves it
+        // without changing the owner.
         guard let live = currentIdentity() else { return false }
-        return live == admitted
+        return live.accountScope == admitted.accountScope
     }
 
     // MARK: - settlement
