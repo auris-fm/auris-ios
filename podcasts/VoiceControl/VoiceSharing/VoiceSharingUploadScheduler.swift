@@ -128,11 +128,15 @@ final class VoiceSharingUploadScheduler {
                 waiter()
             }
         }
-        guard isAuthorized() else { return .idle }
+        guard isAuthorized() else {
+            FileLog.shared.addMessage("[VoiceSharing] drain: unauthorized (session/consent) — idle")
+            return .idle
+        }
         // Neither unknown coverage nor a revocation hold may feed the scheduler: both yield
         // nothing here (the same fail-closed rule serving uses).
         let discovery = queue.readyEntriesReportingUnknownCoverage()
         guard case .known(let ready) = discovery, !ready.isEmpty else {
+            FileLog.shared.addMessage("[VoiceSharing] drain: no ready entries (discovery=\(discovery))")
             // DIAGNOSTIC (reviewer 08e42a5a): `.idle` has two very different causes — an empty
             // served set versus a held one — and inferring between them from the outside was
             // wrong. Record what the decision actually saw.

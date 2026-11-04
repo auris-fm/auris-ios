@@ -102,7 +102,10 @@ final class VoiceSharingUploader {
     /// Uploads one ready entry. Returns what happened; never throws into the caller's pipeline.
     func upload(_ entry: VoiceSharingUploadQueue.Entry) async -> Outcome {
         // AUTHORIZATION FIRST: no request is ever issued without a live permission.
-        guard isAuthorized() else { return .revoked }
+        guard isAuthorized() else {
+            FileLog.shared.addMessage("[VoiceSharing] upload: unauthorized at entry (\(entry.name)) — revoked")
+            return .revoked
+        }
         let networkToken = networkGate?.admissionToken()
         guard !Task.isCancelled, networkGate == nil || networkToken != nil else {
             return .unavailable(reason: "network blocked")
@@ -142,6 +145,7 @@ final class VoiceSharingUploader {
         // An identity move since admission must stop here: A's bytes are never launched under
         // B's authority, and a post-response check cannot repair that disclosure.
         if let admittedIdentity = admitted.identity, !isIdentityCurrent(admittedIdentity) {
+            FileLog.shared.addMessage("[VoiceSharing] upload: identity moved since admission (\(entry.name)) — revoked")
             _ = try? queue.applyAttemptResult(entry, lease: lease, outcome: .retryableFailure)
             return .revoked
         }
