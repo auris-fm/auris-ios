@@ -60,11 +60,11 @@ enum VoiceSharingFirebaseApp {
     /// activation, status and time bind to one authority). Never touches the default
     /// app's RemoteConfig. Completion fires exactly once with activate-outcome.
     static func refreshPolicy(expiration: TimeInterval = 3600,
-                              completion: ((Bool) -> Void)? = nil) {
+                              completion: ((Bool, Int) -> Void)? = nil) {
         guard let named = existing() else {
             FileLog.shared.addMessage("[VoiceSharing] policy refresh skipped: secondary app absent")
             lastPolicyRefreshOutcome = false
-            completion?(false)
+            completion?(false, 0)
             return
         }
         let config = RemoteConfig.remoteConfig(app: named)
@@ -72,7 +72,7 @@ enum VoiceSharingFirebaseApp {
             if let error {
                 FileLog.shared.addMessage("[VoiceSharing] policy fetch failed: \(error.localizedDescription)")
                 lastPolicyRefreshOutcome = false
-                completion?(false)
+                completion?(false, 0)
                 return
             }
             config.activate { activated, error in
@@ -80,7 +80,7 @@ enum VoiceSharingFirebaseApp {
                     FileLog.shared.addMessage("[VoiceSharing] policy activate failed: \(error.localizedDescription)")
                 }
                 lastPolicyRefreshOutcome = activated
-                completion?(activated)
+                completion?(activated, 0)
             }
         }
     }
@@ -97,18 +97,17 @@ enum VoiceSharingFirebaseApp {
     static func performPolicyExchange(coordinator: VoiceSharingCoordinator = .shared,
                                       expiration: TimeInterval = 0,
                                       accountClient: VoiceSharingAccountClient? = nil,
-                                      completion: ((Bool) -> Void)? = nil) {
+                                      completion: ((Bool, Int) -> Void)? = nil) {
         // A new exchange supersedes any pending transient retry (a newer real refresh drives
         // its own outcome), and the outcome classification starts clean for THIS exchange.
         coordinator.cancelTransientPolicyRetryForTesting()
-        coordinator.lastPolicyInstallOutcome = nil
         // Settlement evidence captured BEFORE any network work (see the lifecycle note below).
         guard let named = existing() else {
             FileLog.shared.addMessage("[VoiceSharing] policy exchange skipped: secondary app absent")
             lastPolicyRefreshOutcome = false
             coordinator.policyRefreshAfterActivation(freshActivationSucceeded: false,
                                                      fetchToken: coordinator.policyTokenForFetchStart())
-            completion?(false)
+            completion?(false, 0)
             return
         }
         // At LAUNCH the account is not yet readable — the app restores its session a moment after
@@ -121,10 +120,11 @@ enum VoiceSharingFirebaseApp {
         // honest reading of the guard, not a bypass of it.
         if VoiceSharingSessionGeneration.shared.currentGeneration() == nil {
             FileLog.shared.addMessage("[VoiceSharing] policy exchange deferred: no account lifecycle yet")
-            completion?(false)
+            completion?(false, 0)
             return
         }
         let lookup = coordinator.beginEnrollmentLookup()
+        let exchangeGeneration = lookup.generation
         let policyToken = coordinator.policyTokenForFetchStart()
         let fetchStartedAt = coordinator.nowForFreshnessCheck()
         let sdkTimeBeforeFetch = coordinator.lastFetchTime()
@@ -140,9 +140,11 @@ enum VoiceSharingFirebaseApp {
             guard status == .success, error == nil else {
                 FileLog.shared.addMessage("[VoiceSharing] policy fetch failed: \(error?.localizedDescription ?? "status \(status.rawValue)")")
                 lastPolicyRefreshOutcome = false
+                coordinator.recordPolicyFetchThrottleFloor(from: error)
                 coordinator.policyRefreshAfterActivation(freshActivationSucceeded: false,
-                                                         fetchToken: policyToken)
-                completion?(false)
+                                                         fetchToken: policyToken,
+                                                         settlementGeneration: exchangeGeneration)
+                completion?(false, exchangeGeneration)
                 return
             }
             let activate: (@escaping (Bool, Error?) -> Void) -> Void =
@@ -181,7 +183,7 @@ enum VoiceSharingFirebaseApp {
                     await coordinator.completeActivationWithEnrollment(
                         freshActivationSucceeded: fresh, lookup: lookup, accountClient: accountClient)
                     lastPolicyRefreshOutcome = fresh
-                    completion?(fresh)
+                    completion?(fresh, exchangeGeneration)
                     if fresh { Self.allowanceRefresh?() }
                 }
             }
@@ -196,11 +198,11 @@ enum VoiceSharingFirebaseApp {
     static func connectIdentityRecoveryRefresh(coordinator: VoiceSharingCoordinator = .shared) {
         coordinator.initiateIdentityRecoveryRefresh = { [weak coordinator] in
             guard let coordinator else { return }
-            performPolicyExchange(coordinator: coordinator) { fresh in
+            performPolicyExchange(coordinator: coordinator) { fresh, generation in
                 if !fresh {
                     FileLog.shared.addMessage("[VoiceSharing] policy refresh did not install a snapshot")
                 }
-                coordinator.policyExchangeCompleted(fresh: fresh)
+                coordinator.policyExchangeCompleted(fresh: fresh, exchangeGeneration: generation)
             }
         }
         coordinator.leaseRenewalAfterExpiry = { [weak coordinator] in
