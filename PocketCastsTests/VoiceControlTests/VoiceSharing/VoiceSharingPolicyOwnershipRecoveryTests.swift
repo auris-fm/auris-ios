@@ -1,14 +1,15 @@
+import FirebaseRemoteConfig
 import XCTest
 @testable import podcasts
 
-/// OWNERSHIP + TRANSIENT RECOVERY controls (spec 50d8807d / 2026-11-04 owner incident).
+/// OWNERSHIP + TRANSIENT RECOVERY controls (spec 50d8807d / reviewer 6b6fc0c8).
 ///
-/// Incident being pinned: the settlement rejected its install because the lookup's POLICY
-/// token no longer equaled the current one — policy identity had moved under THIS lookup
-/// with no newer exchange — leaving the only in-flight install with NO owner: no snapshot,
-/// no retry, `gate closed` until (never) another driver. The ownership fix re-derives the
-/// install token for the CURRENT policy identity when only the token moved; the recovery
-/// driver re-drives transient refusals on a doubling, capped backoff without an app restart.
+/// Pinned incident: the settlement rejected its install because the lookup's POLICY token no
+/// longer equaled the current one — policy identity had moved under THIS lookup with no newer
+/// exchange — leaving the only in-flight install with NO owner. The ownership fix re-derives
+/// the install token for the current policy identity when only the token moved. The recovery
+/// driver is exchange-owned (retry claimed by the owning lookup generation), serialized by a
+/// single state lock (no queue reentrancy), and floors its delay at the SDK throttle boundary.
 final class VoiceSharingPolicyOwnershipRecoveryTests: XCTestCase {
 
     private final class StubBearerTokens: CloudTokenProviding {
@@ -30,19 +31,34 @@ final class VoiceSharingPolicyOwnershipRecoveryTests: XCTestCase {
         return (coordinator, store)
     }
 
+    private final class Box<T> { var value: T; init(_ v: T) { value = v } }
+
+    private struct Delivery {
+        let delay: Double
+        let item: DispatchWorkItem
+    }
+
+    /// Controls deliver the REAL work item (real fire closure, generation checks included)
+    /// immediately instead of after the wall-clock delay. Returns the delivery log.
+    private func deliverImmediately(_ coordinator: VoiceSharingCoordinator) -> Box<[Delivery]> {
+        let log = Box<[Delivery]>([])
+        coordinator.deliverPolicyRetryForTesting = { delay, item in
+            log.value.append(Delivery(delay: delay, item: item))
+        }
+        coordinator.observePolicyRetryDelayForTesting = { _ in }
+        return log
+    }
+
     /// OWNERSHIP (red→green): the lookup's policy token is STALE (policy identity moved under
-    /// this lookup — login settle lifted a fence — with NO newer lookup taken), generation and
-    /// projection are still current. The settlement must STILL install, using a re-derived
-    /// token for the current policy identity. Rejecting on the token alone stranded the install.
+    /// this lookup — the incident's fence lift AFTER capture — with NO newer lookup taken),
+    /// generation and projection still current. The settlement must STILL apply membership and
+    /// install, using a re-derived token. Rejecting on the token alone stranded the install.
     func test_policyTokenMovedUnderTheLookupWithNoNewerOwnerStillInstalls() async throws {
         let (coordinator, store) = makeEnrolledStack()
         VoiceSharingSessionGeneration.shared.ensureLifecycle()
         defer { VoiceSharingSessionGeneration.shared.clear() }
 
-        // The lookup is taken, THEN policy identity moves under it (the incident's fence
-        // lift: superseded-install check saw policyTokenEqual=false at equal generation)
-        // with no newer lookup: exactly the stranded state. The move MUST come after the
-        // capture — before it, the lookup would simply record the new identity.
+        // Capture FIRST, then move policy identity under the lookup (the incident's ordering).
         let lookup = coordinator.beginEnrollmentLookup()
         coordinator.policy.invalidateForIdentityChange()
         coordinator.policy.identityBecameReadable()
@@ -60,8 +76,6 @@ final class VoiceSharingPolicyOwnershipRecoveryTests: XCTestCase {
             ])
         defer { VoiceSharingStubProtocol.replies.removeAll() }
 
-        // Stubbed client: the DEFAULT client would hit the real API host; the settlement
-        // fetch must answer from the stub like the existing exchange controls do.
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [VoiceSharingStubProtocol.self]
         let client = VoiceSharingAccountClient(
@@ -72,90 +86,126 @@ final class VoiceSharingPolicyOwnershipRecoveryTests: XCTestCase {
             membershipStore: store)
         await coordinator.completeActivationWithEnrollment(
             freshActivationSucceeded: true, lookup: lookup, accountClient: client)
-        // THE OWNERSHIP DELTA, pass 1: the token moved UNDER this lookup, yet the
-        // authoritative membership must still APPLY (old behavior refused the whole
-        // settlement on policyTokenEqual=false — the stranded-install incident).
+
+        // THE OWNERSHIP DELTA: the token moved UNDER this lookup, yet the authoritative
+        // membership must still APPLY (old behavior refused the whole settlement).
         XCTAssertTrue(store.currentEffectiveEnrolled,
                       "a moved policy token under the current lookup must not refuse the membership apply")
-        // By the settlement contract a CHANGED membership installs the lease on the
-        // UNCHANGED-membership pass (same as the two-exchange exchange control).
+
+        // Changed membership installs the lease on the UNCHANGED-membership pass (settlement
+        // contract, same as the two-exchange exchange control).
         let freshLookup = coordinator.beginEnrollmentLookup()
         await coordinator.completeActivationWithEnrollment(
             freshActivationSucceeded: true, lookup: freshLookup, accountClient: client)
-
-        // The lease MUST be installed (fail-closed kept: an actual identity change that left
-        // the fence raised would still refuse inside refreshAfterActivation). Assert the
-        // installed SNAPSHOT, not permitsCollection: the stub clock does not track wall time
-        // with the lease, so collection permission is out of scope for this control.
         XCTAssertNotNil(coordinator.policy.installedLeaseExpiry,
                         "the only in-flight install must not be stranded by a moved policy token")
     }
 
-    /// TRANSIENT RECOVERY: a transiently refused exchange schedules a bounded retry that
-    /// re-runs the ordinary exchange (generation-fenced); a later install cancels and resets
-    /// the backoff. No app restart involved.
+    /// TRANSIENT RECOVERY, exchange-owned: a transiently refused exchange (its OWN generation)
+    /// schedules a retry whose REAL fire closure re-drives the ordinary exchange; a later
+    /// install cancels and resets the backoff.
     func test_transientRefusalRecoversThroughScheduledRetryWithoutRestart() {
         let (coordinator, _) = makeEnrolledStack()
-        var scheduled: [(Double, () -> Void)] = []
-        coordinator.schedulePolicyRetryForTesting = { delay, fire in scheduled.append((delay, fire)) }
+        let delivered = deliverImmediately(coordinator)
+        let gen = coordinator.currentEnrollmentLookupGenerationForTesting
 
-        coordinator.lastPolicyInstallOutcome = .transientRefused
-        coordinator.policyExchangeCompleted(fresh: false)
-        XCTAssertEqual(scheduled.count, 1, "a transient refusal must schedule recovery")
-        XCTAssertEqual(scheduled[0].0, 30, "base backoff is 30 s")
+        coordinator.setPolicyInstallOutcomeForTesting(.transientRefused, generation: gen)
+        coordinator.policyExchangeCompleted(fresh: false, exchangeGeneration: gen)
+        XCTAssertEqual(delivered.value.count, 1, "a transient refusal must schedule recovery")
+        XCTAssertEqual(delivered.value[0].delay, 30, "base backoff is 30 s")
 
-        // The retry fires the ordinary refresh entry (production: performPolicyExchange).
+        // REAL fire closure runs (delivered item performed inline — no queue reentrancy).
         var refreshRuns = 0
         coordinator.initiateIdentityRecoveryRefresh = { refreshRuns += 1 }
-        scheduled[0].1()
+        delivered.value[0].item.perform()
         XCTAssertEqual(refreshRuns, 1, "the retry re-drives the ordinary exchange")
 
-        // A later SUCCESS cancels and resets: no further retries, backoff back at base.
-        coordinator.policyExchangeCompleted(fresh: true)
-        coordinator.lastPolicyInstallOutcome = .transientRefused
-        coordinator.policyExchangeCompleted(fresh: false)
-        XCTAssertEqual(scheduled.count, 2, "a fresh retry may be scheduled after success")
-        XCTAssertEqual(scheduled[1].0, 30, "backoff RESET after a successful install")
+        // A later SUCCESS cancels and resets: next transient refusal starts back at base.
+        coordinator.policyExchangeCompleted(fresh: true, exchangeGeneration: gen)
+        coordinator.setPolicyInstallOutcomeForTesting(.transientRefused, generation: gen)
+        coordinator.policyExchangeCompleted(fresh: false, exchangeGeneration: gen)
+        XCTAssertEqual(delivered.value.count, 2)
+        XCTAssertEqual(delivered.value[1].delay, 30, "backoff RESET after a successful install")
     }
 
     /// Backoff DOUBLES and is CAPPED: consecutive transient refusals schedule 30 → 60 → … ≤ 900 s.
     func test_transientBackoffDoublesAndCaps() {
         let (coordinator, _) = makeEnrolledStack()
-        var scheduled: [Double] = []
-        coordinator.schedulePolicyRetryForTesting = { delay, _ in scheduled.append(delay) }
-        coordinator.lastPolicyInstallOutcome = .transientRefused
+        let delivered = deliverImmediately(coordinator)
+        let gen = coordinator.currentEnrollmentLookupGenerationForTesting
+        coordinator.setPolicyInstallOutcomeForTesting(.transientRefused, generation: gen)
         coordinator.initiateIdentityRecoveryRefresh = {}
         for expected in [30.0, 60.0, 120.0, 240.0, 480.0, 900.0, 900.0] {
-            coordinator.policyExchangeCompleted(fresh: false)
-            XCTAssertEqual(scheduled.last, expected, "backoff must double up to the 900 s cap")
-            coordinator.firePendingPolicyRetryForTesting()
+            coordinator.policyExchangeCompleted(fresh: false, exchangeGeneration: gen)
+            XCTAssertEqual(delivered.value.last?.delay, expected, "backoff must double up to the 900 s cap")
+            delivered.value.last?.item.perform()
         }
     }
 
     /// AUTHORITATIVE answer: a strict decoded false cancels recovery — retrying cannot change it.
     func test_authoritativeDisabledDoesNotScheduleRetry() {
         let (coordinator, _) = makeEnrolledStack()
-        var scheduled = 0
-        coordinator.schedulePolicyRetryForTesting = { _, _ in scheduled += 1 }
-        coordinator.lastPolicyInstallOutcome = .authoritativeDisabled
-        coordinator.policyExchangeCompleted(fresh: false)
-        XCTAssertEqual(scheduled, 0, "an authoritative disabled answer must not schedule recovery")
+        let delivered = deliverImmediately(coordinator)
+        let gen = coordinator.currentEnrollmentLookupGenerationForTesting
+        coordinator.setPolicyInstallOutcomeForTesting(.authoritativeDisabled, generation: gen)
+        coordinator.policyExchangeCompleted(fresh: false, exchangeGeneration: gen)
+        XCTAssertTrue(delivered.value.isEmpty, "an authoritative disabled answer must not schedule recovery")
     }
 
-    /// SUPERSESSION: a newer real refresh (exchange start) cancels any pending retry.
-    func test_newerExchangeCancelsPendingRetry() {
+    /// LATE OLD FAILURE AFTER A NEWER DISABLE (reviewer blocker 2): an older exchange's
+    /// completion arriving after a newer authoritative-disabled answer must neither schedule
+    /// a retry nor revive recovery.
+    func test_lateOldFailureAfterNewerAuthoritativeDisableSchedulesNothing() {
         let (coordinator, _) = makeEnrolledStack()
-        var pendingFired = false
-        coordinator.schedulePolicyRetryForTesting = { _, fire in
-            // production fires asynchronously; keep the handle without firing here
-            _ = { pendingFired = true; fire() }
-        }
-        coordinator.lastPolicyInstallOutcome = .transientRefused
-        coordinator.policyExchangeCompleted(fresh: false)
-        // A newer exchange starts: the pending retry must be dropped (no double-drive).
-        coordinator.cancelTransientPolicyRetryForTesting()
-        coordinator.lastPolicyInstallOutcome = .transientRefused
-        coordinator.policyExchangeCompleted(fresh: false)
-        XCTAssertFalse(pendingFired)
+        let delivered = deliverImmediately(coordinator)
+        let genOld = coordinator.currentEnrollmentLookupGenerationForTesting
+        coordinator.setPolicyInstallOutcomeForTesting(.transientRefused, generation: genOld)
+        // A newer exchange takes the next generation and settles authoritative-disabled.
+        _ = coordinator.beginEnrollmentLookup()
+        let genNew = coordinator.currentEnrollmentLookupGenerationForTesting
+        coordinator.setPolicyInstallOutcomeForTesting(.authoritativeDisabled, generation: genNew)
+        coordinator.policyExchangeCompleted(fresh: false, exchangeGeneration: genNew)
+        XCTAssertTrue(delivered.value.isEmpty)
+        // The OLD exchange's completion lands late: stale generation → dropped entirely.
+        coordinator.policyExchangeCompleted(fresh: false, exchangeGeneration: genOld)
+        XCTAssertTrue(delivered.value.isEmpty, "a stale completion must not schedule or revive recovery")
+    }
+
+    /// SUPERSESSION (reviewer blocker 2): a retry claimed by an older generation, whose
+    /// callback is delivered AFTER a newer exchange superseded it, must be dropped — the
+    /// callback re-validates the generation before starting an exchange.
+    func test_retryCallbackDeliveredAfterSupersessionIsDropped() {
+        let (coordinator, _) = makeEnrolledStack()
+        let delivered = deliverImmediately(coordinator)
+        let gen = coordinator.currentEnrollmentLookupGenerationForTesting
+        coordinator.setPolicyInstallOutcomeForTesting(.transientRefused, generation: gen)
+        coordinator.policyExchangeCompleted(fresh: false, exchangeGeneration: gen)
+        XCTAssertEqual(delivered.value.count, 1)
+        // A newer exchange begins (generation bumps); THEN the old callback is delivered.
+        _ = coordinator.beginEnrollmentLookup()
+        var refreshRuns = 0
+        coordinator.initiateIdentityRecoveryRefresh = { refreshRuns += 1 }
+        delivered.value[0].item.perform()
+        XCTAssertEqual(refreshRuns, 0, "a superseded retry callback must not start an exchange")
+    }
+
+    /// SDK THROTTLE BOUNDARY (reviewer blocker 3): a fetch error carrying
+    /// `RemoteConfigThrottledEndTimeInSecondsKey` floors the retry delay at the later of the
+    /// boundary and local backoff — INCLUDING a boundary beyond the 900 s backoff cap.
+    func test_throttleBoundaryFloorsRetryDelayBeyondBackoffCap() {
+        let (coordinator, _) = makeEnrolledStack()
+        let delivered = deliverImmediately(coordinator)
+        let gen = coordinator.currentEnrollmentLookupGenerationForTesting
+        let boundary = Date().addingTimeInterval(3600)
+        let error = NSError(domain: "test", code: 1, userInfo: [
+            RemoteConfigThrottledEndTimeInSecondsKey: NSNumber(value: boundary.timeIntervalSince1970),
+        ])
+        coordinator.recordPolicyFetchThrottleFloor(from: error)
+        coordinator.setPolicyInstallOutcomeForTesting(.transientRefused, generation: gen)
+        coordinator.policyExchangeCompleted(fresh: false, exchangeGeneration: gen)
+        XCTAssertEqual(delivered.value.count, 1)
+        // Boundary read just before recording: allow sub-second clock skew.
+        XCTAssertGreaterThanOrEqual(delivered.value[0].delay, 3599,
+                                    "retry delay must respect the SDK throttle boundary, uncapped")
     }
 }

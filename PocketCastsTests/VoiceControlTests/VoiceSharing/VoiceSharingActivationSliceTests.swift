@@ -109,7 +109,7 @@ final class VoiceSharingActivationSliceTests: XCTestCase {
         // The named refresh path completes without touching the default app;
         // with no named app it completes(false) synchronously-ish.
         let expectation = expectation(description: "refresh completes once")
-        VoiceSharingFirebaseApp.refreshPolicy { _ in expectation.fulfill() }
+        VoiceSharingFirebaseApp.refreshPolicy { _, _ in expectation.fulfill() }
         waitForExpectations(timeout: 10)
     }
 
@@ -133,7 +133,7 @@ final class VoiceSharingActivationSliceTests: XCTestCase {
             VoiceSharingSessionGeneration.shared.ensureLifecycle()
             defer { VoiceSharingSessionGeneration.shared.clear() }
             let done = expectation(description: "exchange completes")
-            VoiceSharingFirebaseApp.performPolicyExchange(coordinator: coordinator) { fresh in
+            VoiceSharingFirebaseApp.performPolicyExchange(coordinator: coordinator) { fresh, _ in
                 XCTAssertFalse(fresh)
                 done.fulfill()
             }
@@ -159,7 +159,7 @@ final class VoiceSharingActivationSliceTests: XCTestCase {
             VoiceSharingSessionGeneration.shared.ensureLifecycle()
             defer { VoiceSharingSessionGeneration.shared.clear() }
             let done = expectation(description: "exchange completes")
-            VoiceSharingFirebaseApp.performPolicyExchange(coordinator: coordinator) { fresh in
+            VoiceSharingFirebaseApp.performPolicyExchange(coordinator: coordinator) { fresh, _ in
                 XCTAssertFalse(fresh)
                 done.fulfill()
             }
@@ -194,7 +194,7 @@ final class VoiceSharingActivationSliceTests: XCTestCase {
             coordinator.lastFetchTimeProvider = { box.value ? Date() : nil }
             defer { coordinator.lastFetchTimeProvider = original }
             let done = expectation(description: "exchange completes")
-            VoiceSharingFirebaseApp.performPolicyExchange(coordinator: coordinator) { fresh in
+            VoiceSharingFirebaseApp.performPolicyExchange(coordinator: coordinator) { fresh, _ in
                 done.fulfill()
                 _ = fresh
             }
@@ -283,7 +283,7 @@ final class VoiceSharingActivationSliceTests: XCTestCase {
 
         let settled = expectation(description: "exchange settles")
         VoiceSharingFirebaseApp.performPolicyExchange(
-            coordinator: coordinator, accountClient: client) { fresh in
+            coordinator: coordinator, accountClient: client) { fresh, _ in
                 XCTAssertTrue(fresh, "a fully-stubbed successful exchange must report install")
                 settled.fulfill()
         }
@@ -297,7 +297,7 @@ final class VoiceSharingActivationSliceTests: XCTestCase {
         // the run that installs the lease.
         let followUp = expectation(description: "follow-up exchange settles")
         VoiceSharingFirebaseApp.performPolicyExchange(
-            coordinator: coordinator, accountClient: client) { fresh in
+            coordinator: coordinator, accountClient: client) { fresh, _ in
                 XCTAssertTrue(fresh)
                 followUp.fulfill()
         }
@@ -392,7 +392,7 @@ final class VoiceSharingActivationSliceTests: XCTestCase {
 
         let settled = expectation(description: "exchange settles")
         VoiceSharingFirebaseApp.performPolicyExchange(
-            coordinator: coordinator, accountClient: client) { fresh in
+            coordinator: coordinator, accountClient: client) { fresh, _ in
                 XCTAssertTrue(fresh,
                               "a first fetch whose activation succeeds must install: provenance "
                               + "is read AFTER activation applied the fetched value")

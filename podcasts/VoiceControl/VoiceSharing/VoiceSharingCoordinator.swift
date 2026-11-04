@@ -205,7 +205,9 @@ final class VoiceSharingCoordinator {
 
     /// A newer remote fetch supersedes enrollment work from every older activation.
     struct EnrollmentLookup {
-        fileprivate let generation: Int
+        /// Owning lookup generation — travels through settlement to the exchange completion
+        /// so late older completions cannot classify/schedule/reset after a newer answer.
+        let generation: Int
         fileprivate let policyToken: VoiceSharingPolicy.FetchToken
         fileprivate let projectionToken: VoiceSharingEnrollmentStore.ProjectionToken?
     }
@@ -290,7 +292,7 @@ final class VoiceSharingCoordinator {
             if !membershipChanged {
                 // No new token: only the original, still-current activation can renew the lease.
                 guard lookupOwnershipCurrent(lookup), let token = settlementInstallToken(lookup) else { return false }
-                policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: token)
+                policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: token, settlementGeneration: lookup.generation)
             }
             return membershipChanged
         }
@@ -316,7 +318,8 @@ final class VoiceSharingCoordinator {
     /// a superseded identity cannot install at all.
     func policyRefreshAfterActivation(
         freshActivationSucceeded: Bool,
-        fetchToken: VoiceSharingPolicy.FetchToken
+        fetchToken: VoiceSharingPolicy.FetchToken,
+        settlementGeneration: Int = 0
     ) {
         FileLog.shared.addMessage("[VoiceSharing] policy refresh called: fresh=\(freshActivationSucceeded)")
         let installed = policy.refreshAfterActivation(
@@ -327,15 +330,17 @@ final class VoiceSharingCoordinator {
         // Install-level classification for transient recovery: an installed snapshot is success;
         // a strict decoded false is AUTHORITATIVE (retry cannot change it); every other refusal
         // (fetch/freshness failure, unavailable remote, fence, token refusal) is TRANSIENT.
+        let outcome: PolicyInstallOutcome
         if installed != nil {
-            lastPolicyInstallOutcome = .installed
+            outcome = .installed
         } else if !freshActivationSucceeded {
-            lastPolicyInstallOutcome = .transientRefused
+            outcome = .transientRefused
         } else if policy.lastRemoteReadKind == .valid(false) {
-            lastPolicyInstallOutcome = .authoritativeDisabled
+            outcome = .authoritativeDisabled
         } else {
-            lastPolicyInstallOutcome = .transientRefused
+            outcome = .transientRefused
         }
+        recordInstallOutcome(outcome, forGeneration: settlementGeneration)
         // If the refresh observed the gate closed (switch off, account not enrolled, install
         // refused), any audio the collector still holds is consentless — purge now.
         if !policy.permitsCollection { consentGateLost() }
@@ -773,84 +778,165 @@ final class VoiceSharingCoordinator {
             : policy.tokenForFetchStart()
     }
 
-    /// What the last install-level settlement decided (nil = this exchange never reached an
-    /// install decision). Drives transient-recovery classification. Internal so the production
-    /// exchange entry resets it at exchange start (per-exchange classification must not read the
-    /// PREVIOUS exchange's decision).
+    /// What the last install-level settlement decided, plus the owning exchange's lookup
+    /// generation. The generation travels through the whole exchange (beginEnrollmentLookup →
+    /// settlement → completion) so a LATE completion of an OLDER exchange can neither classify,
+    /// schedule, nor reset after a newer answer superseded it.
     enum PolicyInstallOutcome { case installed, authoritativeDisabled, transientRefused }
-    var lastPolicyInstallOutcome: PolicyInstallOutcome?
+    private var installOutcomeByGeneration: [Int: PolicyInstallOutcome] = [:]
+    private func recordInstallOutcome(_ outcome: PolicyInstallOutcome, forGeneration generation: Int) {
+        policyRetryStateLock.lock(); defer { policyRetryStateLock.unlock() }
+        installOutcomeByGeneration = installOutcomeByGeneration.filter { $0.key >= generation }
+        installOutcomeByGeneration[generation] = outcome
+    }
+    private func installOutcome(forGeneration generation: Int) -> PolicyInstallOutcome? {
+        policyRetryStateLock.lock(); defer { policyRetryStateLock.unlock() }
+        return installOutcomeByGeneration[generation]
+    }
 
-    /// TRANSIENT ACQUISITION RECOVERY: a transiently refused exchange self-recovers without an
-    /// app restart — doubling backoff, 30 s base, capped at 15 min, generation-fenced by the
-    /// ordinary exchange guards. An AUTHORITATIVE answer (strict decoded false) or a successful
-    /// install cancels and resets. A newer real refresh cancels any pending retry (supersession).
-    private let policyRetryQueue = DispatchQueue(label: "fm.auris.voice-sharing.policy-retry", qos: .utility)
-    private var policyRetryWorkItem: DispatchWorkItem?
-    private var pendingRetryFire: (() -> Void)?
+    /// TRANSIENT ACQUISITION RECOVERY (reviewer 6b6fc0c8-hardened): a transiently refused
+    /// exchange self-recovers without an app restart. State transitions are serialized by
+    /// `policyRetryStateLock` (one lock per operation — the retry dispatch queue is NEVER
+    /// synced onto). The retry is CLAIMED by the owning exchange's lookup generation: a fired
+    /// callback re-validates that its generation is still current before starting another
+    /// exchange, so a callback delivered after supersession is dropped. The delay is the
+    /// LATER of local doubling backoff (30 s base, 15 min cap) and any SDK throttle boundary
+    /// (`RemoteConfigThrottledEndTimeInSecondsKey`), the latter deliberately uncapped.
+    private let policyRetryStateLock = NSLock()
+    private var policyRetryPendingClaimGeneration: Int?
     private var policyRetryBackoffSeconds: Double = 30
     private let policyRetryBackoffCapSeconds: Double = 900
-    /// Injectable retry scheduling for deterministic controls; production uses the serial queue.
-    var schedulePolicyRetryForTesting: ((_ delaySeconds: Double, _ fire: @escaping () -> Void) -> Void)?
+    private var policyRetryThrottleFloorDate: Date?
+    private var policyRetryWorkItem: DispatchWorkItem?
+    private let policyRetryDispatchQueue = DispatchQueue(label: "fm.auris.voice-sharing.policy-retry", qos: .utility)
+    /// Injectable DELIVERY of the scheduled work item (not the scheduling decision): controls
+    /// exercise the REAL fire closure, including its generation re-validation, by delivering
+    /// immediately instead of after the wall-clock delay.
+    var deliverPolicyRetryForTesting: ((_ delaySeconds: Double, _ item: DispatchWorkItem) -> Void)?
+    /// Injectable observation of the computed delay (does not replace delivery).
+    var observePolicyRetryDelayForTesting: ((_ delaySeconds: Double) -> Void)?
 
-    func policyExchangeCompleted(fresh: Bool) {
-        if fresh {
-            resetTransientPolicyRetry()
-            return
-        }
-        switch lastPolicyInstallOutcome {
-        case .authoritativeDisabled:
-            FileLog.shared.addMessage("[VoiceSharing] policy exchange settled authoritative-disabled; no retry")
-            resetTransientPolicyRetry()
-        case .installed, nil, .transientRefused:
-            scheduleTransientPolicyRetry()
+    /// Records an SDK throttle boundary from a failed fetch's userInfo
+    /// (`RemoteConfigThrottledEndTimeInSecondsKey`, Firebase 10.29.0). The next retry delay
+    /// floors at the later of this boundary and the local backoff.
+    func recordPolicyFetchThrottleFloor(from error: Error?) {
+        guard
+            let seconds = (error as NSError?)
+                .flatMap({ $0.userInfo[RemoteConfigThrottledEndTimeInSecondsKey] })
+                .flatMap({ ($0 as? NSNumber)?.doubleValue }),
+            seconds > 0
+        else { return }
+        policyRetryStateLock.lock(); defer { policyRetryStateLock.unlock() }
+        let boundary = Date(timeIntervalSince1970: seconds)
+        if boundary > (policyRetryThrottleFloorDate ?? .distantPast) {
+            policyRetryThrottleFloorDate = boundary
+            FileLog.shared.addMessage("[VoiceSharing] fetch throttled by SDK until \(boundary)")
         }
     }
 
-    private func resetTransientPolicyRetry() {
-        policyRetryQueue.sync {
-            policyRetryWorkItem?.cancel()
-            policyRetryWorkItem = nil
-            pendingRetryFire = nil
-            policyRetryBackoffSeconds = 30
+    /// Current lookup generation (for exchange-owned completion wiring and controls).
+    var currentEnrollmentLookupGenerationForTesting: Int { enrollmentLookupGeneration }
+
+    /// Test seam: seeds an install outcome for a generation without running an exchange.
+    func setPolicyInstallOutcomeForTesting(_ outcome: PolicyInstallOutcome, generation: Int) {
+        recordInstallOutcome(outcome, forGeneration: generation)
+    }
+
+    func policyExchangeCompleted(fresh: Bool, exchangeGeneration: Int) {
+        policyRetryStateLock.lock()
+        let currentGeneration = enrollmentLookupGeneration
+        policyRetryStateLock.unlock()
+        guard exchangeGeneration == currentGeneration else {
+            FileLog.shared.addMessage("[VoiceSharing] stale exchange completion (gen \(exchangeGeneration) vs current \(currentGeneration)); newer owner drives")
+            return
         }
+        if fresh {
+            resetTransientPolicyRetry(claimGeneration: exchangeGeneration)
+            return
+        }
+        switch installOutcome(forGeneration: exchangeGeneration) {
+        case .authoritativeDisabled:
+            FileLog.shared.addMessage("[VoiceSharing] policy exchange settled authoritative-disabled; no retry")
+            resetTransientPolicyRetry(claimGeneration: exchangeGeneration)
+        case .installed, nil, .transientRefused:
+            scheduleTransientPolicyRetry(forExchangeWith: exchangeGeneration)
+        }
+    }
+
+    private func resetTransientPolicyRetry(claimGeneration: Int? = nil) {
+        policyRetryStateLock.lock(); defer { policyRetryStateLock.unlock() }
+        guard claimGeneration == nil || policyRetryPendingClaimGeneration == nil
+            || policyRetryPendingClaimGeneration == claimGeneration else { return }
+        policyRetryWorkItem?.cancel()
+        policyRetryWorkItem = nil
+        policyRetryPendingClaimGeneration = nil
+        policyRetryBackoffSeconds = 30
     }
 
     /// Test seam mirror of the production cancellation path (same state, no queue hop).
     func cancelTransientPolicyRetryForTesting() { resetTransientPolicyRetry() }
 
-    /// Test seam: fires the PENDING retry's body synchronously (production fires on the
-    /// serial queue after the backoff). No-op when nothing is pending.
-    func firePendingPolicyRetryForTesting() {
-        policyRetryQueue.sync { pendingRetryFire?() }
-    }
-
-    private func scheduleTransientPolicyRetry() {
-        policyRetryQueue.sync {
-            guard policyRetryWorkItem == nil else {
+    private func scheduleTransientPolicyRetry(forExchangeWith generation: Int) {
+        let item: DispatchWorkItem
+        var delay: Double = 0
+        policyRetryStateLock.lock()
+        do {
+            guard policyRetryPendingClaimGeneration == nil else {
+                policyRetryStateLock.unlock()
                 FileLog.shared.addMessage("[VoiceSharing] transient policy retry already pending; backoff unchanged")
                 return
             }
-            let delay = policyRetryBackoffSeconds
+            delay = policyRetryBackoffSeconds
             policyRetryBackoffSeconds = min(delay * 2, policyRetryBackoffCapSeconds)
-            FileLog.shared.addMessage("[VoiceSharing] transient policy refusal; retry in \(Int(delay))s")
+            if let floorDate = policyRetryThrottleFloorDate {
+                let floorDelay = floorDate.timeIntervalSinceNow
+                if floorDelay > delay {
+                    FileLog.shared.addMessage("[VoiceSharing] retry delay floored at SDK throttle boundary (+\(Int(floorDelay))s)")
+                    delay = floorDelay
+                }
+                policyRetryThrottleFloorDate = nil
+            }
+            policyRetryPendingClaimGeneration = generation
             let fire = { [weak self] in
                 guard let self else { return }
-                self.policyRetryQueue.sync {
+                self.policyRetryStateLock.lock()
+                guard self.policyRetryPendingClaimGeneration == generation,
+                      generation == self.enrollmentLookupGeneration else {
+                    self.policyRetryPendingClaimGeneration = nil
                     self.policyRetryWorkItem = nil
+                    self.policyRetryStateLock.unlock()
+                    FileLog.shared.addMessage("[VoiceSharing] superseded retry callback dropped (gen \(generation) no longer current)")
+                    return
                 }
+                self.policyRetryPendingClaimGeneration = nil
+                self.policyRetryWorkItem = nil
+                self.policyRetryStateLock.unlock()
                 FileLog.shared.addMessage("[VoiceSharing] transient policy retry firing")
                 self.initiateIdentityRecoveryRefresh()
             }
-            pendingRetryFire = fire
-            if let scheduler = schedulePolicyRetryForTesting {
-                scheduler(delay, fire)
-            } else {
-                let item = DispatchWorkItem(block: fire)
-                policyRetryQueue.sync { policyRetryWorkItem = item }
-                policyRetryQueue.asyncAfter(deadline: .now() + delay, execute: item)
-            }
+            let workItem = DispatchWorkItem(block: fire)
+            policyRetryWorkItem = workItem
+            item = workItem
+        }
+        FileLog.shared.addMessage("[VoiceSharing] transient policy refusal; retry in \(Int(delay))s")
+        policyRetryStateLock.unlock()
+        observePolicyRetryDelayForTesting?(delay)
+        if let deliver = deliverPolicyRetryForTesting {
+            deliver(delay, item)
+        } else {
+            policyRetryDispatchQueue.asyncAfter(deadline: .now() + delay, execute: item)
         }
     }
+
+    /// Test seam: fires the PENDING retry's work item synchronously (real fire closure,
+    /// including generation re-validation). No-op when nothing is pending.
+    func firePendingPolicyRetryForTesting() {
+        policyRetryStateLock.lock()
+        let item = policyRetryWorkItem
+        policyRetryStateLock.unlock()
+        item?.perform()
+    }
+
 
     deinit {
         removeAllIdentityObservers()

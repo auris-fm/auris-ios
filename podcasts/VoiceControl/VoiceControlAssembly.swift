@@ -303,7 +303,7 @@ class VoiceControlAssembly {
         // LAUNCH ENTRY (reviewer 0c3168fe): a process that is already signed in has neither a
         // recovery event nor an expiring lease — run one named exchange now so the policy
         // lease installs at launch. Failure reports through the exchange's own path.
-        VoiceSharingFirebaseApp.performPolicyExchange(coordinator: .shared) { _ in
+        VoiceSharingFirebaseApp.performPolicyExchange(coordinator: .shared) { _, _ in
             // The policy exchange still runs (it gates collection); it no longer provisions a
             // capture allowance, because none exists to provision.
         }
