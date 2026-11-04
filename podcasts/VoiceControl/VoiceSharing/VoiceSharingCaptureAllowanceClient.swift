@@ -155,7 +155,7 @@ struct VoiceSharingCaptureAllowanceClient {
     init(baseURLProvider: @escaping () -> String = { CloudConfig.shared.configuredOrigin },
          tokenProvider: CloudTokenProviding,
          session: URLSession = URLSession(configuration: .default),
-         sessionIdentity: @escaping () -> SessionIdentity? = { VoiceSharingSessionGeneration.shared.currentGeneration() },
+         sessionIdentity: @escaping () -> SessionIdentity? = VoiceSharingEnrollmentStore.currentSessionOwner,
          monotonicNowMS: @escaping () -> Int = { Int(DispatchTime.now().uptimeNanoseconds / 1_000_000) }) {
         self.baseURLProvider = baseURLProvider
         self.tokenProvider = tokenProvider

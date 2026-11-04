@@ -55,9 +55,10 @@ final class VoiceSharingAccountClient {
         tokenProvider: CloudTokenProviding,
         session: URLSession = URLSession(configuration: .default),
         requestIDFactory: @escaping () -> String = { UUID().uuidString.lowercased() },
-        // Default reads the in-memory lifecycle generation. NOTE: this deliberately does NOT read a
-        // credential — refresh rotation would look like logout, and credentials are not operation identity.
-        sessionIdentity: @escaping () -> SessionIdentity? = { VoiceSharingSessionGeneration.shared.currentGeneration() },
+        // Default is ORDINARY ACCOUNT OWNERSHIP (spec 4afc6e43): the signed-in account is the lifecycle
+        // a request belongs to. NOTE: this deliberately does NOT read a credential — refresh rotation
+        // would look like logout, and credentials are not operation identity.
+        sessionIdentity: @escaping () -> SessionIdentity? = VoiceSharingEnrollmentStore.currentSessionOwner,
         membershipStore: VoiceSharingEnrollmentStore = .shared
     ) {
         self.baseURLProvider = baseURLProvider

@@ -9,8 +9,8 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
     private var defaults: UserDefaults!
     private var suiteName: String!
     private var scope = "account-A"
-    /// Stands in for the account/session lifecycle generation the real store reads from
-    /// VoiceSharingSessionGeneration, so a control can move sessions explicitly.
+    /// Stands in for the account/session lifecycle the real store reads (ordinary account ownership),
+    /// so a control can move sessions explicitly.
     private var lifecycle: String? = "gen-1"
 
     override func setUp() {
@@ -378,10 +378,17 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
         XCTAssertFalse(relaunched.currentEffectiveEnrolled,
                        "but a previous session's projection is NOT this session's permission")
 
-        // While the GET is in flight the feature stays off.
+        // While the GET is in flight the feature stays off. The remembered OPT-IN is the user's own
+        // standing choice and stays consent (spec 4afc6e43 keeps consent and membership separate), but the
+        // remembered EXPECTATION — enrollment, epoch, disclosure — is not this session's, so membership
+        // refuses and nothing is collected.
         do {
-            XCTAssertFalse(relaunched.consentAllowsCollection,
-                           "cold start + delayed GET must not collect on remembered state")
+            XCTAssertTrue(relaunched.consentAllowsCollection,
+                          "the user's own opt-in is remembered across launches")
+            XCTAssertFalse(relaunched.currentEffectiveEnrolled,
+                           "cold start + delayed GET must not collect on remembered membership")
+            XCTAssertFalse(relaunched.consentAllowsCollection && relaunched.currentEffectiveEnrolled,
+                           "the joint decision refuses until this session confirms")
 
             // The GET finally lands for THIS session, under a token taken after the opt-in gesture.
             let issued = token(relaunched)

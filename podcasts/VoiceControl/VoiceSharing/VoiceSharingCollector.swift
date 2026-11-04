@@ -201,7 +201,7 @@ final class VoiceSharingCollector {
         },
         membership: @escaping () -> VoiceSharingEnrollmentStore.State = { VoiceSharingEnrollmentStore.shared.currentState },
         epochProvider: @escaping () -> String? = { VoiceSharingEnrollmentStore.shared.activeEnrollmentEpoch },
-        sessionIdentity: @escaping () -> String? = { VoiceSharingSessionGeneration.shared.currentGeneration() },
+        sessionIdentity: @escaping () -> String? = { VoiceSharingEnrollmentStore.currentSessionOwner() },
         sink: @escaping (SegmentEvent) -> Void = { _ in }
     ) {
         self.outcomeWaitLimit = outcomeWaitLimit

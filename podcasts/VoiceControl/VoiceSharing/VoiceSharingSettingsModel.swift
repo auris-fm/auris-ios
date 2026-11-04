@@ -603,7 +603,7 @@ final class VoiceSharingAccountModel: ObservableObject {
     init(store: VoiceSharingEnrollmentStore = .shared,
          client: VoiceSharingAccountClient,
          disclosureVersion: String? = nil,
-         session: @escaping () -> String? = { VoiceSharingSessionGeneration.shared.currentGeneration() },
+         session: @escaping () -> String? = VoiceSharingEnrollmentStore.currentSessionOwner,
          purgeLocal: (() -> VoiceSharingSettingsModel.DeleteResult)? = nil) {
         self.store = store
         self.client = client
