@@ -338,6 +338,52 @@ final class VoiceSharingUploaderTests: XCTestCase {
         }
     }
 
+    /// DURABLE QUOTA FLOOR (spec c74d7e30): a 429 quota_exceeded with a SHORT server hint must
+    /// publish the next-UTC-midnight boundary INSIDE the queue's settlement transaction — visible
+    /// in the queue's persisted not-before record and enforced by a RESTARTED queue before the
+    /// boundary. The arithmetic controls in VoiceSharingQuotaRetryFloorTests pin the helper; this
+    /// control pins the durable settlement seam. (Coverage control for existing behavior: the
+    /// floor shipped in b61af2897, so no red-first cycle is possible without deleting the feature.)
+    func test_quotaExceeded429PublishesADurableNextMidnightBoundary() async throws {
+        let entry = try makeReadyEntry()
+        let uploader = makeUploader(transport: { _, _, _ in
+            .response(statusCode: 429, body: Data(
+                "{\"schema_version\":1,\"code\":\"quota_exceeded\",\"retry_after_s\":7}".utf8))
+        })
+        let before = Date()
+        let outcome = await uploader.upload(entry)
+        let floor = VoiceSharingUploader.nextUTCMidnightInterval(from: before)
+        guard case .retry(let delayOpt, _) = outcome else {
+            return XCTFail("expected retry, got \(outcome)")
+        }
+        let delay = try XCTUnwrap(delayOpt)
+        XCTAssertEqual(delay, floor, accuracy: 2,
+                       "settled delay is the midnight floor, not the 7s hint")
+        // The boundary is DURABLY published: the queue's persisted not-before record exists and
+        // its stamp is at/after the next UTC midnight.
+        let url = root.appendingPathComponent(
+            VoiceSharingUploadQueue.notBeforeName(for: entry.name))
+        let data = try Data(contentsOf: url)
+        let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let stamp = try XCTUnwrap(object?["notBefore"] as? Double)
+        XCTAssertGreaterThanOrEqual(stamp, before.timeIntervalSince1970 + floor - 2,
+                                    "persisted boundary respects the quota floor")
+        // A RESTARTED queue over the same directory enforces it: the entry is refused as
+        // not-yet-due (distinguishable from ownership), with the boundary as the retry instant.
+        let restarted = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        do {
+            _ = try restarted.beginAttempt(entry)
+            XCTFail("a pre-midnight attempt must be refused after restart")
+        } catch let error as VoiceSharingUploadQueue.PrepareError {
+            guard case .notYetDue(let retryAt) = error else {
+                return XCTFail("expected notYetDue, got \(error)")
+            }
+            XCTAssertGreaterThanOrEqual(
+                retryAt.timeIntervalSince1970, before.timeIntervalSince1970 + floor - 2,
+                "restart enforces the midnight boundary")
+        }
+    }
+
     /// A 4xx with its OWNING body code is terminal: the entry is abandoned, not retried forever.
     func test_clientErrorAbandonsTheEntry() async throws {
         let entry = try makeReadyEntry()
