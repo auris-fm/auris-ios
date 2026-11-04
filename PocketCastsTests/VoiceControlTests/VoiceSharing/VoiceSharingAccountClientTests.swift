@@ -1592,20 +1592,20 @@ final class VoiceSharingAccountNavigationTests: XCTestCase {
         let model = harness.model()
         var enabled = true
         let view = VoiceSharingAccountView(accountModel: model, localModel: nil, surfaceEnabled: { enabled })
-        view.enroll(confirmed: false)
-        view.deleteAccepted(confirmed: false)
+        view.sectionsForTesting.enroll(confirmed: false)
+        view.sectionsForTesting.deleteAccepted(confirmed: false)
         XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty)
         XCTAssertFalse(harness.store.currentState.localOptIn)
         enabled = false
-        view.enroll(confirmed: true)
-        view.deleteAccepted(confirmed: true)
+        view.sectionsForTesting.enroll(confirmed: true)
+        view.sectionsForTesting.deleteAccepted(confirmed: true)
         XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty)
         enabled = true
         harness.switchAccount(nil)
         await model.refresh()
         XCTAssertFalse(model.accountControlsAvailable)
-        view.enroll(confirmed: true)
-        view.deleteAccepted(confirmed: true)
+        view.sectionsForTesting.enroll(confirmed: true)
+        view.sectionsForTesting.deleteAccepted(confirmed: true)
         XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty)
     }
 
@@ -1662,8 +1662,8 @@ extension VoiceSharingAccountNavigationTests {
         harness.seed()
         let model = harness.model()
         let screenA = VoiceSharingAccountView(accountModel: model, localModel: nil, surfaceEnabled: { true })
-        let queuedEnrollment = screenA.enroll(confirmed: true)
-        let queuedDeletion = screenA.deleteAccepted(confirmed: true)
+        let queuedEnrollment = screenA.sectionsForTesting.enroll(confirmed: true)
+        let queuedDeletion = screenA.sectionsForTesting.deleteAccepted(confirmed: true)
         // Still on the same actor turn: queued action Tasks have not started.
         harness.switchAccount("session-B")
         harness.seed()
@@ -1674,8 +1674,8 @@ extension VoiceSharingAccountNavigationTests {
         XCTAssertFalse(harness.store.currentState.localOptIn)
         XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.allSatisfy { $0.httpMethod == "GET" }, "A's queued confirmations cannot mutate B")
         // The same confirmation can also arrive from a dialog retained across the replacement.
-        let dialogEnrollment = screenA.enroll(confirmed: true)
-        let dialogDeletion = screenA.deleteAccepted(confirmed: true)
+        let dialogEnrollment = screenA.sectionsForTesting.enroll(confirmed: true)
+        let dialogDeletion = screenA.sectionsForTesting.deleteAccepted(confirmed: true)
         await dialogEnrollment?.value
         await dialogDeletion?.value
         XCTAssertFalse(harness.store.currentState.localOptIn)

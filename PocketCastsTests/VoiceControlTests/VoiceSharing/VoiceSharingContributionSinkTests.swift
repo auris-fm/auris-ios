@@ -702,7 +702,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
             encoderProvenance: { frozenProvenance })
         lastSink = sink
         let collector = VoiceSharingCollector(
-            policy: policy, captureAllowance: FiniteCaptureAdmission(), outcomeWaitLimit: limit,
+            policy: policy, outcomeWaitLimit: limit,
             monotonicNow: { scheduler.now },
             scheduleOutcome: { scheduler.scheduled.append(($0, $1)) },
             membership: { state }, epochProvider: { "epoch-1" }, sessionIdentity: sessionIdentity,
@@ -936,7 +936,12 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(producerWakes, 1, "and it must ask the producer for another allocation")
     }
 
-    func test_dailyCaptureChargeSurvivesReadyQueueDrainAndRestart() throws {
+    /// Spec c74d7e30 ("Actual upload usage"): the client no longer holds a per-day record
+    /// limit or charges a usage ledger — the SERVER meters actual accepted bytes per UTC day.
+    /// The former allowance test asserted a second capture is REFUSED locally; its replacement
+    /// asserts the NEW contract: the second consented capture is admitted, and no local ledger
+    /// authorizes anything.
+    func test_noLocalPerDayLimitSecondConsentedCaptureIsAdmittedAndNoLedgerAuthorizes() throws {
         let policy = VoiceSharingPolicy(clock: StubMonotonicClock(time: 1_000),
             readRemoteSwitch: { .valid(true) }, isAccountEnrolled: { true })
         policy.identityBecameReadable()
@@ -946,44 +951,27 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         state.hasAuthoritativeProjection = true
         state.membership = VoiceSharingMembership(membershipRevision: "rev", plan: .pro,
             voiceSharingEnrolled: true, enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "synthetic", withdrawalState: .active)
-        let limits = try XCTUnwrap(VoiceSharingCaptureLimits(dailyRecords: 1, dailyBytes: 100_000,
-            compiledRecordsCeiling: 1, compiledBytesCeiling: 100_000, clipSamples: 16,
-            metadataBytes: VoiceSharingUploadQueue.maxMetadataBytes, compiledClipSamples: 16,
-            compiledMetadataBytes: VoiceSharingUploadQueue.maxMetadataBytes))
-        let stamp = VoiceSharingCaptureStamp(session: "sess-1", epoch: "epoch-1", policyGeneration: policy.currentLeaseGeneration)
-        let authority = try XCTUnwrap(VoiceSharingCaptureAuthorization(account: "synthetic", establishedWindow: "one", batchId: "11111111-1111-4111-8111-111111111111", limits: limits, consent: stamp))
-        let ledgerRoot = root.deletingLastPathComponent().appendingPathComponent("usage-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: ledgerRoot) }
-        XCTAssertTrue(VoiceSharingCaptureLedger(root: ledgerRoot).provision(.init(verifiedFirstProvisioningAccount: "synthetic", establishedWindow: "one", batchId: "11111111-1111-4111-8111-111111111111")!))
-        let owner = VoiceSharingCaptureAllowance(ledger: .init(root: ledgerRoot), currentAuthorization: { authority })
-        owner.requestPreparation()
-        owner.waitForPreparationForTesting()
         let sink = makeSink()
-        let collector = VoiceSharingCollector(policy: policy, captureAllowance: owner,
-            outcomeWaitLimit: .init(milliseconds: 25, ceilingMilliseconds: 100), membership: { state },
+        let collector = VoiceSharingCollector(policy: policy, outcomeWaitLimit: .init(milliseconds: 25, ceilingMilliseconds: 100), membership: { state },
             epochProvider: { "epoch-1" }, sessionIdentity: { "sess-1" }, sink: { sink.handle($0) })
         collector.deliversSynchronouslyForTesting = true
         let context = try XCTUnwrap(collector.speechStarted(confirmationFrameSamples: 640))
         let pcm = [Float](repeating: 0.6, count: 640)
         collector.appendSamples(pcm)
-        XCTAssertEqual(collector.retainedCopyForTesting, Array(pcm.prefix(16)))
+        // Clip ceiling is now the compiled bound (no allowance defines a batch clip size).
+        XCTAssertEqual(collector.retainedCopyForTesting, pcm)
         collector.speechCompleted(pcm, context: context)
         drain()
-        let ready = queue.readyEntries()
-        XCTAssertEqual(ready.count, 1)
-        let entry = try XCTUnwrap(ready.first)
-        let directory = root.appendingPathComponent(entry.name)
-        XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent("audio.wav")).count, 44 + 32)
-        XCTAssertLessThanOrEqual(try Data(contentsOf: directory.appendingPathComponent("metadata.json")).count, limits.metadataBytes)
-        // Exercise the actual successful-drain removal boundary; delivery itself is outside this control.
-        try queue.remove(entry)
-        XCTAssertTrue(queue.readyEntries().isEmpty)
-        owner.waitForPreparationForTesting()
-        XCTAssertNil(collector.speechStarted(confirmationFrameSamples: 640))
+        XCTAssertEqual(queue.readyEntries().count, 1, "first capture delivered to the queue as before")
+
+        // The SECOND consented capture in the same day: no local refusal exists anymore.
+        let second = try XCTUnwrap(collector.speechStarted(confirmationFrameSamples: 640),
+            "no local per-day limit: capture is metered by the server, not gated by a client batch")
         collector.appendSamples(pcm)
-        XCTAssertEqual(collector.retainedSampleCountForTesting, 0)
-        XCTAssertFalse(VoiceSharingCaptureLedger(root: ledgerRoot).charge(authority))
-        XCTAssertEqual(limits.reservationBytes, UInt64(44 + 32 + limits.metadataBytes))
+        collector.speechCompleted(pcm, context: second)
+        drain()
+        XCTAssertEqual(queue.readyEntries().count, 2,
+            "the second capture reaches the queue; daily accounting happens at the server")
     }
 
     private func drain() {
