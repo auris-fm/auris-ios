@@ -46,14 +46,6 @@ extension AccountViewController: UITableViewDataSource, UITableViewDelegate {
         let row = tableData[indexPath.section][indexPath.row]
 
         switch row {
-        case .voiceSharing:
-            let cell = tableView.dequeueReusableCell(withIdentifier: AccountViewController.actionCellId, for: indexPath) as! AccountActionCell
-            cell.cellLabel.text = L10n.voiceSharingAccountTitle
-            cell.cellImage.image = UIImage(systemName: "waveform")
-            cell.iconStyle = .primaryInteractive01
-            cell.counterView.isHidden = true
-            cell.showsDisclosureIndicator = true
-            return cell
         case .upgradeView:
             let cell: PlusAccountPromptTableCell
             if let dequeuedCell = tableView.dequeueReusableCell(withIdentifier: PlusAccountPromptTableCell.reuseIdentifier) as? PlusAccountPromptTableCell {
@@ -183,10 +175,6 @@ extension AccountViewController: UITableViewDataSource, UITableViewDelegate {
         let row = tableData[indexPath.section][indexPath.row]
 
         switch row {
-        case .voiceSharing:
-            if let controller = AccountViewController.makeVoiceSharingController() {
-                navigationController?.pushViewController(controller, animated: true)
-            }
         case .upgradeView:
             break
         case .upgradeAccount:
