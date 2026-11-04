@@ -6751,6 +6751,7 @@
 "voice_sharing_account_plan" = "Plan";
 "voice_sharing_account_membership" = "Voice Sharing";
 "voice_sharing_account_purpose" = "Send your voice recordings, recognized text and command results to help improve Auris.";
+"voice_sharing_account_sharing_optional" = "Sharing is optional and does not change your plan. Pro features stay yours whether or not you share.";
 "voice_sharing_account_background_speech" = "Recordings may include background speech and speech that did not activate Auris. Sharing is separate from your Free or Pro plan.";
 "voice_sharing_account_disclosure_unavailable" = "Enrollment is not available right now. You can still withdraw or request deletion.";
 "voice_sharing_account_enroll" = "Share voice recordings";
