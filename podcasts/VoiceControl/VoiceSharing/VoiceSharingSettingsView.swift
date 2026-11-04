@@ -228,8 +228,16 @@ struct VoiceSharingAccountView: View {
     /// The switch is a *preference*, never a claim: it reflects the last projection the client
     /// actually received. Turning it off stops local collection immediately and then asks the
     /// server to withdraw — the switch alone never renders as server-confirmed.
-    private var accountContent: some View {
+    var accountContent: some View {
         List {
+            accountSections
+        }
+    }
+
+    /// The sharing rows WITHOUT a List wrapper, so the combined Voice Control screen can embed
+    /// them as plain sections in its own single List (reviewer on b61af2897: no nested Lists).
+    var accountSections: some View {
+        Group {
             // Remote pause must not hide the preference. When the server says sharing is
             // temporarily unavailable, the switch stays visible and this sentence explains it.
             if let pause = remotePauseExplanation {

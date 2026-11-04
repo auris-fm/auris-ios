@@ -135,7 +135,7 @@ class LiveConditionMonitor: ObservableObject {
     static let userEnabledDefaultsKey = "VoiceControl.UserEnabled"
 
     @Published var setup: GateSetup = {
-        let persisted = UserDefaults.standard.object(forKey: Self.userEnabledDefaultsKey)
+        let persisted = UserDefaults.standard.object(forKey: LiveConditionMonitor.userEnabledDefaultsKey)
         let enabled = (persisted as? Bool) ?? true
         return .init(
             enabledByUser: enabled ? .allowed : .blocked(reason: "user_disabled"),
