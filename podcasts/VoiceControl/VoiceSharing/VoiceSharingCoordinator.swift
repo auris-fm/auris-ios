@@ -222,6 +222,23 @@ final class VoiceSharingCoordinator {
     func beginEnrollmentLookup() -> EnrollmentLookup {
         enrollmentLookupLock.lock()
         defer { enrollmentLookupLock.unlock() }
+        return takeEnrollmentLookupLocked()
+    }
+
+    /// ATOMIC RETRY HANDOFF (spec 2ffd8026): the retry's claimed generation is validated and
+    /// the exchange's own lookup taken in ONE `enrollmentLookupLock` acquisition. If a newer
+    /// exchange already owns the gate (authoritative answer, or a newer in-flight lookup),
+    /// the claimed generation no longer matches and the retry starts NOTHING — it can neither
+    /// run after a newer authoritative cancel nor supersede a newer in-flight refresh.
+    func beginRetryExchangeIfCurrent(claimedGeneration: Int) -> EnrollmentLookup? {
+        enrollmentLookupLock.lock()
+        defer { enrollmentLookupLock.unlock() }
+        guard claimedGeneration == enrollmentLookupGeneration else { return nil }
+        return takeEnrollmentLookupLocked()
+    }
+
+    /// Caller must hold `enrollmentLookupLock`.
+    private func takeEnrollmentLookupLocked() -> EnrollmentLookup {
         enrollmentLookupGeneration += 1
         return EnrollmentLookup(
             generation: enrollmentLookupGeneration,
@@ -815,6 +832,10 @@ final class VoiceSharingCoordinator {
     var deliverPolicyRetryForTesting: ((_ delaySeconds: Double, _ item: DispatchWorkItem) -> Void)?
     /// Injectable observation of the computed delay (does not replace delivery).
     var observePolicyRetryDelayForTesting: ((_ delaySeconds: Double) -> Void)?
+    /// PRODUCTION-OWNED retry entry (wired by VoiceSharingFirebaseApp): performs the atomic
+    /// handoff — validate claimed generation and take the exchange lookup in one step — then
+    /// runs the exchange with that lookup. Test controls may capture the attempt.
+    var initiateOwnedRetryRefresh: ((_ claimedGeneration: Int) -> Void)?
 
     /// Records an SDK throttle boundary from a failed fetch's userInfo
     /// (`RemoteConfigThrottledEndTimeInSecondsKey`, Firebase 10.29.0). The next retry delay
@@ -912,7 +933,11 @@ final class VoiceSharingCoordinator {
                 self.policyRetryWorkItem = nil
                 self.policyRetryStateLock.unlock()
                 FileLog.shared.addMessage("[VoiceSharing] transient policy retry firing")
-                self.initiateIdentityRecoveryRefresh()
+                if let owned = self.initiateOwnedRetryRefresh {
+                    owned(generation)
+                } else {
+                    self.initiateIdentityRecoveryRefresh()
+                }
             }
             let workItem = DispatchWorkItem(block: fire)
             policyRetryWorkItem = workItem

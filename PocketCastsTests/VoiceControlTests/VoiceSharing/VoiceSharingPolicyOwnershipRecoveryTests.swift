@@ -171,9 +171,11 @@ final class VoiceSharingPolicyOwnershipRecoveryTests: XCTestCase {
         XCTAssertTrue(delivered.value.isEmpty, "a stale completion must not schedule or revive recovery")
     }
 
-    /// SUPERSESSION (reviewer blocker 2): a retry claimed by an older generation, whose
-    /// callback is delivered AFTER a newer exchange superseded it, must be dropped — the
-    /// callback re-validates the generation before starting an exchange.
+    /// SUPERSESSION (reviewer blocker 2 / spec 2ffd8026): a retry claimed by an older
+    /// generation, whose callback is delivered AFTER a newer exchange took the gate, must be
+    /// dropped ATOMICALLY — the owned handoff validates the claimed generation and takes the
+    /// exchange lookup in ONE enrollmentLookupLock step, so the retry can neither start after
+    /// a newer authoritative answer nor supersede a newer in-flight refresh.
     func test_retryCallbackDeliveredAfterSupersessionIsDropped() {
         let (coordinator, _) = makeEnrolledStack()
         let delivered = deliverImmediately(coordinator)
@@ -183,10 +185,33 @@ final class VoiceSharingPolicyOwnershipRecoveryTests: XCTestCase {
         XCTAssertEqual(delivered.value.count, 1)
         // A newer exchange begins (generation bumps); THEN the old callback is delivered.
         _ = coordinator.beginEnrollmentLookup()
-        var refreshRuns = 0
-        coordinator.initiateIdentityRecoveryRefresh = { refreshRuns += 1 }
+        var attempts = 0
+        coordinator.initiateOwnedRetryRefresh = { claimed in
+            if coordinator.beginRetryExchangeIfCurrent(claimedGeneration: claimed) != nil { attempts += 1 }
+        }
         delivered.value[0].item.perform()
-        XCTAssertEqual(refreshRuns, 0, "a superseded retry callback must not start an exchange")
+        XCTAssertEqual(attempts, 0, "a superseded retry must not take a lookup or start an exchange")
+    }
+
+    /// ATOMIC HANDOFF, happy path: a retry whose claim is STILL current takes its exchange
+    /// lookup in the same lock step — the exchange starts with that lookup (its completion
+    /// carries the newly taken generation), not with a re-derived one.
+    func test_retryWithCurrentClaimHandsOffAtomically() {
+        let (coordinator, _) = makeEnrolledStack()
+        let delivered = deliverImmediately(coordinator)
+        let gen = coordinator.currentEnrollmentLookupGenerationForTesting
+        coordinator.setPolicyInstallOutcomeForTesting(.transientRefused, generation: gen)
+        coordinator.policyExchangeCompleted(fresh: false, exchangeGeneration: gen)
+        XCTAssertEqual(delivered.value.count, 1)
+        coordinator.initiateOwnedRetryRefresh = { claimed in
+            guard let lookup = coordinator.beginRetryExchangeIfCurrent(claimedGeneration: claimed) else {
+                XCTFail("a still-current claim must hand off atomically")
+                return
+            }
+            XCTAssertEqual(lookup.generation, gen + 1,
+                           "the exchange must run on the lookup taken IN the handoff")
+        }
+        delivered.value[0].item.perform()
     }
 
     /// SDK THROTTLE BOUNDARY (reviewer blocker 3): a fetch error carrying
