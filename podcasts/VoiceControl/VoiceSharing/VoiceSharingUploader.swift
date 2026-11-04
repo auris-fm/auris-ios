@@ -201,8 +201,15 @@ final class VoiceSharingUploader {
                 return settleRetry(entry: entry, lease: lease, attempt: attemptNumber,
                                    serverRetryAfter: Self.retryAfterSeconds(body))
             case 429:
+                // quota_exceeded (spec c74d7e30): the day is metered from ACTUAL accepted bytes
+                // and resets at next UTC midnight. A day-scale refusal is not something the
+                // exponential ladder should burn attempts against: the floor applies whether or
+                // not the server sent a hint, and a hint can only extend it, never shorten it
+                // (both halves pinned by VoiceSharingQuotaRetryFloorTests).
                 return settleRetry(entry: entry, lease: lease, attempt: attemptNumber,
-                                   serverRetryAfter: Self.retryAfterSeconds(body))
+                                   serverRetryAfter: Self.effectiveRetryAfter(
+                                       statusCode: 429, body: body,
+                                       hint: Self.retryAfterSeconds(body), now: Date()))
             case 408:
                 // Request timeout: transient by the owning table, never a judgement on the record.
                 return settleRetry(entry: entry, lease: lease, attempt: attemptNumber,
@@ -493,6 +500,27 @@ final class VoiceSharingUploader {
             let code = object["code"] as? String, !code.isEmpty
         else { return nil }
         return code
+    }
+
+    /// The effective Retry-After for a settled attempt. For `429 quota_exceeded` the floor is
+    /// the seconds until the NEXT UTC midnight (the quota's actual reset): absent hint → floor;
+    /// hint below the floor → floor; hint above the floor → the hint, unchanged. Any other
+    /// status/code combination returns the hint as received — a non-quota response must keep
+    /// the plain hint-passing behavior, and the floor is a quota mechanism, not a general one.
+    static func effectiveRetryAfter(statusCode: Int, body: Data,
+                                    hint: Double?, now: Date) -> Double? {
+        guard statusCode == 429, errorCode(body) == "quota_exceeded" else { return hint }
+        let floor = nextUTCMidnightInterval(from: now)
+        return max(hint ?? 0, floor)
+    }
+
+    /// Seconds from `now` until the next 00:00:00 UTC boundary. Computed on the calendar so a
+    /// month or year end cannot be miscomputed by 86_400-multiples.
+    static func nextUTCMidnightInterval(from now: Date) -> TimeInterval {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        let nextMidnight = calendar.startOfDay(for: now).addingTimeInterval(86_400)
+        return nextMidnight.timeIntervalSince(now)
     }
 
     /// Retry-After is advisory server guidance; unparseable values are simply absent (the policy
