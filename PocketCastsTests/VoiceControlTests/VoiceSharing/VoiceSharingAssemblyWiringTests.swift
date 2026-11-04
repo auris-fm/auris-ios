@@ -139,14 +139,21 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         let coordinator = VoiceSharingCoordinator()
         // The PRODUCTION registry, exactly as VoiceControlAssembly registers it.
         var revocationSeen = false
-        var purged = false
         let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         _ = try makeReadyEntry(queue)
         let subscription = coordinator.registerGateLostHandler {
             revocationSeen = true
-            purged = (try? queue.purgeAll()) != nil
         }
         defer { _ = subscription }
+
+        // SIMPLIFIED CONTRACT (spec 4afc6e43): a gate-loss fan-out must NOT purge the durable
+        // queue — the old production handler purged on every closure (policy flap included) and
+        // silently destroyed recordings without delivery. Withdrawal's purge is the user's
+        // explicit opt-out path (SettingsModel), not this fan-out.
+        XCTAssertTrue(queue.readyEntries().isEmpty == false, "premise: an entry exists")
+        coordinator.consentGateLostForTesting()
+        XCTAssertEqual(queue.readyEntries().count, 1, "gate loss must retain durable entries")
+        XCTAssertTrue(queue.readyEntries().isEmpty == false)
 
         // WITHDRAW in the account's own projection, then let the real refresh observe it.
         membership.membership = VoiceSharingMembership(
@@ -159,11 +166,10 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         coordinator.consentGateLostForTesting()
 
         XCTAssertTrue(revocationSeen, "withdrawal must reach the sink's revocation through the registry")
-        XCTAssertTrue(purged, "withdrawal must purge the durable queue through the registry")
-        guard case .known(let after) = queue.readyEntriesReportingUnknownCoverage() else {
-            return XCTFail("coverage known")
-        }
-        XCTAssertTrue(after.isEmpty, "no entry survives an account-policy withdrawal")
+        // SIMPLIFIED CONTRACT (spec 4afc6e43): the gate-loss fan-out STOPS collection but never
+        // purges durable recordings — even on withdrawal fan-out. The only purge is the user's
+        // explicit opt-out (SettingsModel's queue.purgeAll()).
+        XCTAssertEqual(queue.readyEntries().count, 1, "the durable entry must survive gate loss")
     }
 
     private func makeReadyEntry(_ queue: VoiceSharingUploadQueue) throws

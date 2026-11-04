@@ -531,10 +531,14 @@ class VoiceControlAssembly {
     ) {
         collector.gateLostSubscription = coordinator.registerGateLostHandler {
             [weak collector, weak sink, weak uploadTrigger] in
+            // ROOT CAUSE OF THE SILENT QUEUE WIPES (confirmed against staging: 32 entries removed,
+            // zero accepted): this handler fired on EVERY gate closure — including the old policy
+            // snapshot flapping "no installed snapshot" — and purged ALL durable recordings. Under
+            // the simplified contract (spec 4afc6e43) gate closure is not consent withdrawal; the
+            // only purge is the user's explicit opt-out (settings) — see SettingsModel.
             sink?.noteRevocation()
             collector?.gateLost()
             uploadTrigger?.stop()
-            _ = queue.purgeAll()
         }
     }
 
