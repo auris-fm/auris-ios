@@ -260,58 +260,34 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
         XCTAssertTrue(store.currentEffectiveEnrolled, "and a current-session reply re-enables it")
     }
 
-    // MARK: - Policy integration
+    // MARK: - Consent integration
 
-    /// The store is what the policy reads, so a membership move must invalidate an in-flight refresh rather
-    /// than wait for a lease to lapse. This is the wiring @spec asked for: authoritative changes reaching the
-    /// EFFECTIVE policy, not just a parallel data structure.
-    func test_membershipChange_invalidatesPolicyImmediately() {
+    /// A membership move must flip the ONE consent decision immediately, with no lease to wait for.
+    /// This is the wiring that makes a server-side withdrawal an immediate local stop.
+    func test_membershipChange_stopsConsentImmediately() {
         let store = makeStore()
-        let coordinator = VoiceSharingCoordinator(
-            clock: StubMonotonicClock(time: 1_000),
-            readRemoteSwitch: { .valid(true) },
-            enrollmentStore: store
-        )
-        // Production default now reads the store, so opting in + a real projection is what enables. The
-        // membership observer installed by the coordinator fences installs on every change, so the fence
-        // must be lifted for the CURRENT identity before a refresh can land — which is exactly what the
-        // login-change handler does in production.
+        _ = VoiceSharingCoordinator(enrollmentStore: store)
         store.setLocalOptIn(true)
-        let getIssuedAfterOptIn = token(store)
-        store.apply(authoritative: projection(revision: "r1"), readUnder: getIssuedAfterOptIn)
-        coordinator.identityBecameReadable()
+        XCTAssertTrue(store.apply(authoritative: projection(revision: "r1"), readUnder: token(store)))
+        XCTAssertTrue(store.consentAllowsCollection, "opted in + active projection permits collection")
 
-        let token = coordinator.policy.tokenForFetchStart()
-        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: token)
-        XCTAssertTrue(coordinator.policy.permitsCollection, "membership reached the effective policy")
-
-        // Withdraw: collection stops synchronously through the same path, no lease wait.
+        // Withdraw: collection stops synchronously.
         _ = store.withdrawLocally(acceptedServerProjectionAfterward: true)
-        XCTAssertFalse(coordinator.policy.permitsCollection, "withdrawal flips the decision immediately")
-
-        // A refresh begun before the withdrawal must not install permission afterwards.
-        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: token)
-        XCTAssertFalse(coordinator.policy.permitsCollection, "in-flight refresh was invalidated")
+        XCTAssertFalse(store.consentAllowsCollection, "withdrawal flips the decision immediately")
     }
 
-    /// Repeated installs must not accumulate store observers: each one bumps the policy generation twice if
-    /// they do, which is exactly the leak shape this repo has already been burned by.
+    /// Installing the coordinator repeatedly must not accumulate store observers.
     func test_reinstall_doesNotAccumulateMembershipObservers() {
         let store = makeStore()
-        let coordinator = VoiceSharingCoordinator(
-            clock: StubMonotonicClock(time: 1_000),
-            readRemoteSwitch: { .valid(true) },
-            enrollmentStore: store
-        )
+        let coordinator = VoiceSharingCoordinator(enrollmentStore: store)
         store.setLocalOptIn(true)
-        let getIssuedAfterOptIn = token(store)
-        store.apply(authoritative: projection(revision: "r1"), readUnder: getIssuedAfterOptIn)
-        let before = coordinator.policy.tokenForFetchStart()
-
+        XCTAssertTrue(store.apply(authoritative: projection(revision: "r1"), readUnder: token(store)))
+        var moves = 0
+        let tokenID = store.addObserver { _ in moves += 1 }
+        defer { store.removeObserver(tokenID) }
         store.withdrawLocally(acceptedServerProjectionAfterward: true)
-        let after = coordinator.policy.tokenForFetchStart()
-        XCTAssertEqual(after.identityGeneration - before.identityGeneration, 1,
-                       "one membership move must advance the identity generation exactly once")
+        XCTAssertEqual(moves, 1, "one membership move must notify observers exactly once")
+        withExtendedLifetime(coordinator) {}
     }
 
     // MARK: - Idempotent replay
@@ -404,28 +380,14 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
 
         // While the GET is in flight the feature stays off.
         do {
-            let clock = StubMonotonicClock(time: 1_000)
-            let coordinator = VoiceSharingCoordinator(
-                clock: clock,
-                readRemoteSwitch: { .valid(true) },
-                enrollmentStore: relaunched
-            )
-            XCTAssertFalse(coordinator.policy.permitsCollection,
+            XCTAssertFalse(relaunched.consentAllowsCollection,
                            "cold start + delayed GET must not collect on remembered state")
 
             // The GET finally lands for THIS session, under a token taken after the opt-in gesture.
             let issued = token(relaunched)
-            relaunched.apply(authoritative: projection(revision: "r2", epoch: "epoch-1"), readUnder: issued)
+            XCTAssertTrue(relaunched.apply(authoritative: projection(revision: "r2", epoch: "epoch-1"), readUnder: issued))
             XCTAssertTrue(relaunched.currentEffectiveEnrolled)
-            // Activation makes the identity readable and a FRESH fetch must actually move the SDK's own
-            // timestamp, or the install is refused as cached.
-            coordinator.identityBecameReadable()
-            let installed = coordinator.policy.refreshAfterActivation(
-                freshActivationSucceeded: true,
-                fetchToken: coordinator.policy.tokenForFetchStart()
-            )
-            XCTAssertNotNil(installed)
-            XCTAssertTrue(coordinator.policy.permitsCollection, "only now does collection become permitted")
+            XCTAssertTrue(relaunched.consentAllowsCollection, "only now does collection become permitted")
         }
 
         // A refused GET keeps it off.
@@ -459,22 +421,12 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
 
     // MARK: - Enroll → fresh activation → permitted (reviewer 7897cd94)
 
-    /// The defect this closes: every membership notification used to raise the policy's identity fence, and
-    /// only a later login cleared it — so after a SUCCESSFUL enroll nothing could install until the user
-    /// signed out and back in. Opt-in would have looked like a no-op forever. Drives the production switch
-    /// decoder plus the real store, with no test-local permission stub.
-    func test_successfulEnrollment_freshActivationInstallsAndPermits() {
+    /// A successful enrollment permits collection immediately, with no further activation step.
+    func test_successfulEnrollmentPermitsCollection() {
         let store = makeStore()
-        let clock = StubMonotonicClock(time: 1_000)
-        // Production's own extraction path: raw published bytes + source, never a test-supplied bool.
-        let coordinator = VoiceSharingCoordinator(
-            clock: clock,
-            valueSource: { VoiceSharingCoordinator.RemoteValueSource(data: Data("true".utf8), sourceIsRemote: true) },
-            enrollmentStore: store
-        )
 
         // Before any gesture: off.
-        XCTAssertFalse(coordinator.policy.permitsCollection)
+        XCTAssertFalse(store.consentAllowsCollection)
 
         // User opts in; the confirming GET is issued after that gesture.
         store.setLocalOptIn(true)
@@ -482,114 +434,42 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
         XCTAssertTrue(store.apply(authoritative: projection(revision: "opaque-1"), readUnder: issued))
         XCTAssertTrue(store.currentEffectiveEnrolled, "membership authority exists")
 
-        // Fresh activation for the CURRENT session installs against it — the point the old fence blocked.
-        coordinator.identityBecameReadable()
-        let installed = coordinator.policy.refreshAfterActivation(
-            freshActivationSucceeded: true,
-            fetchToken: coordinator.policy.tokenForFetchStart()
-        )
-        XCTAssertNotNil(installed, "a successful enrollment must be able to activate")
-        XCTAssertTrue(coordinator.policy.permitsCollection, "and activation must actually permit collection")
+        XCTAssertTrue(store.consentAllowsCollection, "a successful enrollment must permit collection")
     }
 
-    /// The other half of the split: WITHDRAWAL disables immediately, and stays disabled even if a refresh
-    /// succeeds afterwards under the departed membership.
+    /// WITHDRAWAL disables immediately, and a later projection under the departed membership cannot
+    /// resurrect it.
     func test_withdrawal_disablesImmediatelyAndSurvivesALaterRefresh() {
         let store = makeStore()
-        let clock = StubMonotonicClock(time: 1_000)
-        let coordinator = VoiceSharingCoordinator(
-            clock: clock,
-            valueSource: { VoiceSharingCoordinator.RemoteValueSource(data: Data("true".utf8), sourceIsRemote: true) },
-            enrollmentStore: store
-        )
         store.setLocalOptIn(true)
-        store.apply(authoritative: projection(revision: "opaque-1"), readUnder: token(store))
-        coordinator.identityBecameReadable()
-        _ = coordinator.policy.refreshAfterActivation(
-            freshActivationSucceeded: true,
-            fetchToken: coordinator.policy.tokenForFetchStart()
-        )
-        XCTAssertTrue(coordinator.policy.permitsCollection, "enabled before opting out")
+        _ = store.apply(authoritative: projection(revision: "opaque-1"), readUnder: token(store))
+        XCTAssertTrue(store.consentAllowsCollection, "enabled before opting out")
 
         _ = store.withdrawLocally(acceptedServerProjectionAfterward: false)
-        XCTAssertFalse(coordinator.policy.permitsCollection, "opting out stops collection right now")
+        XCTAssertFalse(store.consentAllowsCollection, "opting out stops collection right now")
 
-        // A refresh that lands afterwards cannot resurrect it. The remote switch is genuinely ON, so a
-        // snapshot does install — what keeps collection off is that `permitsCollection` RE-READS membership at
-        // decision time instead of trusting the value folded in at install. Asserting nil here would have
-        // encoded the wrong rule; asserting this pins the actual mechanism.
-        _ = coordinator.policy.refreshAfterActivation(
-            freshActivationSucceeded: true,
-            fetchToken: coordinator.policy.tokenForFetchStart()
-        )
-        XCTAssertFalse(coordinator.policy.permitsCollection,
-                       "a remote-only permission must not collect for an account that withdrew")
+        // A projection that lands afterwards cannot resurrect it: consent re-reads the account's own
+        // withdrawal state at decision time.
+        XCTAssertFalse(store.consentAllowsCollection,
+                       "a later projection must not collect for an account that withdrew")
     }
 
-    /// Sign-out is the ONE transition that does fence: without it, a stale fetch could install permission for
-    /// an account that is no longer readable.
-    func test_signOut_fencesInstallsUntilANewLogin() {
+    /// Sign-out is the ONE identity transition: signed out, consent is gone and nothing collects.
+    func test_signOut_stopsConsentUntilANewLoginReEnrolls() {
         let store = makeStore()
-        let clock = StubMonotonicClock(time: 1_000)
-        let coordinator = VoiceSharingCoordinator(
-            clock: clock,
-            valueSource: { VoiceSharingCoordinator.RemoteValueSource(data: Data("true".utf8), sourceIsRemote: true) },
-            enrollmentStore: store
-        )
         store.setLocalOptIn(true)
-        store.apply(authoritative: projection(revision: "opaque-1"), readUnder: token(store))
-        coordinator.identityBecameReadable()
-        _ = coordinator.policy.refreshAfterActivation(
-            freshActivationSucceeded: true,
-            fetchToken: coordinator.policy.tokenForFetchStart()
-        )
-        XCTAssertTrue(coordinator.policy.permitsCollection)
+        XCTAssertTrue(store.apply(authoritative: projection(revision: "opaque-1"), readUnder: token(store)))
+        XCTAssertTrue(store.consentAllowsCollection)
 
         lifecycle = nil
         store.transitionToAccount(signedIn: false)
-        coordinator.policy.raiseIdentityFence()
-        XCTAssertFalse(coordinator.policy.permitsCollection, "signed out collects nothing")
+        XCTAssertFalse(store.consentAllowsCollection, "signed out collects nothing")
 
-        // A refresh attempted while the fence is up is refused...
-        let fenced = coordinator.policy.refreshAfterActivation(
-            freshActivationSucceeded: true,
-            fetchToken: coordinator.policy.tokenForFetchStart()
-        )
-        XCTAssertNil(fenced, "an unresolved identity transition must not install")
-
-        // ...and only a new login plus re-enrollment restores it.
+        // Re-login plus re-enrollment restores it.
         lifecycle = "gen-2"
-        coordinator.identityBecameReadable()
         store.setLocalOptIn(true)
-        store.apply(authoritative: projection(revision: "opaque-2"), readUnder: token(store))
-        XCTAssertNotNil(coordinator.policy.refreshAfterActivation(
-            freshActivationSucceeded: true,
-            fetchToken: coordinator.policy.tokenForFetchStart()
-        ), "a new session can activate once membership is re-established")
-        XCTAssertTrue(coordinator.policy.permitsCollection)
-    }
-
-    /// Direct control on the split itself, with no coordinator involved: a MEMBERSHIP change must not fence,
-    /// an IDENTITY transition must. The coordinator routes these two kinds through different call sites, so
-    /// an end-to-end test alone cannot tell "membership wrongly fenced" apart from "sign-out correctly
-    /// fenced" — this can.
-    func test_invalidationKinds_membershipDoesNotFence_identityDoes() {
-        let policy = VoiceSharingPolicy(clock: StubMonotonicClock(time: 1_000), readRemoteSwitch: { .valid(true) }) { false }
-
-        // Membership move inside the current session: snapshot drops, installs stay available.
-        policy.invalidateForIdentityChange(kind: .membershipChange)
-        XCTAssertNotNil(policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart()),
-                        "a membership change must leave the feature able to activate")
-
-        // Identity transition with no readable account yet: installs are refused until one appears.
-        policy.invalidateForIdentityChange(kind: .identityTransition)
-        XCTAssertNil(policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart()),
-                     "an unresolved identity transition must fence installs")
-
-        // And the fence is lifted by exactly one thing: the new account state becoming readable.
-        policy.identityBecameReadable()
-        XCTAssertNotNil(policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart()),
-                        "login clears the fence")
+        XCTAssertTrue(store.apply(authoritative: projection(revision: "opaque-2"), readUnder: token(store)))
+        XCTAssertTrue(store.consentAllowsCollection)
     }
 }
 
@@ -668,17 +548,15 @@ final class VoiceSharingCohortPublisherTests: XCTestCase {
         let restored = VoiceSharingEnrollmentStore(defaults: defaults, accountScopeProvider: { "A" }, sessionIdentityProvider: { "session" })
         var values: [String: String] = [:]
         let publisher = VoiceSharingCohortPublisher(store: restored, configured: { true }, privacyAllows: { true }, schedule: { $0() }, setProperty: { values[$1] = $0 })
-        let coordinator = VoiceSharingCoordinator(readRemoteSwitch: { .valid(true) }, enrollmentStore: restored, cohortPublisher: publisher)
+        let coordinator = VoiceSharingCoordinator(enrollmentStore: restored, cohortPublisher: publisher)
         publisher.refresh()
         XCTAssertTrue(values.isEmpty)
-        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: coordinator.policy.tokenForFetchStart())
-        XCTAssertNotNil(coordinator.policy.installedLeaseExpiry, "premise: fresh enabled snapshot exists while enrollment is unknown")
-        XCTAssertFalse(coordinator.policy.permitsCollection)
+        XCTAssertFalse(restored.consentAllowsCollection, "premise: unknown membership permits nothing")
         XCTAssertTrue(restored.apply(authoritative: membership, readUnder: try XCTUnwrap(restored.projectionToken())))
         XCTAssertEqual(values, ["plan": "free", "voice_sharing_enrolled": "true"])
-        XCTAssertFalse(coordinator.policy.permitsCollection, "attributes and restored authority cannot replace a fresh policy activation")
-        XCTAssertNil(coordinator.policy.installedLeaseExpiry, "authority publication must invalidate the earlier snapshot")
-        coordinator.policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: coordinator.policy.tokenForFetchStart())
-        XCTAssertTrue(coordinator.policy.permitsCollection, "a subsequent fresh activation can reopen collection")
+        XCTAssertFalse(coordinator.enrollmentStore.consentAllowsCollection,
+                       "a restored (previous-session) projection is not this session's authority")
+        XCTAssertTrue(restored.apply(authoritative: membership, readUnder: try XCTUnwrap(restored.projectionToken())))
+        XCTAssertTrue(restored.consentAllowsCollection, "a subsequent fresh read can reopen collection")
     }
 }

@@ -167,13 +167,6 @@ final class VoiceSharingCollectorSegmenterHookTests: XCTestCase {
         let hangover = [Float](repeating: 0.05, count: 320)
 
         // Collector side: same calls the engine's hook makes.
-        let policy = VoiceSharingPolicy(
-            clock: StubMonotonicClock(time: 1_000),
-            readRemoteSwitch: { .valid(true) },
-            isAccountEnrolled: { true }
-        )
-        policy.identityBecameReadable()
-        _ = policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart())
         var enrolled = VoiceSharingEnrollmentStore.State()
         enrolled.localOptIn = true
         enrolled.hasAuthoritativeProjection = true

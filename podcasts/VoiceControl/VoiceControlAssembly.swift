@@ -460,7 +460,7 @@ class VoiceControlAssembly {
         if let uploadTrigger {
             return installVoiceSharingLifetime(
                 on: service, settingsModel: settingsModel, uploadTrigger: uploadTrigger,
-                enrollmentStore: .shared, policy: VoiceSharingCoordinator.shared.policy,
+                enrollmentStore: .shared,
                 queue: contributionQueue)
         }
         service.voiceSharingLifetime = nil
@@ -537,13 +537,12 @@ class VoiceControlAssembly {
         settingsModel: VoiceSharingSettingsModel,
         uploadTrigger: VoiceSharingUploadTrigger,
         enrollmentStore: VoiceSharingEnrollmentStore,
-        policy: VoiceSharingPolicy,
         queue: VoiceSharingUploadQueue
     ) -> VoiceControlService {
         service.voiceSharingLifetime = nil
         service.voiceSharingLifetime = VoiceSharingLifetime(
             settingsModel: settingsModel, uploadTrigger: uploadTrigger,
-            enrollmentStore: enrollmentStore, policy: policy, queue: queue)
+            enrollmentStore: enrollmentStore, queue: queue)
         return service
     }
 
@@ -621,26 +620,19 @@ final class VoiceSharingLifetime {
     let settingsModel: VoiceSharingSettingsModel
     let uploadTrigger: VoiceSharingUploadTrigger
     private let enrollmentStore: VoiceSharingEnrollmentStore
-    private let policy: VoiceSharingPolicy
     private let queue: VoiceSharingUploadQueue
     private let enrollmentObserver: UUID
-    private let policyObserver: UUID
     private let queueObserver: UUID
 
     init(settingsModel: VoiceSharingSettingsModel,
          uploadTrigger: VoiceSharingUploadTrigger,
          enrollmentStore: VoiceSharingEnrollmentStore,
-         policy: VoiceSharingPolicy,
          queue: VoiceSharingUploadQueue) {
         self.settingsModel = settingsModel
         self.uploadTrigger = uploadTrigger
         self.enrollmentStore = enrollmentStore
-        self.policy = policy
         self.queue = queue
         enrollmentObserver = enrollmentStore.addObserver { [weak settingsModel] _ in
-            settingsModel?.refreshLiveState()
-        }
-        policyObserver = policy.addChangeObserver { [weak settingsModel] in
             settingsModel?.refreshLiveState()
         }
         queueObserver = queue.addContentObserver { [weak settingsModel] in
@@ -650,7 +642,6 @@ final class VoiceSharingLifetime {
 
     deinit {
         enrollmentStore.removeObserver(enrollmentObserver)
-        policy.removeChangeObserver(policyObserver)
         queue.removeContentObserver(queueObserver)
     }
 }

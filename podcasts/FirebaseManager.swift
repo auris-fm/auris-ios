@@ -38,12 +38,6 @@ struct FirebaseManager {
         // our start.
         let sharingCoordinator = VoiceSharingCoordinator.shared
         sharingCoordinator.refreshCohortAttributes()
-        sharingCoordinator.initiateIdentityRecoveryRefresh = {
-            FirebaseManager.refreshRemoteConfig(expirationDuration: 0)
-        }
-        let fetchStartedAt = sharingCoordinator.nowForFreshnessCheck()
-        let sdkTimeBeforeFetch = sharingCoordinator.lastFetchTime()
-        let enrollmentLookup = sharingCoordinator.beginEnrollmentLookup()
         #endif
         remoteConfig.fetch(withExpirationDuration: expirationDuration) { status, error in
             guard status == .success, error == nil else {
@@ -67,15 +61,10 @@ struct FirebaseManager {
                 // VoiceControl. Those targets stay on the fail-closed default (disabled), which is
                 // correct for surfaces that cannot capture voice.
                 #if os(iOS) && !APPCLIP
-                let didActivate = activationError == nil
-                let provedFreshExchange = sharingCoordinator.lastFetchAdvancedPast(
-                    fetchStartedAt,
-                    previousSDKTime: sdkTimeBeforeFetch
-                )
+                // SIMPLIFIED CONTRACT (spec 4afc6e43): the only sharing work left here is the
+                // projection refresh — how a server-side withdrawal reaches the consent authority.
                 Task {
-                    await sharingCoordinator.completeActivationWithEnrollment(
-                        freshActivationSucceeded: didActivate && provedFreshExchange,
-                        lookup: enrollmentLookup)
+                    await sharingCoordinator.refreshProjectionFromServer()
                 }
                 #endif
                 completion?(status)

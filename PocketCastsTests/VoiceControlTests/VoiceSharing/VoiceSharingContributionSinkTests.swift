@@ -684,12 +684,6 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
     private func deadlineCollector(_ scheduler: OutcomeScheduler,
                                    limit: VoiceSharingCollector.OutcomeWaitLimit? = .init(milliseconds: 25, ceilingMilliseconds: 100),
                                    sessionIdentity: @escaping () -> String? = { "sess-1" }) -> VoiceSharingCollector {
-        let policy = VoiceSharingPolicy(
-            clock: StubMonotonicClock(time: 1_000), readRemoteSwitch: { .valid(true) },
-            isAccountEnrolled: { true })
-        policy.identityBecameReadable()
-        XCTAssertNotNil(policy.refreshAfterActivation(
-            freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart()))
         var state = VoiceSharingEnrollmentStore.State()
         state.localOptIn = true
         state.hasAuthoritativeProjection = true
@@ -848,17 +842,13 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
     /// assertions were carrying the evidence. This version grants spare capacity and asserts the
     /// PRODUCTION admission result on both sides of the boundary.
     func test_allowanceExpiry_refusesAtCaptureBoundaryWithoutATimer() throws {
-        let policy = VoiceSharingPolicy(clock: StubMonotonicClock(time: 1_000),
-            readRemoteSwitch: { .valid(true) }, isAccountEnrolled: { true })
-        policy.identityBecameReadable()
-        XCTAssertNotNil(policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart()))
         // THREE records and ample bytes: capacity is never the reason for a refusal here, so the
         // only thing that can refuse the third capture is the deadline.
         let limits = try XCTUnwrap(VoiceSharingCaptureLimits(dailyRecords: 3, dailyBytes: 900_000,
             compiledRecordsCeiling: 4, compiledBytesCeiling: 4 * 1_985_580, clipSamples: 16,
             metadataBytes: VoiceSharingUploadQueue.maxMetadataBytes, compiledClipSamples: 16,
             compiledMetadataBytes: VoiceSharingUploadQueue.maxMetadataBytes))
-        let stamp = VoiceSharingCaptureStamp(session: "sess-1", epoch: "epoch-1", policyGeneration: policy.currentLeaseGeneration)
+        let stamp = VoiceSharingCaptureStamp(session: "sess-1", epoch: "epoch-1", policyGeneration: 0)
         let batch = "22222222-2222-4222-8222-222222222222"
         let authority = try XCTUnwrap(VoiceSharingCaptureAuthorization(
             account: "synthetic", establishedWindow: "window", batchId: batch, limits: limits,
@@ -942,10 +932,6 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
     /// asserts the NEW contract: the second consented capture is admitted, and no local ledger
     /// authorizes anything.
     func test_noLocalPerDayLimitSecondConsentedCaptureIsAdmittedAndNoLedgerAuthorizes() throws {
-        let policy = VoiceSharingPolicy(clock: StubMonotonicClock(time: 1_000),
-            readRemoteSwitch: { .valid(true) }, isAccountEnrolled: { true })
-        policy.identityBecameReadable()
-        XCTAssertNotNil(policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart()))
         var state = VoiceSharingEnrollmentStore.State()
         state.localOptIn = true
         state.hasAuthoritativeProjection = true

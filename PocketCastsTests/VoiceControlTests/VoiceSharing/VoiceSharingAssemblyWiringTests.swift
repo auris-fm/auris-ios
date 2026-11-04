@@ -165,25 +165,15 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
     }
 
 
-    func test_aPolicyWithdrawalFansOutThroughTheProductionRegistry() async throws {
-        let store = VoiceSharingEnrollmentStore.State()
-        var state = store
+    func test_aWithdrawalFansOutThroughTheProductionRegistry() async throws {
+        var state = VoiceSharingEnrollmentStore.State()
         state.localOptIn = true
         state.hasAuthoritativeProjection = true
         state.membership = VoiceSharingMembership(
             membershipRevision: "rev", plan: .pro, voiceSharingEnrolled: true,
             enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "2026-09",
             withdrawalState: .active)
-        var membership = state
-        let policy = VoiceSharingPolicy(
-            clock: StubMonotonicClock(time: 1_000),
-            readRemoteSwitch: { .valid(true) },
-            isAccountEnrolled: { membership.effectiveEnrolled })
-        policy.identityBecameReadable()
-        _ = policy.refreshAfterActivation(
-            freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart())
-        XCTAssertTrue(policy.permitsCollection, "premise: collection is permitted before withdrawal")
-
+        let membership = state
         let coordinator = VoiceSharingCoordinator()
         // The PRODUCTION registry, exactly as VoiceControlAssembly registers it.
         var revocationSeen = false
@@ -203,11 +193,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         XCTAssertEqual(queue.readyEntries().count, 1, "gate loss must retain durable entries")
         XCTAssertTrue(queue.readyEntries().isEmpty == false)
 
-        // WITHDRAW in the account's own projection, then let the real refresh observe it.
-        membership.membership = VoiceSharingMembership(
-            membershipRevision: "rev2", plan: .pro, voiceSharingEnrolled: true,
-            enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "2026-09",
-            withdrawalState: .withdrawn)
+        // WITHDRAW: the account's projection now says withdrawn, and the store applies it.
         // Drive the PRODUCTION fan-out, not the test helper: `consentGateLost()` is the private
         // snapshot-and-invoke every real consent loss goes through. `fireGateLostHandlersForTesting()`
         // has its own inline loop, so driving IT would pass even if the production path were gutted.
