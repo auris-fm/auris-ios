@@ -894,12 +894,16 @@ final class VoiceSharingCoordinator {
         recordInstallOutcome(outcome, forGeneration: generation)
     }
 
+    /// ENTIRE completion transition runs under the enrollment owner's serialization
+    /// (reviewer 19acaa23): currency validation, cancellation, backoff reset, and retry
+    /// scheduling are ONE transaction in the established enrollment→retry lock order. A
+    /// newer exchange cannot start inside the transition; a rejected transition touches
+    /// neither delivery nor backoff.
     func policyExchangeCompleted(fresh: Bool, exchangeGeneration: Int) {
-        policyRetryStateLock.lock()
-        let currentGeneration = enrollmentLookupGeneration
-        policyRetryStateLock.unlock()
-        guard exchangeGeneration == currentGeneration else {
-            FileLog.shared.addMessage("[VoiceSharing] stale exchange completion (gen \(exchangeGeneration) vs current \(currentGeneration)); newer owner drives")
+        enrollmentLookupLock.lock()
+        defer { enrollmentLookupLock.unlock() }
+        guard exchangeGeneration == enrollmentLookupGeneration else {
+            FileLog.shared.addMessage("[VoiceSharing] stale exchange completion (gen \(exchangeGeneration) vs current \(enrollmentLookupGeneration)); newer owner drives — nothing touched")
             return
         }
         if fresh {
@@ -922,26 +926,35 @@ final class VoiceSharingCoordinator {
             FileLog.shared.addMessage("[VoiceSharing] policy exchange settled authoritative-disabled; no retry")
             resetTransientPolicyRetry(claimGeneration: exchangeGeneration)
         case .installed, nil, .transientRefused:
-            scheduleTransientPolicyRetry(forExchangeWith: exchangeGeneration)
+            scheduleTransientPolicyRetryLocked(forExchangeWith: exchangeGeneration)
         }
     }
 
     /// Cancels a pending DELIVERY only — backoff history is outage evidence and is NOT
-    /// reset here (reviewer 722bcc74 gap 3: exchange entries cancel deliveries, not outages;
-    /// only an actual install resets the backoff schedule).
-    private func cancelPendingRetryDelivery(claimGeneration: Int? = nil) {
+    /// reset here (reviewer 722bcc74 gap 3). Returns whether the transition was APPLIED:
+    /// a refused transition (a newer generation owns the pending retry) touches nothing.
+    @discardableResult
+    private func cancelPendingRetryDelivery(claimGeneration: Int? = nil) -> Bool {
         policyRetryStateLock.lock(); defer { policyRetryStateLock.unlock() }
         guard claimGeneration == nil || policyRetryPendingClaimGeneration == nil
-            || policyRetryPendingClaimGeneration == claimGeneration else { return }
+            || policyRetryPendingClaimGeneration == claimGeneration else { return false }
         policyRetryWorkItem?.cancel()
         policyRetryWorkItem = nil
         policyRetryPendingClaimGeneration = nil
+        return true
     }
 
-    private func resetTransientPolicyRetry(claimGeneration: Int? = nil) {
-        cancelPendingRetryDelivery(claimGeneration: claimGeneration)
-        policyRetryStateLock.lock(); defer { policyRetryStateLock.unlock() }
-        policyRetryBackoffSeconds = 30
+    /// Resets outage backoff ONLY when the cancellation was actually applied — a rejected
+    /// transition (newer generation owns the pending retry) leaves the newer outage's
+    /// backoff untouched (reviewer 19acaa23).
+    @discardableResult
+    private func resetTransientPolicyRetry(claimGeneration: Int? = nil) -> Bool {
+        let applied = cancelPendingRetryDelivery(claimGeneration: claimGeneration)
+        if applied {
+            policyRetryStateLock.lock(); defer { policyRetryStateLock.unlock() }
+            policyRetryBackoffSeconds = 30
+        }
+        return applied
     }
 
     /// Entry-supersession (exchange start): cancels a pending delivery WITHOUT resetting
@@ -950,22 +963,20 @@ final class VoiceSharingCoordinator {
     func cancelPendingRetryDeliveryForNewExchange() { cancelPendingRetryDelivery() }
 
     private func scheduleTransientPolicyRetry(forExchangeWith generation: Int) {
-        // CLAIM + currency in the lookup owner's serialization (reviewer 722bcc74 gap 2): a
-        // completion for a superseded generation can no longer claim a retry at all, however
-        // its stale check raced a newer exchange.
         enrollmentLookupLock.lock()
-        guard generation == enrollmentLookupGeneration else {
-            enrollmentLookupLock.unlock()
-            FileLog.shared.addMessage("[VoiceSharing] stale completion (gen \(generation)) cannot claim a retry; newer exchange owns the gate")
-            return
-        }
+        defer { enrollmentLookupLock.unlock() }
+        scheduleTransientPolicyRetryLocked(forExchangeWith: generation)
+    }
+
+    /// Caller holds `enrollmentLookupLock` (enrollment→retry lock order). Currency was
+    /// validated in the same transaction.
+    private func scheduleTransientPolicyRetryLocked(forExchangeWith generation: Int) {
         let item: DispatchWorkItem
         var delay: Double = 0
         policyRetryStateLock.lock()
         do {
             guard policyRetryPendingClaimGeneration == nil else {
                 policyRetryStateLock.unlock()
-                enrollmentLookupLock.unlock()
                 FileLog.shared.addMessage("[VoiceSharing] transient policy retry already pending; backoff unchanged")
                 return
             }
@@ -1010,7 +1021,6 @@ final class VoiceSharingCoordinator {
         }
         FileLog.shared.addMessage("[VoiceSharing] transient policy refusal; retry in \(Int(delay))s")
         policyRetryStateLock.unlock()
-        enrollmentLookupLock.unlock()
         observePolicyRetryDelayForTesting?(delay)
         if let deliver = deliverPolicyRetryForTesting {
             deliver(delay, item)
