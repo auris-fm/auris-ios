@@ -136,6 +136,13 @@ final class VoiceSharingPolicy {
         let identityGeneration: Int
     }
 
+    /// Classification of the LAST refresh-time remote read, for transient-vs-authoritative
+    /// recovery decisions (spec 50d8807d): a strict decoded value is AUTHORITATIVE (retrying
+    /// cannot change it), an unavailable/unreadable remote value is TRANSIENT (a later exchange
+    /// may succeed). Nil until a refresh reads the config.
+    enum RemoteReadKind: Equatable { case valid(Bool), unavailable }
+    private(set) var lastRemoteReadKind: RemoteReadKind?
+
     /// Snapshot of identity for starting a fetch. Call this at FETCH START, not at completion.
     func tokenForFetchStart() -> FetchToken {
         lock.lock()
@@ -193,6 +200,7 @@ final class VoiceSharingPolicy {
         switch value {
         case .unavailable:
             FileLog.shared.addMessage("[VoiceSharing] policy install refused: remote value unavailable")
+            lastRemoteReadKind = .unavailable
             installed = nil
             leaseGeneration += 1
             lock.unlock()
@@ -200,6 +208,7 @@ final class VoiceSharingPolicy {
             notifyChanged()
             return nil
         case .valid(let enabled):
+            lastRemoteReadKind = .valid(enabled)
             let snapshot = VoiceSharingSnapshot(
                 enabledRemotely: enabled,
                 leaseExpiresAt: now + leaseSeconds,

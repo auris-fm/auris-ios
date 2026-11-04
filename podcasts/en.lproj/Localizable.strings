@@ -6746,7 +6746,7 @@
 "voice_sharing_delete_local_confirm" = "Delete recordings still waiting to upload on this device?";
 
 /* Voice Sharing account enrollment, withdrawal and accepted-data deletion. */
-"voice_sharing_account_title" = "Help improve voice control";
+"voice_sharing_account_title" = "Voice Sharing";
 "voice_sharing_account_unavailable" = "Voice Sharing is unavailable for this account.";
 "voice_sharing_account_plan" = "Plan";
 "voice_sharing_account_membership" = "Voice Sharing";
