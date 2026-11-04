@@ -563,9 +563,16 @@ class PlaybackManager: ServerPlaybackDelegate {
     /// typed overload with the caller's invocation token. Player not a typed seeker or absent:
     /// returns nil with NO fallback effect released — the identified path settles unknown
     /// fail-closed, never dresses the fire-and-forget wrapper as evidence.
-    func seekToIdentified(time: TimeInterval, invocationToken: UUID, typedCompletion: @escaping (SeekExecutionOutcome) -> Void) -> SeekIdentity? {
+    func seekToIdentified(time: TimeInterval, invocationToken: UUID, deadlineNs: UInt64?, typedCompletion: @escaping (SeekExecutionOutcome) -> Void) -> SeekIdentity? {
         guard let typedPlayer = player as? TypedSeekingPlayer else { return nil }
-        return typedPlayer.seekTo(time, completion: nil, typedCompletion: typedCompletion, invocationToken: invocationToken)
+        return typedPlayer.seekTo(time, completion: nil, typedCompletion: typedCompletion,
+                                  invocationToken: invocationToken, deadlineNs: deadlineNs)
+    }
+
+    /// The LIVE engine objects for settlement-time replacement detection (review blocker:
+    /// the old engine's callback must not settle against the replacement's state).
+    func identifiedEngineIdentity() -> SeekIdentity? {
+        (player as? TypedSeekingPlayer)?.currentEngineIdentity()
     }
 
     func seekToFromSync(time: TimeInterval, syncChanges: Bool, startPlaybackAfterSeek: Bool) {

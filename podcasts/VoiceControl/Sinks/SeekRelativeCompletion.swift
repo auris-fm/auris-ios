@@ -8,6 +8,13 @@ import Foundation
 /// and belongs to the original admission (never restarted by duplicates, callbacks or
 /// reconnection), and the settlement classifies exactly per the contract table. The returned
 /// result is immutable: a late callback can neither revise it nor read a successor's state.
+///
+/// Review-blocker revisions: (1) the deadline is enforced at the ENGINE MUTATION SITE via
+/// `deadlineNs`, so queue delay cannot push an expired effect through; (2) success revalidates
+/// the LIVE engine objects against the initiating identity, so a replacement engine cannot have
+/// its predecessor's callback settle on its state; (3) position evidence is the COMPLETION'S
+/// OWN captured clock/frame — never a later global observation that a second pending seek may
+/// have rewritten; (4) expiry is re-checked after the final observation.
 struct SeekRelativeCompletion {
 
     /// The client completion budget, measured with a MONOTONIC clock from the original
@@ -16,21 +23,36 @@ struct SeekRelativeCompletion {
     static let defaultBudgetSeconds: TimeInterval = 15
 
     /// What the initiating side captured when the seek was issued: the engine identity that
-    /// the completion must carry, and the episode the operation owned.
+    /// the completion must carry AND that the live engine must still present at settlement,
+    /// and the episode the operation owned.
     struct Initiation {
         let identity: SeekIdentity
         let episodeUUID: String
-        /// Monotonic admission instant (uptimeNanoseconds). Duplicates and reconnection never
+        /// Monotonic admission instant (uptimeNanoseconds), captured BEFORE the durable claim
+        /// and any suspension (effect gate, queue delay). Duplicates and reconnection never
         /// mint a new one.
         let admittedAtUptimeNs: UInt64
+        /// The admission bound handed to the engine for the at-mutation deadline check.
+        var deadlineNs: UInt64 { admittedAtUptimeNs &+ UInt64(budgetSeconds * 1_000_000_000) }
+        let budgetSeconds: TimeInterval
+        init(identity: SeekIdentity, episodeUUID: String, admittedAtUptimeNs: UInt64,
+             budgetSeconds: TimeInterval = SeekRelativeCompletion.defaultBudgetSeconds) {
+            self.identity = identity
+            self.episodeUUID = episodeUUID
+            self.admittedAtUptimeNs = admittedAtUptimeNs
+            self.budgetSeconds = budgetSeconds
+        }
     }
 
-    /// Live-state probe used at settlement time (never initiation): the observed position and
-    /// playing flag, plus the CURRENT episode identity for same-target verification.
+    /// Live-state probe used at settlement time (never initiation): the OBSERVED playing flag,
+    /// the CURRENT episode identity, and the LIVE engine objects for replacement detection.
+    /// Position deliberately is NOT taken here: the position comes from the completion's own
+    /// captured evidence (blocker 3).
     struct Observation {
-        let positionSeconds: TimeInterval?
         let playing: Bool?
         let currentEpisodeUUID: String?
+        /// The live engine's object identity right now (nil = probe unavailable).
+        let liveEngineIdentity: SeekIdentity?
     }
 
     /// Reasons, mirroring the wire vocabulary.
@@ -39,7 +61,6 @@ struct SeekRelativeCompletion {
         static let completionUnavailable = "seek_completion_unavailable"
     }
 
-    private let budgetSeconds: TimeInterval
     private let nowUptimeNs: () -> UInt64
     /// Awaits the engine's typed outcome for the initiated seek. Returning nil models a
     /// completion that never arrives (missing callback) WITHOUT hanging: the budget still
@@ -48,11 +69,9 @@ struct SeekRelativeCompletion {
     /// Fresh observation at classification time.
     private let observe: () -> Observation
 
-    init(budgetSeconds: TimeInterval = SeekRelativeCompletion.defaultBudgetSeconds,
-         nowUptimeNs: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
+    init(nowUptimeNs: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
          awaitOutcome: @escaping () async -> SeekExecutionOutcome?,
          observe: @escaping () -> Observation) {
-        self.budgetSeconds = budgetSeconds
         self.nowUptimeNs = nowUptimeNs
         self.awaitOutcome = awaitOutcome
         self.observe = observe
@@ -61,41 +80,34 @@ struct SeekRelativeCompletion {
     /// Remaining budget in seconds from the ORIGINAL admission, measured monotonically.
     func remainingSeconds(since initiation: Initiation) -> TimeInterval {
         let elapsed = Double(nowUptimeNs() &- initiation.admittedAtUptimeNs) / 1_000_000_000
-        return budgetSeconds - elapsed
+        return initiation.budgetSeconds - elapsed
     }
 
     /// Settles ONE invocation. Called only after the pre-effect refusals passed and the effect
-    /// was released (or refused before release — see `refuseBeforeRelease`).
+    /// was released (or refused before release — see `refuseBeforeReleaseExpired`).
     func settle(after initiation: Initiation) async -> OperationResult {
-        let deadlineNs = initiation.admittedAtUptimeNs &+ UInt64(budgetSeconds * 1_000_000_000)
+        let deadlineNs = initiation.deadlineNs
         // Bounded waiter: whichever comes first, the correlated outcome or the monotonic
         // deadline. The race is arbitrated by the deadline: at or beyond it, expiry wins
         // (a completion that lands after the budget is not success).
         let outcome: SeekExecutionOutcome? = await raceOutcomeAgainstDeadline(deadlineNs)
         switch outcome {
-        case .some(.completed(let identity, _, _)) where Self.isCorrelated(identity, initiation.identity):
-            return succeededResult(for: initiation)
-        case .some(.cursorRepositioned(let identity, _, let landedFrame)) where Self.isCorrelated(identity, initiation.identity):
-            // Cursor reposition claims the READ CURSOR moved (EffectsPlayer path): valid
-            // completion evidence. State observation still decides success.
-            _ = landedFrame
-            return succeededResult(for: initiation)
+        case .some(.expiredBeforeMutation(let identity)) where Self.isCorrelated(identity, initiation.identity):
+            // The engine itself verified at the MUTATION SITE that no effect was issued:
+            // the honest settlement is the before-release refusal arm.
+            return .nonSuccess(.refused, reason: Reason.deadlineExpired)
+        case .some(.completed(let identity, _, let capturedClock)) where Self.isCorrelated(identity, initiation.identity):
+            // Native completion: the item-clock captured INSIDE the completion handler is this
+            // invocation's landing evidence — not any later mutable clock read.
+            return succeededResult(for: initiation, capturedPosition: capturedClock)
+        case .some(.cursorRepositioned(let identity, _, _, let landedSeconds)) where Self.isCorrelated(identity, initiation.identity):
+            // Cursor reposition: the frame→seconds conversion captured in AudioReadTask's
+            // locked region is this invocation's landing evidence.
+            return succeededResult(for: initiation, capturedPosition: landedSeconds)
         case .some(.endOfFile(let identity, _, let engineTotal)) where Self.isCorrelated(identity, initiation.identity):
             // EOF: the engine-confirmed endpoint supplies position; playing must still be
             // observed. Nothing audible is fabricated — the position is the endpoint itself.
-            let observation = observe()
-            guard let playing = observation.playing else {
-                return .nonSuccess(.unknown, reason: Reason.completionUnavailable)
-            }
-            let position = Int(engineTotal.rounded(.down))
-            guard position >= 0 else {
-                return .nonSuccess(.unknown, reason: Reason.completionUnavailable)
-            }
-            _ = initiation // episode sameness verified below via observation
-            guard observation.currentEpisodeUUID == initiation.episodeUUID else {
-                return .nonSuccess(.unknown, reason: Reason.completionUnavailable)
-            }
-            return .succeeded(state: ["position_seconds": .int(Int64(position)), "playing": .bool(playing)])
+            return succeededResult(for: initiation, capturedPosition: engineTotal)
         case .some(.cancelled(let identity)) where Self.isCorrelated(identity, initiation.identity):
             // Native cancellation: does not prove the seek did not occur. Unknown, no state.
             return .nonSuccess(.unknown, reason: Reason.completionUnavailable)
@@ -103,7 +115,6 @@ struct SeekRelativeCompletion {
             return .nonSuccess(.unknown, reason: Reason.completionUnavailable)
         default:
             // Uncorrelated evidence counts as NO evidence: it belongs to another invocation.
-            // Fall through to the expiry classification.
             break
         }
         // No correlated completion within the live budget.
@@ -113,27 +124,41 @@ struct SeekRelativeCompletion {
     /// The BEFORE-release arm of the table: the budget expired before the effect was released
     /// (an earlier local turn deadline or a held effect gate). Refused, no state, NO effect.
     func refuseBeforeReleaseExpired(since initiation: Initiation) -> OperationResult {
-        _ = initiation
         return .nonSuccess(.refused, reason: Reason.deadlineExpired)
     }
 
-    /// Success classification: correlated completion AND a valid same-target state observation.
-    private func succeededResult(for initiation: Initiation) -> OperationResult {
+    /// Success classification: correlated completion whose CAPTURED position is valid, a
+    /// valid same-target and same-engine state observation, and expiry still not reached
+    /// AFTER the observation (review blocker: the check must follow the final observation).
+    private func succeededResult(for initiation: Initiation,
+                                 capturedPosition: TimeInterval) -> OperationResult {
         let observation = observe()
         guard observation.currentEpisodeUUID == initiation.episodeUUID else {
             // Replacement or advancement to another episode cannot supply this episode's result.
+            return .nonSuccess(.unknown, reason: Reason.completionUnavailable)
+        }
+        // SAME-ENGINE verification: the live engine objects must still be the initiating
+        // engine's objects — the old engine's callback must not settle on a successor's state.
+        guard let live = observation.liveEngineIdentity,
+              live.sameEngineObjects(as: initiation.identity) else {
             return .nonSuccess(.unknown, reason: Reason.completionUnavailable)
         }
         guard let playing = observation.playing else {
             // Missing playing state cannot settle success.
             return .nonSuccess(.unknown, reason: Reason.completionUnavailable)
         }
-        guard let position = observation.positionSeconds, position.isFinite, position >= 0 else {
+        guard capturedPosition.isFinite, capturedPosition >= 0 else {
             return .nonSuccess(.unknown, reason: Reason.completionUnavailable)
         }
-        // Whole elapsed seconds from the OBSERVED position — never the requested target.
+        // Post-observation deadline re-check: success requires the state observation to have
+        // happened within the live budget.
+        guard nowUptimeNs() < initiation.deadlineNs else {
+            return .nonSuccess(.unknown, reason: Reason.completionUnavailable)
+        }
+        // Whole elapsed seconds from the CAPTURED landing evidence — never the requested
+        // target, never a later mutable global clock.
         return .succeeded(state: [
-            "position_seconds": .int(Int64(position.rounded(.down))),
+            "position_seconds": .int(Int64(capturedPosition.rounded(.down))),
             "playing": .bool(playing),
         ])
     }

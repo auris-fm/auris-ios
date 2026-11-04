@@ -157,7 +157,7 @@ class AudioReadTask {
         var seekedToEnd = false
 
         if positionRequired.passedEndOfFile {
-            let capture = LockedSeekCapture(seekedToEnd: true, landedFrame: nil, requestedTime: time, engineTotalSeconds: totalSeconds)
+            let capture = LockedSeekCapture(seekedToEnd: true, landedFrame: nil, landedSeconds: nil, requestedTime: time, engineTotalSeconds: totalSeconds)
             bufferManager.removeAll()
             bufferManager.readToEOFSuccessfully.value = true
 
@@ -182,7 +182,9 @@ class AudioReadTask {
             }
         }
 
-        return LockedSeekCapture(seekedToEnd: seekedToEnd, landedFrame: positionRequired.framePosition, requestedTime: time, engineTotalSeconds: totalSeconds)
+        return LockedSeekCapture(seekedToEnd: seekedToEnd, landedFrame: positionRequired.framePosition,
+                                 landedSeconds: Double(positionRequired.framePosition) / audioFile.fileFormat.sampleRate,
+                                 requestedTime: time, engineTotalSeconds: totalSeconds)
     }
 
     private func handleReachedEndOfFile() {

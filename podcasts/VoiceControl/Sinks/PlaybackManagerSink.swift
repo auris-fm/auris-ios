@@ -20,7 +20,9 @@ protocol PlaybackManagerProtocol {
     func skipToNextUpNextEpisode() -> String?
     /// ADDITIVE REQUIREMENT (task67 seek_relative slice): identified seek — see the extension
     /// default below. Declared as a requirement so the real manager's override dispatches.
-    func seekToIdentified(time: TimeInterval, invocationToken: UUID, typedCompletion: @escaping (SeekExecutionOutcome) -> Void) -> SeekIdentity?
+    func seekToIdentified(time: TimeInterval, invocationToken: UUID, deadlineNs: UInt64?, typedCompletion: @escaping (SeekExecutionOutcome) -> Void) -> SeekIdentity?
+    /// ADDITIVE REQUIREMENT: the LIVE engine objects for replacement detection at settlement.
+    func identifiedEngineIdentity() -> SeekIdentity?
 }
 
 /// ADDITIVE (task67 seek_relative slice): identified seek issued with a caller-supplied
@@ -28,7 +30,8 @@ protocol PlaybackManagerProtocol {
 /// completion evidence; the identified path then settles `unknown` WITHOUT releasing an
 /// effect (fail-closed).
 extension PlaybackManagerProtocol {
-    func seekToIdentified(time: TimeInterval, invocationToken: UUID, typedCompletion: @escaping (SeekExecutionOutcome) -> Void) -> SeekIdentity? { nil }
+    func seekToIdentified(time: TimeInterval, invocationToken: UUID, deadlineNs: UInt64?, typedCompletion: @escaping (SeekExecutionOutcome) -> Void) -> SeekIdentity? { nil }
+    func identifiedEngineIdentity() -> SeekIdentity? { nil }
 }
 
 /// Default implementation of `VoicePlaybackSink` backed by `PlaybackManager`.
@@ -91,7 +94,7 @@ class PlaybackManagerSink: VoicePlaybackSink {
     /// the initiating invocation token, and the engine's typed outcome carries the evidence.
     /// Returns the initiated identity, or nil when the manager cannot seek with evidence
     /// (player not ready): no effect is released on nil.
-    func seekRelativeIdentified(deltaSeconds: Int?, direction: SeekDirection, invocationToken: UUID, typedCompletion: @escaping (SeekExecutionOutcome) -> Void) -> SeekIdentity? {
+    func seekRelativeIdentified(deltaSeconds: Int?, direction: SeekDirection, invocationToken: UUID, deadlineNs: UInt64?, typedCompletion: @escaping (SeekExecutionOutcome) -> Void) -> SeekIdentity? {
         let deltaMs: Int
         if let deltaSeconds {
             deltaMs = deltaSeconds * 1000
@@ -107,6 +110,7 @@ class PlaybackManagerSink: VoicePlaybackSink {
         AnalyticsPlaybackHelper.shared.currentSource = .voiceCommands
         return playbackManager.seekToIdentified(time: TimeInterval(clamped) / 1000.0,
                                                 invocationToken: invocationToken,
+                                                deadlineNs: deadlineNs,
                                                 typedCompletion: typedCompletion)
     }
 

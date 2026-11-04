@@ -344,6 +344,9 @@ struct AdmittedTurnIdentity: Equatable {
     /// keep today's interpretation path.
     private let routeHintProvider: () -> CloudRouteHint?
     private let appOperationSupportProvider: () -> CloudAppOperationSupport?
+    /// ADDITIVE (task67): the identified seek completion budget (seconds, monotonic from the
+    /// original admission).
+    private let identifiedSeekBudgetSeconds: TimeInterval
     /// Bounded prior conversation for the turn (≤4 turns / ≤8 KiB enforced by
     /// `RecentConversation.bounded`).
     private let recentConversationProvider: () -> [RecentConversationTurn]
@@ -598,8 +601,13 @@ struct AdmittedTurnIdentity: Equatable {
         // admitted turn/socket — and the SAME value both serializes onto the frame and gates
         // execution. Default stays nil (empty declaration); the production assembly wires
         // `VoiceControlAssembly.declaredAppOperations` (pause + resume) as its provider.
-        appOperationSupportProvider: @escaping () -> CloudAppOperationSupport? = { nil }
+        appOperationSupportProvider: @escaping () -> CloudAppOperationSupport? = { nil },
+        // ADDITIVE (task67): the identified seek completion budget. Production keeps the spec
+        // default (15s); a control may inject a short budget to exercise expiry arms in
+        // real time without long waits.
+        identifiedSeekBudgetSeconds: TimeInterval = SeekRelativeCompletion.defaultBudgetSeconds
     ) {
+        self.identifiedSeekBudgetSeconds = identifiedSeekBudgetSeconds
         self.onGracePlaybackHoldBegin = onGracePlaybackHoldBegin
         self.onGracePlaybackHoldEnd = onGracePlaybackHoldEnd
         self.admittedWorkAuthority = admittedWorkAuthority
@@ -1852,6 +1860,10 @@ struct AdmittedTurnIdentity: Equatable {
         admittedTurnRoute: (socket: AppOperationResultSocket, client: CloudRouteClient)?,
         negotiatedSupport: CloudAppOperationSupport?
     ) async {
+        // THE ORIGINAL ADMISSION INSTANT (review blocker): captured before the durable claim
+        // and before ANY suspension (effect gate, queue delay) — the 15s budget is measured
+        // from here, and this same bound is handed to the engine for the at-mutation check.
+        let admittedAtUptimeNs = DispatchTime.now().uptimeNanoseconds
         // Reached only from the declared-identity branch, which admits a frame carrying at least
         // one identity field. A missing `operation_id` here is an incomplete pair and refuses
         // `unsupported_operation` — never legacy playback.
@@ -2034,7 +2046,7 @@ struct AdmittedTurnIdentity: Equatable {
             await reportResult(unexecuted, operationId: operationId, capabilityVersion: capabilityVersion, route: admittedTurnRoute)
             return
         }
-        let outcome = await performIdentifiedMutation(action: action, params: params)
+        let outcome = await performIdentifiedMutation(action: action, params: params, admittedAtUptimeNs: admittedAtUptimeNs)
         if let refusal = outcome.refusal {
             // Observe refusal settlement too: a failed refusal-persist leaves the durable
             // record in progress, so the honest report is unknown, never a replayable refusal.
@@ -2103,7 +2115,7 @@ struct AdmittedTurnIdentity: Equatable {
     /// admission, correlates the typed outcome to the token, and settles the classification
     /// table. The legacy fire-and-forget path stays for identityless frames.
     private func performIdentifiedSeekRelative(
-        params: [String: CloudRouteJSONValue]
+        params: [String: CloudRouteJSONValue], admittedAtUptimeNs: UInt64
     ) async -> (refusal: OperationResult?, settledState: [String: CloudRouteJSONValue]?) {
         // Pre-effect refusals FIRST, before any effect or budget consumption: same rules as
         // the legacy seek_relative (availability precondition, then the pre-action capture).
@@ -2122,18 +2134,23 @@ struct AdmittedTurnIdentity: Equatable {
         // arrives between release and the await cannot be lost.
         let (stream, continuation) = AsyncStream<SeekExecutionOutcome>.makeStream(bufferingPolicy: .bufferingNewest(1))
         // THE token belongs to THIS admission; duplicates and reconnection mint new ones only
-        // for their own (journal-refused) executions, never by restarting this budget.
+        // for their own (journal-refused) executions, never by restarting this budget. The
+        // ADMISSION INSTANT came from continueIdentifiedOperation — before the claim and every
+        // suspension — so a delayed admitted operation gets the ORIGINAL bound, not a fresh 15s.
         let token = UUID()
-        let admittedAt = DispatchTime.now().uptimeNanoseconds
         let initiation = SeekRelativeCompletion.Initiation(
             identity: SeekIdentity(invocationToken: token, playerID: ObjectIdentifier(NSObject()), readTaskID: nil, itemID: nil),
             episodeUUID: episodeUUID,
-            admittedAtUptimeNs: admittedAt)
+            admittedAtUptimeNs: admittedAtUptimeNs,
+            budgetSeconds: identifiedSeekBudgetSeconds)
         let coordinator = SeekRelativeCompletion(awaitOutcome: { await stream.first(where: { _ in true }) }, observe: {
+            // Position deliberately NOT observed here: settlement uses the completion's own
+            // captured landing evidence. This probe supplies playing, current episode and the
+            // LIVE engine objects for replacement detection.
             SeekRelativeCompletion.Observation(
-                positionSeconds: TimeInterval(self.playbackPositionMs()) / 1000.0,
                 playing: self.playbackSink.observedPlaying,
-                currentEpisodeUUID: self.currentEpisodeIdProvider.map { $0() } ?? self.playbackManager?.currentEpisode?.uuid)
+                currentEpisodeUUID: self.currentEpisodeIdProvider.map { $0() } ?? self.playbackManager?.currentEpisode?.uuid,
+                liveEngineIdentity: self.playbackSink.identifiedEngineIdentity())
         })
         // Budget expired before release (an earlier local turn deadline already consumed it):
         // refused with the deadline reason, NO effect.
@@ -2142,6 +2159,7 @@ struct AdmittedTurnIdentity: Equatable {
         }
         guard let identity = playbackSink.seekRelativeIdentified(
             deltaSeconds: delta, direction: direction, invocationToken: token,
+            deadlineNs: initiation.deadlineNs,
             typedCompletion: { outcome in continuation.yield(outcome) }) else {
             // Engine cannot produce completion evidence: no effect was released. Unknown.
             return (.nonSuccess(.unknown, reason: SeekRelativeCompletion.Reason.completionUnavailable), nil)
@@ -2149,7 +2167,8 @@ struct AdmittedTurnIdentity: Equatable {
         // Correlation uses the identity the ENGINE initiated (playerID/readTaskID/itemID are
         // the engine's truth; the token is ours).
         let correlatedInitiation = SeekRelativeCompletion.Initiation(
-            identity: identity, episodeUUID: episodeUUID, admittedAtUptimeNs: admittedAt)
+            identity: identity, episodeUUID: episodeUUID, admittedAtUptimeNs: admittedAtUptimeNs,
+            budgetSeconds: identifiedSeekBudgetSeconds)
         let result = await coordinator.settle(after: correlatedInitiation)
         continuation.finish()
         if result.outcome == OperationOutcome.succeeded {
@@ -2182,10 +2201,10 @@ struct AdmittedTurnIdentity: Equatable {
     /// NO state; a nil refusal means the mutation succeeded and `settledState` is the captured
     /// observation to settle and send.
     private func performIdentifiedMutation(
-        action: String, params: [String: CloudRouteJSONValue]
+        action: String, params: [String: CloudRouteJSONValue], admittedAtUptimeNs: UInt64
     ) async -> (refusal: OperationResult?, settledState: [String: CloudRouteJSONValue]?) {
         if action == "seek_relative" {
-            return await performIdentifiedSeekRelative(params: params)
+            return await performIdentifiedSeekRelative(params: params, admittedAtUptimeNs: admittedAtUptimeNs)
         }
         if action == "pause" {
             _ = playbackSink.pause()

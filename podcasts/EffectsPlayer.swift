@@ -260,7 +260,7 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
     /// ADDITIVE typed overload (task67 seek-completion slice): identity-carrying outcomes
     /// alongside the unchanged legacy completion.
     @discardableResult
-    func seekTo(_ time: TimeInterval, completion: (() -> Void)?, typedCompletion: ((SeekExecutionOutcome) -> Void)?, invocationToken: UUID? = nil) -> SeekIdentity? {
+    func seekTo(_ time: TimeInterval, completion: (() -> Void)?, typedCompletion: ((SeekExecutionOutcome) -> Void)?, invocationToken: UUID? = nil, deadlineNs: UInt64? = nil) -> SeekIdentity? {
         // The identity is minted BY VALUE before the queues, so a typed delivery never
         // depends on `self` being alive.
         guard let readOperation = audioReadTask else {
@@ -273,6 +273,13 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
         let identity = SeekIdentity(invocationToken: invocationToken ?? UUID(), playerID: ObjectIdentifier(self), readTaskID: ObjectIdentifier(readOperation), itemID: nil)
 
         serialSeekQueue.async { [weak self] in
+            // DEADLINE AT THE MUTATION SITE: the queue can delay this block arbitrarily past
+            // the coordinator's race return — an expired budget must not mutate here. Checked
+            // INSIDE the block, on the same monotonic clock the budget is measured with.
+            if let deadlineNs, DispatchTime.now().uptimeNanoseconds >= deadlineNs {
+                typedCompletion?(.expiredBeforeMutation(identity: identity))
+                return
+            }
             guard let self else {
                 // Engine gone BEFORE scheduling: the typed evidence still delivers (it is all
                 // by value); the legacy path stays silent here, exactly as it is today.
@@ -299,7 +306,7 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
                 if capture.seekedToEnd {
                     typedCompletion?(.endOfFile(identity: identity, requestedTime: capture.requestedTime, engineTotalSeconds: capture.engineTotalSeconds))
                 } else if let frame = capture.landedFrame {
-                    typedCompletion?(.cursorRepositioned(identity: identity, requestedTime: capture.requestedTime, landedFrame: frame))
+                    typedCompletion?(.cursorRepositioned(identity: identity, requestedTime: capture.requestedTime, landedFrame: frame, landedSeconds: capture.landedSeconds ?? Double(frame) / max(self.audioFileSampleRate, 1)))
                 }
             })
         }
@@ -598,3 +605,11 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
 }
 
 extension EffectsPlayer: TypedSeekingPlayer {}
+
+extension EffectsPlayer {
+    /// The LIVE engine objects (fresh token) for settlement-time replacement detection.
+    func currentEngineIdentity() -> SeekIdentity? {
+        SeekIdentity(invocationToken: UUID(), playerID: ObjectIdentifier(self),
+                     readTaskID: audioReadTask.map(ObjectIdentifier.init), itemID: nil)
+    }
+}

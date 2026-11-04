@@ -258,7 +258,7 @@ class DefaultPlayer: PlaybackProtocol, Hashable {
     /// pre-quantization clamp value), the initiating item identity, and the native
     /// finished/cancelled result. Legacy behavior unchanged.
     @discardableResult
-    func seekTo(_ time: TimeInterval, completion: (() -> Void)?, typedCompletion: ((SeekExecutionOutcome) -> Void)?, invocationToken: UUID? = nil) -> SeekIdentity? {
+    func seekTo(_ time: TimeInterval, completion: (() -> Void)?, typedCompletion: ((SeekExecutionOutcome) -> Void)?, invocationToken: UUID? = nil, deadlineNs: UInt64? = nil) -> SeekIdentity? {
         guard let player else {
             let identity = SeekIdentity(invocationToken: invocationToken ?? UUID(), playerID: ObjectIdentifier(self), readTaskID: nil, itemID: nil)
             typedCompletion?(.engineUnavailable(identity: identity))
@@ -266,6 +266,13 @@ class DefaultPlayer: PlaybackProtocol, Hashable {
         }
         let identity = SeekIdentity(invocationToken: invocationToken ?? UUID(), playerID: ObjectIdentifier(self), readTaskID: nil, itemID: player.currentItem.map(ObjectIdentifier.init))
 
+        // DEADLINE AT THE MUTATION SITE (review blocker): an expired budget must not release
+        // the native seek even if the coordinator race already returned — check at the actual
+        // call, on the same monotonic clock the budget is measured with.
+        if let deadlineNs, DispatchTime.now().uptimeNanoseconds >= deadlineNs {
+            typedCompletion?(.expiredBeforeMutation(identity: identity))
+            return identity
+        }
         let adjustedTime = fmax(0.1, time)
 
         let timeToSeekTo = CMTimeMake(value: Int64(adjustedTime * 100), timescale: 100)
@@ -1115,3 +1122,11 @@ extension NSError {
 }
 
 extension DefaultPlayer: TypedSeekingPlayer {}
+
+extension DefaultPlayer {
+    /// The LIVE engine objects (fresh token) for settlement-time replacement detection.
+    func currentEngineIdentity() -> SeekIdentity? {
+        SeekIdentity(invocationToken: UUID(), playerID: ObjectIdentifier(self),
+                     readTaskID: nil, itemID: player?.currentItem.map(ObjectIdentifier.init))
+    }
+}

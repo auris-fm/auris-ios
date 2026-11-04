@@ -1,4 +1,5 @@
 import XCTest
+import AVFoundation
 @testable import podcasts
 
 /// Controls for the identified `playback.seek_relative` settlement (spec cloud-assistant.md
@@ -20,22 +21,22 @@ final class SeekRelativeCompletionTests: XCTestCase {
     private func initiation(clock: ManualUptimeClock, budget: TimeInterval = 15) -> SeekRelativeCompletion.Initiation {
         SeekRelativeCompletion.Initiation(
             identity: identity(), episodeUUID: "ep-1",
-            admittedAtUptimeNs: clock.now)
+            admittedAtUptimeNs: clock.now, budgetSeconds: budget)
     }
 
-    private func observation(position: TimeInterval? = 120, playing: Bool? = true,
-                             episode: String? = "ep-1") -> SeekRelativeCompletion.Observation {
-        .init(positionSeconds: position, playing: playing, currentEpisodeUUID: episode)
+    private func observation(playing: Bool? = true, episode: String? = "ep-1",
+                             liveEngine: SeekIdentity? = nil) -> SeekRelativeCompletion.Observation {
+        .init(playing: playing, currentEpisodeUUID: episode,
+              liveEngineIdentity: liveEngine ?? identity())
     }
 
-    private func coordinator(clock: ManualUptimeClock, budget: TimeInterval = 15,
-                             observation: @escaping () -> SeekRelativeCompletion.Observation = {
-                                 .init(positionSeconds: 120, playing: true, currentEpisodeUUID: "ep-1")
-                             },
+    private func coordinator(clock: ManualUptimeClock,
+                             observation: (() -> SeekRelativeCompletion.Observation)? = nil,
                              outcome: @escaping () async -> SeekExecutionOutcome?
     ) -> SeekRelativeCompletion {
-        SeekRelativeCompletion(budgetSeconds: budget, nowUptimeNs: { clock.now },
-                               awaitOutcome: outcome, observe: observation)
+        SeekRelativeCompletion(nowUptimeNs: { clock.now },
+                               awaitOutcome: outcome,
+                               observe: observation ?? { [weak self] in self?.observation() ?? .init(playing: true, currentEpisodeUUID: "ep-1", liveEngineIdentity: nil) })
     }
 
     // MARK: - success arms
@@ -51,7 +52,8 @@ final class SeekRelativeCompletionTests: XCTestCase {
         guard result.outcome == .succeeded, let state = result.state else {
             return XCTFail("expected succeeded, got \(result)")
         }
-        XCTAssertEqual(state["position_seconds"], .int(120) as CloudRouteJSONValue)
+        XCTAssertEqual(state["position_seconds"], .int(499) as CloudRouteJSONValue,
+                       "the position is the completion's CAPTURED clock, not a later global read")
         XCTAssertEqual(state["playing"], .bool(true) as CloudRouteJSONValue)
     }
 
@@ -73,12 +75,13 @@ final class SeekRelativeCompletionTests: XCTestCase {
         let clock = ManualUptimeClock()
         let initn = initiation(clock: clock)
         let c = coordinator(clock: clock) { .cursorRepositioned(identity: self.identity(),
-                                                                requestedTime: 60, landedFrame: 2_640_000) }
+                                                                requestedTime: 60, landedFrame: 2_640_000, landedSeconds: 60) }
         let result = await c.settle(after: initn)
         guard result.outcome == .succeeded, let state = result.state else {
             return XCTFail("expected succeeded, got \(result)")
         }
-        XCTAssertEqual(state["position_seconds"], .int(120) as CloudRouteJSONValue)
+        XCTAssertEqual(state["position_seconds"], .int(60) as CloudRouteJSONValue,
+                       "the frame→seconds conversion captured in the locked region")
     }
 
     /// Correlated EOF: the engine-confirmed endpoint supplies the position; playing is still
@@ -96,22 +99,20 @@ final class SeekRelativeCompletionTests: XCTestCase {
         XCTAssertEqual(state["playing"], .bool(true) as CloudRouteJSONValue)
     }
 
-    /// A playing clock advancing after completion is fine: the state is an observation.
+    /// A playing engine observed at settlement: playing is the observation; the position is
+    /// the CAPTURED landing evidence, immune to a clock advancing after completion.
     func test_advancingClockAfterCompletionStillSucceeds() async throws {
         let clock = ManualUptimeClock()
         let initn = initiation(clock: clock)
-        var observed = 130.0
-        let c = coordinator(clock: clock, observation: {
-            observed += 1; return .init(positionSeconds: observed, playing: true, currentEpisodeUUID: "ep-1")
-        }, outcome: { .completed(identity: self.identity(), effectiveRequest: 120, observedItemClock: 120) })
+        let c = coordinator(clock: clock) { .completed(identity: self.identity(),
+                                                       effectiveRequest: 120, observedItemClock: 130.9) }
         let result = await c.settle(after: initn)
         guard result.outcome == .succeeded, let state = result.state else {
             return XCTFail("expected succeeded, got \(result)")
         }
-        guard case .int(let seconds)? = state["position_seconds"] as CloudRouteJSONValue? else {
-            return XCTFail("missing position")
-        }
-        XCTAssertGreaterThanOrEqual(seconds, 130, "position is the live observation")
+        XCTAssertEqual(state["position_seconds"], .int(130) as CloudRouteJSONValue,
+                       "whole seconds from the CAPTURED clock")
+        XCTAssertEqual(state["playing"], .bool(true) as CloudRouteJSONValue)
     }
 
     // MARK: - unknown arms
@@ -154,7 +155,7 @@ final class SeekRelativeCompletionTests: XCTestCase {
         let clock = ManualUptimeClock()
         let initn = initiation(clock: clock)
         let c = coordinator(clock: clock, observation: {
-            .init(positionSeconds: 999, playing: true, currentEpisodeUUID: "ep-2")
+            .init(playing: true, currentEpisodeUUID: "ep-2", liveEngineIdentity: nil)
         }, outcome: { .completed(identity: self.identity(), effectiveRequest: 500, observedItemClock: 500) })
         let result = await c.settle(after: initn)
         XCTAssertEqual(result.outcome, OperationOutcome.unknown)
@@ -165,18 +166,7 @@ final class SeekRelativeCompletionTests: XCTestCase {
         let clock = ManualUptimeClock()
         let initn = initiation(clock: clock)
         let c = coordinator(clock: clock, observation: {
-            .init(positionSeconds: 120, playing: nil, currentEpisodeUUID: "ep-1")
-        }, outcome: { .completed(identity: self.identity(), effectiveRequest: 500, observedItemClock: 500) })
-        let result = await c.settle(after: initn)
-        XCTAssertEqual(result.outcome, OperationOutcome.unknown)
-    }
-
-    /// Non-finite / negative observed position cannot settle success.
-    func test_nonFinitePositionCannotSettleSuccess() async throws {
-        let clock = ManualUptimeClock()
-        let initn = initiation(clock: clock)
-        let c = coordinator(clock: clock, observation: {
-            .init(positionSeconds: Double.nan, playing: true, currentEpisodeUUID: "ep-1")
+            self.observation(playing: nil)
         }, outcome: { .completed(identity: self.identity(), effectiveRequest: 500, observedItemClock: 500) })
         let result = await c.settle(after: initn)
         XCTAssertEqual(result.outcome, OperationOutcome.unknown)
@@ -192,7 +182,7 @@ final class SeekRelativeCompletionTests: XCTestCase {
         let initn = initiation(clock: clock, budget: 15)
         // Fake clock already at the boundary+1s: the expiry arm answers immediately.
         clock.now = 1_000 + UInt64(16 * 1_000_000_000)
-        let c = coordinator(clock: clock, budget: 15) { () -> SeekExecutionOutcome? in
+        let c = coordinator(clock: clock) { () -> SeekExecutionOutcome? in
             // Blocks "forever" but is cancellable — the race's cancelAll must free it.
             try? await Task.sleep(nanoseconds: 600_000_000_000)
             return nil
@@ -213,7 +203,7 @@ final class SeekRelativeCompletionTests: XCTestCase {
         // The engine WILL deliver a valid completion — but the clock is already past the
         // deadline when settle runs.
         clock.now = clock.admission + UInt64(16 * 1_000_000_000)
-        let c = coordinator(clock: clock, budget: 15) { .completed(identity: self.identity(),
+        let c = coordinator(clock: clock) { .completed(identity: self.identity(),
                                                                    effectiveRequest: 500, observedItemClock: 500) }
         let result = await c.settle(after: initn)
         XCTAssertEqual(result.outcome, OperationOutcome.unknown)
@@ -224,7 +214,7 @@ final class SeekRelativeCompletionTests: XCTestCase {
     func test_preReleaseExpiryIsRefusedWithTheDeadlineReason() throws {
         let clock = ManualUptimeClock()
         let initn = initiation(clock: clock, budget: 15)
-        let c = coordinator(clock: clock, budget: 15) { nil }
+        let c = coordinator(clock: clock) { nil }
         clock.now = clock.admission + UInt64(16 * 1_000_000_000)
         let result = c.refuseBeforeReleaseExpired(since: initn)
         XCTAssertEqual(result.outcome, OperationOutcome.refused)
@@ -239,12 +229,112 @@ final class SeekRelativeCompletionTests: XCTestCase {
         clock.now = 0
         let initn = initiation(clock: clock, budget: 15)
         clock.now = UInt64(10 * 1_000_000_000)
-        let c = coordinator(clock: clock, budget: 15) { nil }
+        let c = coordinator(clock: clock) { nil }
         XCTAssertEqual(c.remainingSeconds(since: initn), 5, accuracy: 0.001)
         clock.now = UInt64(16 * 1_000_000_000)
         XCTAssertLessThanOrEqual(c.remainingSeconds(since: initn), 0)
     }
 
+    // MARK: - review-blocker controls (spec a3af56dd + review 885b244d)
+
+    /// The engine's at-mutation deadline check PROVES no seek was issued: refused with the
+    /// deadline reason (the before-release arm), never unknown/cancelled.
+    func test_expiredBeforeMutationIsRefusedWithTheDeadlineReason() async throws {
+        let clock = ManualUptimeClock()
+        let initn = initiation(clock: clock)
+        let c = coordinator(clock: clock) { .expiredBeforeMutation(identity: self.identity()) }
+        let result = await c.settle(after: initn)
+        XCTAssertEqual(result.outcome, OperationOutcome.refused)
+        XCTAssertEqual(result.reason, SeekRelativeCompletion.Reason.deadlineExpired)
+        XCTAssertNil(result.state)
+    }
+
+    /// SAME-EPISODE ENGINE REPLACEMENT (review blocker 2): the live probe reports a different
+    /// engine object — the old engine's callback must not settle on the successor's state.
+    func test_engineReplacementAtSettlementCannotSupplyTheResult() async throws {
+        let clock = ManualUptimeClock()
+        let initn = initiation(clock: clock)
+        let c = coordinator(clock: clock, observation: {
+            .init(playing: true, currentEpisodeUUID: "ep-1",
+                  liveEngineIdentity: SeekIdentity(invocationToken: UUID(),
+                                                   playerID: ObjectIdentifier(NSObject()),
+                                                   readTaskID: nil, itemID: nil))
+        }) { .completed(identity: self.identity(), effectiveRequest: 500, observedItemClock: 500) }
+        let result = await c.settle(after: initn)
+        XCTAssertEqual(result.outcome, OperationOutcome.unknown)
+        XCTAssertNil(result.state)
+    }
+
+    /// POSITION IS THE CAPTURED LANDING EVIDENCE (review blocker 3): the state carries the
+    /// clock captured INSIDE the completion handler, not any later global observation.
+    func test_successCarriesTheCapturedLandingClock() async throws {
+        let clock = ManualUptimeClock()
+        let initn = initiation(clock: clock)
+        let c = coordinator(clock: clock) { .completed(identity: self.identity(),
+                                                       effectiveRequest: 135, observedItemClock: 249.7) }
+        let result = await c.settle(after: initn)
+        guard result.outcome == .succeeded, let state = result.state else {
+            return XCTFail("expected succeeded, got \(result)")
+        }
+        XCTAssertEqual(state["position_seconds"], .int(249) as CloudRouteJSONValue,
+                       "whole seconds from the CAPTURED clock, not a later global read")
+    }
+
+    /// Cursor reposition likewise carries the CAPTURED frame→seconds conversion.
+    func test_cursorRepositionCarriesTheCapturedLandingSeconds() async throws {
+        let clock = ManualUptimeClock()
+        let initn = initiation(clock: clock)
+        let c = coordinator(clock: clock) { .cursorRepositioned(identity: self.identity(),
+                                                                requestedTime: 60, landedFrame: 2_640_000, landedSeconds: 59.9) }
+        let result = await c.settle(after: initn)
+        guard result.outcome == .succeeded, let state = result.state else {
+            return XCTFail("expected succeeded, got \(result)")
+        }
+        XCTAssertEqual(state["position_seconds"], .int(59) as CloudRouteJSONValue)
+    }
+
+    /// A non-finite captured clock cannot settle success.
+    func test_nonFiniteCapturedClockCannotSettleSuccess() async throws {
+        let clock = ManualUptimeClock()
+        let initn = initiation(clock: clock)
+        let c = coordinator(clock: clock) { .completed(identity: self.identity(),
+                                                       effectiveRequest: 500, observedItemClock: .nan) }
+        let result = await c.settle(after: initn)
+        XCTAssertEqual(result.outcome, OperationOutcome.unknown)
+    }
+
+    /// EXPIRY IS RECHECKED AFTER THE FINAL OBSERVATION (review blocker 1c): the observation
+    /// itself consumed the last of the budget — the success must not settle.
+    func test_postObservationExpiryIsUnknown() async throws {
+        let clock = ManualUptimeClock()
+        let initn = initiation(clock: clock, budget: 15)
+        let deadline = initn.admittedAtUptimeNs + UInt64(15 * 1_000_000_000)
+        let c = coordinator(clock: clock, observation: { [weak self] in
+            // The observation lands exactly at the boundary; the post-observation re-check
+            // must then refuse success.
+            clock.now = deadline
+            return self?.observation() ?? .init(playing: true, currentEpisodeUUID: "ep-1", liveEngineIdentity: nil)
+        }) { .completed(identity: self.identity(), effectiveRequest: 500, observedItemClock: 500) }
+        let result = await c.settle(after: initn)
+        XCTAssertEqual(result.outcome, OperationOutcome.unknown)
+    }
+
+    /// NATIVE SEAM (DefaultPlayer): a past deadline delivered to the engine settles
+    /// `expiredBeforeMutation` — the native call was not released. The identity proves the
+    /// engine minted it at the mutation site.
+    func test_nativeSeamExpiredDeadlineDoesNotReleaseTheSeek() async throws {
+        let engine = DefaultPlayer()
+        engine.player = AVPlayer()
+        let token = UUID()
+        let deadline = DispatchTime.now().uptimeNanoseconds &- UInt64(1_000_000_000) // already past
+        var delivered: SeekExecutionOutcome?
+        engine.seekTo(10, completion: nil, typedCompletion: { delivered = $0 },
+                      invocationToken: token, deadlineNs: deadline)
+        guard case .expiredBeforeMutation(let identity)? = delivered else {
+            return XCTFail("expected expiredBeforeMutation, got \(String(describing: delivered))")
+        }
+        XCTAssertEqual(identity.invocationToken, token)
+    }
 }
 
 /// Deterministic monotonic-clock fixture (uptimeNanoseconds semantics).

@@ -925,7 +925,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         CloudAppOperationSupport(operations: operations)
     }
 
-    private func makeSinkWithConsumer(_ consumer: RecordingResultConsumer, conversationManager: CloudConversationManager? = nil, operationJournal: OperationJournal? = nil, audioPayloads: [Data] = [], episodeAvailable: (() -> Bool)? = nil, playbackManager: PlaybackManager? = nil, currentEpisodeId: @escaping () -> String? = { CloudRouteSinkTests.testEpisodeId }, appOperationSupport: CloudAppOperationSupport? = nil) -> CloudRouteSink {
+    private func makeSinkWithConsumer(_ consumer: RecordingResultConsumer, conversationManager: CloudConversationManager? = nil, operationJournal: OperationJournal? = nil, audioPayloads: [Data] = [], episodeAvailable: (() -> Bool)? = nil, playbackManager: PlaybackManager? = nil, currentEpisodeId: @escaping () -> String? = { CloudRouteSinkTests.testEpisodeId }, appOperationSupport: CloudAppOperationSupport? = nil, identifiedSeekBudgetSeconds: TimeInterval = SeekRelativeCompletion.defaultBudgetSeconds) -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
         return CloudRouteSink(
             clientFactory: {
@@ -998,7 +998,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             // to observe durable state passes its own.
             operationJournal: operationJournal ?? OperationJournal(store: InMemoryOperationRecordStore()),
             conversationManager: conversationManager ?? testConversationManager(),
-            appOperationSupportProvider: { appOperationSupport }
+            appOperationSupportProvider: { appOperationSupport },
+            identifiedSeekBudgetSeconds: identifiedSeekBudgetSeconds
         )
     }
 
@@ -1339,11 +1340,14 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     /// playing state; the legacy fire-and-forget seekRelative is NOT called.
     func testCloudIdentifiedSeekRelativeSettlesSuccessWithObservedState() async throws {
         playback.setPlaying(true)
-        playback.setPositionMs(120_000)
+        // The GLOBAL position read is deliberately far from the captured landing clock: the
+        // settled position must be the completion's CAPTURED evidence (120), not this global
+        // read (777) — a second pending seek could have rewritten the global clock.
+        playback.setPositionMs(777_000)
         playback.clearCalls()
         playback.armIdentifiedSeek(mode: .completes, outcome: .completed(
             identity: SeekIdentity(invocationToken: UUID(), playerID: ObjectIdentifier(NSObject()), readTaskID: nil, itemID: nil),
-            effectiveRequest: 135, observedItemClock: 120))
+            effectiveRequest: 135, observedItemClock: 120.4))
         self.pendingFixture = """
             event: action
             data: {"operation_id":"5b1f0a92-6c34-4e71-9d28-a3f5c8e17d40","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":15},"precondition":{"episode_id":"ep-task67"}}
@@ -1407,6 +1411,83 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(frame["reason"] as? String, SeekRelativeCompletion.Reason.completionUnavailable)
         XCTAssertNil(frame["state"])
         XCTAssertEqual(playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count, 0)
+    }
+
+    /// DELAYED ADMISSION at the connected seam (review blocker 1): the effect gate suspends
+    /// the admitted operation past the injected short budget — the ORIGINAL admission bound
+    /// is consumed while suspended, so the pre-release arm refuses `seek_deadline_expired`
+    /// and NO effect is issued.
+    func testCloudIdentifiedSeekRelativeBudgetExpiredDuringSuspensionIsRefusedWithNoEffect() async throws {
+        playback.setPlaying(true)
+        playback.setPositionMs(120_000)
+        playback.clearCalls()
+        playback.armIdentifiedSeek(mode: .completes, outcome: .completed(
+            identity: SeekIdentity(invocationToken: UUID(), playerID: ObjectIdentifier(NSObject()), readTaskID: nil, itemID: nil),
+            effectiveRequest: 135, observedItemClock: 135))
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"1d9e4c07-58a2-4b63-9f10-b7e4a2c9d8e5","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":15},"precondition":{"episode_id":"ep-task67"}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("seek-rel-susp-\(UUID().uuidString).json")
+        let journal = OperationJournal(store: FileOperationRecordStore(url: url))
+        let seekSupport = CloudAppOperationSupport(operations: ["playback.seek_relative"])
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal,
+                                        appOperationSupport: seekSupport,
+                                        identifiedSeekBudgetSeconds: 0.05)
+        await MainActor.run {
+            sink.effectGate = { _ in try? await Task.sleep(nanoseconds: 500_000_000) }
+        }
+        _ = await sink.routeToCloud(request: "forward 15 seconds", tier: .free,
+                                    context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-seek-rel-susp")
+        let frame = try await awaitResultFrame(operationId: "1d9e4c07-58a2-4b63-9f10-b7e4a2c9d8e5")
+        XCTAssertEqual(frame["outcome"] as? String, "refused",
+                       "the budget expired while the operation was suspended: frame \(frame)")
+        XCTAssertEqual(frame["reason"] as? String, SeekRelativeCompletion.Reason.deadlineExpired)
+        XCTAssertNil(frame["state"])
+        XCTAssertTrue(playback.identifiedSeekCalls.isEmpty,
+                      "no effect may be released on the expired admission: \(playback.identifiedSeekCalls)")
+    }
+
+    /// SAME-EPISODE ENGINE REPLACEMENT at the connected seam (review blocker 2): the engine
+    /// completes the seek, but by settlement the live probe reports a DIFFERENT engine
+    /// object — the old engine's callback must not settle on the successor's state.
+    func testCloudIdentifiedSeekRelativeEngineReplacementCannotSettleSuccess() async throws {
+        playback.setPlaying(true)
+        playback.setPositionMs(120_000)
+        playback.clearCalls()
+        defer { playback.setSimulatesEngineReplacement(false) }
+        playback.armIdentifiedSeek(mode: .completes, outcome: .completed(
+            identity: SeekIdentity(invocationToken: UUID(), playerID: ObjectIdentifier(NSObject()), readTaskID: nil, itemID: nil),
+            effectiveRequest: 135, observedItemClock: 135))
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"3f8a7b52-1c94-4e70-b26d-8a5e0f3c7d19","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":15},"precondition":{"episode_id":"ep-task67"}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("seek-rel-repl-\(UUID().uuidString).json")
+        let journal = OperationJournal(store: FileOperationRecordStore(url: url))
+        let seekSupport = CloudAppOperationSupport(operations: ["playback.seek_relative"])
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal,
+                                        appOperationSupport: seekSupport)
+        await MainActor.run {
+            sink.effectGate = { _ in self.playback.setSimulatesEngineReplacement(true) }
+        }
+        _ = await sink.routeToCloud(request: "forward 15 seconds", tier: .free,
+                                    context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-seek-rel-repl")
+        let frame = try await awaitResultFrame(operationId: "3f8a7b52-1c94-4e70-b26d-8a5e0f3c7d19")
+        XCTAssertEqual(frame["outcome"] as? String, "unknown",
+                       "a replaced engine cannot supply the original's result: frame \(frame)")
+        XCTAssertEqual(frame["reason"] as? String, SeekRelativeCompletion.Reason.completionUnavailable)
+        XCTAssertNil(frame["state"])
     }
 
     /// OBSERVED PAUSE — UNAVAILABLE (voice-intents.md @ 818c8f75): no current engine reading
@@ -5352,6 +5433,20 @@ private final class RecordingPlaybackSink: VoicePlaybackSink, @unchecked Sendabl
     /// by the delivered outcome must be EQUAL (correlation compares the whole tuple).
     private let identifiedSeekPlayerID = ObjectIdentifier(NSObject())
     private var identifiedSeekMode: IdentifiedSeekMode = .completes
+    /// Replacement-detection control knob: when set, the LIVE probe reports a DIFFERENT
+    /// engine object than the one that initiated (engine replaced mid-flight for the SAME
+    /// episode) — settlement must not settle success.
+    private var simulatesEngineReplacement = false
+    func setSimulatesEngineReplacement(_ on: Bool) {
+        lock.lock(); simulatesEngineReplacement = on; lock.unlock()
+    }
+    /// The live probe always presents this engine identity unless replacement is simulated.
+    func identifiedEngineIdentity() -> SeekIdentity? {
+        lock.lock(); let replaced = simulatesEngineReplacement; lock.unlock()
+        return SeekIdentity(invocationToken: UUID(),
+                            playerID: replaced ? ObjectIdentifier(NSObject()) : identifiedSeekPlayerID,
+                            readTaskID: nil, itemID: nil)
+    }
     private var identifiedSeekOutcome: SeekExecutionOutcome = .completed(
         identity: SeekIdentity(invocationToken: UUID(), playerID: ObjectIdentifier(NSObject()), readTaskID: nil, itemID: nil),
         effectiveRequest: 0, observedItemClock: 0)
@@ -5370,7 +5465,7 @@ private final class RecordingPlaybackSink: VoicePlaybackSink, @unchecked Sendabl
         return storedIdentifiedSeekCalls
     }
 
-    func seekRelativeIdentified(deltaSeconds: Int?, direction: SeekDirection, invocationToken: UUID, typedCompletion: @escaping (SeekExecutionOutcome) -> Void) -> SeekIdentity? {
+    func seekRelativeIdentified(deltaSeconds: Int?, direction: SeekDirection, invocationToken: UUID, deadlineNs: UInt64?, typedCompletion: @escaping (SeekExecutionOutcome) -> Void) -> SeekIdentity? {
         lock.lock()
         storedIdentifiedSeekCalls.append((deltaSeconds, direction))
         let mode = identifiedSeekMode
@@ -5383,10 +5478,11 @@ private final class RecordingPlaybackSink: VoicePlaybackSink, @unchecked Sendabl
             let correlated: SeekExecutionOutcome
             switch outcome {
             case .completed(_, let e, let c): correlated = .completed(identity: engineIdentity, effectiveRequest: e, observedItemClock: c)
-            case .cancelled: correlated = .cancelled(identity: SeekIdentity(invocationToken: invocationToken, playerID: ObjectIdentifier(NSObject()), readTaskID: nil, itemID: nil))
-            case .engineUnavailable: correlated = .engineUnavailable(identity: SeekIdentity(invocationToken: invocationToken, playerID: ObjectIdentifier(NSObject()), readTaskID: nil, itemID: nil))
-            case .cursorRepositioned(_, let r, let f): correlated = .cursorRepositioned(identity: engineIdentity, requestedTime: r, landedFrame: f)
+            case .cancelled: correlated = .cancelled(identity: engineIdentity)
+            case .engineUnavailable: correlated = .engineUnavailable(identity: engineIdentity)
+            case .cursorRepositioned(_, let r, let f, let ls): correlated = .cursorRepositioned(identity: engineIdentity, requestedTime: r, landedFrame: f, landedSeconds: ls)
             case .endOfFile(_, let r, let t): correlated = .endOfFile(identity: engineIdentity, requestedTime: r, engineTotalSeconds: t)
+            case .expiredBeforeMutation: correlated = .expiredBeforeMutation(identity: engineIdentity)
             }
             DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) { typedCompletion(correlated) }
         }
