@@ -194,8 +194,12 @@ class VoiceControlAssembly {
         // The PER-ENTRY binding above owns the "may this entry go out" decision. A construction-time
         // pin must not also veto it: that froze identity at assembly time, blocking every new entry
         // after a re-enrollment and admitting stale entries after a rebuild (reviewer fd6b8036).
+        // SIMPLIFIED CONTRACT (spec 4afc6e43): one authorization gate — the ordinary
+        // authenticated session plus the user's sharing choice. The policy snapshot/lease no
+        // longer gates uploads; the server re-checks enrollment/enablement at accept.
         let uploadAuthorized: () -> Bool = {
-            VoiceSharingCoordinator.shared.policy.permitsCollection
+            ServerSettings.userId != nil
+                && VoiceSharingEnrollmentStore.shared.currentEffectiveEnrolled
         }
         // ONE identity reader for the whole upload path: queue, uploader and transport all
         // consult it, so the fence spans admission, credential acquisition and settlement.
