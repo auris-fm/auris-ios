@@ -40,6 +40,9 @@ final class VoiceSharingEnrollmentStore {
         /// have restarted into a state the server no longer recognises. Until a current-session reply lands,
         /// `effectiveEnrolled` is false and collection stays off.
         var hasAuthoritativeProjection = false
+        /// True only when the USER turned sharing off. A fresh or default-wiped store is false:
+        /// unknown consent retains recordings (spec e1529db9).
+        var explicitOptOut = false
 
         /// Enrollment requires BOTH halves. This is the property the plan states as
         /// `test_toggleRequiresDisclosureAcceptance_andBackendEpoch`: flipping a switch locally yields
@@ -63,6 +66,7 @@ final class VoiceSharingEnrollmentStore {
     private enum Key {
         static func scoped(_ base: String, _ accountScope: String) -> String { "\(base).\(accountScope)" }
         static let optIn = "VoiceSharing.localOptIn"
+        static let optOut = "VoiceSharing.explicitOptOut"
         static let revision = "VoiceSharing.membershipRevision"
         static let enrolled = "VoiceSharing.serverEnrolled"
         static let epoch = "VoiceSharing.enrollmentEpoch"
@@ -99,6 +103,15 @@ final class VoiceSharingEnrollmentStore {
     private var scope: String { accountScopeProvider() }
 
     // MARK: - Reading
+
+    /// SPEC e1529db9: true when CONSENT IS GONE — the user opted out locally, the account
+    /// withdrew, or there is no session. Only this may authorize purging durable recordings;
+    /// temporary gate loss (policy flap, network, listening) must retain them.
+    var consentGoneForPurge: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return state.explicitOptOut
+            || state.membership.withdrawalState == .withdrawn
+    }
 
     var currentEffectiveEnrolled: Bool {
         lock.lock(); defer { lock.unlock() }
@@ -182,6 +195,10 @@ final class VoiceSharingEnrollmentStore {
         bumpOperationGenerationLocked()
         state.localOptIn = value
         defaults.set(value, forKey: Key.scoped(Key.optIn, scope))
+        // EXPLICIT OPT-OUT is consent loss (spec e1529db9); a never-opted-in or default-wiped
+        // store is NOT — unknown consent must retain recordings, never authorize deleting them.
+        state.explicitOptOut = !value
+        defaults.set(!value, forKey: Key.scoped(Key.optOut, scope))
         lock.unlock()
         notify()
     }
@@ -332,6 +349,7 @@ final class VoiceSharingEnrollmentStore {
     private func loadForCurrentAccountLocked() {
         let s = scope
         state.localOptIn = defaults.bool(forKey: Key.scoped(Key.optIn, s))
+        state.explicitOptOut = defaults.bool(forKey: Key.scoped(Key.optOut, s))
         state.hasAuthoritativeProjection = false
         guard let revision = defaults.string(forKey: Key.scoped(Key.revision, s)), !revision.isEmpty else {
             state.membership = .unavailable

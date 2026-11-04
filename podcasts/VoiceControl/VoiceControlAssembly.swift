@@ -539,6 +539,13 @@ class VoiceControlAssembly {
             sink?.noteRevocation()
             collector?.gateLost()
             uploadTrigger?.stop()
+            // SPEC e1529db9: explicit WITHDRAWAL (local opt-out, server withdrawal, sign-out)
+            // still clears pending recordings; TEMPORARY loss (policy flap, network, listening)
+            // must retain them. Consent truth, not the gate event, decides the purge.
+            if ServerSettings.userId == nil
+                || VoiceSharingEnrollmentStore.shared.consentGoneForPurge {
+                _ = queue.purgeAll()
+            }
         }
     }
 

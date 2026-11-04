@@ -35,6 +35,29 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
         )
     }
 
+    /// SPEC e1529db9: `consentGoneForPurge` is TRUE only for explicit consent loss — local
+    /// opt-out or server withdrawal. Unknown/no-projection states are TRANSIENT (launch, network)
+    /// and must NOT authorize purging durable recordings.
+    func test_consentGoneForPurge_onlyTrueForExplicitConsentLoss() throws {
+        let store = makeStore()
+        // Fresh store: no opt-in, no projection — transient, not purge-worthy.
+        XCTAssertFalse(store.consentGoneForPurge,
+                       "an unknown state is transient and must retain recordings")
+        store.setLocalOptIn(true)
+        XCTAssertFalse(store.consentGoneForPurge)
+        store.setLocalOptIn(false)
+        XCTAssertTrue(store.consentGoneForPurge, "local opt-out is explicit consent loss")
+        store.setLocalOptIn(true)
+        XCTAssertFalse(store.consentGoneForPurge)
+        // Server withdrawal flips the projection's withdrawal state.
+        guard let t = store.projectionToken() else { return XCTFail("projection token") }
+        XCTAssertTrue(store.apply(authoritative: .init(
+            membershipRevision: "rev", plan: .pro, voiceSharingEnrolled: true,
+            enrollmentEpoch: "e1", acceptedDisclosureVersion: "2026-09",
+            withdrawalState: .withdrawn), readUnder: t), "premise: withdrawal projection accepted")
+        XCTAssertTrue(store.consentGoneForPurge, "server withdrawal is explicit consent loss")
+    }
+
     /// Captures the fence value the way a caller MUST: before issuing the request, never after the reply.
     private func token(_ store: VoiceSharingEnrollmentStore) -> VoiceSharingEnrollmentStore.ProjectionToken {
         guard let t = store.projectionToken() else {
