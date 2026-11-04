@@ -55,18 +55,10 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         return state
     }()
 
-    /// The same gate the production collector helper opens: an installed remote lease plus an enrolled
-    /// account. `enrolled: true` on its own is NOT permission, which is the point of the policy.
-    private func openGate() -> VoiceSharingPolicy {
-        let policy = VoiceSharingPolicy(
-            clock: StubMonotonicClock(time: 1_000),
-            readRemoteSwitch: { .valid(true) },
-            isAccountEnrolled: { [weak self] in self?.state.effectiveEnrolled ?? false })
-        policy.identityBecameReadable()
-        _ = policy.refreshAfterActivation(freshActivationSucceeded: true,
-                                          fetchToken: policy.tokenForFetchStart())
-        return policy
-    }
+    /// SIMPLIFIED CONTRACT (spec 4afc6e43): the ONE consent decision is the shared closure. `state` stays
+    /// as PROVENANCE (epoch / session stamped into emitted records), which is what it is here now.
+    private var gateOpen = true
+    private func isCollectionPermitted() -> Bool { gateOpen }
 
     override func setUp() {
         super.setUp()
@@ -76,7 +68,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
 
     /// A REAL sink over a REAL durable queue: the record a control inspects is the one that would be
     /// uploaded, not an in-memory stand-in.
-    private func makeSink(_ collectorPolicy: VoiceSharingPolicy) -> VoiceSharingContributionSink {
+    private func makeSink() -> VoiceSharingContributionSink {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("branch-controls-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -185,7 +177,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root); queue = nil }
         queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-        let policy = openGate()
+        gateOpen = true
         var service: VoiceControlService?
         weak var weakAssembly: VoiceControlAssembly?
         weak var weakModel: VoiceSharingSettingsModel?
@@ -216,7 +208,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
             service = assembly.installVoiceSharingLifetime(
                 on: makeService(router: StubClassifier(), executor: StubExecutor(), collector: collector).service,
                 settingsModel: model, uploadTrigger: trigger,
-                enrollmentStore: store, policy: policy, queue: queue)
+                enrollmentStore: store, queue: queue)
             weakLifetime = service?.voiceSharingLifetime
         }
         XCTAssertNil(weakAssembly)
@@ -248,16 +240,9 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         let store = VoiceSharingEnrollmentStore(defaults: defaults, accountScopeProvider: { "account-a" })
-        var remoteEnabled = true
-        let coordinator = VoiceSharingCoordinator(
-            clock: StubMonotonicClock(time: 1_000),
-            readRemoteSwitch: { .valid(remoteEnabled) }, isAccountEnrolled: { true },
-            lastFetchTime: { nil }, enrollmentStore: store)
-        coordinator.expiryScheduler = { _, _ in } // no real timer; drive the real refresh below
-        coordinator.policy.identityBecameReadable()
-        coordinator.policyRefreshAfterActivation(
-            freshActivationSucceeded: true, fetchToken: coordinator.policy.tokenForFetchStart())
-        XCTAssertTrue(coordinator.policy.permitsCollection, "premise: live lease before disable")
+        let coordinator = VoiceSharingCoordinator(enrollmentStore: store)
+        gateOpen = true
+        XCTAssertTrue(isCollectionPermitted(), "premise: consent open before disable")
         let registryBaseline = coordinator.gateLostHandlerCountForTesting
         let seeded = try AudioFixture.makeReadyEntry(in: queue)
         let seededDirectory = root.appendingPathComponent(seeded.name)
@@ -280,10 +265,9 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         do {
             let assembly = VoiceControlAssembly()
             weakAssembly = assembly
-            let policy = coordinator.policy
             let provenance = self.provenance
             let sink = VoiceSharingContributionSink(
-                queue: queue, isEnabled: { policy.permitsCollection },
+                queue: queue, isEnabled: { [weak self] in self?.gateOpen ?? false },
                 encoderProvenance: { provenance })
             weakSink = sink
             sink.handle(event())
@@ -292,7 +276,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
                 XCTFail("premise: queue readable")
                 return
             }
-            XCTAssertEqual(admitted.count, 2, "premise: this event is admitted while policy permits")
+            XCTAssertEqual(admitted.count, 2, "premise: this event is admitted while consent permits")
             let collector = VoiceSharingCollector(
                 isCollectionPermitted: { true }, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000), membership: { self.state }, epochProvider: { "epoch-1" },
                 sessionIdentity: { "gen-A" }, sink: { sink.handle($0) })
@@ -302,19 +286,19 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
                 queue: queue,
                 retryPolicy: VoiceSharingRetryPolicy(
                     retryBaseDelay: 1, retryMaximumDelay: 60, random: { 0 }),
-                isAuthorized: { policy.permitsCollection }, endpoint: { nil },
+                isAuthorized: { [weak self] in self?.gateOpen ?? false }, endpoint: { nil },
                 transport: { _, _, _ in XCTFail("parked/cancelled trigger must not send"); return .transportFailure })
             let trigger = VoiceSharingUploadTrigger(
                 scheduler: VoiceSharingUploadScheduler(
-                    queue: queue, uploader: uploader, isAuthorized: { policy.permitsCollection }),
-                surfaceEnabled: { true }, isAuthorized: { policy.permitsCollection })
+                    queue: queue, uploader: uploader, isAuthorized: { [weak self] in self?.gateOpen ?? false }),
+                surfaceEnabled: { true }, isAuthorized: { [weak self] in self?.gateOpen ?? false })
             trigger.preDrainGateForTesting = {
                 parked.fulfill()
                 if release.wait(timeout: .now() + 5) != .success { XCTFail("trigger gate timed out") }
             }
             weakTrigger = trigger
             let model = VoiceSharingSettingsModel(
-                queue: queue, isCollectionPermitted: { policy.permitsCollection },
+                queue: queue, isCollectionPermitted: { [weak self] in self?.gateOpen ?? false },
                 isAccountEnrolled: { true }, isLocallyOptedIn: { false },
                 coherenceAccount: { "account-a" })
             assembly.installVoiceSharingGateLoss(
@@ -323,7 +307,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
             service = assembly.installVoiceSharingLifetime(
                 on: makeService(router: StubClassifier(), executor: StubExecutor(), collector: collector).service,
                 settingsModel: model, uploadTrigger: trigger,
-                enrollmentStore: store, policy: policy, queue: queue)
+                enrollmentStore: store, queue: queue)
             weakLifetime = service?.voiceSharingLifetime
             trigger.triggerDrainIfPermitted()
             capturedTask = trigger.drainTaskForTesting
@@ -337,10 +321,11 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         XCTAssertEqual(coordinator.gateLostHandlerCountForTesting, registryBaseline + 1)
         let generation = weakSink?.revocationGenerationForTesting ?? -1
         XCTAssertGreaterThanOrEqual(generation, 0)
-        remoteEnabled = false
-        coordinator.policyRefreshAfterActivation(
-            freshActivationSucceeded: true, fetchToken: coordinator.policy.tokenForFetchStart())
-        XCTAssertFalse(coordinator.policy.permitsCollection)
+        // Consent ends through the PRODUCTION fan-out (the coordinator's registry), exactly as a
+        // withdrawal/sign-out reaches every pipeline owner.
+        gateOpen = false
+        coordinator.consentGateLostForTesting()
+        XCTAssertFalse(isCollectionPermitted())
         XCTAssertEqual(weakSink?.revocationGenerationForTesting, generation + 1)
         XCTAssertFalse(FileManager.default.fileExists(atPath: seededDirectory.path), "retained bytes must be purged")
         if case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() {
@@ -395,11 +380,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         let store = VoiceSharingEnrollmentStore(
             defaults: defaults, accountScopeProvider: { "local-account" }, sessionIdentityProvider: { "local-session" })
         store.setLocalOptIn(true)
-        let coordinator = VoiceSharingCoordinator(
-            clock: StubMonotonicClock(time: 1_000), readRemoteSwitch: { .valid(true) },
-            lastFetchTime: { nil }, enrollmentStore: store)
-        coordinator.expiryScheduler = { _, _ in }
-        coordinator.policy.identityBecameReadable()
+        _ = VoiceSharingCoordinator(enrollmentStore: store)
         let identity: () -> VoiceSharingUploadIdentity? = {
             VoiceSharingUploadIdentity(accountScope: "local-account", enrollmentEpoch: store.activeEnrollmentEpoch)
         }
@@ -422,32 +403,28 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
                 interfaces: [.wifi, .wired], allowsExpensive: false, allowsConstrained: false), monitorPath: false)
             network.update(.init(satisfied: true, interfaces: [.wifi], expensive: false, constrained: false))
             let trigger = assembly.makeVoiceSharingUploadTrigger(
-                queue: queue, isAuthorized: { coordinator.policy.permitsCollection }, currentIdentity: identity,
+                queue: queue, isAuthorized: { [weak self] in self?.gateOpen ?? false }, currentIdentity: identity,
                 baseURLProvider: { endpoint }, tokenProvider: tokens, session: session, clock: { now },
                 retryPolicy: VoiceSharingRetryPolicy(retryBaseDelay: 1, retryMaximumDelay: 1, random: { 0 }),
                 surfaceEnabled: { true }, networkGate: network)
             weakTrigger = trigger
             let model = VoiceSharingSettingsModel(
-                queue: queue, isCollectionPermitted: { coordinator.policy.permitsCollection },
+                queue: queue, isCollectionPermitted: { [weak self] in self?.gateOpen ?? false },
                 isAccountEnrolled: { store.currentEnrollmentAnswer },
                 isLocallyOptedIn: { store.currentState.localOptIn }, coherenceAccount: { "local-account" })
             service = assembly.installVoiceSharingLifetime(
                 on: makeService(router: StubClassifier(), executor: StubExecutor(), collector: makeCollector()).service,
                 settingsModel: model, uploadTrigger: trigger, enrollmentStore: store,
-                policy: coordinator.policy, queue: queue)
+                queue: queue)
         }
         defer { weakTrigger?.stop(); service = nil }
         XCTAssertNil(weakAssembly)
         XCTAssertNotNil(weakTrigger)
         XCTAssertEqual(tokens.value, "local-test-bearer")
         XCTAssertNil(store.currentEnrollmentAnswer)
-        let followUp = expectation(description: "changed enrollment requests fresh authority")
-        coordinator.initiateIdentityRecoveryRefresh = { followUp.fulfill() }
-        await coordinator.completeActivationWithEnrollment(
-            freshActivationSucceeded: true, lookup: coordinator.beginEnrollmentLookup(), accountClient: accountClient)
-        await fulfillment(of: [followUp], timeout: 2)
+        gateOpen = true
+        await VoiceSharingCoordinator(enrollmentStore: store).refreshProjectionFromServer(accountClient: accountClient)
         XCTAssertTrue(store.currentEffectiveEnrolled)
-        XCTAssertFalse(coordinator.policy.permitsCollection)
         let entry = try AudioFixture.makeReadyEntry(in: queue)
         let metadata = try queue.metadata(of: entry)
         let audio = try queue.audio(of: entry)
@@ -458,9 +435,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         await joinLocalSharingDrain(weakTrigger)
         XCTAssertEqual(authority.received.count, 0, "accepted enrollment without a new lease cannot upload")
 
-        await coordinator.completeActivationWithEnrollment(
-            freshActivationSucceeded: true, lookup: coordinator.beginEnrollmentLookup(), accountClient: accountClient)
-        XCTAssertTrue(coordinator.policy.permitsCollection)
+        await VoiceSharingCoordinator(enrollmentStore: store).refreshProjectionFromServer(accountClient: accountClient)
         XCTAssertEqual(authority.lookupCount, 2)
         weakTrigger?.triggerDrainIfPermitted()
         await joinLocalSharingDrain(weakTrigger)
@@ -487,7 +462,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         _ = try AudioFixture.makeReadyEntry(in: queue)
         XCTAssertEqual(queue.readyEntries().count, 1)
         store.setLocalOptIn(false)
-        XCTAssertFalse(coordinator.policy.permitsCollection)
+        XCTAssertFalse(store.consentAllowsCollection)
         weakTrigger?.triggerDrainIfPermitted()
         await joinLocalSharingDrain(weakTrigger)
         XCTAssertEqual(authority.received.count, 2, "configured work cannot send after local withdrawal")

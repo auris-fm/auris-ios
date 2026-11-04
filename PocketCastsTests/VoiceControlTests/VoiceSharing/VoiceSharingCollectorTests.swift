@@ -18,7 +18,6 @@ final class VoiceSharingCollectorTests: XCTestCase {
 
     private var events: [VoiceSharingCollector.SegmentEvent] = []
     private var recordLock = NSLock()
-    private var policy: VoiceSharingPolicy!
     private var storeState = VoiceSharingEnrollmentStore.State()
     private var epoch: String? = "epoch-1"
     private var session: String? = "gen-A"
@@ -29,13 +28,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         storeState = VoiceSharingEnrollmentStore.State()
         epoch = "epoch-1"
         session = "gen-A"
-        // The policy holds its OWN enrollment probe and ANDs it with the remote switch and lease, so positive
-        // paths must satisfy that too. Reading the same injected state is what production does via the store.
-        policy = VoiceSharingPolicy(
-            clock: StubMonotonicClock(time: 1_000),
-            readRemoteSwitch: { .valid(true) },
-            isAccountEnrolled: { [weak self] in self?.storeState.effectiveEnrolled ?? false }
-        )
+        gateOpen = true
     }
 
     /// Clears the recorded log AND confirms nothing is still in flight. With synchronous delivery there is no
@@ -73,14 +66,9 @@ final class VoiceSharingCollectorTests: XCTestCase {
         return collector
     }
 
-    /// Opens the policy lease the only way production does, then asserts it opened. A silently-unopened lease
-    /// is how a zero-retention test becomes vacuous.
-    private func activateLease() {
-        policy.identityBecameReadable()
-        XCTAssertNotNil(policy.refreshAfterActivation(
-            freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart()
-        ), "premise: activation should install a lease")
-    }
+    /// SIMPLIFIED CONTRACT (spec 4afc6e43): the collector's single admission decision is the consent
+    /// closure the assembly passes in. These helpers open and close exactly that closure.
+    private func activateLease() { gateOpen = true }
 
     private func enrolledState(_ enrolled: Bool) {
         storeState.localOptIn = enrolled
@@ -94,15 +82,11 @@ final class VoiceSharingCollectorTests: XCTestCase {
         )
     }
 
-    /// Closes the policy lease the way a remote switch-off or lease expiry does, without touching identity.
-    private func deactivateLease() {
-        // Same primitive a remote switch-off / lease expiry path uses; raises the fence so
-        // permitsCollection goes false while identity stays unchanged.
-        policy.invalidateForIdentityChange(kind: .membershipChange)
-    }
+    /// Closes the consent gate while identity is unchanged — a withdrawal or a transient stop.
+    private func deactivateLease() { gateOpen = false }
 
     private func assertPremisesOpen(file: StaticString = #file, line: UInt = #line) {
-        XCTAssertTrue(policy.permitsCollection, "premise: policy lease open", file: file, line: line)
+        XCTAssertTrue(gateOpen, "premise: consent gate open", file: file, line: line)
         XCTAssertTrue(storeState.effectiveEnrolled, "premise: membership enrolled", file: file, line: line)
         XCTAssertEqual(epoch, "epoch-1", "premise: epoch present", file: file, line: line)
     }

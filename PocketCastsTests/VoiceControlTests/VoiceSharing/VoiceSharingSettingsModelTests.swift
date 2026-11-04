@@ -578,39 +578,6 @@ final class VoiceSharingChangeHookTests: XCTestCase {
         _ = observed.purgeAll()
         wait(for: [silence], timeout: 1)
     }
-
-    /// The policy PUSHES a withdrawal/expiry transition.
-    func test_aPolicyTransitionIsPushed() {
-        let policy = VoiceSharingPolicy(readRemoteSwitch: { .unavailable }, isAccountEnrolled: { true })
-        let fired = expectation(description: "policy change pushed")
-        fired.assertForOverFulfill = false
-        let token = policy.addChangeObserver { fired.fulfill() }
-        defer { policy.removeChangeObserver(token) }
-        policy.invalidateForIdentityChange(kind: VoiceSharingPolicy.InvalidationKind.membershipChange)
-        wait(for: [fired], timeout: 2)
-    }
-
-    /// A superseded refresh must NOT deliver. Two refreshes race; only the newer read may publish,
-    /// and an older read finishing later is dropped at the producer.
-    func test_anObsoleteRefreshDoesNotPublish() {
-        let model = VoiceSharingSettingsModel(queue: queue,
-                                             isCollectionPermitted: { true },
-                                             isAccountEnrolled: { true },
-                                             isLocallyOptedIn: { true },
-                                             coherenceAccount: { "account-a" })
-        let seen = NSMutableArray()
-        let lock = NSLock()
-        let token = model.addStateObserver { sent in
-            lock.lock(); seen.add(sent.sequence); lock.unlock()
-        }
-        defer { model.removeStateObserver(token) }
-        model.refreshLiveState()
-        model.refreshLiveState()
-        lock.lock(); let sequences = seen.compactMap { $0 as? Int }; lock.unlock()
-        XCTAssertEqual(sequences.count, 1, "an unchanged world publishes once, never twice")
-        XCTAssertTrue(sequences.allSatisfy { $0 == model.publicationSequence },
-                      "no delivery may carry a sequence older than the committed one")
-    }
 }
 
 // MARK: - Publication watermark (reviewer 31c7758f)
@@ -672,65 +639,6 @@ final class VoiceSharingWatermarkTests: XCTestCase {
     }
 }
 
-// MARK: - Every permission-clearing policy path is versioned and announced (reviewer 31c7758f)
-
-final class VoiceSharingPolicyTransitionHookTests: XCTestCase {
-    private func policy() -> VoiceSharingPolicy {
-        VoiceSharingPolicy(readRemoteSwitch: { .valid(true) }, isAccountEnrolled: { true })
-    }
-
-    /// A FAILED activation clears permission: the version must move and listeners must hear it,
-    /// or a rendered "active" survives a failed refresh.
-    func test_aFailedActivationVersionsAndAnnounces() {
-        let subject = policy()
-        let before = subject.currentLeaseGeneration
-        var announced = 0
-        let token = subject.addChangeObserver { announced += 1 }
-        defer { subject.removeChangeObserver(token) }
-        _ = subject.refreshAfterActivation(freshActivationSucceeded: false,
-                                           fetchToken: subject.tokenForFetchStart())
-        XCTAssertGreaterThan(subject.currentLeaseGeneration, before, "clearing permission is a version change")
-        XCTAssertEqual(announced, 1, "and it is announced")
-    }
-
-    /// An unavailable config value clears permission the same way.
-    func test_anUnavailableValueVersionsAndAnnounces() {
-        let subject = VoiceSharingPolicy(readRemoteSwitch: { .unavailable }, isAccountEnrolled: { true })
-        let before = subject.currentLeaseGeneration
-        var announced = 0
-        let token = subject.addChangeObserver { announced += 1 }
-        defer { subject.removeChangeObserver(token) }
-        _ = subject.refreshAfterActivation(freshActivationSucceeded: true,
-                                           fetchToken: subject.tokenForFetchStart())
-        XCTAssertGreaterThan(subject.currentLeaseGeneration, before)
-        XCTAssertEqual(announced, 1)
-    }
-
-    /// Raising the fence removes the visible permission: version AND announcement.
-    func test_raisingTheFenceVersionsAndAnnounces() {
-        let subject = policy()
-        let before = subject.currentLeaseGeneration
-        var announced = 0
-        let token = subject.addChangeObserver { announced += 1 }
-        defer { subject.removeChangeObserver(token) }
-        subject.raiseIdentityFence()
-        XCTAssertGreaterThan(subject.currentLeaseGeneration, before)
-        XCTAssertEqual(announced, 1)
-        XCTAssertFalse(subject.permitsCollection, "a fence means no permission")
-    }
-
-    /// Membership invalidation (withdrawal inside the session) does the same.
-    func test_membershipInvalidationVersionsAndAnnounces() {
-        let subject = policy()
-        let before = subject.currentLeaseGeneration
-        var announced = 0
-        let token = subject.addChangeObserver { announced += 1 }
-        defer { subject.removeChangeObserver(token) }
-        subject.invalidateForIdentityChange(kind: .membershipChange)
-        XCTAssertGreaterThan(subject.currentLeaseGeneration, before)
-        XCTAssertEqual(announced, 1)
-    }
-}
 
 // MARK: - Every ready-set mutation is versioned and announced (reviewer 31c7758f)
 

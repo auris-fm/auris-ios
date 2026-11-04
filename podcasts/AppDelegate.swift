@@ -213,7 +213,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         onNotificationCenter center: NotificationCenter = .default,
         coordinator: VoiceSharingCoordinator = .shared
     ) {
-        coordinator.installIdentityInvalidation(onNotificationCenter: center)
+        _ = coordinator.installIdentityInvalidation(onNotificationCenter: center)
     }
 
     private func setupVoiceControlIfNeeded() {

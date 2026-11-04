@@ -23,12 +23,10 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
         epoch = "epoch-1"
     }
 
-    private func openGate(enrolled: Bool) -> VoiceSharingPolicy {
-        let policy = VoiceSharingPolicy(
-            clock: StubMonotonicClock(time: 1_000),
-            readRemoteSwitch: { .valid(true) },
-            isAccountEnrolled: { [weak self] in self?.storeState.effectiveEnrolled ?? false }
-        )
+    /// SIMPLIFIED CONTRACT (spec 4afc6e43): the collector's admission decision is the shared consent
+    /// closure, not a policy/lease object. The store state these controls set is PROVENANCE stamped on
+    /// the emitted record, so it is still established here exactly as before.
+    private func openGate(enrolled: Bool) -> Void {
         storeState.localOptIn = enrolled
         storeState.hasAuthoritativeProjection = enrolled
         if !enrolled { storeState.membership = .unavailable }
@@ -38,18 +36,18 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
                 enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "2026-09", withdrawalState: .active
             )
         }
-        policy.identityBecameReadable()
-        XCTAssertNotNil(policy.refreshAfterActivation(freshActivationSucceeded: true,
-                                                      fetchToken: policy.tokenForFetchStart()),
-                        "premise: activation should install a lease")
-        return policy
     }
 
-    private var engineGateOpen = true
 
-    private func makeCollector(_ policy: VoiceSharingPolicy) -> VoiceSharingCollector {
+    /// The store state the collector reads at EMISSION time. Opening the gate publishes this
+    /// generation, because an emission made against a RESET store is refused as a foreign capture —
+    /// which is exactly what an unbridged `openGate` produced.
+    /// The admission decision these controls open and close.
+    private var engineTestGateOpen = false
+
+    private func makeCollector() -> VoiceSharingCollector {
         let collector = VoiceSharingCollector(
-            isCollectionPermitted: { [weak self] in self?.engineGateOpen ?? false },
+            isCollectionPermitted: { [weak self] in self?.engineTestGateOpen ?? false },
             outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
@@ -88,8 +86,8 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
     /// back cannot change what A carries; a mutant that moves the read inside the body deterministically
     /// picks up B instead.
     func test_queuedUtteranceBodyRunningLate_completesUnderItsOwnFrozenContext() async {
-        let policy = openGate(enrolled: true)
-        let collector = makeCollector(openGate(enrolled: true))
+        openGate(enrolled: true)
+        let collector = makeCollector()
         let backend = EngineStubBackend()
         let engine = makeEngine(collector: collector, wake: NotDetectedWake(), backend: backend)
 
@@ -136,8 +134,8 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
     /// engine-level gate while A closes and B opens; the freeze must already have happened synchronously
     /// inside the closure — a mutant that moves the read into the Task body deterministically picks up B.
     func test_startInstalledOnUtteranceClosure_freezesContextSynchronously() async {
-        let policy = openGate(enrolled: true)
-        let collector = makeCollector(openGate(enrolled: true))
+        openGate(enrolled: true)
+        let collector = makeCollector()
         let backend = EngineStubBackend()
         let engine = makeEngine(collector: collector, wake: NotDetectedWake(), backend: backend)
         XCTAssertTrue(engine.start(), "premise: engine started with stubbed capture")
@@ -199,7 +197,7 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
     /// admitted (samples retained, capture live) while the engine still hands the segmenter
     /// PCM by reference and the natural recognition segment is preserved.
     func test_noAllowanceAuthorityComposedCaptureStillAdmitsAndPreservesNaturalRecognitionSegment() {
-        let policy = openGate(enrolled: true)
+        openGate(enrolled: true)
         let collector = VoiceSharingCollector(
             isCollectionPermitted: { true }, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
@@ -247,7 +245,7 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
     /// capture (samples retained) does not stall the segmenter — recognition completes while
     /// the capture is being retained.
     func test_liveCaptureRetentionDoesNotStallRecognition() throws {
-        let policy = openGate(enrolled: true)
+        openGate(enrolled: true)
         let collector = VoiceSharingCollector(isCollectionPermitted: { true }, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { "epoch-1" }, sessionIdentity: { "gen-A" }, sink: { _ in })
@@ -281,11 +279,11 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
     /// `stop()` must release any partial it holds. Asserted through the engine's public lifecycle rather than
     /// by poking at the segmenter, which is private.
     func test_engineStartAttachesHooksAndStopReleasesThePartial() {
-        let policy = openGate(enrolled: true)
-        XCTAssertTrue(policy.permitsCollection, "premise: gate open")
+        openGate(enrolled: true)
+        XCTAssertTrue(self.storeState.effectiveEnrolled, "premise: consent allows collection")
         XCTAssertTrue(storeState.effectiveEnrolled, "premise: membership enrolled")
 
-        let collector = makeCollector(openGate(enrolled: true))
+        let collector = makeCollector()
         let backend = EngineStubBackend()
         let engine = makeEngine(collector: collector, wake: NotDetectedWake(), backend: backend)
 
@@ -310,8 +308,8 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
 
     /// An idle stop (no speech was ever open) must NOT be reported as a discarded example.
     func test_idleStop_producesNoCancellationEvent() {
-        let policy = openGate(enrolled: true)
-        let collector = makeCollector(policy)
+        openGate(enrolled: true)
+        let collector = makeCollector()
         let engine = makeEngine(collector: collector, wake: NotDetectedWake(), backend: EngineStubBackend())
         XCTAssertTrue(engine.start())
 
@@ -324,8 +322,8 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
     /// Wake-negative segments are collectable per spec, and observing them must add NO ASR/router/action work.
     /// The proof: recognition still returns at the wake branch, so no transcript reaches the router.
     func test_wakeNegativeBranch_isObserved_andRecognitionPathIsUnchanged() async {
-        let policy = openGate(enrolled: true)
-        let collector = makeCollector(openGate(enrolled: true))
+        openGate(enrolled: true)
+        let collector = makeCollector()
         let backend = EngineStubBackend()
         let engine = makeEngine(collector: collector, wake: NotDetectedWake(), backend: backend)
 
@@ -349,8 +347,8 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
     /// Bleed rejection is the other collectable branch. It requires an exposed-speaker route, which the engine
     /// reads from `isExposedSpeakerRoute`; the stub backend sets up the call so the branch is reachable.
     func test_bleedBranch_notifiesWithObservedDecision_whenRouteIsExposed() async {
-        let policy = openGate(enrolled: true)
-        let collector = makeCollector(openGate(enrolled: true))
+        openGate(enrolled: true)
+        let collector = makeCollector()
         let backend = EngineStubBackend()
         let engine = makeEngine(collector: collector, wake: NotDetectedWake(), backend: backend)
         XCTAssertTrue(engine.start())
@@ -380,11 +378,11 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
     /// With the gate closed, the production path must retain nothing at all — including across a full
     /// utterance that runs through both rejection branches.
     func test_closedGate_producesZeroContributionThroughTheRealEngine() async {
-        engineGateOpen = false
-        XCTAssertFalse(engineGateOpen,
+        engineTestGateOpen = false
+        XCTAssertFalse(engineTestGateOpen,
                        "premise: the consent gate is closed")
 
-        let collector = makeCollector(openGate(enrolled: true))
+        let collector = makeCollector()
         let backend = EngineStubBackend()
         let engine = makeEngine(collector: collector, wake: NotDetectedWake(), backend: backend)
         XCTAssertTrue(engine.start())
@@ -404,7 +402,7 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
     /// the sink inline would pass every timing-based check while freezing capture callbacks whenever the
     /// consumer stalls.
     func test_sinkRunsOnADifferentThreadThanTheProducer() {
-        let policy = openGate(enrolled: true)
+        openGate(enrolled: true)
         var deliveredOnMainThread = [Bool]()
         var deliveredFromAudioQueue = [Bool]()
         let lock = NSLock()
@@ -424,7 +422,7 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
         let sem = DispatchSemaphore(value: 0)
         DispatchQueue.global(qos: .userInitiated).async {
             Thread.current.threadDictionary["producer-marker"] = true
-            XCTAssertTrue(policy.permitsCollection, "premise: gate open")
+            XCTAssertTrue(self.storeState.effectiveEnrolled, "premise: consent allows collection")
             collector.speechStarted(confirmationFrameSamples: 320)
             collector.appendSamples([Float](repeating: 1, count: 640), reportedTotal: 640)
             collector.speechCompleted([Float](repeating: 1, count: 640),
@@ -485,6 +483,12 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     private var root: URL!
     private var queue: VoiceSharingUploadQueue!
     private var storeState = VoiceSharingEnrollmentStore.State()
+    /// The live session source, as production reads it.
+    private var engineStoreSession = "gen-A"
+    /// The sink the current chain writes through, so a wait can drain its worker queue.
+    private var sinkUnderTest: VoiceSharingContributionSink?
+    /// The admission decision these controls open and close.
+    private var engineTestGateOpen = false
     /// Events the collector emitted, for the association controls that inspect it directly.
     private var collectedEvents: [VoiceSharingCollector.SegmentEvent] = []
     private let collectedLock = NSLock()
@@ -495,6 +499,9 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         storeState = VoiceSharingEnrollmentStore.State()
+        engineTestGateOpen = true
+        engineStoreSession = "gen-A"
+        openGate(enrolled: true)
     }
 
     override func tearDownWithError() throws {
@@ -502,12 +509,13 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     }
 
     /// A collector wired to record what it emits (no sink) — for observation-association controls.
-    private func makeRecordingCollector(_ policy: VoiceSharingPolicy) -> VoiceSharingCollector {
+    private func makeRecordingCollector() -> VoiceSharingCollector {
         let collector = VoiceSharingCollector(
-            isCollectionPermitted: { true }, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            isCollectionPermitted: { [weak self] in self?.engineTestGateOpen ?? false },
+            outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { "epoch-1" },
-            sessionIdentity: { "gen-A" },
+            sessionIdentity: { [weak self] in self?.engineStoreSession ?? "gen-A" },
             sink: { [weak self] event in
                 guard let self else { return }
                 self.collectedLock.lock()
@@ -547,8 +555,8 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     /// terminal capture into a completed record, so it must refuse everything the normal late-outcome path
     /// refuses: a capture whose epoch/session no longer match, and one that can never contribute.
     func test_aLateFinalizeCannotPublishADisqualifiedOrForeignCapture() async throws {
-        let policy = openGate(enrolled: true)
-        let collector = makeRecordingCollector(policy)
+        openGate(enrolled: true)
+        let collector = makeRecordingCollector()
         let backend = EngineStubBackend()
         let engine = makeEngine(collector: collector, wake: NotDetectedWake(), backend: backend)
         _ = engine
@@ -566,7 +574,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
 
         // The gate CLOSES before the engine finalizes (the real withdrawal lever): a capture that was
         // eligible when it was captured must not be published by a finalize that arrives afterwards.
-        storeState.localOptIn = false
+        openGate(enrolled: false)
         collector.finalizeDeferredCompletion(context: ctxA)
 
         let emitted = snapshot().filter { (event: VoiceSharingCollector.SegmentEvent) in
@@ -581,8 +589,8 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     /// still naming A describes a capture that no longer exists — falling back to "most recent" would
     /// consume B, which nobody cancelled.
     func test_aStaleNamedCancellationConsumesNothingEvenWithALiveDeferredSuccessor() async throws {
-        let policy = openGate(enrolled: true)
-        let collector = makeRecordingCollector(policy)
+        openGate(enrolled: true)
+        let collector = makeRecordingCollector()
         let backend = EngineStubBackend()
         let engine = makeEngine(collector: collector, wake: NotDetectedWake(), backend: backend)
         _ = engine
@@ -623,8 +631,8 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     /// cancellation now belongs to B — it is the capture that is still open. Consuming A instead would
     /// discard a finished capture that was never cancelled and leave B live and filable.
     func test_aCancellationWhileASuccessorIsOpenConsumesTheSuccessorNotTheDeferredPredecessor() async throws {
-        let policy = openGate(enrolled: true)
-        let collector = makeRecordingCollector(policy)
+        openGate(enrolled: true)
+        let collector = makeRecordingCollector()
         let backend = EngineStubBackend()
         let engine = makeEngine(collector: collector, wake: NotDetectedWake(), backend: backend)
         _ = engine
@@ -681,8 +689,8 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         ]
 
         for ordering in orderings {
-            let policy = openGate(enrolled: true)
-            let collector = makeRecordingCollector(policy)
+            openGate(enrolled: true)
+            let collector = makeRecordingCollector()
             let backend = EngineStubBackend()
             let engine = makeEngine(collector: collector, wake: NotDetectedWake(), backend: backend)
             _ = engine
@@ -727,8 +735,8 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     /// first, so it is genuinely ring-resident, and the cancel arrives while the engine still owes its
     /// finalize. The entry must be consumed, not promoted to a completed record.
     func test_aCancelledDeferredCaptureCannotBeRevivedByFinalize() async throws {
-        let policy = openGate(enrolled: true)
-        let collector = makeRecordingCollector(policy)
+        openGate(enrolled: true)
+        let collector = makeRecordingCollector()
         let backend = EngineStubBackend()
         let engine = makeEngine(collector: collector, wake: NotDetectedWake(), backend: backend)
         _ = engine
@@ -751,11 +759,9 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                       "a consumed (cancelled) deferred capture must never become a completed record")
     }
 
-    private func openGate(enrolled: Bool) -> VoiceSharingPolicy {
-        let policy = VoiceSharingPolicy(
-            clock: StubMonotonicClock(time: 1_000),
-            readRemoteSwitch: { .valid(true) },
-            isAccountEnrolled: { [weak self] in self?.storeState.effectiveEnrolled ?? false })
+    private func openGate(enrolled: Bool) -> Void {
+        engineStoreSession = enrolled ? "gen-1" : "gen-2"
+        engineTestGateOpen = enrolled
         storeState.localOptIn = enrolled
         storeState.hasAuthoritativeProjection = enrolled
         if !enrolled { storeState.membership = .unavailable }
@@ -765,10 +771,6 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                 enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "2026-09",
                 withdrawalState: .active)
         }
-        policy.identityBecameReadable()
-        _ = policy.refreshAfterActivation(
-            freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart())
-        return policy
     }
 
     private var provenance: VoiceSharingContributionEncoder.Provenance {
@@ -800,7 +802,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     /// a real engine failure was silently unpublishable.
     func test_theRealEnginePipelinePublishesADetectorErrorAsWakeFailed() async throws {
         let claims: [String: VoiceSharingContributionEncoder.StageOutcome] = claims
-        let chain = makeChain(policy: openGate(enrolled: true), wake: ErroringWake(), claims: { claims })
+        let chain = makeChain(wake: ErroringWake(), claims: { claims })
         chain.engine.listeningMode = .continuous
         await chain.backend.emitSpeechThenSilence(
             level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
@@ -835,7 +837,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     /// capture produced no record at all.
     func test_aSuccessfulRecognitionPublishesItsTranscriptIntoTheDurableRecord() async throws {
         let claims: [String: VoiceSharingContributionEncoder.StageOutcome] = claims
-        let chain = makeChain(policy: openGate(enrolled: true), wake: DetectedWake(), claims: { claims })
+        let chain = makeChain(wake: DetectedWake(), claims: { claims })
         chain.backend.stubTranscript = "play the latest episode"
         chain.engine.listeningMode = .continuous
         await chain.backend.emitSpeechThenSilence(
@@ -867,7 +869,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     /// record as asr/completed/empty_result with neither text nor router_input present.
     func test_anEmptyRecognitionReachesTheDurableRecordAsCompletedEmptyResult() async throws {
         let claims: [String: VoiceSharingContributionEncoder.StageOutcome] = claims
-        let chain = makeChain(policy: openGate(enrolled: true), wake: DetectedWake(), claims: { claims })
+        let chain = makeChain(wake: DetectedWake(), claims: { claims })
         chain.backend.stubTranscript = ""
         chain.engine.listeningMode = .continuous
         await chain.backend.emitSpeechThenSilence(
@@ -906,7 +908,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         let localClaims = claims
-        let chain = makeChain(policy: openGate(enrolled: true), wake: DetectedWake(), claims: { localClaims })
+        let chain = makeChain(wake: DetectedWake(), claims: { localClaims })
         chain.backend.stubTranscript = "play the latest episode"
         chain.backend.stubLanguage = "en"
         chain.engine.listeningMode = .continuous
@@ -943,8 +945,8 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     /// Each case binds the ENCODED record, so a contradiction is a schema refusal, not just a
     /// dictionary mismatch.
     func test_sameStageReReportsCarryOnlyIntendedFactsAcrossTransitions() throws {
-        let policy = openGate(enrolled: true)
-        let collector = makeRecordingCollector(policy)
+        openGate(enrolled: true)
+        let collector = makeRecordingCollector()
         func makeCase() -> VoiceSharingCollector.CaptureContext {
             collector.speechStarted(confirmationFrameSamples: 320)
             guard let ctx = collector.currentCaptureContextForTesting else {
@@ -1080,7 +1082,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
             let claims: [String: VoiceSharingContributionEncoder.StageOutcome] = claims
-            let chain = makeChain(policy: openGate(enrolled: true), wake: DetectedWake(), claims: { claims })
+            let chain = makeChain(wake: DetectedWake(), claims: { claims })
             chain.backend.stubTranscript = "bonjour"
             chain.backend.stubLanguage = testCase.language
             // The backend only claims it translates for the middle case.
@@ -1143,7 +1145,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             ]
             // Wake POSITIVE: with a negative wake the engine strips the wake window, the remaining text is
             // empty, and it returns before routing ever runs — so routing could not be observed at all.
-            let chain = makeChain(policy: openGate(enrolled: true), wake: DetectedWake(),
+            let chain = makeChain(wake: DetectedWake(),
                                   claims: { unknownClaims })
             chain.engine.listeningMode = .continuous
             // Stand where the SERVICE stands. The engine hands the frozen context to the routing
@@ -1248,7 +1250,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
             let claims: [String: VoiceSharingContributionEncoder.StageOutcome] = claims
-            let chain = makeChain(policy: openGate(enrolled: true), wake: DetectedWake(),
+            let chain = makeChain(wake: DetectedWake(),
                                   claims: { claims })
             chain.backend.stubTranscript = matrixCase.transcript
             chain.backend.stubLanguage = matrixCase.language
@@ -1338,8 +1340,8 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     /// COLLECTOR-LEVEL PROBE: an engine report made while the capture is open must ride the event that
     /// the DEFERRED finalize emits. This isolates the merge from the engine and the sink.
     func test_anEngineReportMadeWhileOpenRidesTheDeferredCompletionEvent() async {
-        let policy = openGate(enrolled: true)
-        let collector = makeRecordingCollector(policy)
+        openGate(enrolled: true)
+        let collector = makeRecordingCollector()
         collector.speechStarted(confirmationFrameSamples: 320)
         guard let ctx = collector.currentCaptureContextForTesting else {
             return XCTFail("premise: open capture")
@@ -1375,7 +1377,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             "routing": .init(state: "unknown", reason: "observation_unavailable"),
             "execution": .init(state: "unknown", reason: "observation_unavailable"),
         ]
-        let chain = makeChain(policy: openGate(enrolled: true), wake: NotDetectedWake(), claims: { claims })
+        let chain = makeChain(wake: NotDetectedWake(), claims: { claims })
         chain.backend.stubTranscript = "play the latest episode"
         chain.engine.listeningMode = .continuous
         await chain.backend.emitSpeechThenSilence(
@@ -1506,7 +1508,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     func test_aDeferredCaptureIsReleasedByTheConsumerEvenWhenTheTurnIsAbandoned() async throws {
         for abandoned in [true, false] {
             let claims: [String: VoiceSharingContributionEncoder.StageOutcome] = claims
-            let chain = makeChain(policy: openGate(enrolled: true), wake: DetectedWake(),
+            let chain = makeChain(wake: DetectedWake(),
                                   claims: { claims })
             chain.backend.stubTranscript = "play the latest episode"
             chain.engine.listeningMode = .continuous
@@ -1678,7 +1680,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     /// observed decision, no transcript is invented, and no recognition ran (the stub counts transcribe calls).
     func test_realEngineBleedRejectionPersistsTheObservedAsrSkip() async throws {
         let claims: [String: VoiceSharingContributionEncoder.StageOutcome] = [:]
-        let chain = makeChain(policy: openGate(enrolled: true), wake: NotDetectedWake(), claims: { claims })
+        let chain = makeChain(wake: NotDetectedWake(), claims: { claims })
         let engine = chain.engine
         engine.isExposedSpeakerRouteForTesting = true
         // Use an equal, fully covered window under main's positional echo-reference contract.
@@ -1909,7 +1911,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     /// input's job, and calling this a wake rejection or a provider error is a fabrication.
     func test_aWakeOnlyTranscriptIsPublishedAsCompletedAsrWithItsRawText() async throws {
         let claims: [String: VoiceSharingContributionEncoder.StageOutcome] = claims
-        let chain = makeChain(policy: openGate(enrolled: true), wake: DetectedWake(), claims: { claims })
+        let chain = makeChain(wake: DetectedWake(), claims: { claims })
         // Exactly the wake phrase: removing the wake window leaves nothing for the command path.
         chain.backend.stubTranscript = "hey auris"
         chain.engine.listeningMode = .continuous
@@ -1955,7 +1957,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     func test_aCallerClaimCannotHideTheDetectorsFailure() async throws {
         var claims = claims
         claims["wake"] = .init(state: "not_run", reason: "detector_disabled")
-        let chain = makeChain(policy: openGate(enrolled: true), wake: ErroringWake(), claims: { claims })
+        let chain = makeChain(wake: ErroringWake(), claims: { claims })
         chain.engine.listeningMode = .continuous
         await chain.backend.emitSpeechThenSilence(
             level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
@@ -1998,7 +2000,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     /// `no_wake_detected` — the two gate decisions must not disagree about the same observation.
     func test_aForwardedNegativeSegmentStillReportsNoWakeDetected() async throws {
         let claims: [String: VoiceSharingContributionEncoder.StageOutcome] = claims
-        let chain = makeChain(policy: openGate(enrolled: true), wake: NotDetectedWake(), claims: { claims })
+        let chain = makeChain(wake: NotDetectedWake(), claims: { claims })
         chain.engine.listeningMode = .continuous
         // Open the grace window through the PRODUCTION entry point, not a test seam.
         chain.grace.onWakeWordDetected()
@@ -2032,8 +2034,8 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     /// report by the CONTEXT it carries, and a context whose capture is already emitted is refused, so a
     /// late report can neither adopt a successor nor amend a record that has left.
     func test_aStaleContextReportNeverLandsOnTheSuccessorCapture() async {
-        let policy = openGate(enrolled: true)
-        let collector = makeRecordingCollector(policy)
+        openGate(enrolled: true)
+        let collector = makeRecordingCollector()
         let backend = EngineStubBackend()
         let engine = makeEngine(collector: collector, wake: NotDetectedWake(), backend: backend)
         _ = engine
@@ -2091,8 +2093,8 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     /// ride that event. This drives the two collector calls in that exact order, so the ring carrier — not
     /// the open-capture carrier — is what is exercised.
     func test_aReportLandingAfterSegmentationRidesTheEmittedEvent() async {
-        let policy = openGate(enrolled: true)
-        let collector = makeRecordingCollector(policy)
+        openGate(enrolled: true)
+        let collector = makeRecordingCollector()
         let backend = EngineStubBackend()
         let engine = makeEngine(collector: collector, wake: NotDetectedWake(), backend: backend)
         _ = engine
@@ -2124,21 +2126,22 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     }
 
     private func makeChain(
-        policy: VoiceSharingPolicy,
         wake: WakeWordDetectorProtocol = DetectedWake(),
         claims: @escaping () -> [String: VoiceSharingContributionEncoder.StageOutcome]
     ) -> (engine: VoiceAsrEngine, sink: VoiceSharingContributionSink,
           backend: EngineStubBackend, grace: GracePeriodSignal) {
         let sink = VoiceSharingContributionSink(
-            queue: queue, isEnabled: { policy.permitsCollection },
+            queue: queue, isEnabled: { true },
             encoderProvenance: { [self] in provenance }, observations: claims)
         let collector = VoiceSharingCollector(
-            isCollectionPermitted: { true }, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            isCollectionPermitted: { [weak self] in self?.engineTestGateOpen ?? false },
+            outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
-            epochProvider: { "epoch-1" },
-            sessionIdentity: { "gen-A" },
+            epochProvider: { [weak self] in self?.storeState.membership.enrollmentEpoch },
+            sessionIdentity: { [weak self] in self?.engineStoreSession ?? "gen-A" },
             sink: { event in sink.handle(event) })
         collector.deliversSynchronouslyForTesting = true
+        sinkUnderTest = sink
         let backend = EngineStubBackend()
         let grace = GracePeriodSignal()
         let engine = VoiceAsrEngine(
@@ -2149,6 +2152,16 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             translationStage: nil)
         engine.contributionCollector = collector
         backend.engine = engine
+        // PRODUCTION WIRING: the service hands the capture to its routing consumer as part of the turn
+        // (the real consumer reports and finalizes). A chain with no consumer would leave every capture
+        // deferred forever — which no real path does.
+        engine.onRoutingInputWithContext = { [weak collector] _, context in
+            collector?.engineReported(
+                stage: "execution",
+                outcome: .init(state: "completed", reason: nil), context: context)
+            collector?.finalizeDeferredCompletion(context: context)
+            return true
+        }
         engine.start()
         return (engine: engine, sink: sink, backend: backend, grace: grace)
     }
@@ -2186,6 +2199,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     }
 
     private func waitForReadyEntries(_ count: Int, timeout: TimeInterval = 5) -> [Any] {
+        sinkUnderTest?.waitForIdleForTesting()
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if case .known(let ready) = queue.readyEntriesReportingUnknownCoverage(),
@@ -2199,11 +2213,11 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     /// THE control: speech driven through the real engine's capture callback becomes a durable ready
     /// entry, and the record inside it carries the unknown/observation_unavailable pair.
     func test_theRealEnginePipelineReachesTheDurableQueueWithTheUnobservedPair() async throws {
-        let policy = openGate(enrolled: true)
+        openGate(enrolled: true)
         // The caller claims wake was NOT run. The engine, however, delivers real speech frames for this
         // capture and reports so — the record must carry the ENGINE's observation, not the caller's claim.
         // This is the provenance control: a claim cannot overwrite a real observation.
-        let chain = makeChain(policy: policy, claims: { [self] in
+        let chain = makeChain(claims: { [self] in
             var callerClaims = claims
             callerClaims["wake"] = .init(state: "not_run", reason: "no_wake_detected")
             return callerClaims
@@ -2259,8 +2273,8 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     /// sink drops it — nothing becomes ready. This is what makes the positive control above meaningful:
     /// an entry appearing is not automatic.
     func test_theRealEnginePipelineDropsTheRecordWhenThePairingIsBroken() async throws {
-        let policy = openGate(enrolled: true)
-        let chain = makeChain(policy: policy, claims: { [self] in
+        openGate(enrolled: true)
+        let chain = makeChain(claims: { [self] in
             var broken = self.claims
             // Break a stage the ENGINE DOES NOT report, so the caller's claim is what reaches the sink and
             // the pairing rule is genuinely the thing refusing it (the engine now reports asr itself).
@@ -2394,10 +2408,6 @@ final class VoiceSharingModelProvenanceTests: XCTestCase {
     }
 
     private func collector(_ scheduler: Scheduler = Scheduler()) -> VoiceSharingCollector {
-        let policy = VoiceSharingPolicy(clock: StubMonotonicClock(time: 1_000),
-                                        readRemoteSwitch: { .valid(true) }, isAccountEnrolled: { true })
-        policy.identityBecameReadable()
-        XCTAssertNotNil(policy.refreshAfterActivation(freshActivationSucceeded: true, fetchToken: policy.tokenForFetchStart()))
         var membership = VoiceSharingEnrollmentStore.State()
         membership.localOptIn = true
         membership.hasAuthoritativeProjection = true
