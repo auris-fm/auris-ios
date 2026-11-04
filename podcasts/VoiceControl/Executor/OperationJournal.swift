@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// Production surface for an operation outcome the server must be able to reason about.
@@ -111,6 +112,9 @@ enum OperationReason {
     /// The sink does not support this operation at all, as opposed to supporting it and
     /// refusing for a policy reason.
     static let unsupportedOperation = "unsupported_operation"
+    /// Wire-pinned (cloud-assistant.md @ bf5fb219): a required identity precondition is
+    /// missing — the operation is malformed, refused before any execution.
+    static let invalidRequest = "invalid_request"
     /// The exactly-once record could not be durably persisted (or existing history is
     /// unreadable): the mutation is refused before any effect rather than risking an
     /// unrecorded execution.
@@ -132,6 +136,23 @@ enum OperationReason {
     /// The seek request carried both target forms, neither, or a value that could not be
     /// parsed. Nothing was sought: the request does not say where to go.
     static let malformedSeekTarget = "malformed_seek_target"
+
+    /// A cloud `playback.pause` was attempted and completed, but a fresh post-sink observation
+    /// still found the engine playing (voice-intents.md @ 818c8f75). A FAILED pause, not a
+    /// refusal: the mutation was attempted, so the wire's table places it under `failed`.
+    static let pauseNotObserved = "pause_not_observed"
+
+    /// A cloud `playback.resume` was attempted and completed, but a fresh post-sink observation
+    /// still found the engine paused (voice-intents.md @ df5def09, resume observation contract).
+    /// A FAILED resume, not a refusal: the mutation was attempted, so the wire's table places it
+    /// under `failed`. Mirror of `pause_not_observed`; carries no state.
+    static let resumeNotObserved = "resume_not_observed"
+
+    /// A post-action playback observation could not be produced (voice-intents.md
+    /// @ 818c8f75): the wire's `playback_state_unavailable`. Produced when the engine exposes
+    /// no current reading — `PlaybackManager.observedPlaybackState()` returns `nil` for a
+    /// missing player — distinct from an observed paused engine.
+    static let playbackStateUnavailable = "playback_state_unavailable"
 
     /// The target is expressed in reference (transcript) time, and this client cannot map it to
     /// playback time. No position was changed, and the seek must not be performed at the raw
@@ -162,6 +183,15 @@ enum OperationReason {
     static let turnBudgetExhausted = "turn_budget_exhausted"
     /// The mutation was interrupted in flight: it may or may not have happened.
     static let interruptedInFlight = "interrupted_in_flight"
+
+    /// Every reason this client can put on the wire. Kept as one list so the wire grammar can be
+    /// checked against the whole vocabulary rather than only the tokens a test happens to name.
+    static let allWireReasons: [String] = [
+        clientPolicy, stalePrecondition, unsupportedOperation, invalidRequest,
+        persistenceUnavailable, missingEntitlement, audioSessionDenied, malformedSeekTarget,
+        referenceMappingUnavailable, volumeControlUnavailable, sinkUnimplemented,
+        supersededByPreemption, cancelledByUser, turnBudgetExhausted, interruptedInFlight,
+    ]
 }
 
 /// The result of claiming an operation for execution.
@@ -175,6 +205,11 @@ enum OperationClaim: Equatable {
     case persistenceUnavailable
     /// The operation already ran, and this is what happened.
     case alreadyRun(OperationResult)
+    /// The id is already recorded against DIFFERENT contents, or a different owner,
+    /// conversation or turn. The amendment is explicit: the same id with different contents is a
+    /// different operation, refused rather than executed under the old identity — which would
+    /// apply an effect no record accounts for.
+    case identityConflict
     /// A previous process claimed the operation and did not record an outcome — the app was
     /// interrupted while the mutation was in flight. The effect is not knowable: the operation
     /// must NOT be executed again, and its result is `unknown`.
@@ -200,10 +235,84 @@ enum OperationRecordLoadResult {
     case unreadable
 }
 
+/// WHO an app operation belongs to, and WHICH bytes it was.
+///
+/// The amendment (cloud-assistant.md @ bf5fb219) does not let an operation id stand alone: the id
+/// is server-issued and turn-bound, a redelivery within a turn must carry byte-identical
+/// serialized action, and the same id with different contents is a DIFFERENT operation the
+/// client refuses rather than executes.
+struct OperationIdentity {
+    /// The authenticated account the turn was opened for.
+    let owner: String
+    /// The conversation the turn belongs to.
+    let conversation: String
+    /// The turn the operation was issued in. An id never spans turns.
+    let turn: String
+    /// The exact serialized UTF-8 action the server sent. Replay identity is BYTE equality.
+    let actionBytes: Data
+
+    /// The identity as persisted and re-read: the digest this identity carries.
+    ///
+    /// A persisted record stores the digest, not the frame — the frame's bytes are not needed
+    /// again (a replay answers with the settled result). Re-reading must therefore yield a value
+    /// whose `actionDigest` IS that stored digest, which is why an identity can be built from a
+    /// validated digest instead of being re-hashed on the way in.
+    var actionDigest: String {
+        if let digest = knownDigest { return digest }
+        return Self.digest(of: actionBytes)
+    }
+
+    /// Set only for an identity reconstructed from a persisted digest; nil for a live one.
+    private let knownDigest: String?
+
+    init(owner: String, conversation: String, turn: String, actionBytes: Data) {
+        self.owner = owner
+        self.conversation = conversation
+        self.turn = turn
+        self.actionBytes = actionBytes
+        self.knownDigest = nil
+    }
+
+    /// Rebuilds an identity from what a record persisted. The digest is used AS PERSISTED — it is
+    /// never hashed again, which is what makes a restart compare digest-to-digest. `actionBytes`
+    /// carries the digest text so two identities cannot look equal while differing in identity.
+    init?(persistedOwner owner: String, conversation: String, turn: String, digest: String) {
+        guard !owner.isEmpty, !conversation.isEmpty, !turn.isEmpty, !digest.isEmpty else {
+            return nil
+        }
+        self.owner = owner
+        self.conversation = conversation
+        self.turn = turn
+        self.actionBytes = Data(digest.utf8)
+        self.knownDigest = digest
+    }
+
+    /// Hex SHA-256 of the original bytes. An identity token, not a security primitive.
+    static func digest(of bytes: Data) -> String {
+        SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+extension OperationIdentity: Equatable {
+    /// Equality is on the identity's MEANING, not its storage form: a live identity holds the
+    /// frame's bytes and a reopened one holds the digest that was persisted, so comparing
+    /// `actionBytes` would report a redelivery as a different operation purely because the
+    /// process restarted. The digest is the same value in both forms (`actionDigest`), which is
+    /// exactly why it is persisted.
+    static func == (lhs: OperationIdentity, rhs: OperationIdentity) -> Bool {
+        lhs.owner == rhs.owner
+            && lhs.conversation == rhs.conversation
+            && lhs.turn == rhs.turn
+            && lhs.actionDigest == rhs.actionDigest
+    }
+}
+
 /// One operation's persisted state.
 enum StoredRecord: Equatable {
-    case inProgress
-    case finished(OperationResult)
+    /// The claim WITH the identity it was claimed under: a redelivery is answered only when the
+    /// identity matches byte-for-byte, so the record has to keep it.
+    case inProgress(OperationIdentity)
+    case finished(OperationIdentity, OperationResult)
 }
 
 /// Two properties this type has to provide, and they are different:
@@ -258,20 +367,25 @@ final class OperationJournal {
     ///
     /// The claim is persisted before it is returned, so an interruption after this point is
     /// reconstructible as `.interrupted` rather than silently forgotten.
-    func claim(_ operationID: String) -> OperationClaim {
+    func claim(_ operationID: String, identity: OperationIdentity) -> OperationClaim {
         lock.lock()
         defer { lock.unlock() }
         switch records[operationID] {
-        case .finished(let result)?:
+        case .finished(let recorded, let result)?:
+            // Replay identity is BYTE equality on the original serialized action plus the
+            // owner/conversation/turn triple: same id + same identity = a redelivery answered
+            // from the record; same id + anything else = a different operation, refused.
+            guard recorded == identity else { return .identityConflict }
             return .alreadyRun(result)
-        case .inProgress?:
+        case .inProgress(let recorded)?:
+            guard recorded == identity else { return .identityConflict }
             // A second caller while the first is still executing must not run the mutation:
             // returning `.claimed` here is exactly the both-execute failure the atomic
             // boundary exists to prevent.
             return .inProgress
         case nil:
             if persistenceUnavailable { return .persistenceUnavailable }
-            records[operationID] = .inProgress
+            records[operationID] = .inProgress(identity)
             guard store.save(records) else {
                 // Fail closed: an unrecorded claim must never reach the effect. Revert and
                 // refuse every further claim until persistence is healthy again.
@@ -290,13 +404,13 @@ final class OperationJournal {
     func reconstructInterrupted(_ operationID: String) -> OperationResult? {
         lock.lock()
         defer { lock.unlock() }
-        guard case .inProgress? = records[operationID] else { return nil }
+        guard case .inProgress(let identity)? = records[operationID] else { return nil }
         let result = OperationResult.nonSuccess(.unknown, reason: OperationReason.interruptedInFlight)
         // Persist FIRST, publish second: a failed settlement write must leave the durable
         // record in progress (still interrupted, never executable) and NOT report settled
         // unknown that disk never saw.
         var updated = records
-        updated[operationID] = .finished(result)
+        updated[operationID] = .finished(identity, result)
         guard store.save(updated) else {
             persistenceUnavailable = true
             return nil
@@ -308,12 +422,20 @@ final class OperationJournal {
     /// Records the outcome of a claimed operation.
     /// Settles a claimed operation. Returns false when the settlement could NOT be persisted:
     /// the in-memory record then stays in progress and the caller must not report success.
+    /// Settles a claimed operation UNDER THE IDENTITY IT WAS CLAIMED WITH.
+    ///
+    /// The identity is required, not decorative: a settlement that could name any identity would
+    /// let a second, different operation rewrite a durable result. Callers pass back the identity
+    /// they claimed with, and a settlement that does not match the recorded claim is refused —
+    /// as is settling an operation that was never claimed or is already settled.
     @discardableResult
-    func complete(_ operationID: String, result: OperationResult) -> Bool {
+    func complete(_ operationID: String, identity: OperationIdentity, result: OperationResult) -> Bool {
         lock.lock()
         defer { lock.unlock() }
+        guard case .inProgress(let claimed)? = records[operationID] else { return false }
+        guard claimed == identity else { return false }
         var updated = records
-        updated[operationID] = .finished(result)
+        updated[operationID] = .finished(identity, result)
         guard store.save(updated) else {
             persistenceUnavailable = true
             return false
@@ -326,7 +448,7 @@ final class OperationJournal {
     func result(for operationID: String) -> OperationResult? {
         lock.lock()
         defer { lock.unlock() }
-        if case .finished(let result)? = records[operationID] { return result }
+        if case .finished(_, let result)? = records[operationID] { return result }
         return nil
     }
 
@@ -334,7 +456,10 @@ final class OperationJournal {
     func interruptedOperationIDs() -> [String] {
         lock.lock()
         defer { lock.unlock() }
-        return records.filter { $0.value == .inProgress }.keys.sorted()
+        return records.filter { record in
+            if case .inProgress = record.value { return true }
+            return false
+        }.keys.sorted()
     }
 }
 
@@ -385,9 +510,13 @@ final class FileOperationRecordStore: OperationRecordStore {
         }
         var records: [String: StoredRecord] = [:]
         for (operationID, fields) in raw {
+            // Every record must carry its identity: without one it cannot tell a redelivery from
+            // a different operation, and history we cannot settle that question for is corrupt,
+            // not absent. A record predating identity is therefore unreadable → fail closed.
+            guard let identity = Self.decodeIdentity(fields) else { return .unreadable }
             switch fields["state"] {
             case "inProgress":
-                records[operationID] = .inProgress
+                records[operationID] = .inProgress(identity)
             case "finished":
                 guard let outcome = fields["outcome"].flatMap(OperationOutcome.init(rawValue:)) else {
                     return .unreadable // a bogus outcome is corruption, not absence
@@ -411,10 +540,10 @@ final class FileOperationRecordStore: OperationRecordStore {
                         guard let item = CloudRouteJSONValue(json: value) else { return .unreadable }
                         typed[key] = item
                     }
-                    records[operationID] = .finished(.succeeded(state: typed))
+                    records[operationID] = .finished(identity, .succeeded(state: typed))
                 } else {
                     records[operationID] = .finished(
-                        .nonSuccess(outcome, reason: fields["reason"]!)
+                        identity, .nonSuccess(outcome, reason: fields["reason"]!)
                     )
                 }
             default:
@@ -426,18 +555,45 @@ final class FileOperationRecordStore: OperationRecordStore {
         return .loaded(records)
     }
 
+    /// The persisted identity, or nil when a field is missing/empty. The digest is taken AS
+    /// PERSISTED (see `OperationIdentity.init(persistedOwner:…)`): hashing the stored text again
+    /// would make a restarted process compare `SHA256(digest)` against `SHA256(frame)` and refuse
+    /// a legitimate replay.
+    private static func decodeIdentity(_ fields: [String: String]) -> OperationIdentity? {
+        guard let owner = fields["owner"],
+              let conversation = fields["conversation"],
+              let turn = fields["turn"],
+              let digest = fields["action_sha256"]
+        else { return nil }
+        return OperationIdentity(
+            persistedOwner: owner, conversation: conversation, turn: turn, digest: digest
+        )
+    }
+
+    private static func encodeIdentity(_ identity: OperationIdentity) -> [String: String] {
+        [
+            "owner": identity.owner,
+            "conversation": identity.conversation,
+            "turn": identity.turn,
+            "action_sha256": identity.actionDigest,
+        ]
+    }
+
     @discardableResult
     func save(_ records: [String: StoredRecord]) -> Bool {
         var raw: [String: [String: String]] = [:]
         for (operationID, record) in records {
             switch record {
-            case .inProgress:
-                raw[operationID] = ["state": "inProgress"]
-            case .finished(let result):
+            case .inProgress(let identity):
+                var fields = Self.encodeIdentity(identity)
+                fields["state"] = "inProgress"
+                raw[operationID] = fields
+            case .finished(let identity, let result):
                 var fields: [String: String] = [
                     "state": "finished",
                     "outcome": result.outcome.rawValue,
                 ]
+                for (key, value) in Self.encodeIdentity(identity) { fields[key] = value }
                 if let reason = result.reason { fields["reason"] = reason }
                 if let state = result.state,
                    let data = try? JSONSerialization.data(

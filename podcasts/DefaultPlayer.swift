@@ -7,9 +7,11 @@ import PocketCastsUtils
 
 class DefaultPlayer: PlaybackProtocol, Hashable {
     private var audioMix: AVAudioMix?
-    private var assetTrack: AVAssetTrack?
+    /// Internally settable (task67 seek controls): the typed-surface controls inject real
+    /// AVPlayer instances; production wiring still assigns via loadEpisode.
+    var player: AVPlayer?
 
-    private(set) var player: AVPlayer?
+    private var assetTrack: AVAssetTrack?
 
     private var requiredPlaybackRate: Double = 0
     private var shouldKeepPlaying = false
@@ -245,20 +247,78 @@ class DefaultPlayer: PlaybackProtocol, Hashable {
         }
     }
 
+    /// Original two-argument signature required by `PlaybackProtocol` — forwards to the
+    /// typed overload with no typed completion. Unchanged behavior for every legacy caller.
     func seekTo(_ time: TimeInterval, completion: (() -> Void)?) {
+        seekTo(time, completion: completion, typedCompletion: nil)
+    }
+
+    /// ADDITIVE typed overload (task67 seek-completion slice): reports the effective request
+    /// as ACTUALLY handed to AVPlayer (the quantized CMTime, read back in seconds — not the
+    /// pre-quantization clamp value), the initiating item identity, and the native
+    /// finished/cancelled result. Legacy behavior unchanged.
+    @discardableResult
+    func seekTo(_ time: TimeInterval, completion: (() -> Void)?, typedCompletion: ((SeekExecutionOutcome) -> Void)?, invocationToken: UUID? = nil, deadlineNs: UInt64? = nil) -> SeekIdentity? {
+        guard let player else {
+            let identity = SeekIdentity(invocationToken: invocationToken ?? UUID(), playerID: ObjectIdentifier(self), readTaskID: nil, itemID: nil)
+            typedCompletion?(.engineUnavailable(identity: identity))
+            return identity
+        }
+        let identity = SeekIdentity(invocationToken: invocationToken ?? UUID(), playerID: ObjectIdentifier(self), readTaskID: nil, itemID: player.currentItem.map(ObjectIdentifier.init))
+
+        // DEADLINE AT THE MUTATION SITE (review blocker): an expired budget must not release
+        // the native seek even if the coordinator race already returned — check at the actual
+        // call, on the same monotonic clock the budget is measured with.
+        if let deadlineNs, DispatchTime.now().uptimeNanoseconds >= deadlineNs {
+            typedCompletion?(.expiredBeforeMutation(identity: identity))
+            return identity
+        }
         let adjustedTime = fmax(0.1, time)
 
         let timeToSeekTo = CMTimeMake(value: Int64(adjustedTime * 100), timescale: 100)
+        let effectiveRequest = CMTimeGetSeconds(timeToSeekTo)
         let tolerance = CMTime.zero // in testing setting this to 1 second wasn't honoured and it would sometimes be 10 seconds out. So go for accuracy over seek speed here
 
-        player?.seek(to: timeToSeekTo, toleranceBefore: tolerance, toleranceAfter: tolerance, completionHandler: { finished in
-            if finished {
-                if !self.playing(), self.shouldKeepPlaying {
-                    self.play(completion: nil)
-                }
-                completion?()
-            }
+        player.seek(to: timeToSeekTo, toleranceBefore: tolerance, toleranceAfter: tolerance, completionHandler: { finished in
+            // CONTROLLED NATIVE-CALL SEAM (task67 seek controls): the handler body is an
+            // internal adapter method, invoked here AND directly from the cancelled-control
+            // test to exercise `finished == false` deterministically. Adapter evidence only —
+            // the real AVPlayer call above is unchanged.
+            DefaultPlayer.seekCompletionAdapter(finished: finished,
+                                                observedItemClock: CMTimeGetSeconds(player.currentTime()),
+                                                identity: identity,
+                                                effectiveRequest: effectiveRequest,
+                                                playing: self.playing(),
+                                                shouldKeepPlaying: self.shouldKeepPlaying,
+                                                resumePlay: { if !self.playing(), self.shouldKeepPlaying { self.play(completion: nil) } },
+                                                legacyCompletion: completion,
+                                                typedCompletion: typedCompletion)
         })
+        return identity
+    }
+
+    /// The seek completion-handler body, extracted so tests can drive `finished == false`
+    /// deterministically. Clock observation happens at ENTRY — before resume-play and before
+    /// the arbitrary legacy completion; it is an observation, not an audible-landing claim.
+    static func seekCompletionAdapter(finished: Bool,
+                                      observedItemClock: TimeInterval,
+                                      identity: SeekIdentity,
+                                      effectiveRequest: TimeInterval,
+                                      playing: Bool,
+                                      shouldKeepPlaying: Bool,
+                                      resumePlay: () -> Void,
+                                      legacyCompletion: (() -> Void)?,
+                                      typedCompletion: ((SeekExecutionOutcome) -> Void)?) {
+        if finished {
+            if !playing, shouldKeepPlaying {
+                resumePlay()
+            }
+            legacyCompletion?()
+            typedCompletion?(.completed(identity: identity, effectiveRequest: effectiveRequest, observedItemClock: observedItemClock))
+        } else {
+            // Native engine-level cancellation, previously discarded by the `if finished` guard.
+            typedCompletion?(.cancelled(identity: identity))
+        }
     }
 
     func currentTime() -> TimeInterval {
@@ -1058,5 +1118,15 @@ extension NSError {
             }
         }
         return false
+    }
+}
+
+extension DefaultPlayer: TypedSeekingPlayer {}
+
+extension DefaultPlayer {
+    /// The LIVE engine objects (fresh token) for settlement-time replacement detection.
+    func currentEngineIdentity() -> SeekIdentity? {
+        SeekIdentity(invocationToken: UUID(), playerID: ObjectIdentifier(self),
+                     readTaskID: nil, itemID: player?.currentItem.map(ObjectIdentifier.init))
     }
 }

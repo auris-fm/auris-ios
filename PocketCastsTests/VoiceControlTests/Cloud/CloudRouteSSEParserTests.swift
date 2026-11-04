@@ -142,15 +142,32 @@ final class CloudRouteClientTextParserTests: XCTestCase {
     /// through to the event — the executor's journal claim and refusal gate key on the identity,
     /// and a parser that drops it forces the exact legacy fallback the contract forbids. Frames
     /// without the fields (existing local-path holds) parse as nils.
-    func testParsesAppOperationIdentityOnActionFrames() {
-        let withIdentity = CloudRouteClient.parseTextFrame(
-            #"{"type":"action","operation_id":"6f1c…","capability_version":"v7","tool":"playback","action":"pause","params":{}}"#
-        )
+    func testParsesAppOperationIdentityOnActionFrames() throws {
+        // A SUCCESSFUL-PARSE fixture, so it must carry an identity the contract actually admits:
+        // a server-issued UUID and the pinned `app-ops/1`. The previous values (`6f1c…` / `v7`)
+        // are not an identity the wire permits, so the strict gate refused them and this case
+        // asserted a parse the contract forbids. Malformed-identity zero-effect coverage lives in
+        // `testMalformedIdentityFramesProduceNoEvent`, which is a different claim.
+        let operationId = "6f1c2b40-9d7e-4a15-8c63-2b0f9a4e71d5"
+        let frame = #"{"type":"action","operation_id":"\#(operationId)","capability_version":"app-ops/1","tool":"playback","action":"pause","params":{}}"#
+        let withIdentity = CloudRouteClient.parseTextFrame(frame)
+        // THE EXACT ORIGINAL UTF-8 BYTES are part of the parsed event: replay identity is byte
+        // equality on the received payload, so a snapshot that dropped or re-encoded these would
+        // let the same operation be replayed as a different one.
+        //
+        // The expectation is the fixture's OWN bytes, written out literally. Computing it with
+        // `AppOperationRequest.actionPayloadBytes` — the extractor the parser itself calls — would
+        // make the assertion agree with the implementation by construction: if the extractor
+        // trimmed or re-encoded the payload, both sides would move together and this control could
+        // never catch it. The frame carries no transport framing, so its UTF-8 bytes ARE the
+        // payload, and the equality below is the independent check.
+        let expectedBytes = Data(frame.utf8)
         XCTAssertEqual(
             withIdentity,
             [.action(tool: "playback", action: "pause", params: [:],
-                     operationId: "6f1c…", capabilityVersion: "v7")],
-            "operation_id and capability_version ride the action event"
+                     operationId: operationId, capabilityVersion: "app-ops/1",
+                     actionBytes: expectedBytes)],
+            "operation_id, capability_version and the original bytes ride the action event"
         )
         let withoutIdentity = CloudRouteClient.parseTextFrame(
             #"{"type":"action","tool":"playback","action":"pause","params":{}}"#
@@ -163,6 +180,37 @@ final class CloudRouteClientTextParserTests: XCTestCase {
         )
     }
 
+    /// MALFORMED IDENTITY, ZERO EFFECT — deliberately separate from the successful-parse case
+    /// above. Each frame below declares at least one identity field and therefore IS an
+    /// app-operation attempt; none of them may produce an event, because an event that reaches
+    /// the sink either claims an operation under an identity the wire never sanctioned or falls
+    /// back to the legacy playback path. Both are forbidden, so the answer is no event at all.
+    func testMalformedIdentityFramesProduceNoEvent() {
+        let cases: [(String, String)] = [
+            ("a non-UUID operation_id",
+             #"{"type":"action","operation_id":"6f1c…","capability_version":"app-ops/1","tool":"playback","action":"pause","params":{}}"#),
+            ("a non-canonical capability_version",
+             #"{"type":"action","operation_id":"6f1c2b40-9d7e-4a15-8c63-2b0f9a4e71d5","capability_version":"v7","tool":"playback","action":"pause","params":{}}"#),
+            ("operation_id without capability_version (incomplete pair)",
+             #"{"type":"action","operation_id":"6f1c2b40-9d7e-4a15-8c63-2b0f9a4e71d5","tool":"playback","action":"pause","params":{}}"#),
+            ("capability_version without operation_id (incomplete pair)",
+             #"{"type":"action","capability_version":"app-ops/1","tool":"playback","action":"pause","params":{}}"#),
+            ("a blank operation_id",
+             #"{"type":"action","operation_id":"","capability_version":"app-ops/1","tool":"playback","action":"pause","params":{}}"#),
+            // A field PRESENT BUT BLANK still declares v1. It is not the same as omitting the
+            // field, and it may not be treated as identity-less playback — that is exactly the
+            // collapse a value-only test cannot see.
+            ("a blank capability_version",
+             #"{"type":"action","operation_id":"6f1c2b40-9d7e-4a15-8c63-2b0f9a4e71d5","capability_version":"","tool":"playback","action":"pause","params":{}}"#),
+            ("both identity fields blank",
+             #"{"type":"action","operation_id":"","capability_version":"","tool":"playback","action":"pause","params":{}}"#),
+        ]
+        for (label, frame) in cases {
+            XCTAssertEqual(CloudRouteClient.parseTextFrame(frame), [],
+                           "\(label) must yield NO event: no v1 claim and no legacy fallback")
+        }
+    }
+
     func testParsesTokenOnTheSocket() {
         XCTAssertEqual(
             CloudRouteClient.parseTextFrame(#"{"type":"token","text":"forty-two"}"#),
@@ -172,7 +220,7 @@ final class CloudRouteClientTextParserTests: XCTestCase {
     }
 
     /// The `usage` counts have exactly **one** shape on the wire, and a frame
-    /// that omits it parses to no recorded cost rather than to a top-level
+    /// that omits it parses to no recorded cost rather than to a tfeba06e1-a1ae-4898-ac35-65331a401794
     /// fallback.
     ///
     /// This is the test that pins the *absence* of that fallback: it fails if one
@@ -191,7 +239,7 @@ final class CloudRouteClientTextParserTests: XCTestCase {
             "the Worker's nested shape is read"
         )
 
-        // Flat top-level counts are not a shape the wire defines: they must not
+        // Flat tfeba06e1-a1ae-4898-ac35-65331a401794 counts are not a shape the wire defines: they must not
         // be picked up, so a frame carrying only those records nothing.
         let flat = CloudRouteClient.parseTextFrame(
             #"{"type":"done","input_tokens":7,"output_tokens":3}"#
@@ -199,7 +247,7 @@ final class CloudRouteClientTextParserTests: XCTestCase {
         XCTAssertEqual(
             flat,
             [.done(usage: CloudTurnUsage(inputTokens: nil, outputTokens: nil))],
-            "top-level counts are not a fallback shape"
+            "tfeba06e1-a1ae-4898-ac35-65331a401794 counts are not a fallback shape"
         )
     }
 
@@ -232,7 +280,9 @@ final class CloudRouteClientTextParserTests: XCTestCase {
             #"{"type":"action","tool":"playback","action":"seek_to","params":{"reference_position_ms":1234567}}"#
         )
         XCTAssertEqual(events.count, 1)
-        if case .action(let tool, let action, let params, _, _) = events.first {
+        if case .action(tool: let tool, action: let action, params: let params, operationId: _,
+                        capabilityVersion: _, actionBytes: _, precondition: _,
+                        parameterViolation: _) = events.first {
             XCTAssertEqual(tool, "playback")
             XCTAssertEqual(action, "seek_to")
             XCTAssertEqual(params["reference_position_ms"]?.int64Value, 1_234_567)

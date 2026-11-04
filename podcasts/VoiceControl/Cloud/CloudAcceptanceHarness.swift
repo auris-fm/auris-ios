@@ -84,7 +84,9 @@ enum CloudAcceptanceHarness {
                     requestId: envelope.requestId,
                     conversationId: conversationId,
                     mode: mode
-                )
+                ),
+                // Nonadvertising acceptance scratch: no app-ops declaration, wire shape unchanged.
+                appOperationSupport: nil
             )
             let (stream, record) = client.collectAcceptance(request: text, context: context, turn: turn)
             for await _ in stream {}

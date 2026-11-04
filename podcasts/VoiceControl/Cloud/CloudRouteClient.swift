@@ -384,7 +384,6 @@ final class CloudRouteClient {
         }
     }
 
-    /// TEST SEAM: retire a turn's socket registration EXACTLY as a consumer close would, so a
     /// control can produce the `.undelivered` branch through the production send path instead of
     /// calling state transitions directly. Identity-checked in `retireSocket`, so it cannot retire
     /// a different turn's registration.
@@ -523,8 +522,65 @@ final class CloudRouteClient {
             return true
         }
 
+        // Resolve the validated token-and-account snapshot ONCE for this turn. Everything that
+        // needs to know "whose turn is this" reads this object: the authenticate frame takes its
+        // credential from it, and the sink journals app operations under its account. Two reads
+        // here would let a refresh land in between and pair one account's owner with another
+        // credential.
+        // NAMED `authenticatedSession`, not `session`: this type holds `private let session:
+        // URLSession`, and a local named `session` shadows the WebSocket transport for the rest of
+        // this scope — which is exactly how `session.webSocketTask(with:)` stopped compiling.
+        // TWO DIFFERENT QUESTIONS, resolved ONCE each, and never crossed.
+        //
+        // (1) PRINCIPAL — a validated token+account pair that may claim app operations. Nil for
+        //     providers without an established principal (the trust-on-first-use bearer has none
+        //     until the issuer lands). Nil here DISABLES v1 capability advertisement and
+        //     operation admission; it does NOT fail the turn.
+        // (2) TRANSPORT credential — what carries an ordinary turn. The TOT bearer satisfies
+        //     this. A turn with neither is genuinely unauthorized.
+        //
+        // Previous revisions used the snapshot for BOTH, so removing the invented principal from
+        // the static provider also removed its ability to open any turn at all. That is the bug
+        // this split fixes: legacy transport keeps working while app operations stay fail-closed.
+        let authenticatedSession = await self.tokenProvider.authenticatedSession()
+        let transportCredential: String?
+        if let authenticatedSession {
+            // A provider that established a principal presents THAT credential — one acquisition,
+            // no second token. Acquiring independently here could return a refreshed credential
+            // the snapshot's account was not minted for.
+            transportCredential = authenticatedSession.accessToken
+        } else {
+            // No principal: fall back to a transport-only credential. Whatever comes back is used
+            // for authentication framing alone and is never paired with an account.
+            transportCredential = await self.tokenProvider.transportCredential()
+        }
+        guard let transportCredential, !transportCredential.isEmpty else {
+            FileLog.shared.addMessage("[CloudRoute] unauthorized: token provider \(type(of: self.tokenProvider)) produced no transport credential — the turn was not submitted")
+            continuation.yield(.error(source: .requestConstruction, code: "unauthorized", message: ""))
+            continuation.finish()
+            return true
+        }
+
+        // Publish the snapshot on the turn socket BEFORE the frame goes out, so the app-operation
+        // gate reads the account of the session that actually opened this connection. Nil (no
+        // principal) is published as nil: the gate must fail closed, not inherit a stale owner.
+        // PUBLISH AT THE ACQUISITION. This is the only write, so the account is always the one
+        // that supplied the credential above — never a value swapped in afterwards by a test seam,
+        // which would let a turn be journaled under an account that never sent its authenticate
+        // frame. Publishing is a plain property assignment: readers COMPLETE their owner when they
+        // first consume an action, so nothing blocks the consumer on a second continuation system,
+        // and an early return before this line simply leaves the socket unauthenticated.
+        // FREEZE THE ORIGINAL ACQUISITION ONCE, BEFORE the mutable publication below. The owner of
+        // this turn's operations is taken from this immutable snapshot, so a later rebinding of
+        // `authenticatedSession` can change the live-session re-check (as it must) without ever
+        // relabelling the identity the turn was admitted under.
+        resultSocket?.freezeAcquisition(authenticatedSession)
+        resultSocket?.authenticatedSession = authenticatedSession
+
+
         // Build the authentication frame (cloud-assistant.md).
         guard let authFrame = await Self.buildAuthFrame(
+            credential: transportCredential,
             tokenProvider: self.tokenProvider,
             request: request,
             context: context,
@@ -763,6 +819,7 @@ final class CloudRouteClient {
     /// contract tests pin — so the frame the app sends and the frame the tests
     /// assert on are one construction rather than two that can drift.
     private static func buildAuthFrame(
+        credential: String,
         tokenProvider: CloudTokenProviding,
         request: String,
         context: CloudRouteContext,
@@ -770,7 +827,12 @@ final class CloudRouteClient {
         sourceTranscript: String?,
         sourceLanguage: String?
     ) async -> [String: Any]? {
-        guard let credential = await tokenProvider.token() else {
+        // The credential was resolved by the caller and passed in. This frame must not acquire
+        // its own token: a second acquisition can return a different credential (a refresh, an
+        // account switch) than the one the turn's operations are journaled under — exactly the
+        // mismatch the single-resolution rule exists to prevent. Where a principal exists, this
+        // credential IS the snapshot's, so framing and journaling cannot disagree.
+        guard !credential.isEmpty else {
             // Name the failure. A missing credential surfaced only as a generic `unauthorized`
             // terminal, so a turn that never dialled was indistinguishable from a server
             // rejecting the token — and nothing recorded which provider was consulted.
@@ -839,8 +901,18 @@ final class CloudRouteClient {
     /// accumulation is needed. Internal so the parser tests can exercise it
     /// directly.
     static func parseTextFrame(_ text: String) -> [CloudRouteEvent] {
-        guard let raw = text.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: raw) as? [String: Any]
+        guard let raw = text.data(using: .utf8) else { return [] }
+        // PRE-DECODE CONTROL-ENVELOPE BOUND. This has to happen on the received BYTES and before
+        // the first JSON decoder runs: a bound checked after parsing costs everything the frame
+        // made the parser allocate, which is precisely the cost the bound exists to refuse.
+        //
+        // It deliberately applies to EVERY control-envelope frame, not only to ones that turn out
+        // to be identified app operations: an oversize frame is dropped before its `type` is even
+        // known, so a payload cannot buy itself a parse by omitting `operation_id`.
+        if case .failure = AppOperationRequest.admitEnvelopeSize(rawBytes: raw) {
+            return []
+        }
+        guard let json = try? JSONSerialization.jsonObject(with: raw) as? [String: Any]
         else {
             return []
         }
@@ -858,14 +930,79 @@ final class CloudRouteClient {
             return [.connected(codec: codec)]
 
         case "action":
+            // IDENTITY GATE (cloud-assistant.md @ bf5fb219). This runs AFTER the pre-decode bound
+            // above, on the already-parsed object, so parsing cost was already bounded. Its only
+            // job is the identity pair.
+            //
+            // BOUNDED TOP-LEVEL IDENTITY DETECTION means exactly: look at the two top-level
+            // fields, and nothing deeper. A frame that declares ANY part of the v1 identity —
+            // including one half, an empty string, or a wrong type — is an app-operation attempt
+            // and must be refused. It must NEVER fall through to the playback effect path just
+            // because the pair is incomplete: "partial v1 is malformed" is the contract's rule,
+            // and falling back is how an unaccountable operation executes as a legacy one.
+            // The single byte-boundary extractor defines the replay identity for BOTH paths.
+            let payloadBytes = AppOperationRequest.actionPayloadBytes(rawFrame: raw) ?? raw
+            switch AppOperationRequest.classify(json: json, payloadBytes: payloadBytes) {
+            case .identified(let admitted):
+                guard let tool = json["tool"] as? String, !tool.isEmpty,
+                      let action = json["action"] as? String, !action.isEmpty,
+                      // Typed parameter/precondition admission: absent is an empty bag, present
+                      // but not an object — or holding a value that would need boolean/number
+                      // coercion — yields no event at all rather than a silently reinterpreted
+                      // request. Nothing executes on a guessed type.
+                      let rawParams = AppOperationRequest.typedParams(json),
+                      let rawPrecondition = AppOperationRequest.typedPrecondition(json)
+                else { return [] }
+                let params = CloudRouteJSONValue.object(from: rawParams)
+                let precondition = CloudRouteJSONValue.object(from: rawPrecondition)
+                // ACTION-SPECIFIC ADMISSION. Generic decoding above proved the bags are objects;
+                // this proves the VALUES are the kinds this action reads, that its mandatory
+                // fields are present, and that any mandatory target identity came along. A
+                // violation yields no event: the sink must never receive a request whose
+                // parameters it would have to reinterpret to execute.
+                //
+                // AN INVALID IDENTIFIED REQUEST IS STILL ANSWERED. A violation does not delete the
+                // frame: the identity is intact, so the operation can be settled durably with the
+                // honest reason (`invalid_request`, or the more specific malformed/stale target).
+                // Dropping it would leave the server waiting on an operation it issued and nobody
+                // answered — and would make the invalid path untestable without weakening
+                // admission. The violation travels with the event so the sink can name it.
+                let violation: AppOperationRequest.ParameterViolation?
+                switch AppOperationRequest.validate(
+                    action: action, params: params, precondition: precondition) {
+                case .success:
+                    violation = nil
+                case let .failure(reason):
+                    violation = reason
+                }
+                // REPLAY IDENTITY = the exact received payload bytes, as defined by the single
+                // extractor (no transport framing, original whitespace preserved).
+                return [.action(tool: tool, action: action, params: params,
+                                operationId: admitted.operationId,
+                                capabilityVersion: admitted.capabilityVersion,
+                                actionBytes: admitted.actionBytes,
+                                precondition: precondition,
+                                parameterViolation: violation)]
+            case .malformedIdentity:
+                return []   // partial v1: no event, no effect, no legacy fallback
+            case .unidentified:
+                break        // no identity field of any kind: the pre-v1 playback path
+            }
             guard let tool = json["tool"] as? String,
                   let action = json["action"] as? String
             else { return [] }
             let params = (json["params"] as? [String: Any])
                 .map { CloudRouteJSONValue.object(from: $0) } ?? [:]
+            let precondition = (json["precondition"] as? [String: Any])
+                .map { CloudRouteJSONValue.object(from: $0) } ?? [:]
+            // REPLAY IDENTITY = the exact serialized bytes. Re-encoding the parsed body here
+            // would fabricate identity (different key order, different numbers), so the raw
+            // payload is carried verbatim and bounded by `AppOperationRequest` at admission.
             return [.action(tool: tool, action: action, params: params,
-                            operationId: json["operation_id"] as? String,
-                            capabilityVersion: json["capability_version"] as? String)]
+                            operationId: nil,
+                            capabilityVersion: nil,
+                            actionBytes: nil,
+                            precondition: precondition)]
 
         case "token":
             // `token` rides the **socket**: the Worker's `lifecycle.ts` calls
@@ -948,8 +1085,17 @@ extension CloudRouteJSONValue {
         switch any {
         case nil, is NSNull: return .null
         case let s as String: return .string(s)
-        case let b as Bool: return .bool(b)
         case let n as NSNumber:
+            // A JSON BOOLEAN MUST BE TESTED BEFORE NUMBERS, and by TYPE IDENTITY rather than by
+            // `as? Bool`. On Apple platforms every number bridges to `Bool` (`1 as? Bool` is
+            // true, `0 as? Bool` is false), so a `case let b as Bool` arm placed first silently
+            // turns the integer 1 into `.bool(true)` and 0 into `.bool(false)`. That is not a
+            // cosmetic mislabel: it made every legitimate integer parameter look like a boolean
+            // to `ActionParameter.matches`, so valid requests failed type validation.
+            // `CloudRouteEvent.swift`'s decoder already gets this right; this one must agree.
+            if CFGetTypeID(n) == CFBooleanGetTypeID() {
+                return .bool(n.boolValue)
+            }
             let d = n.doubleValue
             if d.rounded() == d, d >= Double(Int64.min), d < Double(Int64.max) {
                 return .int(n.int64Value)

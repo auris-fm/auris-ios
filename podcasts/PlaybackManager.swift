@@ -161,6 +161,18 @@ class PlaybackManager: ServerPlaybackDelegate {
         return player?.playing() ?? false
     }
 
+    /// A post-action playback observation that keeps UNAVAILABLE separate from OBSERVED-PAUSED
+    /// (voice-intents.md @ 818c8f75). `isPlaying` collapses a missing engine into `false`, which
+    /// would report an unobservable state as a successful pause; this returns `nil` when there
+    /// is no engine to read (no player), `.some(false)` for an observed not-playing state (an
+    /// already-paused engine included), and `.some(true)` for an observed playing state. It
+    /// reads ONLY the actual current engine: `aboutToPlay` is pending intent, not an engine
+    /// reading, and keeps its legacy role in `isPlaying` only.
+    func observedPlaybackState() -> Bool? {
+        guard let player else { return nil }
+        return player.playing()
+    }
+
     /// True while the shared audio session is still in use by playback.
     ///
     /// `isPlaying` goes false the instant the user pauses, but playback keeps
@@ -545,6 +557,22 @@ class PlaybackManager: ServerPlaybackDelegate {
 
     func seekTo(time: TimeInterval, startPlaybackAfterSeek: Bool = false, seekHint: SeekHint? = nil) {
         seekTo(time: time, syncChanges: SyncManager.isUserLoggedIn(), startPlaybackAfterSeek: startPlaybackAfterSeek, seekHint: seekHint)
+    }
+
+    /// ADDITIVE (task67 seek_relative slice): identified seek — forwards to the live player's
+    /// typed overload with the caller's invocation token. Player not a typed seeker or absent:
+    /// returns nil with NO fallback effect released — the identified path settles unknown
+    /// fail-closed, never dresses the fire-and-forget wrapper as evidence.
+    func seekToIdentified(time: TimeInterval, invocationToken: UUID, deadlineNs: UInt64?, typedCompletion: @escaping (SeekExecutionOutcome) -> Void) -> SeekIdentity? {
+        guard let typedPlayer = player as? TypedSeekingPlayer else { return nil }
+        return typedPlayer.seekTo(time, completion: nil, typedCompletion: typedCompletion,
+                                  invocationToken: invocationToken, deadlineNs: deadlineNs)
+    }
+
+    /// The LIVE engine objects for settlement-time replacement detection (review blocker:
+    /// the old engine's callback must not settle against the replacement's state).
+    func identifiedEngineIdentity() -> SeekIdentity? {
+        (player as? TypedSeekingPlayer)?.currentEngineIdentity()
     }
 
     func seekToFromSync(time: TimeInterval, syncChanges: Bool, startPlaybackAfterSeek: Bool) {

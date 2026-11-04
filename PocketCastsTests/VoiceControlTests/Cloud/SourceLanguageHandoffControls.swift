@@ -337,6 +337,11 @@ final class SourceLanguageHandoffControls: XCTestCase {
 
     /// Records ACTUAL local playback invocations (reviewer 9d6dc5a7).
     final class RecordingPlaybackSink: VoicePlaybackSink {
+
+    /// App-operation observation (voice-intents.md @ 818c8f75): this double has no notion of an
+    /// unavailable engine, so it mirrors `isPlaying`.
+    var observedPlaying: Bool? { isPlaying }
+
         private(set) var pauseCalls = 0
         var isPlaying = false
         func pause() -> VoiceResponse { pauseCalls += 1; return .earcon(.success) }

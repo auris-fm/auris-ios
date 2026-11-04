@@ -41,8 +41,10 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
     private let useVoiceBoostN = AtomicBool()
     private var audioFileSampleRate: Double = 0
 
-    private var playBufferManager: PlayBufferManager?
-    private var audioReadTask: AudioReadTask?
+    var playBufferManager: PlayBufferManager?
+    /// Internally settable (task67 seek controls): the typed-surface controls inject real
+    /// read tasks; production wiring still assigns via loadEpisode.
+    var audioReadTask: AudioReadTask?
     private var audioPlayTask: AudioPlayTask?
     private var audioFile: AVAudioFile?
 
@@ -58,6 +60,26 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
 
     private var seeking = false
     private var lastSeekTime = 0 as TimeInterval
+    /// Whether a seek mutation is pending (read-only probe; also the connected-control seam).
+    var isSeekPending: Bool { seekStateLock.lock(); defer { seekStateLock.unlock() }; return seeking }
+    /// Which invocation's SPECULATIVE state (`lastSeekTime`/`seeking`) currently owns the
+    /// engine (review 4b784fa2): an expired request must not clear or rewrite a newer seek's
+    /// state, and must not publish its target at all when it expires before mutation.
+    private var seekingOwnerToken: UUID?
+    /// OWNERSHIP ATOMICITY (review 61ebb558): the serial queue publishes the speculative
+    /// state while the read-task's expiry/completion closures check and retire it on other
+    /// queues — the ownership COMPARISON and the state transition must be one locked
+    /// transaction, and `currentTime()` snapshots under the same lock.
+    private let seekStateLock = NSLock()
+    private func withSeekState<T>(_ body: () -> T) -> T {
+        seekStateLock.lock()
+        defer { seekStateLock.unlock() }
+        return body()
+    }
+    /// INJECTABLE MONOTONIC CLOCK for the hop-1 (serialSeekQueue) deadline check and tests;
+    /// production reads the real uptime clock. The hop-2 (read-task lock) check has its own
+    /// injectable clock on AudioReadTask.
+    var nowUptimeNs: () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }
 
     // this lock is to avoid race conditions where you're destroying the player while in the middle of setting it up (since the play method does its work asynchronously)
     private lazy var playerLock = NSLock()
@@ -249,15 +271,73 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
         }
     }
 
+    /// Original two-argument signature required by `PlaybackProtocol` — forwards to the
+    /// typed overload with no typed completion. Unchanged behavior for every legacy caller.
     func seekTo(_ time: TimeInterval, completion: (() -> Void)?) {
-        guard let readOperation = audioReadTask else { return }
+        seekTo(time, completion: completion, typedCompletion: nil)
+    }
+
+    /// ADDITIVE typed overload (task67 seek-completion slice): identity-carrying outcomes
+    /// alongside the unchanged legacy completion.
+    @discardableResult
+    func seekTo(_ time: TimeInterval, completion: (() -> Void)?, typedCompletion: ((SeekExecutionOutcome) -> Void)?, invocationToken: UUID? = nil, deadlineNs: UInt64? = nil) -> SeekIdentity? {
+        // The identity is minted BY VALUE before the queues, so a typed delivery never
+        // depends on `self` being alive.
+        guard let readOperation = audioReadTask else {
+            // Actual surface capability: the read task is absent — decided synchronously at
+            // the initiating call; nothing is scheduled and nothing awaits.
+            let identity = SeekIdentity(invocationToken: invocationToken ?? UUID(), playerID: ObjectIdentifier(self), readTaskID: nil, itemID: nil)
+            typedCompletion?(.engineUnavailable(identity: identity))
+            return identity
+        }
+        let identity = SeekIdentity(invocationToken: invocationToken ?? UUID(), playerID: ObjectIdentifier(self), readTaskID: ObjectIdentifier(readOperation), itemID: nil)
 
         serialSeekQueue.async { [weak self] in
-            guard let self else { return }
+            // DEADLINE AT THE MUTATION SITE: the queue can delay this block arbitrarily past
+            // the coordinator's race return — an expired budget must not mutate here. Checked
+            // INSIDE the block, on the same monotonic clock the budget is measured with.
+            guard let self else {
+                // Engine gone BEFORE scheduling: the typed evidence still delivers (it is all
+                // by value); the legacy path stays silent here, exactly as it is today.
+                typedCompletion?(.engineUnavailable(identity: identity))
+                return
+            }
 
-            lastSeekTime = max(0.1, time)
-            seeking = true
-            readOperation.seekTo(time, completion: { [weak self] seekedToEnd in
+            // Hop-1 deadline check (serialSeekQueue) on the same monotonic clock as the
+            // budget; an expired budget must not mutate here and must publish NOTHING.
+            if let deadlineNs, self.nowUptimeNs() >= deadlineNs {
+                typedCompletion?(.expiredBeforeMutation(identity: identity))
+                return
+            }
+            // SPECULATIVE STATE WITH OWNERSHIP: published only after both expiry checks are
+            // plausible, and tagged with THIS invocation so a late expiry (hop 2) restores it
+            // only if this invocation still owns it. Publish is one locked transaction.
+            let ownershipToken = identity.invocationToken
+            let previousLastSeekTime = withSeekState {
+                let previous = self.lastSeekTime
+                self.lastSeekTime = max(0.1, time)
+                self.seeking = true
+                self.seekingOwnerToken = ownershipToken
+                return previous
+            }
+            readOperation.seekTo(time, deadlineNs: deadlineNs, expired: { [weak self, ownershipToken, previousLastSeekTime, typedCompletion, identity] in
+                // The locked mutation site verified NO effect was issued. Restore the
+                // speculative state ONLY if this invocation STILL owns it, atomically — an
+                // old expired request must not clear or rewrite a newer seek's pending state.
+                guard let self else {
+                    typedCompletion?(.expiredBeforeMutation(identity: identity))
+                    return
+                }
+                let restored: Bool = self.withSeekState {
+                    guard self.seekingOwnerToken == ownershipToken else { return false }
+                    self.lastSeekTime = previousLastSeekTime
+                    self.seeking = false
+                    self.seekingOwnerToken = nil
+                    return true
+                }
+                _ = restored
+                typedCompletion?(.expiredBeforeMutation(identity: identity))
+            }, completion: { [weak self] seekedToEnd in // strong self below for the locked retire
                 if !seekedToEnd {
                     completion?()
                 } else if !(self?.playBufferManager?.haveNotifiedPlayer.value ?? false) {
@@ -266,14 +346,33 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
                     PlaybackManager.shared.playerDidFinishPlayingEpisode()
                 }
 
-                self?.seeking = false
+                guard let self else { return }
+                _ = self.withSeekState {
+                    // Only the owning invocation retires the speculative state, atomically;
+                    // a stale completion must not clear a newer seek's pending state.
+                    guard self.seekingOwnerToken == ownershipToken else { return false }
+                    self.seeking = false
+                    self.seekingOwnerToken = nil
+                    return true
+                }
+            }, typedCapture: { capture in
+                // The immutable locked capture travels with the per-invocation identity by
+                // value; this closure never touches `self`, so weak-self disappearance cannot
+                // block a typed delivery.
+                if capture.seekedToEnd {
+                    typedCompletion?(.endOfFile(identity: identity, requestedTime: capture.requestedTime, engineTotalSeconds: capture.engineTotalSeconds))
+                } else if let frame = capture.landedFrame {
+                    typedCompletion?(.cursorRepositioned(identity: identity, requestedTime: capture.requestedTime, landedFrame: frame, landedSeconds: capture.landedSeconds ?? Double(frame) / max(self.audioFileSampleRate, 1)))
+                }
             })
         }
+        return identity
     }
 
     func currentTime() -> TimeInterval {
-        if seeking {
-            return lastSeekTime
+        let (pending, target) = withSeekState { (seeking, lastSeekTime) }
+        if pending {
+            return target
         }
 
         if let audioFile, let curFrame = currentFrame() {
@@ -560,4 +659,14 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
     func setEngineForTesting(_ engine: AVAudioEngine?) { self.engine = engine }
     #endif
 
+}
+
+extension EffectsPlayer: TypedSeekingPlayer {}
+
+extension EffectsPlayer {
+    /// The LIVE engine objects (fresh token) for settlement-time replacement detection.
+    func currentEngineIdentity() -> SeekIdentity? {
+        SeekIdentity(invocationToken: UUID(), playerID: ObjectIdentifier(self),
+                     readTaskID: audioReadTask.map(ObjectIdentifier.init), itemID: nil)
+    }
 }

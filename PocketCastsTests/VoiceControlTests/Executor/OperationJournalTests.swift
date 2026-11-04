@@ -12,28 +12,41 @@ final class OperationJournalTests: XCTestCase {
         return (OperationJournal(store: store), store)
     }
 
+    /// A stable identity for tests that do not care which one: the journal's rules about replay,
+    /// conflict and interruption are all expressed RELATIVE TO an identity, so every claim and
+    /// settlement carries one.
+    private func identity(
+        owner: String = "owner-1",
+        conversation: String = "conv-1",
+        turn: String = "turn-1",
+        bytes: String = #"{"tool":"playback","action":"pause"}"#
+    ) -> OperationIdentity {
+        OperationIdentity(owner: owner, conversation: conversation, turn: turn,
+                          actionBytes: Data(bytes.utf8))
+    }
+
     // MARK: - claim
 
     func test_firstClaim_isClaimed() {
         let (journal, _) = makeJournal()
-        XCTAssertEqual(journal.claim("op-1"), .claimed)
+        XCTAssertEqual(journal.claim("op-1", identity: identity()), .claimed)
     }
 
     func test_secondClaimForTheSameOperation_isAlreadyRun() {
         let (journal, _) = makeJournal()
-        XCTAssertEqual(journal.claim("op-1"), .claimed)
-        journal.complete("op-1", result: .succeeded(state: ["position_seconds": .int(0)]))
-        XCTAssertEqual(journal.claim("op-1"), .alreadyRun(.succeeded(state: ["position_seconds": .int(0)])))
+        XCTAssertEqual(journal.claim("op-1", identity: identity()), .claimed)
+        journal.complete("op-1", identity: identity(), result: .succeeded(state: ["position_seconds": .int(0)]))
+        XCTAssertEqual(journal.claim("op-1", identity: identity()), .alreadyRun(.succeeded(state: ["position_seconds": .int(0)])))
     }
 
     func test_differentOperations_claimIndependently() {
         let (journal, _) = makeJournal()
-        XCTAssertEqual(journal.claim("op-1"), .claimed)
-        XCTAssertEqual(journal.claim("op-2"), .claimed)
-        journal.complete("op-1", result: .nonSuccess(.refused, reason: OperationReason.clientPolicy))
-        journal.complete("op-2", result: .succeeded(state: ["position_seconds": .int(0)]))
-        XCTAssertEqual(journal.claim("op-1"), .alreadyRun(.nonSuccess(.refused, reason: OperationReason.clientPolicy)))
-        XCTAssertEqual(journal.claim("op-2"), .alreadyRun(.succeeded(state: ["position_seconds": .int(0)])))
+        XCTAssertEqual(journal.claim("op-1", identity: identity()), .claimed)
+        XCTAssertEqual(journal.claim("op-2", identity: identity()), .claimed)
+        journal.complete("op-1", identity: identity(), result: .nonSuccess(.refused, reason: OperationReason.clientPolicy))
+        journal.complete("op-2", identity: identity(), result: .succeeded(state: ["position_seconds": .int(0)]))
+        XCTAssertEqual(journal.claim("op-1", identity: identity()), .alreadyRun(.nonSuccess(.refused, reason: OperationReason.clientPolicy)))
+        XCTAssertEqual(journal.claim("op-2", identity: identity()), .alreadyRun(.succeeded(state: ["position_seconds": .int(0)])))
     }
 
     func test_aSecondClaimWhileInProgress_doesNotClaimAgain() {
@@ -41,21 +54,27 @@ final class OperationJournalTests: XCTestCase {
         // execute nor receive an outcome, because nothing has happened yet. Returning
         // `.claimed` again would admit a second execution — the both-execute failure.
         let (journal, _) = makeJournal()
-        XCTAssertEqual(journal.claim("op-1"), .claimed)
-        XCTAssertEqual(journal.claim("op-1"), .inProgress)
+        XCTAssertEqual(journal.claim("op-1", identity: identity()), .claimed)
+        XCTAssertEqual(journal.claim("op-1", identity: identity()), .inProgress)
         XCTAssertNil(journal.result(for: "op-1"))
 
-        journal.complete("op-1", result: .succeeded(state: ["position_seconds": .int(0)]))
-        XCTAssertEqual(journal.claim("op-1"), .alreadyRun(.succeeded(state: ["position_seconds": .int(0)])))
+        journal.complete("op-1", identity: identity(), result: .succeeded(state: ["position_seconds": .int(0)]))
+        XCTAssertEqual(journal.claim("op-1", identity: identity()), .alreadyRun(.succeeded(state: ["position_seconds": .int(0)])))
     }
 
-    func test_complete_replacesTheRecordedResult() {
+    /// A settlement is FINAL. The former rule here — "a second complete() replaces the recorded
+    /// result" — is exactly the rewrite the review forbade: a durable result must not be
+    /// mutable by a later, differently-shaped settlement of the same id.
+    func test_complete_doesNotReplaceAnAlreadyRecordedResult() {
         let (journal, _) = makeJournal()
-        XCTAssertEqual(journal.claim("op-1"), .claimed)
-        journal.complete("op-1", result: .nonSuccess(.refused, reason: OperationReason.stalePrecondition))
+        XCTAssertEqual(journal.claim("op-1", identity: identity()), .claimed)
+        journal.complete("op-1", identity: identity(), result: .nonSuccess(.refused, reason: OperationReason.stalePrecondition))
         XCTAssertEqual(journal.result(for: "op-1")?.outcome, .refused)
-        journal.complete("op-1", result: .succeeded(state: ["position_seconds": .int(0)]))
-        XCTAssertEqual(journal.result(for: "op-1"), .succeeded(state: ["position_seconds": .int(0)]))
+        XCTAssertFalse(
+            journal.complete("op-1", identity: identity(), result: .succeeded(state: ["position_seconds": .int(0)])),
+            "a settled operation is final"
+        )
+        XCTAssertEqual(journal.result(for: "op-1")?.outcome, .refused, "the recorded refusal stands")
     }
 
     func test_result_forAnUnclaimedOperation_isNil() {
@@ -72,7 +91,7 @@ final class OperationJournalTests: XCTestCase {
         let store = InMemoryOperationRecordStore()
         let first = OperationJournal(store: store)
         // The mutation is in flight when the process dies: claimed, never completed.
-        XCTAssertEqual(first.claim("op-1"), .claimed)
+        XCTAssertEqual(first.claim("op-1", identity: identity()), .claimed)
 
         // A new process reads the same store.
         let second = OperationJournal(store: store)
@@ -83,13 +102,13 @@ final class OperationJournalTests: XCTestCase {
         XCTAssertEqual(reconstructed?.reason, OperationReason.interruptedInFlight)
 
         // Now settled: a redelivery is answered, never executed.
-        XCTAssertEqual(second.claim("op-1"), .alreadyRun(.nonSuccess(.unknown, reason: OperationReason.interruptedInFlight)))
+        XCTAssertEqual(second.claim("op-1", identity: identity()), .alreadyRun(.nonSuccess(.unknown, reason: OperationReason.interruptedInFlight)))
     }
 
     func test_reconstructingAnInterruptedOperation_settlesIt() {
         let store = InMemoryOperationRecordStore()
         let first = OperationJournal(store: store)
-        _ = first.claim("op-1")
+        _ = first.claim("op-1", identity: identity())
         let second = OperationJournal(store: store)
         _ = second.reconstructInterrupted("op-1")
         XCTAssertTrue(second.interruptedOperationIDs().isEmpty, "the record should be settled")
@@ -99,12 +118,12 @@ final class OperationJournalTests: XCTestCase {
     func test_aCompletedOperation_isNotReconstructedAsInterrupted() {
         let store = InMemoryOperationRecordStore()
         let first = OperationJournal(store: store)
-        _ = first.claim("op-1")
-        first.complete("op-1", result: .succeeded(state: ["position_seconds": .int(0)]))
+        _ = first.claim("op-1", identity: identity())
+        first.complete("op-1", identity: identity(), result: .succeeded(state: ["position_seconds": .int(0)]))
 
         let second = OperationJournal(store: store)
         XCTAssertTrue(second.interruptedOperationIDs().isEmpty)
-        XCTAssertEqual(second.claim("op-1"), .alreadyRun(.succeeded(state: ["position_seconds": .int(0)])))
+        XCTAssertEqual(second.claim("op-1", identity: identity()), .alreadyRun(.succeeded(state: ["position_seconds": .int(0)])))
     }
 
     func test_anUnclaimedOperationSurvivesRestartWithoutBecomingInterrupted() {
@@ -114,7 +133,7 @@ final class OperationJournalTests: XCTestCase {
         _ = OperationJournal(store: store)
         let restarted = OperationJournal(store: store)
         XCTAssertTrue(restarted.interruptedOperationIDs().isEmpty)
-        XCTAssertEqual(restarted.claim("op-1"), .claimed)
+        XCTAssertEqual(restarted.claim("op-1", identity: identity()), .claimed)
     }
 
     // MARK: - the result contract
@@ -179,7 +198,7 @@ final class OperationJournalTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: url) }
 
         let first = OperationJournal(store: FileOperationRecordStore(url: url))
-        XCTAssertEqual(first.claim("op-1"), .claimed)
+        XCTAssertEqual(first.claim("op-1", identity: identity()), .claimed)
 
         let second = OperationJournal(store: FileOperationRecordStore(url: url))
         XCTAssertEqual(second.interruptedOperationIDs(), ["op-1"])
@@ -198,8 +217,8 @@ final class OperationJournalTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: url) }
 
         let first = OperationJournal(store: FileOperationRecordStore(url: url))
-        XCTAssertEqual(first.claim("op-1"), .claimed)
-        first.complete("op-1", result: .nonSuccess(.refused, reason: OperationReason.stalePrecondition))
+        XCTAssertEqual(first.claim("op-1", identity: identity()), .claimed)
+        first.complete("op-1", identity: identity(), result: .nonSuccess(.refused, reason: OperationReason.stalePrecondition))
 
         let second = OperationJournal(store: FileOperationRecordStore(url: url))
         XCTAssertEqual(
@@ -213,7 +232,7 @@ final class OperationJournalTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: url) }
         let journal = OperationJournal(store: FileOperationRecordStore(url: url))
         XCTAssertTrue(journal.interruptedOperationIDs().isEmpty)
-        XCTAssertEqual(journal.claim("op-1"), .claimed, "a new operation must still execute")
+        XCTAssertEqual(journal.claim("op-1", identity: identity()), .claimed, "a new operation must still execute")
     }
 
     func test_theFileBackedStore_recoversFromUnreadableContent() {
@@ -225,7 +244,7 @@ final class OperationJournalTests: XCTestCase {
         try? Data("not json".utf8).write(to: url)
         let journal = OperationJournal(store: FileOperationRecordStore(url: url))
         XCTAssertTrue(journal.interruptedOperationIDs().isEmpty)
-        XCTAssertEqual(journal.claim("op-1"), .persistenceUnavailable)
+        XCTAssertEqual(journal.claim("op-1", identity: identity()), .persistenceUnavailable)
     }
 
     // MARK: - concurrency
@@ -239,11 +258,12 @@ final class OperationJournalTests: XCTestCase {
         let callers = 8
         var claimed = 0
         let lock = NSLock()
+        let shared = identity()
 
         for _ in 0..<callers {
             DispatchQueue.global().async(group: group) {
                 start.wait()
-                if case .claimed = journal.claim("op-shared") {
+                if case .claimed = journal.claim("op-shared", identity: shared) {
                     lock.lock(); claimed += 1; lock.unlock()
                 }
             }
@@ -270,7 +290,7 @@ extension OperationJournalTests {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let journal = OperationJournal(store: FileOperationRecordStore(url: dir))
-        XCTAssertEqual(journal.claim("op-1"), .persistenceUnavailable, "a real read error must fail closed")
+        XCTAssertEqual(journal.claim("op-1", identity: identity()), .persistenceUnavailable, "a real read error must fail closed")
     }
 
     /// A stored nonsuccess WITHOUT its reason is corrupt: never fabricate interrupted_in_flight.
@@ -279,7 +299,7 @@ extension OperationJournalTests {
         defer { try? FileManager.default.removeItem(at: url) }
         try? Data("{\"op-r\":{\"state\":\"finished\",\"outcome\":\"refused\"}}".utf8).write(to: url)
         let journal = OperationJournal(store: FileOperationRecordStore(url: url))
-        XCTAssertEqual(journal.claim("op-r"), .persistenceUnavailable)
+        XCTAssertEqual(journal.claim("op-r", identity: identity()), .persistenceUnavailable)
     }
 }
 
@@ -292,6 +312,191 @@ extension OperationJournalTests {
         try? Data("not a directory".utf8).write(to: parentFile)
         defer { try? FileManager.default.removeItem(at: parentFile) }
         let journal = OperationJournal(store: FileOperationRecordStore(url: parentFile.appendingPathComponent("child.json")))
-        XCTAssertEqual(journal.claim("op-1"), .persistenceUnavailable, "a real write failure must fail closed")
+        XCTAssertEqual(journal.claim("op-1", identity: identity()), .persistenceUnavailable, "a real write failure must fail closed")
+    }
+
+    // MARK: - identity: replay is byte equality, conflict is refusal
+
+    func test_identicalIdentityIsAReplayNotAReRun() {
+        let (journal, _) = makeJournal()
+        let original = identity()
+        XCTAssertEqual(journal.claim("op-1", identity: original), .claimed)
+        journal.complete("op-1", identity: original, result: .succeeded(state: ["position_seconds": .int(30)]))
+        XCTAssertEqual(
+            journal.claim("op-1", identity: original),
+            .alreadyRun(.succeeded(state: ["position_seconds": .int(30)]))
+        )
+    }
+
+    /// The same operation id carrying different action bytes is a DIFFERENT operation.
+    func test_sameIdWithDifferentActionBytesIsRefused() {
+        let (journal, _) = makeJournal()
+        XCTAssertEqual(journal.claim("op-1", identity: identity(bytes: #"{"action":"pause"}"#)), .claimed)
+        XCTAssertEqual(
+            journal.claim("op-1", identity: identity(bytes: #"{"action":"resume"}"#)),
+            .identityConflict
+        )
+    }
+
+    /// "Same action as far as we can tell" is not replay identity: two encodings that a human
+    /// would read the same are different bytes, so they are different requests.
+    func test_byteDifferencesThatOnlyDifferInWhitespaceAreAConflict() {
+        let (journal, _) = makeJournal()
+        XCTAssertEqual(journal.claim("op-1", identity: identity(bytes: #"{"a": 1}"#)), .claimed)
+        XCTAssertEqual(
+            journal.claim("op-1", identity: identity(bytes: #"{"a":1}"#)),
+            .identityConflict,
+            "replay identity is byte equality, not parsed equality"
+        )
+    }
+
+    /// An id is turn-bound: the same id under a different turn, conversation or owner is a
+    /// conflict even when the bytes match exactly.
+    func test_sameIdInADifferentTurnConversationOrOwnerIsAConflict() {
+        let cases: [(String, OperationIdentity)] = [
+            ("turn", identity(turn: "turn-2")),
+            ("conversation", identity(conversation: "conv-2")),
+            ("owner", identity(owner: "owner-2")),
+        ]
+        for (label, other) in cases {
+            let (journal, _) = makeJournal()
+            XCTAssertEqual(journal.claim("op-1", identity: identity()), .claimed)
+            XCTAssertEqual(
+                journal.claim("op-1", identity: other), .identityConflict,
+                "a different \(label) is a different operation"
+            )
+        }
+    }
+
+    func test_conflictingIdentityIsRefusedWhileTheOriginalIsStillInProgress() {
+        let (journal, _) = makeJournal()
+        XCTAssertEqual(journal.claim("op-1", identity: identity()), .claimed)
+        XCTAssertEqual(journal.claim("op-1", identity: identity(bytes: "{}")), .identityConflict)
+    }
+
+    // MARK: - settlement is bound to the claimed identity
+
+    /// A settlement must name the identity it settles. A different identity cannot rewrite a
+    /// durable result, and settling an unclaimed id invents nothing.
+    func test_settlementWithAForeignIdentityIsRefused() {
+        let (journal, _) = makeJournal()
+        XCTAssertEqual(journal.claim("op-1", identity: identity()), .claimed)
+        XCTAssertFalse(
+            journal.complete("op-1", identity: identity(bytes: "{}"),
+                             result: .succeeded(state: ["position_seconds": .int(99)])),
+            "a settlement carrying different contents must not rewrite the claim"
+        )
+        XCTAssertNil(journal.result(for: "op-1"), "the operation stays in progress")
+        XCTAssertFalse(journal.complete("op-never-claimed", identity: identity(),
+                                        result: .succeeded(state: ["a": .int(1)])))
+    }
+
+    /// Once settled, a second settlement cannot rewrite the result — the record is final.
+    func test_secondSettlementCannotRewriteADurableResult() {
+        let (journal, _) = makeJournal()
+        XCTAssertEqual(journal.claim("op-1", identity: identity()), .claimed)
+        XCTAssertTrue(journal.complete("op-1", identity: identity(),
+                                       result: .succeeded(state: ["position_seconds": .int(10)])))
+        XCTAssertFalse(journal.complete("op-1", identity: identity(),
+                                        result: .succeeded(state: ["position_seconds": .int(20)])))
+        XCTAssertEqual(journal.result(for: "op-1"), .succeeded(state: ["position_seconds": .int(10)]))
+    }
+
+    // MARK: - identity across a real file reopen
+
+    /// The digest must be READ AS PERSISTED, never hashed again: a restarted process re-reads the
+    /// record and must still recognise a byte-identical redelivery as a replay.
+    func test_fileReopenReplaysIdenticalBytesAndRefusesConflictingBytes() {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("opjournal-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let bytes = #"{"tool":"playback","action":"seek_to","params":{"position_seconds":42}}"#
+
+        let first = OperationJournal(store: FileOperationRecordStore(url: url))
+        XCTAssertEqual(first.claim("op-1", identity: identity(bytes: bytes)), .claimed)
+        first.complete("op-1", identity: identity(bytes: bytes),
+                       result: .succeeded(state: ["position_seconds": .int(42)]))
+
+        let reopened = OperationJournal(store: FileOperationRecordStore(url: url))
+        XCTAssertEqual(
+            reopened.claim("op-1", identity: identity(bytes: bytes)),
+            .alreadyRun(.succeeded(state: ["position_seconds": .int(42)])),
+            "a reopened file must replay the same bytes, not refuse them"
+        )
+        XCTAssertEqual(
+            reopened.claim("op-1", identity: identity(bytes: #"{"tool":"playback","action":"pause"}"#)),
+            .identityConflict
+        )
+    }
+
+    /// An in-progress record survives the reopen as still-in-progress for the SAME bytes, and as
+    /// a conflict for different ones.
+    func test_fileReopenKeepsAnInProgressIdentity() {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("opjournal-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let first = OperationJournal(store: FileOperationRecordStore(url: url))
+        XCTAssertEqual(first.claim("op-1", identity: identity(bytes: #"{"a":1}"#)), .claimed)
+
+        let reopened = OperationJournal(store: FileOperationRecordStore(url: url))
+        XCTAssertEqual(reopened.interruptedOperationIDs(), ["op-1"])
+        XCTAssertEqual(reopened.claim("op-1", identity: identity(bytes: #"{"a":1}"#)), .inProgress)
+        XCTAssertEqual(reopened.claim("op-1", identity: identity(bytes: #"{"a":2}"#)), .identityConflict)
+        XCTAssertEqual(reopened.reconstructInterrupted("op-1")?.outcome, .unknown)
+    }
+
+    /// Full result/state replay across restarts: the settled state comes back exactly, and only
+    /// for the matching identity.
+    func test_finishedResultAndStateReplayAcrossRestarts() {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("opjournal-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let first = OperationJournal(store: FileOperationRecordStore(url: url))
+        XCTAssertEqual(first.claim("op-1", identity: identity()), .claimed)
+        first.complete("op-1", identity: identity(),
+                       result: .succeeded(state: ["position_seconds": .int(7), "playing": .bool(true)]))
+
+        let reopened = OperationJournal(store: FileOperationRecordStore(url: url))
+        XCTAssertEqual(
+            reopened.result(for: "op-1"),
+            .succeeded(state: ["position_seconds": .int(7), "playing": .bool(true)])
+        )
+        XCTAssertEqual(
+            reopened.claim("op-1", identity: identity()),
+            .alreadyRun(.succeeded(state: ["position_seconds": .int(7), "playing": .bool(true)]))
+        )
+        XCTAssertEqual(reopened.claim("op-1", identity: identity(owner: "someone-else")), .identityConflict)
+    }
+
+    /// Persisted history WITHOUT identity cannot answer the replay/conflict question, so it is
+    /// unreadable history: claims fail closed rather than re-executing into an old id.
+    func test_historyWithoutIdentityFieldsFailsClosed() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("opjournal-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try JSONSerialization.data(withJSONObject: ["op-1": ["state": "inProgress"]]).write(to: url)
+
+        let journal = OperationJournal(store: FileOperationRecordStore(url: url))
+        XCTAssertEqual(journal.claim("op-1", identity: identity()), .persistenceUnavailable)
+        XCTAssertEqual(journal.claim("op-2", identity: identity()), .persistenceUnavailable)
+    }
+
+    /// The digest is the SHA-256 a reader can reproduce from the same bytes — the property that
+    /// makes a persisted digest comparable to a live frame at all.
+    func test_identityDigestIsTheFramesSha256() {
+        let bytes = Data(#"{"a":1}"#.utf8)
+        XCTAssertEqual(
+            OperationIdentity.digest(of: bytes),
+            "015abd7f5cc57a2dd94b7590f04ad8084273905ee33ec5cebeae62276a97f862"
+        )
+        // A digest-built identity and a bytes-built identity of the same frame are EQUAL, which
+        // is what makes a reopened record recognise its own redelivery.
+        let live = OperationIdentity(owner: "o", conversation: "c", turn: "t", actionBytes: bytes)
+        let persisted = OperationIdentity(
+            persistedOwner: "o", conversation: "c", turn: "t", digest: live.actionDigest
+        )
+        XCTAssertEqual(persisted, live)
     }
 }

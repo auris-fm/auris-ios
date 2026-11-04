@@ -941,6 +941,7 @@
 		BDE48A1A2410D06900ECA6CA /* DefaultPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDB4E7D3240E3C7A005770E3 /* DefaultPlayer.swift */; };
 		BDE48A1B2410D06C00ECA6CA /* PlaybackItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD5294281B564417007A0B1D /* PlaybackItem.swift */; };
 		BDE48A1C2410D07300ECA6CA /* PlaybackProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDF15A431B54E155000EC323 /* PlaybackProtocol.swift */; };
+		FD5EE0A1000000000000000B /* SeekExecutionOutcome.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD5EE0A10000000000000002 /* SeekExecutionOutcome.swift */; };
 		BDE48A1D2410D08600ECA6CA /* Constants.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDF15A4D1B54E8F0000EC323 /* Constants.swift */; };
 		BDE48A1E2410D08F00ECA6CA /* EpisodeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDE740992060CE1B00FB22C7 /* EpisodeManager.swift */; };
 		BDE48A1F2410D09900ECA6CA /* DownloadManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDB165DD20806F86007B57CD /* DownloadManager.swift */; };
@@ -995,6 +996,7 @@
 		BDF15A401B54E064000EC323 /* PlaybackQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDF15A3F1B54E064000EC323 /* PlaybackQueue.swift */; };
 		BDF15A421B54E088000EC323 /* EffectsPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDF15A411B54E088000EC323 /* EffectsPlayer.swift */; };
 		BDF15A441B54E155000EC323 /* PlaybackProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDF15A431B54E155000EC323 /* PlaybackProtocol.swift */; };
+		FD5EE0A1000000000000000A /* SeekExecutionOutcome.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD5EE0A10000000000000002 /* SeekExecutionOutcome.swift */; };
 		BDF15A461B54E21B000EC323 /* PlaybackEffects.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDF15A451B54E21B000EC323 /* PlaybackEffects.swift */; };
 		BDF15A4E1B54E8F0000EC323 /* Constants.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDF15A4D1B54E8F0000EC323 /* Constants.swift */; };
 		BDF4D30B2175A9E90086463E /* StarredViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDF4D3092175A9E90086463E /* StarredViewController.swift */; };
@@ -1150,6 +1152,7 @@
 		F5F509062CEBEA93007D6E39 /* ThemeColor.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDA0E2A222DDB5550029EBEB /* ThemeColor.swift */; };
 		F5F509072CEBEA9D007D6E39 /* SleepTimerManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B1B782A2BC7104000DC3373 /* SleepTimerManager.swift */; };
 		F5F509082CEBEAEF007D6E39 /* PlaybackProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDF15A431B54E155000EC323 /* PlaybackProtocol.swift */; };
+		FD5EE0A1000000000000000C /* SeekExecutionOutcome.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD5EE0A10000000000000002 /* SeekExecutionOutcome.swift */; };
 		F5F509092CEBEAFB007D6E39 /* FadeOutManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8BB4AA622BD17EC10091480A /* FadeOutManager.swift */; };
 		F5F5090A2CEBEB0C007D6E39 /* UIColor+SwiftUI.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD27B8C42756F486007A0EA7 /* UIColor+SwiftUI.swift */; };
 		F5F5090C2CEBEB6B007D6E39 /* PlayerContainerViewController+Update.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD2F3BA12366C0DA00416633 /* PlayerContainerViewController+Update.swift */; };
@@ -1374,6 +1377,7 @@
 		FF8FFE4D2FAA4C0D0086A867 /* SleepTimerManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B1B782A2BC7104000DC3373 /* SleepTimerManager.swift */; };
 		FF8FFE4E2FAA4C510086A867 /* FadeOutManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8BB4AA622BD17EC10091480A /* FadeOutManager.swift */; };
 		FF8FFE4F2FAA4CCD0086A867 /* PlaybackProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDF15A431B54E155000EC323 /* PlaybackProtocol.swift */; };
+		FD5EE0A1000000000000000D /* SeekExecutionOutcome.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD5EE0A10000000000000002 /* SeekExecutionOutcome.swift */; };
 		FF8FFE502FAA4CF60086A867 /* ChapterManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDD6F0332140E1A3005FD8A3 /* ChapterManager.swift */; };
 		FF8FFE512FAA4D060086A867 /* PlaybackEffects.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDF15A451B54E21B000EC323 /* PlaybackEffects.swift */; };
 		FF8FFE522FAA4D110086A867 /* PlaybackCatchUpHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD2219F0253EAEAF000025BE /* PlaybackCatchUpHelper.swift */; };
@@ -2605,6 +2609,7 @@
 		BDF15A3F1B54E064000EC323 /* PlaybackQueue.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = PlaybackQueue.swift; sourceTree = "<group>"; };
 		BDF15A411B54E088000EC323 /* EffectsPlayer.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = EffectsPlayer.swift; sourceTree = "<group>"; };
 		BDF15A431B54E155000EC323 /* PlaybackProtocol.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = PlaybackProtocol.swift; sourceTree = "<group>"; };
+		FD5EE0A10000000000000002 /* SeekExecutionOutcome.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SeekExecutionOutcome.swift; sourceTree = "<group>"; };
 		BDF15A451B54E21B000EC323 /* PlaybackEffects.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = PlaybackEffects.swift; sourceTree = "<group>"; };
 		BDF15A4D1B54E8F0000EC323 /* Constants.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = Constants.swift; sourceTree = "<group>"; };
 		BDF4D3092175A9E90086463E /* StarredViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StarredViewController.swift; sourceTree = "<group>"; };
@@ -5578,6 +5583,7 @@
 				BD4098771B9ECA2C007F36BD /* Default Player */,
 				BD4098781B9ECA33007F36BD /* Effects */,
 				BDF15A431B54E155000EC323 /* PlaybackProtocol.swift */,
+				FD5EE0A10000000000000002 /* SeekExecutionOutcome.swift */,
 				1D2A1F95464D843A3E431F2C /* VoiceBoostN.h */,
 				14DD11DB5830A48ACE6928B2 /* VoiceBoostN.c */,
 				232C32192FA9FA97E332A6E4 /* VoiceBoostN_Internal.h */,
@@ -8028,6 +8034,7 @@
 				BD5294291B564417007A0B1D /* PlaybackItem.swift in Sources */,
 				9A9B83BA2DCA666A002CE179 /* CancelSubscriptionSurveyView.swift in Sources */,
 				BDF15A441B54E155000EC323 /* PlaybackProtocol.swift in Sources */,
+				FD5EE0A1000000000000000A /* SeekExecutionOutcome.swift in Sources */,
 				BD9F2FD627549BA300070958 /* AboutView.swift in Sources */,
 				F29158922FBD0C3E0028F7F3 /* ProfilePhotoMenu.swift in Sources */,
 				BDCCBC8824BC444F009B4D1D /* CustomTimeStepper.swift in Sources */,
@@ -8193,6 +8200,7 @@
 				467DF6EA26E10AFB00AC290C /* Strings+Generated.swift in Sources */,
 				BDE48A372410D4E300ECA6CA /* WatchNowPlayingHelper.swift in Sources */,
 				BDE48A1C2410D07300ECA6CA /* PlaybackProtocol.swift in Sources */,
+				FD5EE0A1000000000000000B /* SeekExecutionOutcome.swift in Sources */,
 				BDD3018F1EFB9574004A9972 /* WatchConstants.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -8234,6 +8242,7 @@
 				F5F509432CEBF298007D6E39 /* PCNavigationController.swift in Sources */,
 				F5F509112CEBEBCC007D6E39 /* PlaybackCatchUpHelper.swift in Sources */,
 				F5F509082CEBEAEF007D6E39 /* PlaybackProtocol.swift in Sources */,
+				FD5EE0A1000000000000000C /* SeekExecutionOutcome.swift in Sources */,
 				F5F509242CEBEE90007D6E39 /* FileTypeUtil.swift in Sources */,
 				F57ABBFB2CECEBCD00CC50AF /* PodcastManager.swift in Sources */,
 				F536B45B2DEA02830051A929 /* PCHostingController.swift in Sources */,
@@ -8396,6 +8405,7 @@
 				0CF5B7BE2FB3B0E60023691C /* LiquidGlass.swift in Sources */,
 				FF8FFE542FAA5FAC0086A867 /* ArchiveHelper.swift in Sources */,
 				FF8FFE4F2FAA4CCD0086A867 /* PlaybackProtocol.swift in Sources */,
+				FD5EE0A1000000000000000D /* SeekExecutionOutcome.swift in Sources */,
 				FF4B5C8E2FB4C441004784EC /* SignOutHelper.swift in Sources */,
 				FF8FFE442FAA49BE0086A867 /* PodcastManager+Cleanup.swift in Sources */,
 				FFE477202FBE0D8100716EAA /* ServerPodcastManager+Subscription.swift in Sources */,
