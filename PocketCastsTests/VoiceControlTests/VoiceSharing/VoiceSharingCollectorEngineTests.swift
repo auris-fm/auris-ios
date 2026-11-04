@@ -2046,7 +2046,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             return XCTFail("premise: A open")
         }
         collector.segmentationEnded(ctxA)
-        collector.speechCompleted([Float](repeating: 0.01, count: 640), context: ctxA)
+        collector.finalizeDeferredCompletion(context: ctxA)
         let afterA = snapshot()
         guard afterA.contains(where: { $0.captureID == ctxA.id && $0.kind == .completed }) else {
             return XCTFail("premise: A emitted its completion; got \(afterA.map { "\($0.kind)" })")
@@ -2068,7 +2068,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         // B must now close and emit, so anything the stale report attached to B becomes visible. Without
         // this the assertion would inspect only B's `.started` and pass vacuously.
         collector.segmentationEnded(ctxB)
-        collector.speechCompleted([Float](repeating: 0.01, count: 640), context: ctxB)
+        collector.finalizeDeferredCompletion(context: ctxB)
 
         // Nothing about A's report may appear under B.
         let bEvents = snapshot().filter { (event: VoiceSharingCollector.SegmentEvent) in
@@ -2114,7 +2114,9 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             outcome: VoiceSharingContributionEncoder.StageOutcome(
                 state: "failed", reason: "detector_error"),
             context: ctx)
-        collector.speechCompleted([Float](repeating: 0.01, count: 640), context: ctx)
+        // A segment the engine closed has downstream stages still to run, so it is RELEASED by
+        // finalization rather than by a second `speechCompleted` (spec 2dcf8c5b).
+        collector.finalizeDeferredCompletion(context: ctx)
 
         let completed = snapshot().first { (event: VoiceSharingCollector.SegmentEvent) in
             event.captureID == ctx.id && event.kind == .completed

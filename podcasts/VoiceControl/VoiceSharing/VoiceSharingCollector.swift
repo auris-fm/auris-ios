@@ -132,6 +132,12 @@ final class VoiceSharingCollector {
 
     private var outcomeDeadlines: [UUID: OutcomeDeadline] = [:]
     private let outcomeWaitLimit: OutcomeWaitLimit?
+
+    /// FIXED ANNOTATION DEADLINE (spec 4afc6e43): a segment released to the engine must eventually
+    /// finalize even when a downstream stage never reports. This is an ordinary default, not an
+    /// admission gate — its ABSENCE no longer refuses collection.
+    static let defaultOutcomeWaitLimit = OutcomeWaitLimit(
+        milliseconds: 20_000, ceilingMilliseconds: 60_000)
     private let monotonicNow: () -> DispatchTime
     private let scheduleOutcome: (DispatchTime, DispatchWorkItem) -> Void
 
@@ -194,7 +200,7 @@ final class VoiceSharingCollector {
             ServerSettings.userId != nil
                 && VoiceSharingEnrollmentStore.shared.consentAllowsCollection
         },
-        outcomeWaitLimit: OutcomeWaitLimit? = nil,
+        outcomeWaitLimit: OutcomeWaitLimit? = VoiceSharingCollector.defaultOutcomeWaitLimit,
         monotonicNow: @escaping () -> DispatchTime = DispatchTime.now,
         scheduleOutcome: @escaping (DispatchTime, DispatchWorkItem) -> Void = {
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: $0, execute: $1)
@@ -253,8 +259,15 @@ final class VoiceSharingCollector {
             return nil
         }
         let session = sessionIdentity()
-        // PROVENANCE, not a gate: an unknown epoch is stamped empty and the record still carries it.
-        let epoch = epochProvider() ?? ""
+        // PROVENANCE WITH NO PLACEHOLDER (spec 4afc6e43, @spec 48a928f0): every record must carry the
+        // real epoch the account holds at capture time. When no epoch is available there is nothing
+        // truthful to stamp, so the capture is not opened — ordinary record construction fails rather
+        // than writing an unsupported value the server refuses. This is NOT a readiness lifecycle: it
+        // is the same "cannot build a valid record" condition as any other.
+        guard let epoch = epochProvider(), !epoch.isEmpty else {
+            abandonForGateMove(context: currentCaptureContext())
+            return nil
+        }
         let stamp = VoiceSharingCaptureStamp(session: session, epoch: epoch, policyGeneration: 0)
         // No capture allowance is requested before retaining audio (spec c74d7e30, "Actual upload
         // usage"): daily quota is metered from ACTUAL accepted bytes at the server, so there is
@@ -304,6 +317,13 @@ final class VoiceSharingCollector {
         }
         var done = c
         done.terminal = true
+        // A SEGMENT THAT ENDED HAS DOWNSTREAM STAGES STILL TO RUN (spec 2dcf8c5b, review 6fe6d773).
+        // The engine reaches this path from `segmenter.onUtterance`, i.e. BEFORE ASR, translation and
+        // routing. Publishing here would emit a record that can never carry them, so the capture
+        // stays ring-resident and the engine releases it via `finalizeDeferredCompletion`. Without
+        // this stamp every real-engine capture is finalized into nothing and no durable record is
+        // ever written.
+        done.deferEmissionUntilFinalized = true
         current = nil
         aggregateAudioSamples -= done.retained.count
         markTerminal(done)
@@ -647,6 +667,10 @@ return }
         c.original = max(c.original ?? 0, samples)
         if samples > c.retained.count, c.droppedFrom == nil { c.droppedFrom = c.retained.count }
         c.terminal = true
+        // A REJECTION IS ITSELF THE TERMINAL OUTCOME: bleed/wake rejection carries no downstream
+        // stage to wait for, so it is never deferred even when the segment has already ended (which
+        // stamps the deferral flag for the ordinary ASR→routing path).
+        c.deferEmissionUntilFinalized = false
         current = nil
         aggregateAudioSamples -= c.retained.count
         markTerminal(c)
@@ -973,11 +997,13 @@ return }
         let event = pending.removeFirst()
         // Dropped HERE (before the sink) means the bytes leave the budget immediately; delivered means
         // they stay counted IN FLIGHT until the sink returns (subtract after the call below).
-        // Live consent check at dequeue: identity AND the policy gate. Epoch/session equality alone would
-        // deliver work queued before a switch-off or lease expiry, because a disable does not change either.
+        // Live consent check at dequeue. The event's epoch is PROVENANCE and is NOT compared: an event
+        // queued before a re-enrollment carries the epoch it was captured under, and the server — not
+        // this hop — decides whether that epoch is still acceptable (spec 4afc6e43, @spec 48a928f0).
+        // A retired record may receive the ordinary server refusal; dropping it here would be silent
+        // and would strand audio the user consented to contribute.
         let stillValid = event.isGateControl
-            || ((event.enrollmentEpoch == epochProvider())
-                && (event.authorizationSession == sessionIdentity())
+            || ((event.authorizationSession == sessionIdentity())
                 && isCollectionPermitted())
         lock.unlock()
         guard stillValid else {
