@@ -1,4 +1,5 @@
 import Foundation
+import PocketCastsServer
 import PocketCastsUtils
 
 /// Observes the microphone segment pipeline and turns eligible speech into bounded contribution work.
@@ -156,7 +157,9 @@ final class VoiceSharingCollector {
         var deferEmissionUntilFinalized = false
     }
 
-    private let policy: VoiceSharingPolicy
+    /// ONE consent gate (spec 4afc6e43): the user's sharing choice under the ordinary session.
+    /// The policy snapshot no longer gates capture; the server re-checks enrollment at accept.
+    private let isCollectionPermitted: () -> Bool
     private let membership: () -> VoiceSharingEnrollmentStore.State
     private let epochProvider: () -> String?
     private let sessionIdentity: () -> String?
@@ -186,7 +189,13 @@ final class VoiceSharingCollector {
     var deliversSynchronouslyForTesting = false
 
     init(
-        policy: VoiceSharingPolicy,
+        isCollectionPermitted: @escaping () -> Bool = {
+            // Session + the user's choice, with explicit consent loss (local opt-out, server
+            // withdrawal) stopping immediately (spec e1529db9). Unknown projection is TRANSIENT:
+            // capture proceeds and the server re-checks enrollment at accept.
+            ServerSettings.userId != nil
+                && !VoiceSharingEnrollmentStore.shared.consentGoneForPurge
+        },
         outcomeWaitLimit: OutcomeWaitLimit? = nil,
         monotonicNow: @escaping () -> DispatchTime = DispatchTime.now,
         scheduleOutcome: @escaping (DispatchTime, DispatchWorkItem) -> Void = {
@@ -200,7 +209,7 @@ final class VoiceSharingCollector {
         self.outcomeWaitLimit = outcomeWaitLimit
         self.monotonicNow = monotonicNow
         self.scheduleOutcome = scheduleOutcome
-        self.policy = policy
+        self.isCollectionPermitted = isCollectionPermitted
         self.membership = membership
         self.epochProvider = epochProvider
         self.sessionIdentity = sessionIdentity
@@ -223,18 +232,8 @@ final class VoiceSharingCollector {
             FileLog.shared.addMessage("[VoiceSharing] gate closed: no outcome wait limit")
             return nil
         }
-        guard policy.permitsCollection else {
-            FileLog.shared.addMessage("[VoiceSharing] gate closed: policy does not permit collection")
-            return nil
-        }
-        let state = membership()
-        // Unknown membership (no projection accepted this session) is NOT permission. Stale likewise.
-        guard state.hasAuthoritativeProjection else {
-            FileLog.shared.addMessage("[VoiceSharing] gate closed: no authoritative projection")
-            return nil
-        }
-        guard state.effectiveEnrolled else {
-            FileLog.shared.addMessage("[VoiceSharing] gate closed: not enrolled")
+        guard isCollectionPermitted() else {
+            FileLog.shared.addMessage("[VoiceSharing] gate closed: consent (session/sharing choice)")
             return nil
         }
         guard let epoch = epochProvider(), !epoch.isEmpty else {
@@ -263,7 +262,7 @@ final class VoiceSharingCollector {
             return nil
         }
         let session = sessionIdentity()
-        let stamp = VoiceSharingCaptureStamp(session: session, epoch: epoch, policyGeneration: policy.currentLeaseGeneration)
+        let stamp = VoiceSharingCaptureStamp(session: session, epoch: epoch, policyGeneration: 0)
         // No capture allowance is requested before retaining audio (spec c74d7e30, "Actual upload
         // usage"): daily quota is metered from ACTUAL accepted bytes at the server, so there is
         // nothing to acquire here and nothing that can refuse local retention. The clip and
@@ -273,7 +272,7 @@ final class VoiceSharingCollector {
         frozen.clipSampleCeiling = Self.maxRetainedSamples
         frozen.metadataByteCeiling = VoiceSharingUploadQueue.maxMetadataBytes
         lock.lock()
-        guard stillPermitted(for: frozen), policy.currentLeaseGeneration == stamp.policyGeneration else {
+        guard stillPermitted(for: frozen) else {
             lock.unlock()
             return nil
         }
@@ -532,8 +531,7 @@ final class VoiceSharingCollector {
         }
         let sameConsent = (rec.capture.epoch == epochProvider())
             && (rec.capture.session == sessionIdentity())
-            && policy.permitsCollection
-            && membership().effectiveEnrolled
+            && isCollectionPermitted()
         guard sameConsent else { lock.unlock(); return }
         cancelOutcomeDeadlineLocked(context.id)
         rec.emitted = true
@@ -857,8 +855,7 @@ return }
         // queued-not-executed while B starts under the SAME consent — is what this path exists for.
         let sameConsent = (rec.capture.epoch == epochProvider())
             && (rec.capture.session == sessionIdentity())
-            && policy.permitsCollection
-            && membership().effectiveEnrolled
+            && isCollectionPermitted()
         guard sameConsent else { lock.unlock(); return false }
         // DEFER (spec 2dcf8c5b, review 6fe6d773): the capture's downstream stages (ASR, translation,
         // routing) have not run yet. Emitting now would publish an immutable record that can never carry
@@ -988,8 +985,7 @@ return }
         let stillValid = event.isGateControl
             || ((event.enrollmentEpoch == epochProvider())
                 && (event.authorizationSession == sessionIdentity())
-                && policy.permitsCollection
-                && membership().effectiveEnrolled)
+                && isCollectionPermitted())
         lock.unlock()
         guard stillValid else {
             lock.lock(); aggregateAudioSamples -= event.audio.count; lock.unlock()

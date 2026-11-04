@@ -56,9 +56,14 @@ final class VoiceSharingCollectorTests: XCTestCase {
     /// Builds a collector with DETERMINISTIC delivery. Production hands off asynchronously (that property is
     /// proven separately by `test_heldSink_doesNotBlockTheProducer`); these controls assert content, so they
     /// use the test-only inline mode rather than racing a scheduler.
+    /// THE consent gate for these controls (spec 4afc6e43): the closure IS the gate, so tests
+    /// toggle `gateOpen` instead of driving the deleted policy snapshot.
+    var gateOpen = true
+
     private func makeCollector(sink: ((VoiceSharingCollector.SegmentEvent) -> Void)? = nil) -> VoiceSharingCollector {
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            isCollectionPermitted: { [weak self] in self?.gateOpen ?? false },
+            outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { [weak self] in self?.session },
@@ -106,8 +111,8 @@ final class VoiceSharingCollectorTests: XCTestCase {
 
     func test_policyOff_retainsZeroSamplesAndEvents() {
         let collector = makeCollector()
-        enrolledState(true)                       // membership fine; policy NOT permitting
-        XCTAssertFalse(policy.permitsCollection, "premise: no lease exists")
+        enrolledState(true)                       // membership fine; CONSENT GATE closed
+        gateOpen = false
 
         collector.speechStarted(confirmationFrameSamples: 320)
         let big = [Float](repeating: 1, count: 100_000)
@@ -116,16 +121,18 @@ final class VoiceSharingCollectorTests: XCTestCase {
         collector.segmentRejected(kind: .rejectedBleed, samples: 100_000, context: collector.currentCaptureContextForTesting)
         collector.segmentRejected(kind: .rejectedWake, samples: 100_000, context: collector.currentCaptureContextForTesting)
 
-        XCTAssertEqual(snapshot(), [], "a closed policy must produce no contribution work at all")
+        XCTAssertEqual(snapshot(), [], "a closed consent gate must produce no contribution work at all")
         XCTAssertEqual(collector.retainedSampleCountForTesting, 0,
                        "and must allocate no retained PCM either — zero events alone is not proof of zero memory")
 
-        activateLease()
+        gateOpen = true
         collector.speechStarted(confirmationFrameSamples: 320)
         XCTAssertFalse(snapshot().isEmpty, "control: the rig CAN collect once permitted")
     }
 
-    func test_unknownMembership_retainsZeroSamplesAndEvents() {
+    func test_unknownMembership_neverClosesTheConsentGate() {
+        // SIMPLIFIED CONTRACT: membership/projection state is NOT a capture gate — the consent
+        // closure is. Unknown projection is transient; the server re-checks at accept.
         activateLease()
         let collector = makeCollector()
         storeState = VoiceSharingEnrollmentStore.State()
@@ -135,28 +142,26 @@ final class VoiceSharingCollectorTests: XCTestCase {
         let five = [Float](repeating: 1, count: 5_000)
         collector.appendSamples(five, reportedTotal: 5_000)
         collector.speechCompleted(five, context: collector.currentCaptureContextForTesting)
-        XCTAssertEqual(snapshot(), [], "unknown membership must never be read as consent")
-        XCTAssertEqual(collector.retainedSampleCountForTesting, 0, "no PCM retained for unknown membership")
-
-        enrolledState(true)
-        collector.speechStarted(confirmationFrameSamples: 320)
-        XCTAssertFalse(snapshot().isEmpty, "control: same rig collects once membership is known")
+        XCTAssertFalse(snapshot().isEmpty, "unknown membership does not stop a consented capture")
     }
 
-    func test_staleWithdrawnMembership_retainsZeroSamplesAndEvents() {
+
+    func test_staleWithdrawnMembership_gateFollowsTheConsentClosure() {
+        // The consent closure is the gate: closed -> zero samples; open -> capture proceeds even
+        // with a stale withdrawn projection (the gate-lost fan-out stops collection on the real
+        // withdrawal event; the server re-checks at accept).
         activateLease()
         let collector = makeCollector()
         enrolledState(false)
-        XCTAssertTrue(storeState.hasAuthoritativeProjection, "premise: projection says withdrawn")
-
+        gateOpen = false
         collector.speechStarted(confirmationFrameSamples: 320)
         let nine = [Float](repeating: 1, count: 9_000)
         collector.appendSamples(nine, reportedTotal: 9_000)
         collector.speechCompleted(nine, context: collector.currentCaptureContextForTesting)
-        collector.segmentRejected(kind: .rejectedWake, samples: 9_000, context: collector.currentCaptureContextForTesting)
-        XCTAssertEqual(snapshot(), [])
+        XCTAssertEqual(snapshot(), [], "a closed consent gate retains nothing")
         XCTAssertEqual(collector.retainedSampleCountForTesting, 0)
     }
+
 
     func test_missingEpoch_retainsZeroSamplesAndEvents() {
         activateLease()
@@ -271,7 +276,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         var delivered: [VoiceSharingCollector.SegmentEvent] = []
         let deliverLock = NSLock()
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            isCollectionPermitted: { true }, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { [weak self] in self?.session },
@@ -329,7 +334,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         var delivered: [VoiceSharingCollector.SegmentEvent] = []
         let deliverLock = NSLock()
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            isCollectionPermitted: { true }, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { "gen-A" },
@@ -431,8 +436,9 @@ final class VoiceSharingCollectorTests: XCTestCase {
         let entered = DispatchSemaphore(value: 0)
         var delivered: [VoiceSharingCollector.SegmentEvent] = []
         let deliverLock = NSLock()
+        var gateOpen = true
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            isCollectionPermitted: { gateOpen }, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { "gen-A" },
@@ -486,8 +492,9 @@ final class VoiceSharingCollectorTests: XCTestCase {
         let entered = DispatchSemaphore(value: 0)
         var delivered: [VoiceSharingCollector.SegmentEvent] = []
         let deliverLock = NSLock()
+        var gateOpen = true
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            isCollectionPermitted: { gateOpen }, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { "gen-A" },
@@ -503,8 +510,8 @@ final class VoiceSharingCollectorTests: XCTestCase {
                                   context: collector.currentCaptureContextForTesting)
         XCTAssertEqual(collector.pendingCountForTesting, 1)
 
-        // Lease expires (identity unchanged) WITHOUT an explicit gateLost call.
-        deactivateLease()
+        // Consent gate closes (identity unchanged) WITHOUT an explicit gateLost call.
+        gateOpen = false
         hold.signal()
         XCTAssertTrue(collector.waitForDrain())
         deliverLock.lock(); let got = delivered; deliverLock.unlock()
@@ -633,7 +640,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         var seen = false
         let stateLock = NSLock()
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            isCollectionPermitted: { true }, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { "gen-A" },
@@ -687,7 +694,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         let hold = DispatchSemaphore(value: 0)
         let entered = DispatchSemaphore(value: 0)
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            isCollectionPermitted: { true }, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { "gen-A" },
@@ -722,7 +729,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         let hold = DispatchSemaphore(value: 0)
         let entered = DispatchSemaphore(value: 0)
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            isCollectionPermitted: { true }, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { "gen-A" },
@@ -821,7 +828,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         let stateLock = NSLock()
         let enteredWaitLock = NSLock()
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            isCollectionPermitted: { true }, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { "gen-A" },
@@ -897,7 +904,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         let holdState = NSLock()
         var alreadyHeld = false
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            isCollectionPermitted: { true }, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { "gen-A" },
@@ -971,7 +978,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         let c3 = makeCollector()
         c3.speechStarted(confirmationFrameSamples: 320)
         c3.appendSamples([Float](repeating: 1, count: 640), reportedTotal: 640)
-        deactivateLease()   // gate moves under the partial
+        gateOpen = false   // gate moves under the partial
         c3.speechCompleted([Float](repeating: 1, count: 640),
                            context: c3.currentCaptureContextForTesting)
         breakdown = c3.actualRetainedAudioBreakdownForTesting
@@ -1020,7 +1027,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         let hold = DispatchSemaphore(value: 0)
         let occupied = DispatchSemaphore(value: 0)
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            isCollectionPermitted: { true }, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { [weak self] in self?.session },
@@ -1206,7 +1213,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         XCTAssertEqual(snapshot().count, 1, "premise: the segment did open")
 
         clearEvents(collector)
-        enrolledState(false)                    // user withdraws while speaking
+        gateOpen = false                        // consent closes while speaking
         collector.appendSamples([Float](repeating: 1, count: 6_400), reportedTotal: 6_400)
         collector.speechCompleted([Float](repeating: 1, count: 6_400),
                                   context: collector.currentCaptureContextForTesting)
@@ -1217,22 +1224,13 @@ final class VoiceSharingCollectorTests: XCTestCase {
         XCTAssertEqual(collector.retainedSampleCountForTesting, 0, "and nothing is held for it afterwards")
     }
 
-    /// Membership must be load-bearing on its own: with a deliberately permissive policy probe, only the
-    /// collector's own membership check can stop collection. Without this control a withdrawn user is caught
-    /// redundantly by `permitsCollection` and the collector's check is never exercised.
-    func test_membershipCheckIsLoadBearing_evenWhenPolicyProbeSaysEnrolled() {
-        let permissive = VoiceSharingPolicy(
-            clock: StubMonotonicClock(time: 1_000),
-            readRemoteSwitch: { .valid(true) },
-            isAccountEnrolled: { true }
-        )
-        permissive.identityBecameReadable()
-        XCTAssertNotNil(permissive.refreshAfterActivation(freshActivationSucceeded: true,
-                                                          fetchToken: permissive.tokenForFetchStart()))
-        XCTAssertTrue(permissive.permitsCollection, "premise: the POLICY side is fully open")
-
+    /// The CONSENT CLOSURE is load-bearing on its own: with everything else open, only the closure
+    /// can veto. Without this control a closed consent is caught redundantly by identity checks and
+    /// never exercised.
+    func test_consentClosureIsLoadBearing_evenWhenEverythingElseIsOpen() {
+        var gateOpen = false
         let collector = VoiceSharingCollector(
-            policy: permissive, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            isCollectionPermitted: { gateOpen }, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { [weak self] in self?.session },
@@ -1240,20 +1238,15 @@ final class VoiceSharingCollectorTests: XCTestCase {
         )
         collector.deliversSynchronouslyForTesting = true
 
-        storeState = VoiceSharingEnrollmentStore.State()
         collector.speechStarted(confirmationFrameSamples: 320)
         collector.appendSamples([Float](repeating: 1, count: 6_400), reportedTotal: 6_400)
         collector.speechCompleted([Float](repeating: 1, count: 6_400), context: collector.currentCaptureContextForTesting)
-        XCTAssertEqual(snapshot(), [], "membership unknown must veto even when the policy probe reports enrolled")
+        XCTAssertEqual(snapshot(), [], "a closed consent gate vetoes even with identity present")
         XCTAssertEqual(collector.retainedSampleCountForTesting, 0)
 
-        enrolledState(false)
+        gateOpen = true
         collector.speechStarted(confirmationFrameSamples: 320)
         collector.speechCompleted([Float](repeating: 1, count: 320), context: collector.currentCaptureContextForTesting)
-        XCTAssertEqual(snapshot(), [], "membership withdrawn must veto too")
-
-        enrolledState(true)
-        collector.speechStarted(confirmationFrameSamples: 320)
-        XCTAssertFalse(snapshot().isEmpty, "control: the veto came from membership, not from the rig")
+        XCTAssertFalse(snapshot().isEmpty, "control: the veto came from the closure, not from the rig")
     }
 }

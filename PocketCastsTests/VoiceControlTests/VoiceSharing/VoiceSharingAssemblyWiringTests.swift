@@ -135,7 +135,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
             })
         let coordinator = VoiceSharingCoordinator()
         let collector = VoiceSharingCollector(
-            policy: coordinator.policy,
+            isCollectionPermitted: { true },
             outcomeWaitLimit: .init(milliseconds: 1_000, ceilingMilliseconds: 1_000),
             sink: { _ in })
         let assembly = VoiceControlAssembly()

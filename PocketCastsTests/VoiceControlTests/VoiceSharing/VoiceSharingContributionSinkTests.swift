@@ -702,7 +702,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
             encoderProvenance: { frozenProvenance })
         lastSink = sink
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: limit,
+            isCollectionPermitted: { true }, outcomeWaitLimit: limit,
             monotonicNow: { scheduler.now },
             scheduleOutcome: { scheduler.scheduled.append(($0, $1)) },
             membership: { state }, epochProvider: { "epoch-1" }, sessionIdentity: sessionIdentity,
@@ -952,7 +952,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         state.membership = VoiceSharingMembership(membershipRevision: "rev", plan: .pro,
             voiceSharingEnrolled: true, enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "synthetic", withdrawalState: .active)
         let sink = makeSink()
-        let collector = VoiceSharingCollector(policy: policy, outcomeWaitLimit: .init(milliseconds: 25, ceilingMilliseconds: 100), membership: { state },
+        let collector = VoiceSharingCollector(isCollectionPermitted: { true }, outcomeWaitLimit: .init(milliseconds: 25, ceilingMilliseconds: 100), membership: { state },
             epochProvider: { "epoch-1" }, sessionIdentity: { "sess-1" }, sink: { sink.handle($0) })
         collector.deliversSynchronouslyForTesting = true
         let context = try XCTUnwrap(collector.speechStarted(confirmationFrameSamples: 640))
