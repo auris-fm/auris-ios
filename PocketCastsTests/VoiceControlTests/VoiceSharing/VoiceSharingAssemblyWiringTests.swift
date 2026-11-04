@@ -117,6 +117,54 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
     /// what (a) bumps the sink's revocation generation, (b) purges the durable queue, and (c) — via the
     /// same live policy reader every attempt consults — stops any further upload. This drives the
     /// production registry, not a hand-called purge.
+    /// REVIEWER 7318214c: drive the PRODUCTION handler (registered by the assembly's
+    /// installVoiceSharingGateLoss) — a completed file must SURVIVE a temporary loss and be
+    /// CLEARED only by explicit withdrawal, through the actual wiring.
+    func test_productionGateLossHandler_retainsOnTransientLoss_clearsOnWithdrawal() throws {
+        let chain = makeChain(policyPermits: { true },
+                              tokenProvider: StaticTokenProvider(token: "tok"))
+        let trigger = makeTrigger(chain, surfaceEnabled: { true }, isAuthorized: { true })
+        let sink = VoiceSharingContributionSink(
+            queue: chain.queue,
+            isEnabled: { false },
+            encoderProvenance: {
+                .init(platform: "ios", appVersion: "test", build: "0",
+                      captureSessionID: UUID().uuidString,
+                      models: .init(vad: nil, wakeword: nil, asr: nil, translation: nil, router: nil),
+                      conversionVersion: "v1")
+            })
+        let coordinator = VoiceSharingCoordinator()
+        let collector = VoiceSharingCollector(
+            policy: coordinator.policy,
+            outcomeWaitLimit: .init(milliseconds: 1_000, ceilingMilliseconds: 1_000),
+            sink: { _ in })
+        let assembly = VoiceControlAssembly()
+        // CONSENT INTACT: temporary loss must retain.
+        var sessionAlive = true
+        var consentGone = false
+        assembly.installVoiceSharingGateLoss(
+            collector: collector, sink: sink, uploadTrigger: trigger,
+            queue: chain.queue, coordinator: coordinator,
+            sessionAlive: { sessionAlive }, consentGone: { consentGone })
+        let entry = try makeReadyEntry(chain.queue)
+        coordinator.consentGateLostForTesting()
+        XCTAssertEqual(chain.queue.readyEntries(), [entry],
+                       "temporary gate loss must retain the completed recording")
+        // EXPLICIT WITHDRAWAL: the production handler must purge.
+        consentGone = true
+        coordinator.consentGateLostForTesting()
+        XCTAssertTrue(chain.queue.readyEntries().isEmpty,
+                      "explicit withdrawal must clear pending recordings")
+        // SIGN-OUT (session gone) also purges even with consent otherwise intact.
+        _ = try makeReadyEntry(chain.queue)
+        consentGone = false
+        sessionAlive = false
+        coordinator.consentGateLostForTesting()
+        XCTAssertTrue(chain.queue.readyEntries().isEmpty,
+                      "sign-out must clear pending recordings")
+    }
+
+
     func test_aPolicyWithdrawalFansOutThroughTheProductionRegistry() async throws {
         let store = VoiceSharingEnrollmentStore.State()
         var state = store
