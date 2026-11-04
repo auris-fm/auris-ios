@@ -218,57 +218,60 @@ struct VoiceSharingAccountView: View {
         .navigationTitle(L10n.voiceSharingAccountTitle)
     }
 
+    /// The simple sharing screen (spec `8bf536ad`, "Simple settings flow").
+    ///
+    /// ONE switch, its purpose sentence, the full disclosure, and a separate delete action.
+    /// Plan rows, membership internals, queue counts and routine refresh/retry controls are
+    /// deliberately absent: they were the crowded surface Merlin asked to have simplified, and
+    /// the spec places them out of scope here.
+    ///
+    /// The switch is a *preference*, never a claim: it reflects the last projection the client
+    /// actually received. Turning it off stops local collection immediately and then asks the
+    /// server to withdraw — the switch alone never renders as server-confirmed.
     private var accountContent: some View {
         List {
-            Section(L10n.voiceSharingSectionTitle) {
-                LabeledContent(L10n.voiceSharingAccountPlan, value: accountModel.membership.map { $0.plan == .pro ? "Pro" : "Free" } ?? L10n.voiceSharingValueUnknown)
-                LabeledContent(L10n.voiceSharingAccountMembership, value: accountModel.membership.map { $0.voiceSharingEnrolled ? L10n.voiceSharingValueActive : L10n.voiceSharingValueNotActive } ?? L10n.voiceSharingValueUnknown)
+            // Remote pause must not hide the preference. When the server says sharing is
+            // temporarily unavailable, the switch stays visible and this sentence explains it.
+            if let pause = remotePauseExplanation {
+                Section {
+                    Text(pause).font(.caption).foregroundColor(.secondary)
+                }
+            }
+
+            Section {
                 Text(L10n.voiceSharingAccountPurpose)
-                Text(L10n.voiceSharingAccountBackgroundSpeech).font(.caption).foregroundStyle(.secondary)
+                // Full truthful disclosure (scope, purpose, background speech, one-year
+                // retention, withdrawal, separate deletion) — shown in full rather than hidden
+                // behind a link we cannot verify the destination of offline.
+                Text(VoiceSharingDisclosure.englishBody ?? L10n.voiceSharingAccountBackgroundSpeech)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
                 if !accountModel.enrollmentAvailable {
                     Text(L10n.voiceSharingAccountDisclosureUnavailable).font(.caption)
                 }
-                Button(L10n.voiceSharingAccountEnroll) { disclosureConfirmation = true }
-                    .disabled(!accountModel.enrollmentAvailable || accountModel.busy)
-                    .confirmationDialog(L10n.voiceSharingAccountEnroll, isPresented: $disclosureConfirmation, titleVisibility: .visible) {
-                        Button(L10n.voiceSharingAccountConfirmDisclosure) { enroll(confirmed: true) }
-                        Button(L10n.cancel, role: .cancel) { enroll(confirmed: false) }
-                    } message: {
-                        // Activation slice: the disclosure dialog carries the FULL truthful
-                        // body (sharing scope, purpose, background speech, one-year retention,
-                        // withdrawal, separate deletion) — no infrastructure or limit names.
-                        Text(VoiceSharingDisclosure.englishBody
-                             ?? (L10n.voiceSharingAccountPurpose + " " + L10n.voiceSharingAccountBackgroundSpeech))
-                    }
-                // Local stop is available even while enrollment or refresh is waiting.
-                Button(L10n.voiceSharingAccountWithdraw, role: .destructive) {
-                    guard controlsAvailable else { return }
-                    Task {
-                        guard controlsAvailable else { return }
-                        await accountModel.withdraw() }
+            }
+
+            Section {
+                Toggle(isOn: sharingBinding) {
+                    Text(L10n.voiceSharingAccountEnroll)
                 }
-                if !membershipSummary.isEmpty { Text(membershipSummary).font(.caption) }
-                if accountModel.refreshUnavailable { Text(L10n.voiceSharingAccountRefreshFailed).font(.caption) }
-                Button(L10n.voiceSharingAccountRefresh) {
-                    guard controlsAvailable else { return }
-                    Task {
-                        guard controlsAvailable else { return }
-                        await accountModel.refresh() }
-                }.disabled(accountModel.busy)
-                Button(L10n.voiceSharingAccountRetry) {
-                    guard controlsAvailable else { return }
-                    Task {
-                        guard controlsAvailable else { return }
-                        await accountModel.retryMembership() }
-                }.disabled(accountModel.busy)
-                if cleanupNeedsAttention {
-                    Text(accountModel.localCleanupUnavailable ? L10n.voiceSharingAccountCleanupUnavailable : L10n.voiceSharingAccountCleanupUnresolved).font(.caption)
-                    Button(L10n.voiceSharingAccountRetryCleanup) {
-                        guard controlsAvailable else { return }
-                        accountModel.retryLocalCleanup()
+                .disabled(!controlsAvailable || accountModel.busy || accountModel.membership == nil)
+            } footer: {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(L10n.voiceSharingAccountSharingOptional)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    if !switchingSummary.isEmpty {
+                        Text(switchingSummary)
+                            .font(.caption)
+                            .foregroundColor(accountModel.membershipStatus == .withdrawalUnconfirmed
+                                             || accountModel.membershipStatus == .unavailable ? .orange : .secondary)
                     }
                 }
             }
+
+            // SEPARATE action with its own confirmation (spec: distinct from stopping future
+            // sharing; retained after withdrawal). Never nested under the switch.
             Section {
                 Button(L10n.voiceSharingAccountDeleteAccepted, role: .destructive) { deletionConfirmation = true }
                     .disabled(accountModel.deletionStatus == .sending)
@@ -281,21 +284,75 @@ struct VoiceSharingAccountView: View {
                     Button(L10n.voiceSharingAccountRetry) {
                         guard controlsAvailable else { return }
                         Task {
-                        guard controlsAvailable else { return }
-                        await accountModel.retryDeletion() }
+                            guard controlsAvailable else { return }
+                            await accountModel.retryDeletion() }
                     }
                 }
             } footer: { Text(L10n.voiceSharingAccountDeleteScope) }
-            if let localModel {
-                NavigationLink(L10n.voiceSharingAccountLocalRecordings) {
-                    VoiceSharingAccountLocalView(accountModel: accountModel, localModel: localModel,
-                                                 originatingSession: originatingSession, surfaceEnabled: surfaceEnabled)
-                }
-            }
+        }
+        // Turning the switch ON must present the disclosure and require explicit confirmation
+        // before enrollment (spec). Attached here so it is triggered by the switch itself.
+        .confirmationDialog(L10n.voiceSharingAccountEnroll,
+                            isPresented: $disclosureConfirmation,
+                            titleVisibility: .visible) {
+            Button(L10n.voiceSharingAccountConfirmDisclosure) { enroll(confirmed: true) }
+            Button(L10n.cancel, role: .cancel) { enroll(confirmed: false) }
+        } message: {
+            Text(VoiceSharingDisclosure.englishBody ?? L10n.voiceSharingAccountBackgroundSpeech)
         }
         .task {
             guard controlsAvailable else { return }
             await accountModel.refresh()
+        }
+    }
+
+    /// A single-switch view over the projection. `true` only when the last received projection
+    /// says enrollment is active; `false` otherwise, including when no projection has arrived.
+    /// A nil projection disables the toggle instead of guessing, so "unknown" never renders as
+    /// "off" — the user would be told they had declined when we simply had not been told.
+    private var sharingBinding: Binding<Bool> {
+        Binding(
+            get: { accountModel.membership?.voiceSharingEnrolled == true },
+            set: { wantsOn in
+                guard controlsAvailable, accountModel.membership != nil else { return }
+                if wantsOn {
+                    // Turning ON presents the disclosure before enrolling (spec). The
+                    // confirmation dialog carries it; a decline changes nothing locally.
+                    disclosureConfirmation = true
+                } else {
+                    // Turning OFF stops new collection immediately, then asks the server to
+                    // withdraw. Pending/failed withdrawal is surfaced; the switch alone never
+                    // implies server confirmation.
+                    Task {
+                        guard controlsAvailable else { return }
+                        await accountModel.withdraw()
+                    }
+                }
+            }
+        )
+    }
+
+    /// Explains a temporary remote pause WITHOUT hiding the preference (spec). Returns nil
+    /// when nothing is pausing collection, so an ordinary state adds no noise.
+    private var remotePauseExplanation: String? {
+        guard accountModel.membershipStatus == .unavailable else { return nil }
+        return L10n.voiceSharingAccountOperationFailed
+    }
+
+    /// Reports only what the last operation actually established. A local switch change with an
+    /// unconfirmed server withdrawal reads as pending, never as done.
+    private var switchingSummary: String {
+        switch accountModel.membershipStatus {
+        case .idle, .loading, .enrolled: return ""
+        case .checking: return L10n.voiceSharingAccountChecking
+        case .disclosureUnavailable: return L10n.voiceSharingAccountDisclosureUnavailable
+        case .confirmationRequired: return L10n.voiceSharingAccountConfirmDisclosure
+        case .unavailable: return L10n.voiceSharingAccountOperationFailed
+        case .conflict: return L10n.voiceSharingAccountConflict
+        case .unauthorized: return L10n.voiceSharingAccountSignInAgain
+        case .refused: return L10n.voiceSharingAccountRefused
+        case .withdrawnServerConfirmed: return L10n.voiceSharingAccountWithdrawn
+        case .withdrawalUnconfirmed: return L10n.voiceSharingAccountWithdrawalPending
         }
     }
 
