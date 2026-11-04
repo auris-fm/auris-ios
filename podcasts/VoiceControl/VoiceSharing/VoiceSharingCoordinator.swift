@@ -980,6 +980,11 @@ final class VoiceSharingCoordinator {
                 FileLog.shared.addMessage("[VoiceSharing] transient policy retry already pending; backoff unchanged")
                 return
             }
+            guard initiateOwnedRetryRefresh != nil else {
+                policyRetryStateLock.unlock()
+                FileLog.shared.addMessage("[VoiceSharing] no recovery driver connected; not scheduling retry")
+                return
+            }
             delay = policyRetryBackoffSeconds
             policyRetryBackoffSeconds = min(delay * 2, policyRetryBackoffCapSeconds)
             if let floorDate = policyRetryThrottleFloorDate {
