@@ -159,6 +159,55 @@ final class SeekExecutionOutcomeTests: XCTestCase {
         XCTAssertEqual(gotLegacy, [true], "legacy Bool unchanged")
     }
 
+    // MARK: - read-task expiry state ownership (review 4b784fa2, real engine + read task)
+
+    /// CONNECTED READ-TASK-EXPIRY CONTROL: a seek whose budget expires at the SECOND queue
+    /// hop (AudioReadTask's locked mutation) must (a) deliver expiredBeforeMutation, (b) NOT
+    /// publish its speculative target through currentTime() — the pre-expiry value is
+    /// restored — and (c) leave the engine clean for a NEWER overlapping seek, whose target
+    /// then owns currentTime() while pending and whose completion retires it. Deterministic
+    /// via the injectable hop clocks (engine hop-1 passes, read-task hop-2 reads past the
+    /// deadline).
+    func testReadTaskExpiryDoesNotPublishSpeculativeStateAndANewerSeekOwnsCurrentTime() throws {
+        let (file, url, _) = try makeAudioFile(durationSeconds: 10)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let task = makeReadTask(file: file)
+        let engine = EffectsPlayer()
+        engine.audioReadTask = task
+
+        let deadline: UInt64 = 1_000_000_000
+        // Hop 1 (engine) must PASS the deadline; hop 2 (read-task lock) reads past it.
+        engine.nowUptimeNs = { deadline &- 1_000_000_000 }
+        task.nowUptimeNs = { deadline &+ 1 }
+
+        let expiredOutcome = XCTestExpectation(description: "expiredBeforeMutation delivered")
+        var legacyRan = false
+        engine.seekTo(5.0, completion: { legacyRan = true }, typedCompletion: { outcome in
+            if case .expiredBeforeMutation = outcome { expiredOutcome.fulfill() }
+        }, invocationToken: UUID(), deadlineNs: deadline)
+        XCTAssertEqual(XCTWaiter().wait(for: [expiredOutcome], timeout: 5), .completed)
+
+        XCTAssertFalse(legacyRan, "no effect was issued: the legacy completion must not run")
+        // The speculative target (5.0) was NEVER published, and the expired invocation's
+        // restore put the pre-expiry state back.
+        XCTAssertFalse(engine.isSeekPending,
+                       "the expired request must not leave seeking=true")
+        XCTAssertNotEqual(engine.currentTime(), 5.0,
+                       "currentTime must not report the expired request's target (restored pre-expiry state)")
+
+        // A NEWER seek owns the state: while its mutation is pending, currentTime() reports
+        // THAT seek's target; after it completes, seeking retires.
+        task.nowUptimeNs = { deadline &+ 10_000_000_000 } // well within no deadline; pass a far-future deadline instead
+        let newerDone = XCTestExpectation(description: "newer seek completed")
+        engine.nowUptimeNs = { 0 } // hop 1 passes (deadline below)
+        engine.seekTo(2.0, completion: { newerDone.fulfill() }, typedCompletion: nil,
+                      invocationToken: UUID(), deadlineNs: deadline &+ 20_000_000_000)
+        XCTAssertEqual(XCTWaiter().wait(for: [newerDone], timeout: 5), .completed)
+        XCTAssertNotEqual(engine.currentTime(), 5.0,
+                       "after completion, currentTime must not report the expired target")
+        XCTAssertFalse(engine.isSeekPending, "the newer seek retired its own state")
+    }
+
     // MARK: - EffectsPlayer typed path (real engine, injected read task)
 
     /// EffectsPlayer delivers the typed EOF outcome with the full identity (player + read

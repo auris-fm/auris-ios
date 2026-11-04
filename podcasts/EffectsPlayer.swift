@@ -60,6 +60,16 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
 
     private var seeking = false
     private var lastSeekTime = 0 as TimeInterval
+    /// Whether a seek mutation is pending (read-only probe; also the connected-control seam).
+    var isSeekPending: Bool { seeking }
+    /// Which invocation's SPECULATIVE state (`lastSeekTime`/`seeking`) currently owns the
+    /// engine (review 4b784fa2): an expired request must not clear or rewrite a newer seek's
+    /// state, and must not publish its target at all when it expires before mutation.
+    private var seekingOwnerToken: UUID?
+    /// INJECTABLE MONOTONIC CLOCK for the hop-1 (serialSeekQueue) deadline check and tests;
+    /// production reads the real uptime clock. The hop-2 (read-task lock) check has its own
+    /// injectable clock on AudioReadTask.
+    var nowUptimeNs: () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }
 
     // this lock is to avoid race conditions where you're destroying the player while in the middle of setting it up (since the play method does its work asynchronously)
     private lazy var playerLock = NSLock()
@@ -276,10 +286,6 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
             // DEADLINE AT THE MUTATION SITE: the queue can delay this block arbitrarily past
             // the coordinator's race return — an expired budget must not mutate here. Checked
             // INSIDE the block, on the same monotonic clock the budget is measured with.
-            if let deadlineNs, DispatchTime.now().uptimeNanoseconds >= deadlineNs {
-                typedCompletion?(.expiredBeforeMutation(identity: identity))
-                return
-            }
             guard let self else {
                 // Engine gone BEFORE scheduling: the typed evidence still delivers (it is all
                 // by value); the legacy path stays silent here, exactly as it is today.
@@ -287,10 +293,29 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
                 return
             }
 
+            // Hop-1 deadline check (serialSeekQueue) on the same monotonic clock as the
+            // budget; an expired budget must not mutate here and must publish NOTHING.
+            if let deadlineNs, self.nowUptimeNs() >= deadlineNs {
+                typedCompletion?(.expiredBeforeMutation(identity: identity))
+                return
+            }
+            // SPECULATIVE STATE WITH OWNERSHIP: published only after both expiry checks are
+            // plausible, and tagged with THIS invocation so a late expiry (hop 2) restores it
+            // only if this invocation still owns it.
+            let ownershipToken = identity.invocationToken
+            let previousLastSeekTime = lastSeekTime
             lastSeekTime = max(0.1, time)
             seeking = true
-            readOperation.seekTo(time, deadlineNs: deadlineNs, expired: {
-                // The locked mutation site verified NO effect was issued.
+            seekingOwnerToken = ownershipToken
+            readOperation.seekTo(time, deadlineNs: deadlineNs, expired: { [weak self] in
+                // The locked mutation site verified NO effect was issued. Restore the
+                // speculative state ONLY if this invocation still owns it — an old expired
+                // request must not clear a newer seek's state.
+                if let self, self.seekingOwnerToken == ownershipToken {
+                    self.lastSeekTime = previousLastSeekTime
+                    self.seeking = false
+                    self.seekingOwnerToken = nil
+                }
                 typedCompletion?(.expiredBeforeMutation(identity: identity))
             }, completion: { [weak self] seekedToEnd in
                 if !seekedToEnd {
@@ -301,7 +326,12 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
                     PlaybackManager.shared.playerDidFinishPlayingEpisode()
                 }
 
-                self?.seeking = false
+                if let self, self.seekingOwnerToken == ownershipToken {
+                    // Only the owning invocation retires the speculative state; a stale
+                    // completion must not clear a newer seek's pending state.
+                    self.seeking = false
+                    self.seekingOwnerToken = nil
+                }
             }, typedCapture: { capture in
                 // The immutable locked capture travels with the per-invocation identity by
                 // value; this closure never touches `self`, so weak-self disappearance cannot

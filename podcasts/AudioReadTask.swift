@@ -155,10 +155,13 @@ class AudioReadTask {
 
     /// Acquires the lock, checks the deadline, and only then performs the mutation.
     /// nil = expired before mutation: NOTHING was touched.
+    /// INJECTABLE MONOTONIC CLOCK for the hop-2 (locked-mutation) deadline check; production
+    /// reads the real uptime clock.
+    var nowUptimeNs: () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }
     private func performSeekIfWithinDeadline(_ time: TimeInterval, deadlineNs: UInt64?) -> LockedSeekCapture? {
         objc_sync_enter(lock)
         defer { objc_sync_exit(lock) }
-        if let deadlineNs, DispatchTime.now().uptimeNanoseconds >= deadlineNs {
+        if let deadlineNs, nowUptimeNs() >= deadlineNs {
             return nil
         }
         return performSeek(time)
