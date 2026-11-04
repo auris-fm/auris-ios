@@ -1,3 +1,4 @@
+import FirebaseCore
 import FirebaseRemoteConfig
 import XCTest
 @testable import podcasts
@@ -11,6 +12,23 @@ import XCTest
 /// driver is exchange-owned (retry claimed by the owning lookup generation), serialized by a
 /// single state lock (no queue reentrancy), and floors its delay at the SDK throttle boundary.
 final class VoiceSharingPolicyOwnershipRecoveryTests: XCTestCase {
+
+    private enum TestSupport {
+        static func makeVoiceSharingPlist() throws -> String {
+            let path = NSTemporaryDirectory() + "vs-fb-\(UUID().uuidString).plist"
+            let dict: [String: Any] = [
+                "API_KEY": "AIzaSyDijrCBGM8Jx2U1Pj5C8YWQsE4-TLVpIcQ",
+                "GCM_SENDER_ID": "1083869833786",
+                "GOOGLE_APP_ID": "1:1083869833786:ios:6348e7f8ce326ad4caa303",
+                "PROJECT_ID": "auris-fm",
+                "BUNDLE_ID": Bundle.main.bundleIdentifier ?? "fm.auris",
+                "BUNDLE_URL_SCHEME_SUFFIX": "",
+            ]
+            let data = try PropertyListSerialization.data(fromPropertyList: dict, format: .xml, options: 0)
+            try data.write(to: URL(fileURLWithPath: path))
+            return path
+        }
+    }
 
     private final class StubBearerTokens: CloudTokenProviding {
         func token() async -> String? { "test-bearer" }
@@ -108,15 +126,19 @@ final class VoiceSharingPolicyOwnershipRecoveryTests: XCTestCase {
         let (coordinator, _) = makeEnrolledStack()
         let delivered = deliverImmediately(coordinator)
         let gen = coordinator.currentEnrollmentLookupGenerationForTesting
+        coordinator.initiateOwnedRetryRefresh = { _ in }
 
         coordinator.setPolicyInstallOutcomeForTesting(.transientRefused, generation: gen)
         coordinator.policyExchangeCompleted(fresh: false, exchangeGeneration: gen)
         XCTAssertEqual(delivered.value.count, 1, "a transient refusal must schedule recovery")
         XCTAssertEqual(delivered.value[0].delay, 30, "base backoff is 30 s")
 
-        // REAL fire closure runs (delivered item performed inline — no queue reentrancy).
+        // REAL fire closure runs (delivered item performed inline — no queue reentrancy):
+        // it routes through the production-owned retry entry, which hands off atomically.
         var refreshRuns = 0
-        coordinator.initiateIdentityRecoveryRefresh = { refreshRuns += 1 }
+        coordinator.initiateOwnedRetryRefresh = { claimed in
+            if coordinator.beginRetryExchangeIfCurrent(claimedGeneration: claimed) != nil { refreshRuns += 1 }
+        }
         delivered.value[0].item.perform()
         XCTAssertEqual(refreshRuns, 1, "the retry re-drives the ordinary exchange")
 
@@ -137,7 +159,7 @@ final class VoiceSharingPolicyOwnershipRecoveryTests: XCTestCase {
         let delivered = deliverImmediately(coordinator)
         let gen = coordinator.currentEnrollmentLookupGenerationForTesting
         coordinator.setPolicyInstallOutcomeForTesting(.transientRefused, generation: gen)
-        coordinator.initiateIdentityRecoveryRefresh = {}
+        coordinator.initiateOwnedRetryRefresh = { _ in }
         for expected in [30.0, 60.0, 120.0, 240.0, 480.0, 900.0, 900.0] {
             coordinator.policyExchangeCompleted(fresh: false, exchangeGeneration: gen)
             XCTAssertEqual(delivered.value.last?.delay, expected, "backoff must double up to the 900 s cap")
@@ -203,9 +225,6 @@ final class VoiceSharingPolicyOwnershipRecoveryTests: XCTestCase {
         let (coordinator, _) = makeEnrolledStack()
         let delivered = deliverImmediately(coordinator)
         let gen = coordinator.currentEnrollmentLookupGenerationForTesting
-        coordinator.setPolicyInstallOutcomeForTesting(.transientRefused, generation: gen)
-        coordinator.policyExchangeCompleted(fresh: false, exchangeGeneration: gen)
-        XCTAssertEqual(delivered.value.count, 1)
         coordinator.initiateOwnedRetryRefresh = { claimed in
             guard let lookup = coordinator.beginRetryExchangeIfCurrent(claimedGeneration: claimed) else {
                 XCTFail("a still-current claim must hand off atomically")
@@ -214,6 +233,9 @@ final class VoiceSharingPolicyOwnershipRecoveryTests: XCTestCase {
             XCTAssertEqual(lookup.generation, gen + 1,
                            "the exchange must run on the lookup taken IN the handoff")
         }
+        coordinator.setPolicyInstallOutcomeForTesting(.transientRefused, generation: gen)
+        coordinator.policyExchangeCompleted(fresh: false, exchangeGeneration: gen)
+        XCTAssertEqual(delivered.value.count, 1)
         delivered.value[0].item.perform()
     }
 
@@ -226,6 +248,7 @@ final class VoiceSharingPolicyOwnershipRecoveryTests: XCTestCase {
         let gen = coordinator.currentEnrollmentLookupGenerationForTesting
         // Completion reports fresh, but no install outcome and no follow-up were recorded:
         // exactly the completion `performPolicyExchange` emits for a refused settlement.
+        coordinator.initiateOwnedRetryRefresh = { _ in }
         coordinator.policyExchangeCompleted(fresh: true, exchangeGeneration: gen)
         XCTAssertEqual(delivered.value.count, 1,
                        "fresh-but-uninstalled must recover transiently, not reset")
@@ -271,7 +294,7 @@ final class VoiceSharingPolicyOwnershipRecoveryTests: XCTestCase {
         let delivered = deliverImmediately(coordinator)
         let gen = coordinator.currentEnrollmentLookupGenerationForTesting
         coordinator.setPolicyInstallOutcomeForTesting(.transientRefused, generation: gen)
-        coordinator.initiateIdentityRecoveryRefresh = {}
+        coordinator.initiateOwnedRetryRefresh = { _ in }
         coordinator.policyExchangeCompleted(fresh: false, exchangeGeneration: gen)
         XCTAssertEqual(delivered.value.last?.delay, 30)
         delivered.value.last?.item.perform()
@@ -309,6 +332,7 @@ final class VoiceSharingPolicyOwnershipRecoveryTests: XCTestCase {
         // Newer exchange gen1 claims a pending retry (transient refusal at gen1).
         _ = coordinator.beginEnrollmentLookup()
         let genNew = coordinator.currentEnrollmentLookupGenerationForTesting
+        coordinator.initiateOwnedRetryRefresh = { _ in }
         coordinator.setPolicyInstallOutcomeForTesting(.transientRefused, generation: genNew)
         coordinator.policyExchangeCompleted(fresh: false, exchangeGeneration: genNew)
         XCTAssertEqual(delivered.value.count, 1)
@@ -335,6 +359,37 @@ final class VoiceSharingPolicyOwnershipRecoveryTests: XCTestCase {
                        "a stale completion must not reset the newer outage's backoff")
     }
 
+    /// LEASE EXPIRY → FAILED FETCH → RECOVERY (spec e42d2959 / reviewer 974f4958): the
+    /// expiry renewal goes through the SAME centralized settlement, so a transient fetch
+    /// failure schedules recovery without an app restart. Authoritative-disable cancellation
+    /// on this path is covered by test_authoritativeDisabledDoesNotScheduleRetry.
+    func test_leaseExpiryWithFailedFetchRecoversWithoutRestart() throws {
+        let (coordinator, _) = makeEnrolledStack()
+        VoiceSharingSessionGeneration.shared.ensureLifecycle()
+        defer { VoiceSharingSessionGeneration.shared.clear() }
+        let firApp = try XCTUnwrap(
+            VoiceSharingFirebaseApp.configure(plistPath: TestSupport.makeVoiceSharingPlist()))
+        let delivered = deliverImmediately(coordinator)
+        XCTAssertNotNil(firApp)
+        VoiceSharingFirebaseApp.connectIdentityRecoveryRefresh(coordinator: coordinator)
+        VoiceSharingFirebaseApp.policyFetchActor = { _, handler in
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) {
+                handler(.failure, NSError(domain: "test", code: 1))
+            }
+        }
+        defer {
+            VoiceSharingFirebaseApp.policyFetchActor = nil
+        }
+        // The production expiry path: renewal runs the exchange; fetch fails transiently.
+        coordinator.leaseRenewalAfterExpiry()
+        let waited = NSPredicate { _, _ in !delivered.value.isEmpty }
+        wait(for: [XCTNSPredicateExpectation(predicate: waited, object: nil)], timeout: 10)
+        XCTAssertEqual(delivered.value.count, 1,
+                       "an expiry renewal with a failed fetch must schedule recovery")
+        XCTAssertTrue(delivered.value[0].delay >= 30)
+        XCTAssertNotNil(firApp)
+    }
+
     /// SDK THROTTLE BOUNDARY (reviewer blocker 3): a fetch error carrying
     /// `RemoteConfigThrottledEndTimeInSecondsKey` floors the retry delay at the later of the
     /// boundary and local backoff — INCLUDING a boundary beyond the 900 s backoff cap.
@@ -347,6 +402,7 @@ final class VoiceSharingPolicyOwnershipRecoveryTests: XCTestCase {
             RemoteConfigThrottledEndTimeInSecondsKey: NSNumber(value: boundary.timeIntervalSince1970),
         ])
         coordinator.recordPolicyFetchThrottleFloor(from: error)
+        coordinator.initiateOwnedRetryRefresh = { _ in }
         coordinator.setPolicyInstallOutcomeForTesting(.transientRefused, generation: gen)
         coordinator.policyExchangeCompleted(fresh: false, exchangeGeneration: gen)
         XCTAssertEqual(delivered.value.count, 1)

@@ -110,7 +110,9 @@ enum VoiceSharingFirebaseApp {
             FileLog.shared.addMessage("[VoiceSharing] policy exchange skipped: secondary app absent")
             lastPolicyRefreshOutcome = false
             coordinator.policyRefreshAfterActivation(freshActivationSucceeded: false,
-                                                     fetchToken: coordinator.policyTokenForFetchStart())
+                                                     fetchToken: coordinator.policyTokenForFetchStart(),
+                                                     settlementGeneration: 0)
+            coordinator.policyExchangeCompleted(fresh: false, exchangeGeneration: 0)
             completion?(false, 0)
             return
         }
@@ -124,6 +126,7 @@ enum VoiceSharingFirebaseApp {
         // honest reading of the guard, not a bypass of it.
         if VoiceSharingSessionGeneration.shared.currentGeneration() == nil {
             FileLog.shared.addMessage("[VoiceSharing] policy exchange deferred: no account lifecycle yet")
+            coordinator.policyExchangeCompleted(fresh: false, exchangeGeneration: 0)
             completion?(false, 0)
             return
         }
@@ -154,6 +157,7 @@ enum VoiceSharingFirebaseApp {
                 } else {
                     FileLog.shared.addMessage("[VoiceSharing] stale fetch failure dropped (gen \(exchangeGeneration) superseded); installed policy untouched")
                 }
+                coordinator.policyExchangeCompleted(fresh: false, exchangeGeneration: exchangeGeneration)
                 completion?(false, exchangeGeneration)
                 return
             }
@@ -193,6 +197,10 @@ enum VoiceSharingFirebaseApp {
                     await coordinator.completeActivationWithEnrollment(
                         freshActivationSucceeded: fresh, lookup: lookup, accountClient: accountClient)
                     lastPolicyRefreshOutcome = fresh
+                    // CENTRALIZED settlement notification (spec e42d2959): every production
+                    // entry — launch, identity change, lease expiry, owned retry — reaches
+                    // the same recovery handling; a caller cannot silently omit it.
+                    coordinator.policyExchangeCompleted(fresh: fresh, exchangeGeneration: exchangeGeneration)
                     completion?(fresh, exchangeGeneration)
                     if fresh { Self.allowanceRefresh?() }
                 }
@@ -208,11 +216,10 @@ enum VoiceSharingFirebaseApp {
     static func connectIdentityRecoveryRefresh(coordinator: VoiceSharingCoordinator = .shared) {
         coordinator.initiateIdentityRecoveryRefresh = { [weak coordinator] in
             guard let coordinator else { return }
-            performPolicyExchange(coordinator: coordinator) { fresh, generation in
+            performPolicyExchange(coordinator: coordinator) { fresh, _ in
                 if !fresh {
                     FileLog.shared.addMessage("[VoiceSharing] policy refresh did not install a snapshot")
                 }
-                coordinator.policyExchangeCompleted(fresh: fresh, exchangeGeneration: generation)
             }
         }
         // OWNED RETRY ENTRY (spec 2ffd8026): the retry's claimed generation is validated and
@@ -225,16 +232,16 @@ enum VoiceSharingFirebaseApp {
                 FileLog.shared.addMessage("[VoiceSharing] retry dropped: claimed generation \(claimedGeneration) no longer owns the gate")
                 return
             }
-            performPolicyExchange(coordinator: coordinator, pretakenLookup: lookup) { fresh, generation in
+            performPolicyExchange(coordinator: coordinator, pretakenLookup: lookup) { fresh, _ in
                 if !fresh {
                     FileLog.shared.addMessage("[VoiceSharing] policy refresh did not install a snapshot")
                 }
-                coordinator.policyExchangeCompleted(fresh: fresh, exchangeGeneration: generation)
             }
         }
+        // Lease expiry goes through the SAME centralized settlement/recovery path.
         coordinator.leaseRenewalAfterExpiry = { [weak coordinator] in
             guard let coordinator else { return }
-            performPolicyExchange(coordinator: coordinator)
+            performPolicyExchange(coordinator: coordinator) { _, _ in }
         }
     }
 
