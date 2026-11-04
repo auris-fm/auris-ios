@@ -250,11 +250,29 @@ final class VoiceSharingCoordinator {
             FileLog.shared.addMessage("[VoiceSharing] activation settlement: no fresh activation")
             return
         }
-        let mayFetch = enrollmentLookupLock.withLock { lookupIsCurrent(lookup) }
-        guard mayFetch else {
-            FileLog.shared.addMessage("[VoiceSharing] activation settlement: lookup superseded")
-            return
+        // OWNERSHIP (spec 50d8807d): generation + projection decide whether a NEWER lookup owns
+        // this settlement. The lookup's POLICY token does not: policy identity can move under
+        // this very lookup (login settle, fence lift) with NO newer exchange existing, and
+        // rejecting on it stranded the only in-flight install with no owner (2026-11-04 owner
+        // incident: policyTokenEqual=false at gen=1/1 → install dropped, never re-driven, gate
+        // closed forever). When only the policy token moved, re-derive the token for the CURRENT
+        // policy identity — refreshAfterActivation re-validates it atomically under the policy
+        // lock, so a real identity change (fence) still refuses the install. Fail-closed kept.
+        let installToken: VoiceSharingPolicy.FetchToken?
+        enrollmentLookupLock.lock()
+        let projectionNow = enrollmentStore.projectionToken()
+        if lookup.generation != enrollmentLookupGeneration || lookup.projectionToken == nil
+            || lookup.projectionToken != projectionNow {
+            FileLog.shared.addMessage("[VoiceSharing] activation settlement: lookup superseded (newer lookup/projection owns the install)")
+            installToken = nil
+        } else if lookup.policyToken == policy.tokenForFetchStart() {
+            installToken = lookup.policyToken
+        } else {
+            FileLog.shared.addMessage("[VoiceSharing] activation settlement: policy token moved under this lookup (no newer owner) — re-deriving for current policy identity")
+            installToken = policy.tokenForFetchStart()
         }
+        enrollmentLookupLock.unlock()
+        guard let installToken else { return }
         let client = accountClient ?? CloudTokenProviderRouter.voiceSharingProvider().map {
             VoiceSharingAccountClient(tokenProvider: $0, membershipStore: enrollmentStore)
         }
@@ -264,15 +282,15 @@ final class VoiceSharingCoordinator {
         }
 
         let changed: Bool = enrollmentLookupLock.withLock {
-            guard lookupIsCurrent(lookup), fetched.issuedUnder == lookup.projectionToken else { return false }
+            guard lookupOwnershipCurrent(lookup), fetched.issuedUnder == lookup.projectionToken else { return false }
             let membershipChanged = enrollmentStore.currentState.membership != fetched.membership
             guard enrollmentStore.apply(authoritative: fetched.membership, readUnder: fetched.issuedUnder) else {
                 return false
             }
             if !membershipChanged {
                 // No new token: only the original, still-current activation can renew the lease.
-                guard lookupIsCurrent(lookup) else { return false }
-                policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: lookup.policyToken)
+                guard lookupOwnershipCurrent(lookup), let token = settlementInstallToken(lookup) else { return false }
+                policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: token)
             }
             return membershipChanged
         }
@@ -306,6 +324,18 @@ final class VoiceSharingCoordinator {
             fetchToken: fetchToken
         )
         FileLog.shared.addMessage("[VoiceSharing] policy refresh returned: installed=\(installed != nil)")
+        // Install-level classification for transient recovery: an installed snapshot is success;
+        // a strict decoded false is AUTHORITATIVE (retry cannot change it); every other refusal
+        // (fetch/freshness failure, unavailable remote, fence, token refusal) is TRANSIENT.
+        if installed != nil {
+            lastPolicyInstallOutcome = .installed
+        } else if !freshActivationSucceeded {
+            lastPolicyInstallOutcome = .transientRefused
+        } else if policy.lastRemoteReadKind == .valid(false) {
+            lastPolicyInstallOutcome = .authoritativeDisabled
+        } else {
+            lastPolicyInstallOutcome = .transientRefused
+        }
         // If the refresh observed the gate closed (switch off, account not enrolled, install
         // refused), any audio the collector still holds is consentless — purge now.
         if !policy.permitsCollection { consentGateLost() }
@@ -720,6 +750,106 @@ final class VoiceSharingCoordinator {
     func identityBecameReadable() {
         policy.identityBecameReadable()
         initiateIdentityRecoveryRefresh()
+    }
+
+    // MARK: Settlement ownership + transient acquisition recovery (spec 50d8807d)
+
+    /// OWNERSHIP-ONLY currency: generation + projection. The policy token is intentionally
+    /// excluded — see the settlement comment; it is re-derived, never used to strand the install.
+    private func lookupOwnershipCurrent(_ lookup: EnrollmentLookup) -> Bool {
+        let current = enrollmentStore.projectionToken()
+        return lookup.generation == enrollmentLookupGeneration
+            && lookup.projectionToken != nil
+            && lookup.projectionToken == current
+    }
+
+    /// The token an install may use right now: the lookup's own if the policy identity has not
+    /// moved, otherwise a freshly captured one for the CURRENT identity (policy re-validates).
+    /// Nil only when a newer lookup/projection genuinely owns the install.
+    private func settlementInstallToken(_ lookup: EnrollmentLookup) -> VoiceSharingPolicy.FetchToken? {
+        guard lookupOwnershipCurrent(lookup) else { return nil }
+        return lookup.policyToken == policy.tokenForFetchStart()
+            ? lookup.policyToken
+            : policy.tokenForFetchStart()
+    }
+
+    /// What the last install-level settlement decided (nil = this exchange never reached an
+    /// install decision). Drives transient-recovery classification. Internal so the production
+    /// exchange entry resets it at exchange start (per-exchange classification must not read the
+    /// PREVIOUS exchange's decision).
+    enum PolicyInstallOutcome { case installed, authoritativeDisabled, transientRefused }
+    var lastPolicyInstallOutcome: PolicyInstallOutcome?
+
+    /// TRANSIENT ACQUISITION RECOVERY: a transiently refused exchange self-recovers without an
+    /// app restart — doubling backoff, 30 s base, capped at 15 min, generation-fenced by the
+    /// ordinary exchange guards. An AUTHORITATIVE answer (strict decoded false) or a successful
+    /// install cancels and resets. A newer real refresh cancels any pending retry (supersession).
+    private let policyRetryQueue = DispatchQueue(label: "fm.auris.voice-sharing.policy-retry", qos: .utility)
+    private var policyRetryWorkItem: DispatchWorkItem?
+    private var pendingRetryFire: (() -> Void)?
+    private var policyRetryBackoffSeconds: Double = 30
+    private let policyRetryBackoffCapSeconds: Double = 900
+    /// Injectable retry scheduling for deterministic controls; production uses the serial queue.
+    var schedulePolicyRetryForTesting: ((_ delaySeconds: Double, _ fire: @escaping () -> Void) -> Void)?
+
+    func policyExchangeCompleted(fresh: Bool) {
+        if fresh {
+            resetTransientPolicyRetry()
+            return
+        }
+        switch lastPolicyInstallOutcome {
+        case .authoritativeDisabled:
+            FileLog.shared.addMessage("[VoiceSharing] policy exchange settled authoritative-disabled; no retry")
+            resetTransientPolicyRetry()
+        case .installed, nil, .transientRefused:
+            scheduleTransientPolicyRetry()
+        }
+    }
+
+    private func resetTransientPolicyRetry() {
+        policyRetryQueue.sync {
+            policyRetryWorkItem?.cancel()
+            policyRetryWorkItem = nil
+            pendingRetryFire = nil
+            policyRetryBackoffSeconds = 30
+        }
+    }
+
+    /// Test seam mirror of the production cancellation path (same state, no queue hop).
+    func cancelTransientPolicyRetryForTesting() { resetTransientPolicyRetry() }
+
+    /// Test seam: fires the PENDING retry's body synchronously (production fires on the
+    /// serial queue after the backoff). No-op when nothing is pending.
+    func firePendingPolicyRetryForTesting() {
+        policyRetryQueue.sync { pendingRetryFire?() }
+    }
+
+    private func scheduleTransientPolicyRetry() {
+        policyRetryQueue.sync {
+            guard policyRetryWorkItem == nil else {
+                FileLog.shared.addMessage("[VoiceSharing] transient policy retry already pending; backoff unchanged")
+                return
+            }
+            let delay = policyRetryBackoffSeconds
+            policyRetryBackoffSeconds = min(delay * 2, policyRetryBackoffCapSeconds)
+            FileLog.shared.addMessage("[VoiceSharing] transient policy refusal; retry in \(Int(delay))s")
+            let fire = { [weak self] in
+                guard let self else { return }
+                self.policyRetryQueue.sync {
+                    self.policyRetryWorkItem = nil
+                }
+                FileLog.shared.addMessage("[VoiceSharing] transient policy retry firing")
+                self.initiateIdentityRecoveryRefresh()
+            }
+            pendingRetryFire = fire
+            if let scheduler = schedulePolicyRetryForTesting {
+                scheduler(delay, fire)
+            } else {
+                let item = DispatchWorkItem(block: fire)
+                policyRetryQueue.sync { policyRetryWorkItem = item }
+                policyRetryQueue.asyncAfter(deadline: .now() + delay, execute: item)
+            }
+        }
     }
 
     deinit {

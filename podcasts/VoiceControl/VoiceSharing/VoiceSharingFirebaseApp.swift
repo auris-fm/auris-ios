@@ -98,6 +98,10 @@ enum VoiceSharingFirebaseApp {
                                       expiration: TimeInterval = 0,
                                       accountClient: VoiceSharingAccountClient? = nil,
                                       completion: ((Bool) -> Void)? = nil) {
+        // A new exchange supersedes any pending transient retry (a newer real refresh drives
+        // its own outcome), and the outcome classification starts clean for THIS exchange.
+        coordinator.cancelTransientPolicyRetryForTesting()
+        coordinator.lastPolicyInstallOutcome = nil
         // Settlement evidence captured BEFORE any network work (see the lifecycle note below).
         guard let named = existing() else {
             FileLog.shared.addMessage("[VoiceSharing] policy exchange skipped: secondary app absent")
@@ -190,11 +194,13 @@ enum VoiceSharingFirebaseApp {
     /// lease-expiry revocation the same exchange is initiated. The default-app
     /// refresh remains the caller's separate concern.
     static func connectIdentityRecoveryRefresh(coordinator: VoiceSharingCoordinator = .shared) {
-        coordinator.initiateIdentityRecoveryRefresh = {
-            performPolicyExchange(coordinator: coordinator) { activated in
-                if !activated {
+        coordinator.initiateIdentityRecoveryRefresh = { [weak coordinator] in
+            guard let coordinator else { return }
+            performPolicyExchange(coordinator: coordinator) { fresh in
+                if !fresh {
                     FileLog.shared.addMessage("[VoiceSharing] policy refresh did not install a snapshot")
                 }
+                coordinator.policyExchangeCompleted(fresh: fresh)
             }
         }
         coordinator.leaseRenewalAfterExpiry = { [weak coordinator] in
