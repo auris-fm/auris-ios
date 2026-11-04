@@ -257,12 +257,14 @@ class DefaultPlayer: PlaybackProtocol, Hashable {
     /// as ACTUALLY handed to AVPlayer (the quantized CMTime, read back in seconds — not the
     /// pre-quantization clamp value), the initiating item identity, and the native
     /// finished/cancelled result. Legacy behavior unchanged.
-    func seekTo(_ time: TimeInterval, completion: (() -> Void)?, typedCompletion: ((SeekExecutionOutcome) -> Void)?) {
+    @discardableResult
+    func seekTo(_ time: TimeInterval, completion: (() -> Void)?, typedCompletion: ((SeekExecutionOutcome) -> Void)?, invocationToken: UUID? = nil) -> SeekIdentity? {
         guard let player else {
-            typedCompletion?(.engineUnavailable(identity: SeekIdentity(invocationToken: UUID(), playerID: ObjectIdentifier(self), readTaskID: nil, itemID: nil)))
-            return
+            let identity = SeekIdentity(invocationToken: invocationToken ?? UUID(), playerID: ObjectIdentifier(self), readTaskID: nil, itemID: nil)
+            typedCompletion?(.engineUnavailable(identity: identity))
+            return identity
         }
-        let identity = SeekIdentity(invocationToken: UUID(), playerID: ObjectIdentifier(self), readTaskID: nil, itemID: player.currentItem.map(ObjectIdentifier.init))
+        let identity = SeekIdentity(invocationToken: invocationToken ?? UUID(), playerID: ObjectIdentifier(self), readTaskID: nil, itemID: player.currentItem.map(ObjectIdentifier.init))
 
         let adjustedTime = fmax(0.1, time)
 
@@ -285,6 +287,7 @@ class DefaultPlayer: PlaybackProtocol, Hashable {
                                                 legacyCompletion: completion,
                                                 typedCompletion: typedCompletion)
         })
+        return identity
     }
 
     /// The seek completion-handler body, extracted so tests can drive `finished == false`
@@ -1110,3 +1113,5 @@ extension NSError {
         return false
     }
 }
+
+extension DefaultPlayer: TypedSeekingPlayer {}

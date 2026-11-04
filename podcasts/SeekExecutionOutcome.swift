@@ -46,3 +46,15 @@ enum SeekExecutionOutcome: Equatable {
     case cancelled(identity: SeekIdentity)
     case engineUnavailable(identity: SeekIdentity)
 }
+
+/// Engines that can issue an identity-carrying seek with a CALLER-SUPPLIED invocation token
+/// (task67 seek_relative client slice, spec a3af56dd): the identified path correlates the
+/// completion to the initiating invocation by token, so the token must be minted by the
+/// initiator, not by the engine.
+protocol TypedSeekingPlayer: AnyObject {
+    /// Issues the seek and returns the identity actually initiated (nil impossible today —
+    /// engines mint an identity even on the unavailable path — the optional keeps room for
+    /// engines that cannot initiate at all).
+    @discardableResult
+    func seekTo(_ time: TimeInterval, completion: (() -> Void)?, typedCompletion: ((SeekExecutionOutcome) -> Void)?, invocationToken: UUID?) -> SeekIdentity?
+}

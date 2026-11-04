@@ -2034,7 +2034,7 @@ struct AdmittedTurnIdentity: Equatable {
             await reportResult(unexecuted, operationId: operationId, capabilityVersion: capabilityVersion, route: admittedTurnRoute)
             return
         }
-        let outcome = performIdentifiedMutation(action: action, params: params)
+        let outcome = await performIdentifiedMutation(action: action, params: params)
         if let refusal = outcome.refusal {
             // Observe refusal settlement too: a failed refusal-persist leaves the durable
             // record in progress, so the honest report is unknown, never a replayable refusal.
@@ -2097,6 +2097,67 @@ struct AdmittedTurnIdentity: Equatable {
         }
     }
 
+    /// ADDITIVE identified seek_relative (task67 slice, spec cloud-assistant.md "Client seek
+    /// completion and settlement" @ a3af56dd): the effect is issued with a caller-minted
+    /// invocation token; the coordinator owns the 15-second monotonic budget from THIS
+    /// admission, correlates the typed outcome to the token, and settles the classification
+    /// table. The legacy fire-and-forget path stays for identityless frames.
+    private func performIdentifiedSeekRelative(
+        params: [String: CloudRouteJSONValue]
+    ) async -> (refusal: OperationResult?, settledState: [String: CloudRouteJSONValue]?) {
+        // Pre-effect refusals FIRST, before any effect or budget consumption: same rules as
+        // the legacy seek_relative (availability precondition, then the pre-action capture).
+        if let precondition = currentEpisodePrecondition { return (precondition, nil) }
+        capturePreActionPositionForRelativeSeek()
+        // Zero delta is "no stated amount" — the sink applies its interval in the direction.
+        let delta = params["delta_seconds"]?.int64Value
+            .flatMap { Int($0) == 0 ? nil : Int($0) }
+        let direction = seekDirectionOf(delta: delta, declared: params["direction"]?.stringValue)
+        // Same-target verification needs the episode identity AT INITIATION. No manager source
+        // (injection-only configuration): no evidence of the target — fail closed, no effect.
+        guard let episodeUUID = currentEpisodeIdProvider.map { $0() } ?? playbackManager?.currentEpisode?.uuid else {
+            return (.nonSuccess(.unknown, reason: OperationReason.playbackStateUnavailable), nil)
+        }
+        // The completion channel is registered BEFORE the effect is released: a completion that
+        // arrives between release and the await cannot be lost.
+        let (stream, continuation) = AsyncStream<SeekExecutionOutcome>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        // THE token belongs to THIS admission; duplicates and reconnection mint new ones only
+        // for their own (journal-refused) executions, never by restarting this budget.
+        let token = UUID()
+        let admittedAt = DispatchTime.now().uptimeNanoseconds
+        let initiation = SeekRelativeCompletion.Initiation(
+            identity: SeekIdentity(invocationToken: token, playerID: ObjectIdentifier(NSObject()), readTaskID: nil, itemID: nil),
+            episodeUUID: episodeUUID,
+            admittedAtUptimeNs: admittedAt)
+        let coordinator = SeekRelativeCompletion(awaitOutcome: { await stream.first(where: { _ in true }) }, observe: {
+            SeekRelativeCompletion.Observation(
+                positionSeconds: TimeInterval(self.playbackPositionMs()) / 1000.0,
+                playing: self.playbackSink.observedPlaying,
+                currentEpisodeUUID: self.currentEpisodeIdProvider.map { $0() } ?? self.playbackManager?.currentEpisode?.uuid)
+        })
+        // Budget expired before release (an earlier local turn deadline already consumed it):
+        // refused with the deadline reason, NO effect.
+        guard coordinator.remainingSeconds(since: initiation) > 0 else {
+            return (coordinator.refuseBeforeReleaseExpired(since: initiation), nil)
+        }
+        guard let identity = playbackSink.seekRelativeIdentified(
+            deltaSeconds: delta, direction: direction, invocationToken: token,
+            typedCompletion: { outcome in continuation.yield(outcome) }) else {
+            // Engine cannot produce completion evidence: no effect was released. Unknown.
+            return (.nonSuccess(.unknown, reason: SeekRelativeCompletion.Reason.completionUnavailable), nil)
+        }
+        // Correlation uses the identity the ENGINE initiated (playerID/readTaskID/itemID are
+        // the engine's truth; the token is ours).
+        let correlatedInitiation = SeekRelativeCompletion.Initiation(
+            identity: identity, episodeUUID: episodeUUID, admittedAtUptimeNs: admittedAt)
+        let result = await coordinator.settle(after: correlatedInitiation)
+        continuation.finish()
+        if result.outcome == OperationOutcome.succeeded {
+            return (nil, result.state)
+        }
+        return (result, nil)
+    }
+
     /// Runs the mutation. Returns the refusal to record (nil = executed).
     /// The LEGACY playback path: a frame that never claimed an identity. It runs the same
     /// effect, and NOTHING else — no journal claim (there is no identity to claim under), no
@@ -2122,7 +2183,10 @@ struct AdmittedTurnIdentity: Equatable {
     /// observation to settle and send.
     private func performIdentifiedMutation(
         action: String, params: [String: CloudRouteJSONValue]
-    ) -> (refusal: OperationResult?, settledState: [String: CloudRouteJSONValue]?) {
+    ) async -> (refusal: OperationResult?, settledState: [String: CloudRouteJSONValue]?) {
+        if action == "seek_relative" {
+            return await performIdentifiedSeekRelative(params: params)
+        }
         if action == "pause" {
             _ = playbackSink.pause()
             didAutoPause = false

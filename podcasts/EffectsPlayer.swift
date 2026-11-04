@@ -259,16 +259,18 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
 
     /// ADDITIVE typed overload (task67 seek-completion slice): identity-carrying outcomes
     /// alongside the unchanged legacy completion.
-    func seekTo(_ time: TimeInterval, completion: (() -> Void)?, typedCompletion: ((SeekExecutionOutcome) -> Void)?) {
+    @discardableResult
+    func seekTo(_ time: TimeInterval, completion: (() -> Void)?, typedCompletion: ((SeekExecutionOutcome) -> Void)?, invocationToken: UUID? = nil) -> SeekIdentity? {
         // The identity is minted BY VALUE before the queues, so a typed delivery never
         // depends on `self` being alive.
         guard let readOperation = audioReadTask else {
             // Actual surface capability: the read task is absent — decided synchronously at
             // the initiating call; nothing is scheduled and nothing awaits.
-            typedCompletion?(.engineUnavailable(identity: SeekIdentity(invocationToken: UUID(), playerID: ObjectIdentifier(self), readTaskID: nil, itemID: nil)))
-            return
+            let identity = SeekIdentity(invocationToken: invocationToken ?? UUID(), playerID: ObjectIdentifier(self), readTaskID: nil, itemID: nil)
+            typedCompletion?(.engineUnavailable(identity: identity))
+            return identity
         }
-        let identity = SeekIdentity(invocationToken: UUID(), playerID: ObjectIdentifier(self), readTaskID: ObjectIdentifier(readOperation), itemID: nil)
+        let identity = SeekIdentity(invocationToken: invocationToken ?? UUID(), playerID: ObjectIdentifier(self), readTaskID: ObjectIdentifier(readOperation), itemID: nil)
 
         serialSeekQueue.async { [weak self] in
             guard let self else {
@@ -301,6 +303,7 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
                 }
             })
         }
+        return identity
     }
 
     func currentTime() -> TimeInterval {
@@ -593,3 +596,5 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
     #endif
 
 }
+
+extension EffectsPlayer: TypedSeekingPlayer {}

@@ -214,7 +214,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         self.pendingFixture =
             """
             event: action
-            data:{"tool":"playback","action":"seek_relative","params":{"delta_seconds":15}}
+            data:{"tool":"playback","action":"seek_relative","params":{"delta_seconds":15},"precondition":{"episode_id":"ep-task67"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -1334,6 +1334,81 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
                        "the mutation was attempted exactly once")
     }
 
+    /// IDENTIFIED SEEK_RELATIVE — SUCCESS (task67 slice, spec a3af56dd): the typed completion
+    /// correlated to the invocation token settles `succeeded` with the OBSERVED position and
+    /// playing state; the legacy fire-and-forget seekRelative is NOT called.
+    func testCloudIdentifiedSeekRelativeSettlesSuccessWithObservedState() async throws {
+        playback.setPlaying(true)
+        playback.setPositionMs(120_000)
+        playback.clearCalls()
+        playback.armIdentifiedSeek(mode: .completes, outcome: .completed(
+            identity: SeekIdentity(invocationToken: UUID(), playerID: ObjectIdentifier(NSObject()), readTaskID: nil, itemID: nil),
+            effectiveRequest: 135, observedItemClock: 120))
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"5b1f0a92-6c34-4e71-9d28-a3f5c8e17d40","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":15},"precondition":{"episode_id":"ep-task67"}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("seek-rel-success-\(UUID().uuidString).json")
+        let journal = OperationJournal(store: FileOperationRecordStore(url: url))
+        let seekSupport = CloudAppOperationSupport(operations: ["playback.seek_relative"])
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal,
+                                        appOperationSupport: seekSupport)
+        // Action boundary (pre-effect gate): restore PLAYING after the turn's legacy auto-pause
+        // hold, so the settlement observation reads the engine the user had.
+        await MainActor.run {
+            sink.effectGate = { _ in self.playback.setPlaying(true) }
+        }
+        _ = await sink.routeToCloud(request: "forward 15 seconds", tier: .free,
+                                    context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-seek-rel-ok")
+        let frame = try await awaitResultFrame(operationId: "5b1f0a92-6c34-4e71-9d28-a3f5c8e17d40")
+        XCTAssertEqual(frame["outcome"] as? String, "succeeded", "frame: \(frame)")
+        let state = frame["state"] as? [String: Any]
+        XCTAssertEqual(state?["position_seconds"] as? Int, 120,
+                       "the state carries the OBSERVED position, never the requested target")
+        XCTAssertEqual(state?["playing"] as? Bool, true)
+        XCTAssertTrue(playback.identifiedSeekCalls.contains { call in call == (15, .forward) },
+                      "the identified path issued the seek: \(playback.identifiedSeekCalls)")
+        XCTAssertEqual(playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count, 0,
+                       "the identified path must NOT go through the legacy fire-and-forget sink")
+    }
+
+    /// IDENTIFIED SEEK_RELATIVE — CANCELLED NATIVE SEEK (spec table): after effect release,
+    /// cancellation does not prove no seek occurred → `unknown` with reason
+    /// `seek_completion_unavailable`, no state.
+    func testCloudIdentifiedSeekRelativeCancelledNativeSeekIsUnknownWithNoState() async throws {
+        playback.setPlaying(true)
+        playback.setPositionMs(120_000)
+        playback.clearCalls()
+        playback.armIdentifiedSeek(mode: .completes, outcome: .cancelled(
+            identity: SeekIdentity(invocationToken: UUID(), playerID: ObjectIdentifier(NSObject()), readTaskID: nil, itemID: nil)))
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"7e2d4c81-90a5-4b36-8f17-c2e9b0d4a6f3","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":-15},"precondition":{"episode_id":"ep-task67"}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("seek-rel-cancel-\(UUID().uuidString).json")
+        let journal = OperationJournal(store: FileOperationRecordStore(url: url))
+        let seekSupport = CloudAppOperationSupport(operations: ["playback.seek_relative"])
+        let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal,
+                                        appOperationSupport: seekSupport)
+        _ = await sink.routeToCloud(request: "back 15 seconds", tier: .free,
+                                    context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-seek-rel-cancel")
+        let frame = try await awaitResultFrame(operationId: "7e2d4c81-90a5-4b36-8f17-c2e9b0d4a6f3")
+        XCTAssertEqual(frame["outcome"] as? String, "unknown")
+        XCTAssertEqual(frame["reason"] as? String, SeekRelativeCompletion.Reason.completionUnavailable)
+        XCTAssertNil(frame["state"])
+        XCTAssertEqual(playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count, 0)
+    }
+
     /// OBSERVED PAUSE — UNAVAILABLE (voice-intents.md @ 818c8f75): no current engine reading
     /// exists (a missing engine — `PlaybackManager.isPlaying` collapses this into `false`,
     /// which the tri-state `observedPlaying` must not). The result is `unknown` with reason
@@ -2417,6 +2492,10 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
+        playback.setPositionMs(120_000)
+        playback.armIdentifiedSeek(mode: .completes, outcome: .completed(
+            identity: SeekIdentity(invocationToken: UUID(), playerID: ObjectIdentifier(NSObject()), readTaskID: nil, itemID: nil),
+            effectiveRequest: 0, observedItemClock: 0))
         let sink = makeSinkWithConsumer(RecordingResultConsumer(),
                                        conversationManager: testConversationManager(),
                                        operationJournal: OperationJournal(store: InMemoryOperationRecordStore()),
@@ -2425,14 +2504,13 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(),
                                     origin: cloudTestOrigin, selection: nil, utteranceId: "u-match")
 
-        let relativeSeeks = playback.calls.filter {
-            if case .seekRelative = $0 { return true }
-            return false
-        }
-        XCTAssertEqual(relativeSeeks.count, 1, "a matching target must execute exactly once")
         let frame = try await awaitResultFrame(operationId: operationId)
         XCTAssertEqual(frame["outcome"] as? String, "succeeded",
                        "a valid request is not refused: \(String(describing: frame["reason"]))")
+        // REWRITTEN ONTO THE TYPED PATH (spec a3af56dd): identified seek_relative settles from
+        // correlated typed completion evidence — the fire-and-forget sink is never used. The
+        // settlement races done, so the count is asserted AFTER the result frame is awaited.
+        XCTAssertEqual(playback.identifiedSeekCalls.count, 1, "a matching target must execute exactly once")
     }
 
     /// NEGATIVE: the same request with a target that is no longer current runs ZERO effects.
@@ -2651,6 +2729,12 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             appOperationSupportProvider: { self.fixtureSupport("playback.seek_relative") }
         )
 
+        // REWRITTEN ONTO THE TYPED PATH (spec a3af56dd): the identified seek needs completion
+        // evidence; the double delivers a correlated completed outcome.
+        playback.setPositionMs(120_000)
+        playback.armIdentifiedSeek(mode: .completes, outcome: .completed(
+            identity: SeekIdentity(invocationToken: UUID(), playerID: ObjectIdentifier(NSObject()), readTaskID: nil, itemID: nil),
+            effectiveRequest: 0, observedItemClock: 0))
         // The turn has been routed but the acquisition is still shut.
         let turn = Task {
             await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(),
@@ -2666,7 +2750,14 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         provider.release()
         _ = await turn.value
         // The refusal path is not what is being tested; if the action ran, ownership resolved.
-        let seeks = playback.calls.filter { if case .seekRelative = $0 { return true }; return false }
+        // The typed settlement is asynchronous; wait bounded for the initiation, without
+        // requiring a result frame (this control asserts ownership, not reporting).
+        var seeks: [(Int?, SeekDirection)] = []
+        for _ in 0..<200 {
+            seeks = playback.identifiedSeekCalls
+            if seeks.count == 1 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
         XCTAssertEqual(seeks.count, 1,
                        "ownership is completed at first use, so a late acquisition is not a denial: \(playback.calls)")
         // Read the DURABLE record, not an in-sink field: the owner that matters is the one the
@@ -3241,6 +3332,12 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             let reCompletedOwner = await MainActor.run { turnBox.completing(from: liveSocket).owner }
             XCTAssertEqual(reCompletedOwner, completedOwner,
                            "the completed owner stays sticky across the switch — the box is not relabelled")
+            // REWRITTEN ONTO THE TYPED PATH (spec a3af56dd): identified seek_relative settles
+            // from correlated typed completion evidence.
+            playback.setPositionMs(120_000)
+            playback.armIdentifiedSeek(mode: .completes, outcome: .completed(
+                identity: SeekIdentity(invocationToken: UUID(), playerID: ObjectIdentifier(NSObject()), readTaskID: nil, itemID: nil),
+                effectiveRequest: 0, observedItemClock: 0))
             let params: [String: CloudRouteJSONValue] = ["delta_seconds": .int(5)]
             await sink.executeActionForTesting(
                 action: "seek_relative", params: params,
@@ -3342,6 +3439,12 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             XCTAssertEqual(owner, liveAccount,
                            "the live session still names the admitted account — the ONLY difference")
 
+            // REWRITTEN ONTO THE TYPED PATH (spec a3af56dd): identified seek_relative settles
+            // from correlated typed completion evidence.
+            playback.setPositionMs(120_000)
+            playback.armIdentifiedSeek(mode: .completes, outcome: .completed(
+                identity: SeekIdentity(invocationToken: UUID(), playerID: ObjectIdentifier(NSObject()), readTaskID: nil, itemID: nil),
+                effectiveRequest: 0, observedItemClock: 0))
             let params: [String: CloudRouteJSONValue] = ["delta_seconds": .int(5)]
             await sink.executeActionForTesting(
                 action: "seek_relative", params: params,
@@ -3355,8 +3458,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             )
 
             // THE POSITIVE: one effect, and a durable settlement under the same owner.
-            XCTAssertEqual(playback.calls.filter { if case .seekRelative = $0 { return true }; return false }.count, 1,
-                           "with the account unchanged the operation executes exactly once: \(playback.calls)")
+            XCTAssertEqual(playback.identifiedSeekCalls.count, 1,
+                           "with the account unchanged the operation executes exactly once: \(playback.identifiedSeekCalls)")
             XCTAssertNotNil(journal.result(for: operationId),
                             "and it settles durably — the seam is capable of a settlement")
 
@@ -5235,6 +5338,60 @@ private final class RecordingPlaybackSink: VoicePlaybackSink, @unchecked Sendabl
     func seekRelative(deltaSeconds: Int?, direction: SeekDirection) -> VoiceResponse {
         record(.seekRelative(deltaSeconds, direction))
         return .silent
+    }
+
+    // MARK: identified seek_relative (task67 slice controls)
+
+    enum IdentifiedSeekMode {
+        case unavailable // engine refuses to initiate (no evidence, no effect)
+        case completes   // engine initiates and delivers the configured typed outcome
+        case silent      // engine initiates but the callback NEVER arrives (budget arm)
+    }
+
+    /// One STABLE engine identity: the identity returned at initiation and the identity carried
+    /// by the delivered outcome must be EQUAL (correlation compares the whole tuple).
+    private let identifiedSeekPlayerID = ObjectIdentifier(NSObject())
+    private var identifiedSeekMode: IdentifiedSeekMode = .completes
+    private var identifiedSeekOutcome: SeekExecutionOutcome = .completed(
+        identity: SeekIdentity(invocationToken: UUID(), playerID: ObjectIdentifier(NSObject()), readTaskID: nil, itemID: nil),
+        effectiveRequest: 0, observedItemClock: 0)
+    private var storedIdentifiedSeekCalls: [(Int?, SeekDirection)] = []
+
+    func armIdentifiedSeek(mode: IdentifiedSeekMode,
+                           outcome: SeekExecutionOutcome? = nil) {
+        lock.lock()
+        identifiedSeekMode = mode
+        if let outcome { identifiedSeekOutcome = outcome }
+        lock.unlock()
+    }
+
+    var identifiedSeekCalls: [(Int?, SeekDirection)] {
+        lock.lock(); defer { lock.unlock() }
+        return storedIdentifiedSeekCalls
+    }
+
+    func seekRelativeIdentified(deltaSeconds: Int?, direction: SeekDirection, invocationToken: UUID, typedCompletion: @escaping (SeekExecutionOutcome) -> Void) -> SeekIdentity? {
+        lock.lock()
+        storedIdentifiedSeekCalls.append((deltaSeconds, direction))
+        let mode = identifiedSeekMode
+        let outcome = identifiedSeekOutcome
+        lock.unlock()
+        guard mode != .unavailable else { return nil }
+        let engineIdentity = SeekIdentity(invocationToken: invocationToken, playerID: identifiedSeekPlayerID, readTaskID: nil, itemID: nil)
+        if mode == .completes {
+            // Echo the CORRELATED identity: the engine carries the initiating token.
+            let correlated: SeekExecutionOutcome
+            switch outcome {
+            case .completed(_, let e, let c): correlated = .completed(identity: engineIdentity, effectiveRequest: e, observedItemClock: c)
+            case .cancelled: correlated = .cancelled(identity: SeekIdentity(invocationToken: invocationToken, playerID: ObjectIdentifier(NSObject()), readTaskID: nil, itemID: nil))
+            case .engineUnavailable: correlated = .engineUnavailable(identity: SeekIdentity(invocationToken: invocationToken, playerID: ObjectIdentifier(NSObject()), readTaskID: nil, itemID: nil))
+            case .cursorRepositioned(_, let r, let f): correlated = .cursorRepositioned(identity: engineIdentity, requestedTime: r, landedFrame: f)
+            case .endOfFile(_, let r, let t): correlated = .endOfFile(identity: engineIdentity, requestedTime: r, engineTotalSeconds: t)
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) { typedCompletion(correlated) }
+        }
+        // .silent: initiates, never delivers — the budget must bound the waiter.
+        return engineIdentity
     }
 
     func seekTo(positionSeconds: Int) -> VoiceResponse {

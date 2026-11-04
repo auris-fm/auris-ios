@@ -18,6 +18,17 @@ protocol PlaybackManagerProtocol {
     func pause()
     func play()
     func skipToNextUpNextEpisode() -> String?
+    /// ADDITIVE REQUIREMENT (task67 seek_relative slice): identified seek — see the extension
+    /// default below. Declared as a requirement so the real manager's override dispatches.
+    func seekToIdentified(time: TimeInterval, invocationToken: UUID, typedCompletion: @escaping (SeekExecutionOutcome) -> Void) -> SeekIdentity?
+}
+
+/// ADDITIVE (task67 seek_relative slice): identified seek issued with a caller-supplied
+/// invocation token and a typed completion. Default nil = this manager cannot produce
+/// completion evidence; the identified path then settles `unknown` WITHOUT releasing an
+/// effect (fail-closed).
+extension PlaybackManagerProtocol {
+    func seekToIdentified(time: TimeInterval, invocationToken: UUID, typedCompletion: @escaping (SeekExecutionOutcome) -> Void) -> SeekIdentity? { nil }
 }
 
 /// Default implementation of `VoicePlaybackSink` backed by `PlaybackManager`.
@@ -73,6 +84,30 @@ class PlaybackManagerSink: VoicePlaybackSink {
         AnalyticsPlaybackHelper.shared.currentSource = .voiceCommands
         playbackManager.seekTo(time: TimeInterval(clamped) / 1000.0)
         return .silent
+    }
+
+    /// ADDITIVE (task67 seek_relative slice): computes the same clamped target as
+    /// `seekRelative`, then issues it as an IDENTIFIED seek — the completion is correlated to
+    /// the initiating invocation token, and the engine's typed outcome carries the evidence.
+    /// Returns the initiated identity, or nil when the manager cannot seek with evidence
+    /// (player not ready): no effect is released on nil.
+    func seekRelativeIdentified(deltaSeconds: Int?, direction: SeekDirection, invocationToken: UUID, typedCompletion: @escaping (SeekExecutionOutcome) -> Void) -> SeekIdentity? {
+        let deltaMs: Int
+        if let deltaSeconds {
+            deltaMs = deltaSeconds * 1000
+        } else {
+            // Same interval rule as `seekRelative` — the sink owns the interval; the mapper
+            // must never manufacture a delta for a direction-only call.
+            let interval = direction == .backward ? Settings.skipBackTime : Settings.skipForwardTime
+            deltaMs = (direction == .backward ? -1 : 1) * interval * 1000
+        }
+        let currentPos = Int(playbackManager.currentTime() * 1000)
+        let duration = Int(playbackManager.duration() * 1000)
+        let clamped = max(0, min(duration, currentPos + deltaMs))
+        AnalyticsPlaybackHelper.shared.currentSource = .voiceCommands
+        return playbackManager.seekToIdentified(time: TimeInterval(clamped) / 1000.0,
+                                                invocationToken: invocationToken,
+                                                typedCompletion: typedCompletion)
     }
 
     /// Seek to an absolute position.

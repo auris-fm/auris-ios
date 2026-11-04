@@ -559,6 +559,15 @@ class PlaybackManager: ServerPlaybackDelegate {
         seekTo(time: time, syncChanges: SyncManager.isUserLoggedIn(), startPlaybackAfterSeek: startPlaybackAfterSeek, seekHint: seekHint)
     }
 
+    /// ADDITIVE (task67 seek_relative slice): identified seek — forwards to the live player's
+    /// typed overload with the caller's invocation token. Player not a typed seeker or absent:
+    /// returns nil with NO fallback effect released — the identified path settles unknown
+    /// fail-closed, never dresses the fire-and-forget wrapper as evidence.
+    func seekToIdentified(time: TimeInterval, invocationToken: UUID, typedCompletion: @escaping (SeekExecutionOutcome) -> Void) -> SeekIdentity? {
+        guard let typedPlayer = player as? TypedSeekingPlayer else { return nil }
+        return typedPlayer.seekTo(time, completion: nil, typedCompletion: typedCompletion, invocationToken: invocationToken)
+    }
+
     func seekToFromSync(time: TimeInterval, syncChanges: Bool, startPlaybackAfterSeek: Bool) {
         analyticsPlaybackHelper.currentSource = .sync
         seekTo(time: time, syncChanges: syncChanges, startPlaybackAfterSeek: startPlaybackAfterSeek)

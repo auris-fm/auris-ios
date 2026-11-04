@@ -26,10 +26,21 @@ protocol VoicePlaybackSink {
     /// applies its own interval in `direction`. `direction` is `forward` when
     /// the request stated neither an amount nor a direction.
     func seekRelative(deltaSeconds: Int?, direction: SeekDirection) -> VoiceResponse
+    /// ADDITIVE REQUIREMENT (task67 seek_relative slice): identified relative seek. Declared as
+    /// a REQUIREMENT so conformers that implement it dispatch dynamically; the extension below
+    /// supplies the fail-closed nil default for conformers that do not.
+    func seekRelativeIdentified(deltaSeconds: Int?, direction: SeekDirection, invocationToken: UUID, typedCompletion: @escaping (SeekExecutionOutcome) -> Void) -> SeekIdentity?
     func seekTo(positionSeconds: Int) -> VoiceResponse
     /// A negative `positionSeconds` is an offset back from the episode end.
     /// The sink resolves and bounds it against the episode; callers must not
     /// clamp.
     func seekTo(positionSeconds: Int, episodeDurationSeconds: Int) -> VoiceResponse
     func nextEpisode() -> VoiceResponse
+}
+
+/// ADDITIVE (task67 seek_relative slice): the identified relative seek. Default nil = this
+/// sink cannot produce completion evidence; the identified path settles `unknown` WITHOUT
+/// releasing any effect (fail-closed) — the legacy `seekRelative` stays fire-and-forget.
+extension VoicePlaybackSink {
+    func seekRelativeIdentified(deltaSeconds: Int?, direction: SeekDirection, invocationToken: UUID, typedCompletion: @escaping (SeekExecutionOutcome) -> Void) -> SeekIdentity? { nil }
 }
