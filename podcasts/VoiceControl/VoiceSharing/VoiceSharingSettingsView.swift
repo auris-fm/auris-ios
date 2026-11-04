@@ -192,7 +192,11 @@ struct VoiceSharingSettingsView: View {
 }
 /// Account operations remain distinct from the existing device-only recording controls.
 @MainActor
-struct VoiceSharingAccountView: View {
+/// The sharing ROWS as one mounted view: owns its dialog `@State` and observes the account
+/// model retained upstream (reviewer on b34660ce2: the sections subtree must own its state,
+/// not borrow it from a discarded wrapper). Rendered standalone inside `VoiceSharingAccountView`
+/// and embedded as plain sections in the combined Voice Control screen's single List.
+struct VoiceSharingAccountSections: View {
     @ObservedObject var accountModel: VoiceSharingAccountModel
     let localModel: VoiceSharingSettingsModel?
     let surfaceEnabled: () -> Bool
@@ -210,12 +214,11 @@ struct VoiceSharingAccountView: View {
     var body: some View {
         Group {
             if controlsAvailable {
-                accountContent
+                sectionsContent
             } else {
                 Text(L10n.voiceSharingAccountUnavailable)
             }
         }
-        .navigationTitle(L10n.voiceSharingAccountTitle)
     }
 
     /// The simple sharing screen (spec `8bf536ad`, "Simple settings flow").
@@ -228,15 +231,10 @@ struct VoiceSharingAccountView: View {
     /// The switch is a *preference*, never a claim: it reflects the last projection the client
     /// actually received. Turning it off stops local collection immediately and then asks the
     /// server to withdraw — the switch alone never renders as server-confirmed.
-    var accountContent: some View {
-        List {
-            accountSections
-        }
-    }
-
-    /// The sharing rows WITHOUT a List wrapper, so the combined Voice Control screen can embed
-    /// them as plain sections in its own single List (reviewer on b61af2897: no nested Lists).
-    var accountSections: some View {
+    /// The sharing rows WITHOUT a List wrapper, so both surfaces compose them: the standalone
+    /// screen wraps them in ONE List; the combined Voice Control screen embeds them as plain
+    /// sections in its own single List (reviewer on b61af2897: no nested Lists).
+    private var sectionsContent: some View {
         Group {
             // Remote pause must not hide the preference. When the server says sharing is
             // temporarily unavailable, the switch stays visible and this sentence explains it.
@@ -434,6 +432,37 @@ struct VoiceSharingAccountView: View {
         case .refused: return L10n.voiceSharingAccountRefused
         case .pending: return L10n.voiceSharingAccountDeletionPending
         }
+    }
+}
+
+/// The standalone sharing screen: the sections view inside its own List, with the fallback
+/// text and navigation title. The account route (and VoiceSharingAccountController) mount THIS.
+struct VoiceSharingAccountView: View {
+    @ObservedObject var accountModel: VoiceSharingAccountModel
+    let localModel: VoiceSharingSettingsModel?
+    let surfaceEnabled: () -> Bool
+    let originatingSession: String?
+
+    init(accountModel: VoiceSharingAccountModel, localModel: VoiceSharingSettingsModel?, surfaceEnabled: @escaping () -> Bool) {
+        self.accountModel = accountModel
+        self.localModel = localModel
+        self.surfaceEnabled = surfaceEnabled
+        self.originatingSession = accountModel.accountActionSession
+    }
+
+    var body: some View {
+        Group {
+            if surfaceEnabled() && accountModel.canAct(in: originatingSession) {
+                List {
+                    VoiceSharingAccountSections(
+                        accountModel: accountModel, localModel: localModel,
+                        surfaceEnabled: surfaceEnabled, originatingSession: originatingSession)
+                }
+            } else {
+                Text(L10n.voiceSharingAccountUnavailable)
+            }
+        }
+        .navigationTitle(L10n.voiceSharingAccountTitle)
     }
 }
 

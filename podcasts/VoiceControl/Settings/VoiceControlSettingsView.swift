@@ -177,11 +177,15 @@ private struct VoiceSharingSectionHost: View {
         self.localModel = localModel
         // No configured origin ⇒ a never-yielding credential: the client exists so the screen
         // composes, but every server action fails closed (token() -> nil) exactly as signed out.
+        // purgeLocal is nil unless a local settings model exists — the closure must return a
+        // NON-optional DeleteResult (reviewer on b34660ce2 reproduced the type mismatch).
         let tokenProvider = CloudTokenProviderRouter.voiceSharingProvider() ?? NeverTokenProvider()
         _account = StateObject(wrappedValue: VoiceSharingAccountModel(
             client: VoiceSharingAccountClient(tokenProvider: tokenProvider),
             disclosureVersion: VoiceSharingDisclosure.productionVersion,
-            purgeLocal: { localModel?.deletePendingRecordingsOnThisDevice() }))
+            purgeLocal: localModel.map { model in
+                { model.deletePendingRecordingsOnThisDevice() }
+            }))
     }
 
     var body: some View {
@@ -189,26 +193,15 @@ private struct VoiceSharingSectionHost: View {
             // @ObservedObject expects the object to already exist; the view struct here holds
             // @StateObject upstream, so wrap in a minimal observed passthrough is unnecessary:
             // construct the section view against the state-owned model.
-            VoiceSharingAccountSectionsView(accountModel: account, localModel: localModel)
+            VoiceSharingAccountSections(
+                accountModel: account,
+                localModel: localModel,
+                surfaceEnabled: { VoiceSharingSettingsModel.surfaceEnabled },
+                originatingSession: account.accountActionSession)
         }
     }
 }
 
-/// Sections-only adapter: renders `VoiceSharingAccountView.accountSections` without the List
-/// wrapper or the standalone screen's navigation title.
-@MainActor
-private struct VoiceSharingAccountSectionsView: View {
-    @ObservedObject var accountModel: VoiceSharingAccountModel
-    let localModel: VoiceSharingSettingsModel?
-
-    var body: some View {
-        VoiceSharingAccountView(
-            accountModel: accountModel,
-            localModel: localModel,
-            surfaceEnabled: { VoiceSharingSettingsModel.surfaceEnabled }
-        ).accountSections
-    }
-}
 
 
 /// Credential source that never yields a token: composes the sharing client when no Auris origin
