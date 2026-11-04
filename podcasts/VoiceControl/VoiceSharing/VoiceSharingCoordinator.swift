@@ -237,6 +237,21 @@ final class VoiceSharingCoordinator {
         return takeEnrollmentLookupLocked()
     }
 
+    /// LATE-FAILURE FENCE (reviewer 722bcc74): validates exchange ownership and performs the
+    /// failure settlement (policy clear + retry classification) in ONE `enrollmentLookupLock`
+    /// acquisition — the same serialization the success settlement uses — so a newer lookup
+    /// that installs between check and mutation cannot be cleared by an old failure.
+    /// Returns false (touching nothing) when the exchange no longer owns the gate.
+    func settleFailureIfCurrent(exchangeGeneration: Int, fetchToken: VoiceSharingPolicy.FetchToken) -> Bool {
+        enrollmentLookupLock.lock()
+        defer { enrollmentLookupLock.unlock() }
+        guard exchangeGeneration == enrollmentLookupGeneration else { return false }
+        policyRefreshAfterActivation(freshActivationSucceeded: false,
+                                     fetchToken: fetchToken,
+                                     settlementGeneration: exchangeGeneration)
+        return true
+    }
+
     /// Caller must hold `enrollmentLookupLock`.
     private func takeEnrollmentLookupLocked() -> EnrollmentLookup {
         enrollmentLookupGeneration += 1
@@ -911,26 +926,46 @@ final class VoiceSharingCoordinator {
         }
     }
 
-    private func resetTransientPolicyRetry(claimGeneration: Int? = nil) {
+    /// Cancels a pending DELIVERY only — backoff history is outage evidence and is NOT
+    /// reset here (reviewer 722bcc74 gap 3: exchange entries cancel deliveries, not outages;
+    /// only an actual install resets the backoff schedule).
+    private func cancelPendingRetryDelivery(claimGeneration: Int? = nil) {
         policyRetryStateLock.lock(); defer { policyRetryStateLock.unlock() }
         guard claimGeneration == nil || policyRetryPendingClaimGeneration == nil
             || policyRetryPendingClaimGeneration == claimGeneration else { return }
         policyRetryWorkItem?.cancel()
         policyRetryWorkItem = nil
         policyRetryPendingClaimGeneration = nil
+    }
+
+    private func resetTransientPolicyRetry(claimGeneration: Int? = nil) {
+        cancelPendingRetryDelivery(claimGeneration: claimGeneration)
+        policyRetryStateLock.lock(); defer { policyRetryStateLock.unlock() }
         policyRetryBackoffSeconds = 30
     }
 
-    /// Test seam mirror of the production cancellation path (same state, no queue hop).
-    func cancelTransientPolicyRetryForTesting() { resetTransientPolicyRetry() }
+    /// Entry-supersession (exchange start): cancels a pending delivery WITHOUT resetting
+    /// outage backoff. A pretaken retry lookup arrives with its claim already released, so
+    /// it touches nothing (and must not reset its own backoff history).
+    func cancelPendingRetryDeliveryForNewExchange() { cancelPendingRetryDelivery() }
 
     private func scheduleTransientPolicyRetry(forExchangeWith generation: Int) {
+        // CLAIM + currency in the lookup owner's serialization (reviewer 722bcc74 gap 2): a
+        // completion for a superseded generation can no longer claim a retry at all, however
+        // its stale check raced a newer exchange.
+        enrollmentLookupLock.lock()
+        guard generation == enrollmentLookupGeneration else {
+            enrollmentLookupLock.unlock()
+            FileLog.shared.addMessage("[VoiceSharing] stale completion (gen \(generation)) cannot claim a retry; newer exchange owns the gate")
+            return
+        }
         let item: DispatchWorkItem
         var delay: Double = 0
         policyRetryStateLock.lock()
         do {
             guard policyRetryPendingClaimGeneration == nil else {
                 policyRetryStateLock.unlock()
+                enrollmentLookupLock.unlock()
                 FileLog.shared.addMessage("[VoiceSharing] transient policy retry already pending; backoff unchanged")
                 return
             }
@@ -975,6 +1010,7 @@ final class VoiceSharingCoordinator {
         }
         FileLog.shared.addMessage("[VoiceSharing] transient policy refusal; retry in \(Int(delay))s")
         policyRetryStateLock.unlock()
+        enrollmentLookupLock.unlock()
         observePolicyRetryDelayForTesting?(delay)
         if let deliver = deliverPolicyRetryForTesting {
             deliver(delay, item)

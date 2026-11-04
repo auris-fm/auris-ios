@@ -99,9 +99,12 @@ enum VoiceSharingFirebaseApp {
                                       accountClient: VoiceSharingAccountClient? = nil,
                                       pretakenLookup: VoiceSharingCoordinator.EnrollmentLookup? = nil,
                                       completion: ((Bool, Int) -> Void)? = nil) {
-        // A new exchange supersedes any pending transient retry (a newer real refresh drives
-        // its own outcome), and the outcome classification starts clean for THIS exchange.
-        coordinator.cancelTransientPolicyRetryForTesting()
+        // A new exchange supersedes any pending transient DELIVERY (a newer real refresh
+        // drives its own outcome) — WITHOUT resetting outage backoff (reviewer 722bcc74 gap 3).
+        // A pretaken retry lookup arrives with its claim already released; it touches nothing.
+        if pretakenLookup == nil {
+            coordinator.cancelPendingRetryDeliveryForNewExchange()
+        }
         // Settlement evidence captured BEFORE any network work (see the lifecycle note below).
         guard let named = existing() else {
             FileLog.shared.addMessage("[VoiceSharing] policy exchange skipped: secondary app absent")
@@ -145,14 +148,12 @@ enum VoiceSharingFirebaseApp {
                 // OWNERSHIP FENCE (reviewer 632cce79): a LATE fetch failure of an OLD exchange
                 // must not clear a policy a newer successor already installed. Only the
                 // generation that still owns the gate may run the failure settlement.
-                guard coordinator.currentEnrollmentLookupGenerationForTesting == exchangeGeneration else {
+                if coordinator.settleFailureIfCurrent(exchangeGeneration: exchangeGeneration,
+                                                      fetchToken: policyToken) {
+                    // failure settlement ran under the lookup owner's serialization
+                } else {
                     FileLog.shared.addMessage("[VoiceSharing] stale fetch failure dropped (gen \(exchangeGeneration) superseded); installed policy untouched")
-                    completion?(false, exchangeGeneration)
-                    return
                 }
-                coordinator.policyRefreshAfterActivation(freshActivationSucceeded: false,
-                                                         fetchToken: policyToken,
-                                                         settlementGeneration: exchangeGeneration)
                 completion?(false, exchangeGeneration)
                 return
             }
