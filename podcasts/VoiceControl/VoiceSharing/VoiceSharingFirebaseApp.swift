@@ -48,6 +48,12 @@ enum VoiceSharingFirebaseApp {
     /// Injectable activate actor for controls (paired with `policyFetchActor`).
     static var policyActivateActor: ((@escaping (Bool, Error?) -> Void) -> Void)?
 
+    /// Injectable DEFAULT account client (controls): when the caller passes no client, the
+    /// exchange normally builds the production one. Controls that drive real recovery
+    /// (expiry → failed fetch → delivered retry → fresh install) inject a stubbed client so
+    /// the settlement fetch answers from the stub like explicit-client controls.
+    static var defaultAccountClientOverride: ((VoiceSharingCoordinator) -> VoiceSharingAccountClient?)?
+
     /// Injectable provenance actor for controls (paired with `policyActivateActor`):
     /// when set, replaces the active-config value-source read. Nil (production)
     /// reads the named config live - INSIDE the activation completion (reviewer
@@ -195,7 +201,9 @@ enum VoiceSharingFirebaseApp {
                 FileLog.shared.addMessage("[VoiceSharing] policy exchange settled: sdkActivated=\(sdkActivated) error=\(activationError == nil ? "none" : String(describing: type(of: activationError!))) fetchAdvanced=\(provedFreshExchange) valueRemote=\(valueIsRemote) installing=\(fresh)")
                 Task {
                     await coordinator.completeActivationWithEnrollment(
-                        freshActivationSucceeded: fresh, lookup: lookup, accountClient: accountClient)
+                        freshActivationSucceeded: fresh, lookup: lookup,
+                        accountClient: accountClient
+                            ?? defaultAccountClientOverride?(coordinator))
                     lastPolicyRefreshOutcome = fresh
                     // CENTRALIZED settlement notification (spec e42d2959): every production
                     // entry — launch, identity change, lease expiry, owned retry — reaches
