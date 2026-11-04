@@ -188,7 +188,14 @@ struct SeekRelativeCompletion {
             // Drain so no child is left dangling; the cancel makes the drain immediate.
             _ = await group.next()
             // Deadline arbitration on the SAME clock: at or beyond the boundary, expiry wins
-            // even if a correlated completion raced it.
+            // for SUCCESS-CAPABLE evidence. But a correlated `expiredBeforeMutation` is a
+            // PROOF OF NO EFFECT that the engine produced at the mutation site — it survives
+            // expiry (it can only arrive at/after the deadline in production) and classifies
+            // as the before-release refusal. It never revises an earlier settlement: settle
+            // runs once and returns once.
+            if case .expiredBeforeMutation = firstSettled {
+                return firstSettled
+            }
             if nowUptimeNs() >= deadlineNs { return nil }
             return firstSettled
         }

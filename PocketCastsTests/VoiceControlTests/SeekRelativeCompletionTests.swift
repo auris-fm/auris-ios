@@ -238,14 +238,40 @@ final class SeekRelativeCompletionTests: XCTestCase {
     // MARK: - review-blocker controls (spec a3af56dd + review 885b244d)
 
     /// The engine's at-mutation deadline check PROVES no seek was issued: refused with the
-    /// deadline reason (the before-release arm), never unknown/cancelled.
+    /// deadline reason (the before-release arm), never unknown/cancelled. PRODUCTION
+    /// CONDITION (review 7d4bc057): this proof only exists at/after the deadline — the fake
+    /// clock reaches the boundary as the proof is delivered, and the proof must SURVIVE the
+    /// expiry arbitration that would discard success evidence.
     func test_expiredBeforeMutationIsRefusedWithTheDeadlineReason() async throws {
         let clock = ManualUptimeClock()
         let initn = initiation(clock: clock)
-        let c = coordinator(clock: clock) { .expiredBeforeMutation(identity: self.identity()) }
+        let deadline = initn.admittedAtUptimeNs + UInt64(15 * 1_000_000_000)
+        let c = coordinator(clock: clock) { () -> SeekExecutionOutcome? in
+            // The engine checks at the mutation site; by then the budget is spent.
+            try? await Task.sleep(nanoseconds: 10_000_000)
+            clock.now = deadline
+            return .expiredBeforeMutation(identity: self.identity())
+        }
         let result = await c.settle(after: initn)
-        XCTAssertEqual(result.outcome, OperationOutcome.refused)
+        XCTAssertEqual(result.outcome, OperationOutcome.refused,
+                       "correlated no-mutation proof survives expiry: \(result)")
         XCTAssertEqual(result.reason, SeekRelativeCompletion.Reason.deadlineExpired)
+        XCTAssertNil(result.state)
+    }
+
+    /// The OTHER direction of the same arbitration: success-capable evidence delivered only
+    /// at/after the deadline is discarded — expiry wins, unknown.
+    func test_successEvidenceArrivingAfterTheDeadlineIsUnknown() async throws {
+        let clock = ManualUptimeClock()
+        let initn = initiation(clock: clock)
+        let deadline = initn.admittedAtUptimeNs + UInt64(15 * 1_000_000_000)
+        let c = coordinator(clock: clock) { () -> SeekExecutionOutcome? in
+            try? await Task.sleep(nanoseconds: 10_000_000)
+            clock.now = deadline
+            return .completed(identity: self.identity(), effectiveRequest: 500, observedItemClock: 500)
+        }
+        let result = await c.settle(after: initn)
+        XCTAssertEqual(result.outcome, OperationOutcome.unknown)
         XCTAssertNil(result.state)
     }
 

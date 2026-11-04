@@ -289,7 +289,10 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
 
             lastSeekTime = max(0.1, time)
             seeking = true
-            readOperation.seekTo(time, completion: { [weak self] seekedToEnd in
+            readOperation.seekTo(time, deadlineNs: deadlineNs, expired: {
+                // The locked mutation site verified NO effect was issued.
+                typedCompletion?(.expiredBeforeMutation(identity: identity))
+            }, completion: { [weak self] seekedToEnd in
                 if !seekedToEnd {
                     completion?()
                 } else if !(self?.playBufferManager?.haveNotifiedPlayer.value ?? false) {
