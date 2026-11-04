@@ -162,11 +162,6 @@ class VoiceControlAssembly {
         // recognition pipeline.
         let queueRoot = VoiceSharingUploadQueue.defaultRootDirectory()
         try? FileManager.default.createDirectory(at: queueRoot, withIntermediateDirectories: true)
-        // ACTIVATION SLICE (2026-11-03): configure the NAMED secondary Firebase app so the
-        // policy's remote scalar reads from the dedicated auris-fm registration. The default
-        // app and its consumers are untouched; a missing/invalid bundled plist degrades to
-        // nil and the coordinator falls back to the default-app read (existing behavior).
-        _ = VoiceSharingFirebaseApp.configure()
         // PER-ENTRY IDENTITY BINDING (reviewer fd6b8036 / spec fe99ec96): the queue compares each
         // entry's own durable enrollment epoch against this LIVE read at admission, so a surviving
         // entry from a previous epoch cannot ride a newer process into an upload — and a new entry
@@ -297,20 +292,6 @@ class VoiceControlAssembly {
         // Re-login recovery (review 15a18d5d): identityBecameReadable must INITIATE the normal
         // refresh, not merely permit a later one. Wired here where Firebase is configured; the
         // coordinator's default is a no-op so tests can drive the sequence without Firebase.
-        VoiceSharingCoordinator.shared.initiateIdentityRecoveryRefresh = {
-            FirebaseManager.refreshRemoteConfig(expirationDuration: 0)
-        }
-        // ACTIVATION SLICE (reviewer 45479ac1): the named secondary policy refresh is a
-        // PRODUCTION-connected entry — identity recovery runs the named fetch→activate→value
-        // path (with failure reporting); the default-app refresh above stays for its own consumers.
-        VoiceSharingFirebaseApp.connectIdentityRecoveryRefresh()
-        // LAUNCH ENTRY (reviewer 0c3168fe): a process that is already signed in has neither a
-        // recovery event nor an expiring lease — run one named exchange now so the policy
-        // lease installs at launch. Failure reports through the exchange's own path.
-        VoiceSharingFirebaseApp.performPolicyExchange(coordinator: .shared) { _, _ in
-            // The policy exchange still runs (it gates collection); it no longer provisions a
-            // capture allowance, because none exists to provision.
-        }
         if let uploadTrigger {
             installVoiceSharingGateLoss(
                 collector: contributionCollector, sink: contributionSink, uploadTrigger: uploadTrigger,
