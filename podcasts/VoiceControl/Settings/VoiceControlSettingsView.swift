@@ -3,58 +3,63 @@ import SwiftUI
 struct VoiceControlSettingsView: View {
     @ObservedObject var service: VoiceControlService
 
+    /// The sharing section, rendered from the SAME single settings model the surface has always
+    /// used. Optional because the sharing lifetime is absent when no Auris origin is configured —
+    /// in that case the row is omitted rather than shown as a dead control.
+    private var sharing: VoiceSharingAccountView? {
+        guard VoiceSharingSettingsModel.surfaceEnabled,
+              let model = service.voiceSharingLifetime?.settingsModel,
+              let tokenProvider = CloudTokenProviderRouter.voiceSharingProvider() else { return nil }
+        let account = VoiceSharingAccountModel(
+            client: VoiceSharingAccountClient(tokenProvider: tokenProvider),
+            disclosureVersion: VoiceSharingDisclosure.productionVersion,
+            purgeLocal: { model.deletePendingRecordingsOnThisDevice() })
+        return VoiceSharingAccountView(accountModel: account, localModel: model,
+                                       surfaceEnabled: { VoiceSharingSettingsModel.surfaceEnabled })
+    }
+
     var body: some View {
         List {
-            Section("Status") {
-                HStack {
-                    Text("Voice Control")
-                    Spacer()
-                    statusBadge
+            // Layout mirrors Android's Voice Control screen (spec 233c0d02, @android f86c6a67):
+            // enable switch, model readiness, one plain status line, then the sharing section.
+            Section {
+                Toggle(isOn: Binding(
+                    get: { service.gatePosture.setup.enabledByUser.isAllowed },
+                    set: { service.setUserEnabled($0) }
+                )) {
+                    Text("Enable Voice Control")
                 }
-                if case .listening(let mode) = service.gateState {
-                    HStack {
-                        Text("Listening Mode")
-                        Spacer()
-                        Text(mode == .continuous ? "Continuous" : "Wake Word")
-                            .foregroundColor(.secondary)
-                    }
-                }
+            } footer: {
+                Text("Listen for voice commands during playback")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
 
-            Section("Diagnostics") {
-                let posture = service.gatePosture
-                statusRow(label: "Gate", value: posture.allowed ? "Allowed" : "Blocked")
-                statusRow(label: "Off Reason", value: offReasonText(posture))
-                statusRow(label: "Listening Mode", value: listeningModeText(posture))
-                statusRow(label: "Mic Exposure", value: "\(posture.micExposure)")
-                statusRow(label: "Grace Period", value: posture.gracePeriodActive ? "Active" : "Inactive")
-                statusRow(label: "Context", value: "\(posture.context)")
-
-                // Per-condition breakdown
-                Section("Setup") {
-                    conditionRow(label: "User Enabled", condition: posture.setup.enabledByUser)
-                    conditionRow(label: "Device Supported", condition: posture.setup.deviceSupported)
-                    conditionRow(label: "Models Ready", condition: posture.setup.modelsReady)
-                }
-
-                Section("Conflicts") {
-                    conditionRow(label: "Not On Call", condition: posture.conflicts.notOnCall)
-                    conditionRow(label: "Not Casting", condition: posture.conflicts.notCasting)
-                    conditionRow(label: "Battery OK", condition: posture.conflicts.batteryOk)
-                    conditionRow(label: "Other App Playing", condition: posture.conflicts.otherAppPlaying)
-                }
+            Section {
+                statusRow(label: "Wake Word Model", value: readinessText(service.gatePosture.setup.modelsReady))
+                // iOS exposes one combined readiness condition for the speech stack; there is no
+                // separate published backend flag, so this reports the condition the app actually
+                // gates on rather than inventing a second source.
+                statusRow(label: "Speech Recognition Model", value: readinessText(service.gatePosture.setup.modelsReady))
             }
 
-            Section("Wake Word") {
-                HStack {
-                    Text("Wake Word")
-                    Spacer()
-                    Text("Auris")
-                        .foregroundColor(.secondary)
-                }
+            // A plain status line, not a diagnostics block. iOS-specific wording: there is no
+            // microphone-isolation requirement on this platform, so Android's "a headset or earbud
+            // microphone is required" is deliberately NOT reproduced here — it would state
+            // something false about this build.
+            Section {
+                statusRow(label: "Status", value: primaryStatusText(service.gatePosture))
+            }
+
+            if let sharing {
+                sharing
             }
         }
         .navigationTitle("Voice Control")
+    }
+
+    private func readinessText(_ condition: GateCondition) -> String {
+        condition.isAllowed ? "Ready" : "Not ready"
     }
 
     @ViewBuilder

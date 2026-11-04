@@ -156,7 +156,6 @@ final class VoiceSharingCollector {
         var deferEmissionUntilFinalized = false
     }
 
-    private let captureAllowance: VoiceSharingCaptureAdmitting?
     private let policy: VoiceSharingPolicy
     private let membership: () -> VoiceSharingEnrollmentStore.State
     private let epochProvider: () -> String?
@@ -188,7 +187,6 @@ final class VoiceSharingCollector {
 
     init(
         policy: VoiceSharingPolicy,
-        captureAllowance: VoiceSharingCaptureAdmitting? = nil,
         outcomeWaitLimit: OutcomeWaitLimit? = nil,
         monotonicNow: @escaping () -> DispatchTime = DispatchTime.now,
         scheduleOutcome: @escaping (DispatchTime, DispatchWorkItem) -> Void = {
@@ -199,7 +197,6 @@ final class VoiceSharingCollector {
         sessionIdentity: @escaping () -> String? = { VoiceSharingSessionGeneration.shared.currentGeneration() },
         sink: @escaping (SegmentEvent) -> Void = { _ in }
     ) {
-        self.captureAllowance = captureAllowance
         self.outcomeWaitLimit = outcomeWaitLimit
         self.monotonicNow = monotonicNow
         self.scheduleOutcome = scheduleOutcome
@@ -267,17 +264,14 @@ final class VoiceSharingCollector {
         }
         let session = sessionIdentity()
         let stamp = VoiceSharingCaptureStamp(session: session, epoch: epoch, policyGeneration: policy.currentLeaseGeneration)
-        // The first contribution-owned PCM copy occurs only after taking this prepaid, single-use token.
-        let admission = captureAllowance?.take(for: stamp)
-        captureAllowance?.requestPreparation()
-        guard let admission else {
-            abandonForGateMove(context: currentCaptureContext())
-            return nil
-        }
+        // No capture allowance is requested before retaining audio (spec c74d7e30, "Actual upload
+        // usage"): daily quota is metered from ACTUAL accepted bytes at the server, so there is
+        // nothing to acquire here and nothing that can refuse local retention. The clip and
+        // metadata ceilings are the compiled bounds, applied unconditionally.
         var frozen = FrozenCapture(id: UUID(), epoch: epoch, session: session,
                                    retained: [], sawStart: true, original: confirmationFrameSamples)
-        frozen.clipSampleCeiling = min(Self.maxRetainedSamples, admission.clipSamples)
-        frozen.metadataByteCeiling = min(VoiceSharingUploadQueue.maxMetadataBytes, admission.metadataBytes)
+        frozen.clipSampleCeiling = Self.maxRetainedSamples
+        frozen.metadataByteCeiling = VoiceSharingUploadQueue.maxMetadataBytes
         lock.lock()
         guard stillPermitted(for: frozen), policy.currentLeaseGeneration == stamp.policyGeneration else {
             lock.unlock()
@@ -682,10 +676,9 @@ return }
 
     /// The pipeline stopped. A partial owned by this collector is released — it can never complete. Completed
     /// contributions are untouched: closing listening is not implicit withdrawal.
-    func pipelineStarting() { captureAllowance?.requestPreparation() }
+    func pipelineStarting() {}
 
     func pipelineStopped() {
-        captureAllowance?.invalidate()
         speechCancelled()
     }
 
@@ -695,7 +688,6 @@ return }
     /// gone, so nothing already in the FIFO may reach the sink either. Without this, "disable" only took
     /// effect at the next segmentation signal, and a stalled sink could hold stale work for the whole wait.
     func gateLost() {
-        captureAllowance?.invalidate()
         lock.lock()
         // WITHDRAWAL DISPOSAL. Every retained byte dies here, synchronously:
         //   * queued events (each holds a full audio copy) — purged;
@@ -725,7 +717,6 @@ return }
     /// An account or session transition abandons whatever partial is open UNDER THE PREDECESSOR. Without this,
     /// A's late completion would be finalized under B's identity.
     func invalidateForAccountTransition(expectedSession: String?) {
-        captureAllowance?.invalidate()
         speechCancelled()
         _ = expectedSession
     }

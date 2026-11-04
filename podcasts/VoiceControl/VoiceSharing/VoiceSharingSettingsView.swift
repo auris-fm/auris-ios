@@ -255,12 +255,17 @@ struct VoiceSharingAccountView: View {
                 Toggle(isOn: sharingBinding) {
                     Text(L10n.voiceSharingAccountEnroll)
                 }
-                .disabled(!controlsAvailable || accountModel.busy || accountModel.membership == nil)
+                .disabled(!controlsAvailable || accountModel.busy || accountModel.locallyOptedIn == nil)
             } footer: {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(L10n.voiceSharingAccountSharingOptional)
                         .font(.caption)
                         .foregroundColor(.secondary)
+                    if let projectionSummary {
+                        Text(projectionSummary)
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                    }
                     if !switchingSummary.isEmpty {
                         Text(switchingSummary)
                             .font(.caption)
@@ -306,23 +311,28 @@ struct VoiceSharingAccountView: View {
         }
     }
 
-    /// A single-switch view over the projection. `true` only when the last received projection
-    /// says enrollment is active; `false` otherwise, including when no projection has arrived.
-    /// A nil projection disables the toggle instead of guessing, so "unknown" never renders as
-    /// "off" — the user would be told they had declined when we simply had not been told.
+    /// The switch reflects the user's OWN preference, not the server projection.
+    ///
+    /// These can legitimately disagree: `withdraw()` stops local collection immediately while the
+    /// server withdrawal is still in flight, so `voiceSharingEnrolled` remains `true` for a while.
+    /// Reading only the projection made the switch spring back ON after the user turned it off,
+    /// and left no way to turn it on again through the binding (reviewer 042d5a69).
+    ///
+    /// `nil` = we have not read local preference yet. The toggle is then disabled and says so,
+    /// rather than rendering an off switch that would state "you declined" when we were never told.
     private var sharingBinding: Binding<Bool> {
         Binding(
-            get: { accountModel.membership?.voiceSharingEnrolled == true },
+            get: { accountModel.locallyOptedIn ?? false },
             set: { wantsOn in
-                guard controlsAvailable, accountModel.membership != nil else { return }
+                guard controlsAvailable, accountModel.locallyOptedIn != nil else { return }
                 if wantsOn {
-                    // Turning ON presents the disclosure before enrolling (spec). The
-                    // confirmation dialog carries it; a decline changes nothing locally.
+                    // Turning ON presents the disclosure and requires explicit confirmation
+                    // before enrollment (spec). Declining changes nothing locally.
                     disclosureConfirmation = true
                 } else {
                     // Turning OFF stops new collection immediately, then asks the server to
-                    // withdraw. Pending/failed withdrawal is surfaced; the switch alone never
-                    // implies server confirmation.
+                    // withdraw. The pending/failed withdrawal is surfaced below; the switch
+                    // alone never implies server confirmation.
                     Task {
                         guard controlsAvailable else { return }
                         await accountModel.withdraw()
@@ -330,6 +340,18 @@ struct VoiceSharingAccountView: View {
                 }
             }
         )
+    }
+
+    /// Explains the server projection SEPARATELY from the user's preference, so a switch that is
+    /// off while the server still reports enrolled is explained rather than looking broken.
+    private var projectionSummary: String? {
+        guard let locallyOptedIn = accountModel.locallyOptedIn else {
+            return L10n.voiceSharingValueUnknown
+        }
+        guard !locallyOptedIn, accountModel.membership?.voiceSharingEnrolled == true else { return nil }
+        // Local preference is off while the server still shows enrolled: withdrawal is pending or
+        // failed. Never present this as confirmed.
+        return L10n.voiceSharingAccountWithdrawalPending
     }
 
     /// Explains a temporary remote pause WITHOUT hiding the preference (spec). Returns nil

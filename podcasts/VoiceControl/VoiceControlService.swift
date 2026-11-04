@@ -34,6 +34,17 @@ class VoiceControlService: ObservableObject {
     /// does not run voice-sharing work unchanged; routing/execution are reported through it when present.
     private let contributionCollector: VoiceSharingCollector?
     var voiceSharingLifetime: VoiceSharingLifetime?
+
+    /// The user's Voice Control enable preference, driven from Settings.
+    ///
+    /// This routes to the existing gate condition source rather than introducing a second state
+    /// holder, so "disabled in settings" stays the same condition the gate already evaluates.
+    /// NOTE: the value is currently session-scoped — `LiveConditionMonitor` seeds `enabledByUser`
+    /// to `.allowed` on construction and no persisted preference exists yet, so the switch does
+    /// not survive a relaunch. Recording that here rather than implying it persists.
+    func setUserEnabled(_ enabled: Bool) {
+        conditionMonitor.updateUserEnabled(enabled)
+    }
     /// Injected for the routing/execution provenance controls; production uses `contributionCollector`.
     var contributionCollectorForTesting: VoiceSharingCollector? { contributionCollector }
 
