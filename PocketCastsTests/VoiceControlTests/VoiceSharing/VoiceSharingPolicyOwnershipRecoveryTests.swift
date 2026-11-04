@@ -38,6 +38,15 @@ final class VoiceSharingPolicyOwnershipRecoveryTests: XCTestCase {
         func get() -> Bool { lock.lock(); defer { lock.unlock() }; return value }
     }
 
+    /// Crash-free polling wait for async tests (XCTest expectation machinery has crashed
+    /// under the async test runner here).
+    private func pollUntil(_ condition: @escaping () -> Bool, timeoutSeconds: TimeInterval) async {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline && !condition() {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+    }
+
     private final class StubBearerTokens: CloudTokenProviding {
         func token() async -> String? { "test-bearer" }
         func prepare() async {}
@@ -368,12 +377,21 @@ final class VoiceSharingPolicyOwnershipRecoveryTests: XCTestCase {
     }
 
     /// LEASE EXPIRY → FAILED FETCH → DELIVERED RETRY → FRESH INSTALLED POLICY
-    /// (spec f734c75c / e42d2959 / reviewer 974f4958): the expiry renewal goes through the
-    /// SAME centralized settlement; a transient fetch failure schedules recovery, and the
-    /// DELIVERED retry — through the real owned handoff and exchange — ends with a fresh
-    /// installed policy lease.
-    func test_leaseExpiryWithFailedFetchRecoversToAFreshInstalledPolicy() throws {
-        let (coordinator, store) = makeEnrolledStack()
+    /// (spec f734c75c / e42d2959 / reviewers 974f4958 + aa503d56): install an initial
+    /// enabled lease, advance the injected clock past its deadline, invoke the captured
+    /// REAL expiry schedule, watch collection close, then let the renewal fetch fail
+    /// transiently and DELIVER the scheduled retry through the real owned handoff and
+    /// exchange — ending in a fresh installed lease with collection permitted again.
+    func test_leaseExpiryWithFailedFetchRecoversToAFreshInstalledPolicy() async throws {
+        let store = VoiceSharingEnrollmentStore(sessionIdentityProvider: { "gen-A" })
+        store.setLocalOptIn(true)
+        let clock = StubMonotonicClock(time: 1_000)
+        let coordinator = VoiceSharingCoordinator(
+            clock: clock,
+            lastFetchTime: { nil },
+            valueSource: { VoiceSharingCoordinator.RemoteValueSource(
+                data: Data("true".utf8), sourceIsRemote: true) },
+            enrollmentStore: store)
         VoiceSharingSessionGeneration.shared.ensureLifecycle()
         defer { VoiceSharingSessionGeneration.shared.clear() }
         let firApp = try XCTUnwrap(
@@ -381,15 +399,55 @@ final class VoiceSharingPolicyOwnershipRecoveryTests: XCTestCase {
         XCTAssertNotNil(firApp)
         let delivered = deliverImmediately(coordinator)
         VoiceSharingFirebaseApp.connectIdentityRecoveryRefresh(coordinator: coordinator)
-        // Phase 1: the renewal fetch FAILS transiently → recovery scheduled.
+
+        // Phase 0: the settlement passes must settle SUCCESSFULLY (no pending retry left
+        // behind for a later generation to trip over): immediate successful fetch.
+        VoiceSharingFirebaseApp.policyFetchActor = { _, handler in handler(.success, nil as Error?) }
+        defer { VoiceSharingFirebaseApp.policyFetchActor = nil }
+        let config0 = URLSessionConfiguration.ephemeral
+        config0.protocolClasses = [VoiceSharingStubProtocol.self]
+        let client0 = VoiceSharingAccountClient(
+            baseURLProvider: { "https://api.example.test" },
+            tokenProvider: StubBearerTokens(),
+            session: URLSession(configuration: config0),
+            sessionIdentity: { "gen-A" },
+            membershipStore: store)
+        VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] = .init(
+            status: 200,
+            body: ["schema_version": 1, "membership_revision": "r1", "plan": "pro",
+                   "voice_sharing_enrolled": true, "withdrawal_state": "active",
+                   "enrollment_epoch": "e1" as Any, "accepted_disclosure_version": "voice-sharing-v1" as Any])
+        var expiryCallback: (() -> Void)?
+        coordinator.expiryScheduler = { _, body in expiryCallback = body }
+        var lookup0 = coordinator.beginEnrollmentLookup()
+        await coordinator.completeActivationWithEnrollment(
+            freshActivationSucceeded: true, lookup: lookup0, accountClient: client0)
+        lookup0 = coordinator.beginEnrollmentLookup()
+        await coordinator.completeActivationWithEnrollment(
+            freshActivationSucceeded: true, lookup: lookup0, accountClient: client0)
+        XCTAssertNotNil(coordinator.policy.installedLeaseExpiry,
+                        "phase 0: an initial lease must install")
+        XCTAssertTrue(coordinator.policy.permitsCollection,
+                      "phase 0: the initial lease permits collection")
+        let initialExpiry = coordinator.policy.installedLeaseExpiry
+
+        // Phase 1: advance the injected clock PAST the lease deadline so the captured REAL
+        // expiry schedule's revoke check fires; collection must CLOSE; the renewal fetch
+        // FAILS transiently → recovery scheduled.
+        try XCTUnwrap(expiryCallback != nil, "the initial install must arm the real expiry schedule")
+        clock.advance(1_000_000)
+        XCTAssertFalse(coordinator.policy.permitsCollection,
+                       "after the clock passes the deadline the lease must close collection")
         VoiceSharingFirebaseApp.policyFetchActor = { _, handler in
             DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) {
                 handler(.failure, NSError(domain: "test", code: 1))
             }
         }
-        coordinator.leaseRenewalAfterExpiry()
-        let scheduled = NSPredicate { _, _ in !delivered.value.isEmpty }
-        wait(for: [XCTNSPredicateExpectation(predicate: scheduled, object: nil)], timeout: 10)
+        expiryCallback?()
+        await pollUntil({ !delivered.value.isEmpty }, timeoutSeconds: 10)
+        guard !delivered.value.isEmpty else {
+            XCTFail("no recovery was scheduled after the real expiry callback"); return
+        }
         XCTAssertEqual(delivered.value.count, 1,
                        "an expiry renewal with a failed fetch must schedule recovery")
 
@@ -407,11 +465,6 @@ final class VoiceSharingPolicyOwnershipRecoveryTests: XCTestCase {
         VoiceSharingFirebaseApp.policyValueProvenanceActor = { true }
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [VoiceSharingStubProtocol.self]
-        VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] = .init(
-            status: 200,
-            body: ["schema_version": 1, "membership_revision": "r1", "plan": "pro",
-                   "voice_sharing_enrolled": true, "withdrawal_state": "active",
-                   "enrollment_epoch": "e1" as Any, "accepted_disclosure_version": "voice-sharing-v1" as Any])
         VoiceSharingFirebaseApp.defaultAccountClientOverride = { coordinator in
             VoiceSharingAccountClient(
                 baseURLProvider: { "https://api.example.test" },
@@ -430,10 +483,15 @@ final class VoiceSharingPolicyOwnershipRecoveryTests: XCTestCase {
         delivered.value[0].item.perform()
         // First settlement applies the CHANGED membership (deferred follow-up drives the
         // install); wait for the lease to appear via the auto-driven follow-up.
-        let installed = NSPredicate { _, _ in coordinator.policy.installedLeaseExpiry != nil }
-        wait(for: [XCTNSPredicateExpectation(predicate: installed, object: nil)], timeout: 10)
+        await pollUntil({ coordinator.policy.installedLeaseExpiry != nil }, timeoutSeconds: 10)
         XCTAssertNotNil(coordinator.policy.installedLeaseExpiry,
                         "the delivered retry must end in a fresh installed policy")
+        XCTAssertTrue(coordinator.policy.permitsCollection,
+                      "the recovered lease must be usable: collection permitted")
+        if let initialExpiry, let fresh = coordinator.policy.installedLeaseExpiry {
+            XCTAssertNotEqual(fresh, initialExpiry,
+                              "the recovered lease must be a LATER deadline than the expired one")
+        }
     }
 
     /// SDK THROTTLE BOUNDARY (reviewer blocker 3): a fetch error carrying
