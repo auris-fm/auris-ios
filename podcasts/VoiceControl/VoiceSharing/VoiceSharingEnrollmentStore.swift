@@ -83,7 +83,7 @@ final class VoiceSharingEnrollmentStore {
     init(
         defaults: UserDefaults = .standard,
         accountScopeProvider: @escaping () -> String = VoiceSharingEnrollmentStore.currentAccountScope,
-        sessionIdentityProvider: @escaping () -> String? = { VoiceSharingSessionGeneration.shared.currentGeneration() }
+        sessionIdentityProvider: @escaping () -> String? = VoiceSharingEnrollmentStore.currentSessionOwner
     ) {
         self.defaults = defaults
         self.accountScopeProvider = accountScopeProvider
@@ -94,6 +94,15 @@ final class VoiceSharingEnrollmentStore {
     /// Membership is per-account. Keying storage by the signed-in account means signing into a different
     /// account cannot read the previous account's enrollment out of disk, and signing back in restores the
     /// user's own prior intent rather than resetting it.
+    /// ORDINARY ACCOUNT OWNERSHIP (spec 4afc6e43): the lifecycle a projection was read under is the
+    /// signed-in account itself, read from the same place every other authenticated request reads it. The
+    /// retired sharing lifecycle registry used to supply this and no longer exists, so leaving the default
+    /// pointed at it would refuse every signed-in operation before a request was made.
+    static func currentSessionOwner() -> String? {
+        guard SyncManager.isUserLoggedIn() else { return nil }
+        return ServerSettings.userId
+    }
+
     private let accountScopeProvider: () -> String
     private static func currentAccountScope() -> String {
         // Fail closed to an unscoped-but-stable label when nothing is authenticated.

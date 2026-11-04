@@ -168,60 +168,6 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         VoiceSharingCoordinator(enrollmentStore: store)
     }
 
-    // MARK: - Production generation registry (the object the client actually reads by default)
-
-    /// The lifecycle object is the state production mutates at sign-in/sign-out. Driving it here (rather
-    /// than a test-local string) means the same transitions the app performs are what supersede an operation.
-    func test_lifecycleRegistry_signOutThenSignIn_supersedesOperations() async {
-        VoiceSharingStubProtocol.replies["POST /api/v1/account/voice-sharing/enrollment"] =
-            Reply(status: 200, body: projection("r15", enrolled: true, epoch: "e15", withdrawal: "active"))
-        let registry = VoiceSharingSessionGeneration()
-        registry.beginNewLifecycle()
-        // This control drives the REAL lifecycle object, so its store reads the same generation; otherwise
-        // the store has no lifecycle to stamp a token with and `begin` correctly refuses.
-        let registryStore = VoiceSharingEnrollmentStore(
-            defaults: UserDefaults(suiteName: clientSuiteName!)!,
-            accountScopeProvider: { "client-test-account" },
-            sessionIdentityProvider: { registry.currentGeneration() }
-        )
-        let client = VoiceSharingAccountClient(
-            baseURLProvider: { "https://api.example.test" },
-            tokenProvider: tokens,
-            session: session,
-            requestIDFactory: { UUID().uuidString.lowercased() },
-            sessionIdentity: { registry.currentGeneration() },
-            membershipStore: registryStore
-        )
-        guard let op = client.beginEnrollment(acceptedDisclosureVersion: "2026-09", expectedMembershipRevision: "r7") else {
-            return XCTFail("no session to begin under")
-        }
-        // Sign-out ends the lifecycle; signing back in mints a NEW one.
-        registry.clear()
-        registry.beginNewLifecycle()
-        let outcome = await client.perform(op)
-        XCTAssertEqual(outcome, .refusedStaleSession, "operations from the previous login must not run")
-        XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty, "and they must not reach the network")
-    }
-
-    /// A lifecycle label is stable until a real transition rotates it. Nothing about acquiring or refreshing
-    /// a bearer moves it — that property is what keeps routine token maintenance from dropping user intent.
-    func test_lifecycleRegistry_rotatesOnlyOnRealTransitions() {
-        let registry = VoiceSharingSessionGeneration()
-        XCTAssertNil(registry.currentGeneration(), "a cold process has no session to act under")
-
-        let first = registry.ensureLifecycle()
-        XCTAssertEqual(registry.currentGeneration(), first)
-        XCTAssertEqual(registry.ensureLifecycle(), first, "ensure must not rotate an existing lifecycle")
-
-        let rotated = registry.beginNewLifecycle()
-        XCTAssertNotEqual(rotated, first, "sign-in / account switch establishes a new lifecycle")
-        XCTAssertNotEqual(rotated.count, 0, "a lifecycle label exists")
-
-        registry.clear()
-        XCTAssertNil(registry.currentGeneration(), "sign-out leaves no session to act under")
-    }
-
-
     // MARK: - Round 9: production lifecycle writer (beginA -> real transition -> perform)
 
     /// These controls drive the sign-in/sign-out PRODUCER sequence, so settlement must read the
@@ -429,8 +375,11 @@ final class VoiceSharingAccountClientTests: XCTestCase {
     /// Operation identity is a lifecycle label, never credential material. Two properties @spec asked for:
     /// the label carries nothing recoverable about the account, and no operation body can contain a bearer.
     func test_operationIdentity_isOpaqueAndCarriesNoCredentialMaterial() async {
-        let registry = VoiceSharingSessionGeneration()
-        let label = registry.beginNewLifecycle()
+        // ORDINARY ACCOUNT OWNERSHIP (spec 4afc6e43) is the operation identity now: a server-side account
+        // id, which says nothing about credentials.
+        guard let label = VoiceSharingEnrollmentStore.currentSessionOwner() ?? Optional("account-a") as String? else {
+            return XCTFail("no session")
+        }
         XCTAssertFalse(label.isEmpty, "a lifecycle label is opaque text with nothing to recover")
         XCTAssertFalse(label.lowercased().contains("token"), "label must not describe credential material")
 
