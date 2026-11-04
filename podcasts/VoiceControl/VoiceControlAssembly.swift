@@ -198,8 +198,11 @@ class VoiceControlAssembly {
         // authenticated session plus the user's sharing choice. The policy snapshot/lease no
         // longer gates uploads; the server re-checks enrollment/enablement at accept.
         let uploadAuthorized: () -> Bool = {
+            // ONE CONSENT DECISION (spec 4afc6e43): the user's sharing choice, under the ordinary
+            // authenticated session. The server re-checks enrollment/enablement at accept; the
+            // client no longer gates on projection/enrollment-membership readiness.
             ServerSettings.userId != nil
-                && VoiceSharingEnrollmentStore.shared.currentEffectiveEnrolled
+                && VoiceSharingEnrollmentStore.shared.currentState.localOptIn
         }
         // ONE identity reader for the whole upload path: queue, uploader and transport all
         // consult it, so the fence spans admission, credential acquisition and settlement.
