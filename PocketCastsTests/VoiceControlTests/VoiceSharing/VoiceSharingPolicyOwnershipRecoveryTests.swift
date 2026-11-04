@@ -299,6 +299,42 @@ final class VoiceSharingPolicyOwnershipRecoveryTests: XCTestCase {
         XCTAssertTrue(delivered.value.isEmpty, "a stale completion must not claim a retry")
     }
 
+    /// GATED OLD COMPLETION VS NEWER PENDING RETRY (reviewer 19acaa23): a stale completion
+    /// arriving while a NEWER generation's retry is pending must touch NOTHING — the newer
+    /// retry stays deliverable and the newer outage's backoff stays intact.
+    func test_oldCompletionLeavesNewerPendingRetryUntouched() {
+        let (coordinator, _) = makeEnrolledStack()
+        let delivered = deliverImmediately(coordinator)
+        let genOld = coordinator.currentEnrollmentLookupGenerationForTesting
+        // Newer exchange gen1 claims a pending retry (transient refusal at gen1).
+        _ = coordinator.beginEnrollmentLookup()
+        let genNew = coordinator.currentEnrollmentLookupGenerationForTesting
+        coordinator.setPolicyInstallOutcomeForTesting(.transientRefused, generation: genNew)
+        coordinator.policyExchangeCompleted(fresh: false, exchangeGeneration: genNew)
+        XCTAssertEqual(delivered.value.count, 1)
+        // Now the OLD generation's completion lands (claimed installed, gated fresh=true):
+        // currency-refused inside the owner transaction → nothing touched.
+        coordinator.setPolicyInstallOutcomeForTesting(.installed, generation: genOld)
+        coordinator.policyExchangeCompleted(fresh: true, exchangeGeneration: genOld)
+        XCTAssertEqual(delivered.value.count, 1, "the newer retry's delivery must survive a stale completion")
+        // The newer retry still fires and the backoff schedule is NOT reset (next is 60).
+        var retryExchangeGeneration = 0
+        coordinator.initiateOwnedRetryRefresh = { claimed in
+            if let lookup = coordinator.beginRetryExchangeIfCurrent(claimedGeneration: claimed) {
+                retryExchangeGeneration = lookup.generation
+            }
+        }
+        delivered.value[0].item.perform()
+        XCTAssertEqual(retryExchangeGeneration, genNew + 1,
+                       "the newer retry must still be deliverable after the stale completion")
+        // The retry's OWN exchange continues the outage: its transient completion must
+        // schedule at 60 — proof the stale completion reset nothing.
+        coordinator.setPolicyInstallOutcomeForTesting(.transientRefused, generation: retryExchangeGeneration)
+        coordinator.policyExchangeCompleted(fresh: false, exchangeGeneration: retryExchangeGeneration)
+        XCTAssertEqual(delivered.value.last?.delay, 60,
+                       "a stale completion must not reset the newer outage's backoff")
+    }
+
     /// SDK THROTTLE BOUNDARY (reviewer blocker 3): a fetch error carrying
     /// `RemoteConfigThrottledEndTimeInSecondsKey` floors the retry delay at the later of the
     /// boundary and local backoff — INCLUDING a boundary beyond the 900 s backoff cap.
