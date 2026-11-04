@@ -240,15 +240,15 @@ final class SeekExecutionOutcomeTests: XCTestCase {
 
         // B takes over the engine's read task and publishes pending state.
         engine.audioReadTask = taskB
-        engine.seekTo(2.0, completion: { _ = gateB.wait(timeout: .now() + 10) }, typedCompletion: nil,
-                      invocationToken: UUID(), deadlineNs: deadline &+ 20_000_000_000)
-
-        // Wait until B OWNS the pending state (published target visible through currentTime()).
+        // B signals the boundary ITSELF from its held completion: entering that closure
+        // means B has published its pending state and mutated — it definitively OWNS the
+        // speculative state at this instant (deterministic, no polling that A's publish
+        // could satisfy).
         let bOwns = XCTestExpectation(description: "B owns pending state")
-        DispatchQueue.global().async {
-            for _ in 0..<500 where !engine.isSeekPending { usleep(10_000) }
+        engine.seekTo(2.0, completion: {
             bOwns.fulfill()
-        }
+            _ = gateB.wait(timeout: .now() + 10)
+        }, typedCompletion: nil, invocationToken: UUID(), deadlineNs: deadline &+ 20_000_000_000)
         XCTAssertEqual(XCTWaiter().wait(for: [bOwns], timeout: 5), .completed)
         XCTAssertTrue(engine.isSeekPending, "B must be pending (held before its retire)")
         XCTAssertEqual(engine.currentTime(), 2.0, "B's target owns currentTime()")
