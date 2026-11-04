@@ -61,11 +61,21 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
     private var seeking = false
     private var lastSeekTime = 0 as TimeInterval
     /// Whether a seek mutation is pending (read-only probe; also the connected-control seam).
-    var isSeekPending: Bool { seeking }
+    var isSeekPending: Bool { seekStateLock.lock(); defer { seekStateLock.unlock() }; return seeking }
     /// Which invocation's SPECULATIVE state (`lastSeekTime`/`seeking`) currently owns the
     /// engine (review 4b784fa2): an expired request must not clear or rewrite a newer seek's
     /// state, and must not publish its target at all when it expires before mutation.
     private var seekingOwnerToken: UUID?
+    /// OWNERSHIP ATOMICITY (review 61ebb558): the serial queue publishes the speculative
+    /// state while the read-task's expiry/completion closures check and retire it on other
+    /// queues — the ownership COMPARISON and the state transition must be one locked
+    /// transaction, and `currentTime()` snapshots under the same lock.
+    private let seekStateLock = NSLock()
+    private func withSeekState<T>(_ body: () -> T) -> T {
+        seekStateLock.lock()
+        defer { seekStateLock.unlock() }
+        return body()
+    }
     /// INJECTABLE MONOTONIC CLOCK for the hop-1 (serialSeekQueue) deadline check and tests;
     /// production reads the real uptime clock. The hop-2 (read-task lock) check has its own
     /// injectable clock on AudioReadTask.
@@ -301,23 +311,33 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
             }
             // SPECULATIVE STATE WITH OWNERSHIP: published only after both expiry checks are
             // plausible, and tagged with THIS invocation so a late expiry (hop 2) restores it
-            // only if this invocation still owns it.
+            // only if this invocation still owns it. Publish is one locked transaction.
             let ownershipToken = identity.invocationToken
-            let previousLastSeekTime = lastSeekTime
-            lastSeekTime = max(0.1, time)
-            seeking = true
-            seekingOwnerToken = ownershipToken
-            readOperation.seekTo(time, deadlineNs: deadlineNs, expired: { [weak self] in
+            let previousLastSeekTime = withSeekState {
+                let previous = self.lastSeekTime
+                self.lastSeekTime = max(0.1, time)
+                self.seeking = true
+                self.seekingOwnerToken = ownershipToken
+                return previous
+            }
+            readOperation.seekTo(time, deadlineNs: deadlineNs, expired: { [weak self, ownershipToken, previousLastSeekTime, typedCompletion, identity] in
                 // The locked mutation site verified NO effect was issued. Restore the
-                // speculative state ONLY if this invocation still owns it — an old expired
-                // request must not clear a newer seek's state.
-                if let self, self.seekingOwnerToken == ownershipToken {
+                // speculative state ONLY if this invocation STILL owns it, atomically — an
+                // old expired request must not clear or rewrite a newer seek's pending state.
+                guard let self else {
+                    typedCompletion?(.expiredBeforeMutation(identity: identity))
+                    return
+                }
+                let restored: Bool = self.withSeekState {
+                    guard self.seekingOwnerToken == ownershipToken else { return false }
                     self.lastSeekTime = previousLastSeekTime
                     self.seeking = false
                     self.seekingOwnerToken = nil
+                    return true
                 }
+                _ = restored
                 typedCompletion?(.expiredBeforeMutation(identity: identity))
-            }, completion: { [weak self] seekedToEnd in
+            }, completion: { [weak self] seekedToEnd in // strong self below for the locked retire
                 if !seekedToEnd {
                     completion?()
                 } else if !(self?.playBufferManager?.haveNotifiedPlayer.value ?? false) {
@@ -326,11 +346,14 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
                     PlaybackManager.shared.playerDidFinishPlayingEpisode()
                 }
 
-                if let self, self.seekingOwnerToken == ownershipToken {
-                    // Only the owning invocation retires the speculative state; a stale
-                    // completion must not clear a newer seek's pending state.
+                guard let self else { return }
+                _ = self.withSeekState {
+                    // Only the owning invocation retires the speculative state, atomically;
+                    // a stale completion must not clear a newer seek's pending state.
+                    guard self.seekingOwnerToken == ownershipToken else { return false }
                     self.seeking = false
                     self.seekingOwnerToken = nil
+                    return true
                 }
             }, typedCapture: { capture in
                 // The immutable locked capture travels with the per-invocation identity by
@@ -347,8 +370,9 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
     }
 
     func currentTime() -> TimeInterval {
-        if seeking {
-            return lastSeekTime
+        let (pending, target) = withSeekState { (seeking, lastSeekTime) }
+        if pending {
+            return target
         }
 
         if let audioFile, let curFrame = currentFrame() {

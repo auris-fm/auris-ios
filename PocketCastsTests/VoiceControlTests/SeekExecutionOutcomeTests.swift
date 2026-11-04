@@ -208,6 +208,69 @@ final class SeekExecutionOutcomeTests: XCTestCase {
         XCTAssertFalse(engine.isSeekPending, "the newer seek retired its own state")
     }
 
+    /// CONTROLLED OVERLAP (review 61ebb558): B must OWN the pending speculative state
+    /// before A's late expiry is released — proving the ownership comparison and state
+    /// transition are one atomic transaction. A (first read task) is parked INSIDE its
+    /// hop-2 clock; B (second read task) publishes and mutates, and is held PENDING by
+    /// its test-provided completion closure running before EffectsPlayer retires the
+    /// state. A's released expiry then must restore NOTHING (owner is B), and B retires
+    /// its own state cleanly.
+    func testLateExpiryReleasedWhileANewerSeekOwnsPendingStateRestoresNothing() throws {
+        let (file, url, _) = try makeAudioFile(durationSeconds: 10)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let taskA = makeReadTask(file: file)
+        let taskB = makeReadTask(file: file)
+        let engine = EffectsPlayer()
+        engine.audioReadTask = taskA
+
+        let deadline: UInt64 = 1_000_000_000
+        let gateA = DispatchSemaphore(value: 0)
+        let gateB = DispatchSemaphore(value: 0)
+        // A parks inside its hop-2 (locked-mutation) clock until the test releases it.
+        taskA.nowUptimeNs = { _ = gateA.wait(timeout: .now() + 10); return deadline &+ 1 }
+        // B's hop-2 passes just below its deadline (its own injectable clock — the real
+        // uptime clock dwarfs these synthetic deadlines); engine hop-1 passes for both.
+        taskB.nowUptimeNs = { deadline &+ 1 }
+        engine.nowUptimeNs = { 0 }
+
+        let aExpired = XCTestExpectation(description: "A expiredBeforeMutation delivered")
+        engine.seekTo(5.0, completion: nil, typedCompletion: { outcome in
+            if case .expiredBeforeMutation = outcome { aExpired.fulfill() }
+        }, invocationToken: UUID(), deadlineNs: deadline)
+
+        // B takes over the engine's read task and publishes pending state.
+        engine.audioReadTask = taskB
+        engine.seekTo(2.0, completion: { _ = gateB.wait(timeout: .now() + 10) }, typedCompletion: nil,
+                      invocationToken: UUID(), deadlineNs: deadline &+ 20_000_000_000)
+
+        // Wait until B OWNS the pending state (published target visible through currentTime()).
+        let bOwns = XCTestExpectation(description: "B owns pending state")
+        DispatchQueue.global().async {
+            for _ in 0..<500 where !engine.isSeekPending { usleep(10_000) }
+            bOwns.fulfill()
+        }
+        XCTAssertEqual(XCTWaiter().wait(for: [bOwns], timeout: 5), .completed)
+        XCTAssertTrue(engine.isSeekPending, "B must be pending (held before its retire)")
+        XCTAssertEqual(engine.currentTime(), 2.0, "B's target owns currentTime()")
+
+        // NOW release A's late expiry: owner is B, so A must restore NOTHING.
+        gateA.signal()
+        XCTAssertEqual(XCTWaiter().wait(for: [aExpired], timeout: 5), .completed)
+        XCTAssertTrue(engine.isSeekPending, "A's late expiry must not clear B's pending state")
+        XCTAssertEqual(engine.currentTime(), 2.0, "A's late expiry must not rewrite B's target")
+
+        // Release B: its own invocation retires its own state.
+        gateB.signal()
+        let bRetired = XCTestExpectation(description: "B retired")
+        DispatchQueue.global().async {
+            for _ in 0..<500 where engine.isSeekPending { usleep(10_000) }
+            bRetired.fulfill()
+        }
+        XCTAssertEqual(XCTWaiter().wait(for: [bRetired], timeout: 5), .completed)
+        XCTAssertFalse(engine.isSeekPending)
+        XCTAssertNotEqual(engine.currentTime(), 5.0, "the expired target must never surface")
+    }
+
     // MARK: - EffectsPlayer typed path (real engine, injected read task)
 
     /// EffectsPlayer delivers the typed EOF outcome with the full identity (player + read
