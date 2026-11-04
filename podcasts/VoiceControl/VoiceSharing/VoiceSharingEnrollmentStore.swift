@@ -113,6 +113,15 @@ final class VoiceSharingEnrollmentStore {
             || state.membership.withdrawalState == .withdrawn
     }
 
+    /// ONE CONSENT DECISION for capture AND upload (reviewer ee48cdfe): the ordinary session,
+    /// an affirmative local sharing choice, and no explicit consent loss. Unknown projection is
+    /// transient and permits; the server re-checks enrollment at accept. Never a readiness gate.
+    var consentAllowsCollection: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return state.localOptIn
+            && state.membership.withdrawalState != .withdrawn
+    }
+
     var currentEffectiveEnrolled: Bool {
         lock.lock(); defer { lock.unlock() }
         return state.effectiveEnrolled
