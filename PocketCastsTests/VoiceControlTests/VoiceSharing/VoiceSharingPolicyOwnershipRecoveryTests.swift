@@ -263,6 +263,42 @@ final class VoiceSharingPolicyOwnershipRecoveryTests: XCTestCase {
                       "a follow-up-owned completion must not schedule a duplicate retry")
     }
 
+    /// ENTRY SUPERSESSION PRESERVES BACKOFF (reviewer 722bcc74 gap 3): a new exchange entry
+    /// cancels a pending delivery but must NOT reset outage backoff — consecutive transient
+    /// failures keep growing 30 → 60 → 120 even across intervening exchange entries.
+    func test_exchangeEntriesBetweenFailuresPreserveBackoffGrowth() {
+        let (coordinator, _) = makeEnrolledStack()
+        let delivered = deliverImmediately(coordinator)
+        let gen = coordinator.currentEnrollmentLookupGenerationForTesting
+        coordinator.setPolicyInstallOutcomeForTesting(.transientRefused, generation: gen)
+        coordinator.initiateIdentityRecoveryRefresh = {}
+        coordinator.policyExchangeCompleted(fresh: false, exchangeGeneration: gen)
+        XCTAssertEqual(delivered.value.last?.delay, 30)
+        delivered.value.last?.item.perform()
+        // A new exchange entry happens (what every real retry does):
+        coordinator.cancelPendingRetryDeliveryForNewExchange()
+        coordinator.policyExchangeCompleted(fresh: false, exchangeGeneration: gen)
+        XCTAssertEqual(delivered.value.last?.delay, 60,
+                       "an exchange entry must cancel delivery, not reset outage backoff")
+        delivered.value.last?.item.perform()
+        coordinator.cancelPendingRetryDeliveryForNewExchange()
+        coordinator.policyExchangeCompleted(fresh: false, exchangeGeneration: gen)
+        XCTAssertEqual(delivered.value.last?.delay, 120)
+    }
+
+    /// STALE COMPLETION CANNOT CLAIM (reviewer 722bcc74 gap 2): a completion for a superseded
+    /// generation cannot schedule a retry even when the retry state looks free — the claim is
+    /// currency-checked in the lookup owner's serialization.
+    func test_staleCompletionCannotClaimRetryThroughSchedulePath() {
+        let (coordinator, _) = makeEnrolledStack()
+        let delivered = deliverImmediately(coordinator)
+        let genOld = coordinator.currentEnrollmentLookupGenerationForTesting
+        _ = coordinator.beginEnrollmentLookup() // newer exchange owns the gate
+        coordinator.setPolicyInstallOutcomeForTesting(.transientRefused, generation: genOld)
+        coordinator.policyExchangeCompleted(fresh: false, exchangeGeneration: genOld)
+        XCTAssertTrue(delivered.value.isEmpty, "a stale completion must not claim a retry")
+    }
+
     /// SDK THROTTLE BOUNDARY (reviewer blocker 3): a fetch error carrying
     /// `RemoteConfigThrottledEndTimeInSecondsKey` floors the retry delay at the later of the
     /// boundary and local backoff — INCLUDING a boundary beyond the 900 s backoff cap.
