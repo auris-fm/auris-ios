@@ -1,4 +1,38 @@
-# Build note: GRDBMacrosPlugin host compile fails — exact invocation and package configuration
+# Build note: GRDBMacrosPlugin host compile — RESOLVED (root cause found)
+
+## RESOLUTION (2026-11-04, commit d62eef196)
+
+**ROOT CAUSE: our own xcodebuild invocation passed `-sdk iphonesimulator`.** Command-line build
+settings cascade to ALL targets — including the HOST macro-plugin build — so the plugin was
+compiled with the simulator SDK and `-target arm64-apple-ios17.0-simulator` against macOS-only
+prebuilt modules. Dropping `-sdk iphonesimulator` and using `-destination` only:
+
+    xcodebuild -project podcasts.xcodeproj -scheme pocketcasts -configuration Debug
+      -derivedDataPath /tmp/dd-cmd
+      -destination 'platform=iOS Simulator,id=13EB57ED-99BB-4C6F-B855-D31E96028D57'
+      build CODE_SIGNING_ALLOWED=YES
+    ** BUILD SUCCEEDED **
+
+(Scheme `XcodeTarget_podcasts` is not configured for the test action; the `pocketcasts` scheme is.)
+
+The earlier macosx26.0-vs-26.5 "incompatible target" theory is DEAD: the successful SwiftPM host
+build passes `-target arm64-apple-macosx13.0` with the macOS SDK and imports the SAME prebuilt
+modules (built at macosx26.5) without complaint — deployment-target differences are tolerated;
+PLATFORM differences are not. The incompatibility warnings appeared only when the plugin compile
+was handed the iOS simulator target.
+
+Executed controls (real simulator runs): VoiceSharingQuotaRetryFloorTests 7/7 PASSED,
+VoiceSharingWithdrawalBindingTests 5/5 PASSED; three allowance-era tests rewritten to the
+actual-usage contract; `serviceKeepsSharingAliveAfterTheAssemblyIsReleased` verified failing
+IDENTICALLY on untouched base `f16eb328b` (pre-existing baseline, not this change's regression).
+
+The original analysis below is retained for the record; its synthesis (SDK/prebuilt/toolchain
+mismatch inside the service) was an inference, and the flag-cascade above is the verified
+mechanism — an instrument error on my side of the invocation, not a defect in the repo's package
+configuration.
+
+---
+
 
 Date: 2026-11-04. Tree: `voice-sharing-uploads` `b34660ce2`. Xcode 26.6 (17F113), only Xcode installed.
 macOS 26.7.1. Toolchain: Apple Swift 6.3.3 (swiftlang-6.3.3.1.3), **default host target
