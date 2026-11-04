@@ -310,6 +310,8 @@ final class VoiceSharingCoordinator {
                 // No new token: only the original, still-current activation can renew the lease.
                 guard lookupOwnershipCurrent(lookup), let token = settlementInstallToken(lookup) else { return false }
                 policyRefreshAfterActivation(freshActivationSucceeded: true, fetchToken: token, settlementGeneration: lookup.generation)
+            } else {
+                markDeferredFollowUp(forGeneration: lookup.generation)
             }
             return membershipChanged
         }
@@ -801,6 +803,20 @@ final class VoiceSharingCoordinator {
     /// schedule, nor reset after a newer answer superseded it.
     enum PolicyInstallOutcome { case installed, authoritativeDisabled, transientRefused }
     private var installOutcomeByGeneration: [Int: PolicyInstallOutcome] = [:]
+    /// Settlement verdicts per owning generation: an exchange that applied a CHANGED
+    /// membership defers the lease install to its follow-up exchange, so its own completion
+    /// must neither count as success nor schedule a duplicate retry. Install refusals with no
+    /// newer owner and no follow-up ARE transient (the stranded-install shape).
+    private var deferredFollowUpByGeneration: Set<Int> = []
+    private func markDeferredFollowUp(forGeneration generation: Int) {
+        policyRetryStateLock.lock(); defer { policyRetryStateLock.unlock() }
+        deferredFollowUpByGeneration.insert(generation)
+    }
+    private func deferredFollowUp(forGeneration generation: Int) -> Bool {
+        policyRetryStateLock.lock(); defer { policyRetryStateLock.unlock() }
+        return deferredFollowUpByGeneration.contains(generation)
+    }
+
     private func recordInstallOutcome(_ outcome: PolicyInstallOutcome, forGeneration generation: Int) {
         policyRetryStateLock.lock(); defer { policyRetryStateLock.unlock() }
         installOutcomeByGeneration = installOutcomeByGeneration.filter { $0.key >= generation }
@@ -872,8 +888,19 @@ final class VoiceSharingCoordinator {
             return
         }
         if fresh {
-            resetTransientPolicyRetry(claimGeneration: exchangeGeneration)
-            return
+            if deferredFollowUp(forGeneration: exchangeGeneration) {
+                // The follow-up exchange owns the install from here; this completion must
+                // neither count as success nor schedule a duplicate retry.
+                resetTransientPolicyRetry(claimGeneration: exchangeGeneration)
+                return
+            }
+            if installOutcome(forGeneration: exchangeGeneration) == .installed {
+                resetTransientPolicyRetry(claimGeneration: exchangeGeneration)
+                return
+            }
+            // Fresh fetch but the install did NOT happen (refused with no newer owner, no
+            // follow-up): exactly the stranded-install shape — recover transiently.
+            FileLog.shared.addMessage("[VoiceSharing] fresh fetch settled without an install; recovering transiently")
         }
         switch installOutcome(forGeneration: exchangeGeneration) {
         case .authoritativeDisabled:
@@ -923,8 +950,11 @@ final class VoiceSharingCoordinator {
                 self.policyRetryStateLock.lock()
                 guard self.policyRetryPendingClaimGeneration == generation,
                       generation == self.enrollmentLookupGeneration else {
-                    self.policyRetryPendingClaimGeneration = nil
-                    self.policyRetryWorkItem = nil
+                    // A stale callback must leave a NEWER retry's claim/work item untouched.
+                    if self.policyRetryPendingClaimGeneration == generation {
+                        self.policyRetryPendingClaimGeneration = nil
+                        self.policyRetryWorkItem = nil
+                    }
                     self.policyRetryStateLock.unlock()
                     FileLog.shared.addMessage("[VoiceSharing] superseded retry callback dropped (gen \(generation) no longer current)")
                     return

@@ -120,7 +120,10 @@ final class VoiceSharingPolicyOwnershipRecoveryTests: XCTestCase {
         delivered.value[0].item.perform()
         XCTAssertEqual(refreshRuns, 1, "the retry re-drives the ordinary exchange")
 
-        // A later SUCCESS cancels and resets: next transient refusal starts back at base.
+        // A later SUCCESS (actual install) cancels and resets: next transient refusal starts
+        // back at base. (fresh + refused install would itself be transient per the new
+        // semantics — covered by test_freshFetchWithRefusedInstallRecoversTransiently.)
+        coordinator.setPolicyInstallOutcomeForTesting(.installed, generation: gen)
         coordinator.policyExchangeCompleted(fresh: true, exchangeGeneration: gen)
         coordinator.setPolicyInstallOutcomeForTesting(.transientRefused, generation: gen)
         coordinator.policyExchangeCompleted(fresh: false, exchangeGeneration: gen)
@@ -212,6 +215,52 @@ final class VoiceSharingPolicyOwnershipRecoveryTests: XCTestCase {
                            "the exchange must run on the lookup taken IN the handoff")
         }
         delivered.value[0].item.perform()
+    }
+
+    /// FRESH FETCH, REFUSED INSTALL (reviewer blocker 2): a fresh fetch whose settlement
+    /// installs nothing — no newer owner, no follow-up — is the stranded-install shape and
+    /// MUST schedule transient recovery, not count as success.
+    func test_freshFetchWithRefusedInstallRecoversTransiently() {
+        let (coordinator, _) = makeEnrolledStack()
+        let delivered = deliverImmediately(coordinator)
+        let gen = coordinator.currentEnrollmentLookupGenerationForTesting
+        // Completion reports fresh, but no install outcome and no follow-up were recorded:
+        // exactly the completion `performPolicyExchange` emits for a refused settlement.
+        coordinator.policyExchangeCompleted(fresh: true, exchangeGeneration: gen)
+        XCTAssertEqual(delivered.value.count, 1,
+                       "fresh-but-uninstalled must recover transiently, not reset")
+    }
+
+    /// FOLLOW-UP OWNERSHIP: a completion whose settlement deferred the install to its
+    /// follow-up exchange counts as neither success-install nor transient — no duplicate
+    /// retry; the follow-up drives the install.
+    func test_deferredFollowUpCompletionSchedulesNoDuplicateRetry() async throws {
+        let (coordinator, store) = makeEnrolledStack()
+        let delivered = deliverImmediately(coordinator)
+        VoiceSharingSessionGeneration.shared.ensureLifecycle()
+        defer { VoiceSharingSessionGeneration.shared.clear() }
+        let lookup = coordinator.beginEnrollmentLookup()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [VoiceSharingStubProtocol.self]
+        let client = VoiceSharingAccountClient(
+            baseURLProvider: { "https://api.example.test" },
+            tokenProvider: StubBearerTokens(),
+            session: URLSession(configuration: config),
+            sessionIdentity: { "gen-A" },
+            membershipStore: store)
+        VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] = .init(
+            status: 200,
+            body: ["schema_version": 1, "membership_revision": "r1", "plan": "pro",
+                   "voice_sharing_enrolled": true, "withdrawal_state": "active",
+                   "enrollment_epoch": "e1" as Any, "accepted_disclosure_version": "voice-sharing-v1" as Any])
+        defer { VoiceSharingStubProtocol.replies.removeAll() }
+        await coordinator.completeActivationWithEnrollment(
+            freshActivationSucceeded: true, lookup: lookup, accountClient: client)
+        // Membership CHANGED here, so this generation deferred its install to the follow-up.
+        XCTAssertTrue(store.currentEffectiveEnrolled)
+        coordinator.policyExchangeCompleted(fresh: true, exchangeGeneration: lookup.generation)
+        XCTAssertTrue(delivered.value.isEmpty,
+                      "a follow-up-owned completion must not schedule a duplicate retry")
     }
 
     /// SDK THROTTLE BOUNDARY (reviewer blocker 3): a fetch error carrying

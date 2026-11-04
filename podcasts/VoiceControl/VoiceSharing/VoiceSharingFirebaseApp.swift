@@ -142,6 +142,14 @@ enum VoiceSharingFirebaseApp {
                 FileLog.shared.addMessage("[VoiceSharing] policy fetch failed: \(error?.localizedDescription ?? "status \(status.rawValue)")")
                 lastPolicyRefreshOutcome = false
                 coordinator.recordPolicyFetchThrottleFloor(from: error)
+                // OWNERSHIP FENCE (reviewer 632cce79): a LATE fetch failure of an OLD exchange
+                // must not clear a policy a newer successor already installed. Only the
+                // generation that still owns the gate may run the failure settlement.
+                guard coordinator.currentEnrollmentLookupGenerationForTesting == exchangeGeneration else {
+                    FileLog.shared.addMessage("[VoiceSharing] stale fetch failure dropped (gen \(exchangeGeneration) superseded); installed policy untouched")
+                    completion?(false, exchangeGeneration)
+                    return
+                }
                 coordinator.policyRefreshAfterActivation(freshActivationSucceeded: false,
                                                          fetchToken: policyToken,
                                                          settlementGeneration: exchangeGeneration)
