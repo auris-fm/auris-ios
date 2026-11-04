@@ -45,9 +45,12 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
         return policy
     }
 
+    private var engineGateOpen = true
+
     private func makeCollector(_ policy: VoiceSharingPolicy) -> VoiceSharingCollector {
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            isCollectionPermitted: { [weak self] in self?.engineGateOpen ?? false },
+            outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { "gen-A" },
@@ -86,7 +89,7 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
     /// picks up B instead.
     func test_queuedUtteranceBodyRunningLate_completesUnderItsOwnFrozenContext() async {
         let policy = openGate(enrolled: true)
-        let collector = makeCollector(policy)
+        let collector = makeCollector(openGate(enrolled: true))
         let backend = EngineStubBackend()
         let engine = makeEngine(collector: collector, wake: NotDetectedWake(), backend: backend)
 
@@ -134,7 +137,7 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
     /// inside the closure — a mutant that moves the read into the Task body deterministically picks up B.
     func test_startInstalledOnUtteranceClosure_freezesContextSynchronously() async {
         let policy = openGate(enrolled: true)
-        let collector = makeCollector(policy)
+        let collector = makeCollector(openGate(enrolled: true))
         let backend = EngineStubBackend()
         let engine = makeEngine(collector: collector, wake: NotDetectedWake(), backend: backend)
         XCTAssertTrue(engine.start(), "premise: engine started with stubbed capture")
@@ -198,7 +201,7 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
     func test_noAllowanceAuthorityComposedCaptureStillAdmitsAndPreservesNaturalRecognitionSegment() {
         let policy = openGate(enrolled: true)
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            isCollectionPermitted: { true }, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { "epoch-1" }, sessionIdentity: { "gen-A" }, sink: { _ in }
         )
@@ -245,7 +248,7 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
     /// the capture is being retained.
     func test_liveCaptureRetentionDoesNotStallRecognition() throws {
         let policy = openGate(enrolled: true)
-        let collector = VoiceSharingCollector(policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+        let collector = VoiceSharingCollector(isCollectionPermitted: { true }, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { "epoch-1" }, sessionIdentity: { "gen-A" }, sink: { _ in })
         let segmenter = NativeVadSegmenter(threshold: 0.5, silenceTimeoutMs: -1, minSpeechFrames: 2)
@@ -282,7 +285,7 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
         XCTAssertTrue(policy.permitsCollection, "premise: gate open")
         XCTAssertTrue(storeState.effectiveEnrolled, "premise: membership enrolled")
 
-        let collector = makeCollector(policy)
+        let collector = makeCollector(openGate(enrolled: true))
         let backend = EngineStubBackend()
         let engine = makeEngine(collector: collector, wake: NotDetectedWake(), backend: backend)
 
@@ -322,7 +325,7 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
     /// The proof: recognition still returns at the wake branch, so no transcript reaches the router.
     func test_wakeNegativeBranch_isObserved_andRecognitionPathIsUnchanged() async {
         let policy = openGate(enrolled: true)
-        let collector = makeCollector(policy)
+        let collector = makeCollector(openGate(enrolled: true))
         let backend = EngineStubBackend()
         let engine = makeEngine(collector: collector, wake: NotDetectedWake(), backend: backend)
 
@@ -347,7 +350,7 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
     /// reads from `isExposedSpeakerRoute`; the stub backend sets up the call so the branch is reachable.
     func test_bleedBranch_notifiesWithObservedDecision_whenRouteIsExposed() async {
         let policy = openGate(enrolled: true)
-        let collector = makeCollector(policy)
+        let collector = makeCollector(openGate(enrolled: true))
         let backend = EngineStubBackend()
         let engine = makeEngine(collector: collector, wake: NotDetectedWake(), backend: backend)
         XCTAssertTrue(engine.start())
@@ -377,11 +380,11 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
     /// With the gate closed, the production path must retain nothing at all — including across a full
     /// utterance that runs through both rejection branches.
     func test_closedGate_producesZeroContributionThroughTheRealEngine() async {
-        let policy = openGate(enrolled: false)
-        XCTAssertFalse(policy.permitsCollection || storeState.effectiveEnrolled,
-                       "premise: membership is unknown/off, so the gate is closed")
+        engineGateOpen = false
+        XCTAssertFalse(engineGateOpen,
+                       "premise: the consent gate is closed")
 
-        let collector = makeCollector(policy)
+        let collector = makeCollector(openGate(enrolled: true))
         let backend = EngineStubBackend()
         let engine = makeEngine(collector: collector, wake: NotDetectedWake(), backend: backend)
         XCTAssertTrue(engine.start())
@@ -406,7 +409,7 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
         var deliveredFromAudioQueue = [Bool]()
         let lock = NSLock()
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            isCollectionPermitted: { true }, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { "gen-A" },
@@ -501,7 +504,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     /// A collector wired to record what it emits (no sink) — for observation-association controls.
     private func makeRecordingCollector(_ policy: VoiceSharingPolicy) -> VoiceSharingCollector {
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            isCollectionPermitted: { true }, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { "epoch-1" },
             sessionIdentity: { "gen-A" },
@@ -2130,7 +2133,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             queue: queue, isEnabled: { policy.permitsCollection },
             encoderProvenance: { [self] in provenance }, observations: claims)
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            isCollectionPermitted: { true }, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { "epoch-1" },
             sessionIdentity: { "gen-A" },
@@ -2408,7 +2411,7 @@ final class VoiceSharingModelProvenanceTests: XCTestCase {
         let sink = VoiceSharingContributionSink(queue: queue, isEnabled: { true }, encoderProvenance: { provenance })
         self.sink = sink
         let collector = VoiceSharingCollector(
-            policy: policy, outcomeWaitLimit: .init(milliseconds: 25, ceilingMilliseconds: 100),
+            isCollectionPermitted: { true }, outcomeWaitLimit: .init(milliseconds: 25, ceilingMilliseconds: 100),
             monotonicNow: { scheduler.now }, scheduleOutcome: { scheduler.work.append(($0, $1)) },
             membership: { membership }, epochProvider: { "epoch" }, sessionIdentity: { "session" }, sink: { sink.handle($0) })
         collector.deliversSynchronouslyForTesting = true

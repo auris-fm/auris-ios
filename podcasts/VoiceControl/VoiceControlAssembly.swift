@@ -275,7 +275,8 @@ class VoiceControlAssembly {
         // constructed at all — removing only the collector's guard would have left a provisioner
         // still requesting allowances on every policy exchange.
         let contributionCollector = VoiceSharingCollector(
-            policy: VoiceSharingCoordinator.shared.policy,
+            // Capture gate = the same consent truth as upload (session + sharing choice).
+            isCollectionPermitted: uploadAuthorized,
             // CONNECTED CAPTURE ENTRY, second half (2026-11-03): admission ALSO requires the
             // completion wait limit — a nil limit closes the gate before the allowance is ever
             // consulted (collector: `guard outcomeWaitLimit != nil`). Without this the provisioned
