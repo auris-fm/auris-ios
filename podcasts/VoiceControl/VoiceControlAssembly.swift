@@ -527,7 +527,11 @@ class VoiceControlAssembly {
         sink: VoiceSharingContributionSink,
         uploadTrigger: VoiceSharingUploadTrigger,
         queue: VoiceSharingUploadQueue,
-        coordinator: VoiceSharingCoordinator
+        coordinator: VoiceSharingCoordinator,
+        // Injectable so the focused control can drive the PRODUCTION handler (reviewer 7318214c);
+        // production resolves the real consent truth.
+        sessionAlive: @escaping () -> Bool = { ServerSettings.userId != nil },
+        consentGone: @escaping () -> Bool = { VoiceSharingEnrollmentStore.shared.consentGoneForPurge }
     ) {
         collector.gateLostSubscription = coordinator.registerGateLostHandler {
             [weak collector, weak sink, weak uploadTrigger] in
@@ -542,8 +546,7 @@ class VoiceControlAssembly {
             // SPEC e1529db9: explicit WITHDRAWAL (local opt-out, server withdrawal, sign-out)
             // still clears pending recordings; TEMPORARY loss (policy flap, network, listening)
             // must retain them. Consent truth, not the gate event, decides the purge.
-            if ServerSettings.userId == nil
-                || VoiceSharingEnrollmentStore.shared.consentGoneForPurge {
+            if !sessionAlive() || consentGone() {
                 _ = queue.purgeAll()
             }
         }
