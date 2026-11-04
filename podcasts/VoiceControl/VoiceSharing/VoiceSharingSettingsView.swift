@@ -201,11 +201,12 @@ struct VoiceSharingAccountSections: View {
     let localModel: VoiceSharingSettingsModel?
     let surfaceEnabled: () -> Bool
     let originatingSession: String?
-    init(accountModel: VoiceSharingAccountModel, localModel: VoiceSharingSettingsModel?, surfaceEnabled: @escaping () -> Bool) {
+    init(accountModel: VoiceSharingAccountModel, localModel: VoiceSharingSettingsModel?,
+         surfaceEnabled: @escaping () -> Bool, originatingSession: String? = nil) {
         self.accountModel = accountModel
         self.localModel = localModel
         self.surfaceEnabled = surfaceEnabled
-        self.originatingSession = accountModel.accountActionSession
+        self.originatingSession = originatingSession ?? accountModel.accountActionSession
     }
     private var controlsAvailable: Bool { surfaceEnabled() && accountModel.canAct(in: originatingSession) }
     @State private var disclosureConfirmation = false
@@ -371,8 +372,8 @@ struct VoiceSharingAccountSections: View {
     /// unconfirmed server withdrawal reads as pending, never as done.
     private var switchingSummary: String {
         switch accountModel.membershipStatus {
-        case .idle, .loading, .enrolled: return ""
-        case .checking: return L10n.voiceSharingAccountChecking
+        case .idle, .enrolled: return ""
+        case .loading: return L10n.voiceSharingAccountChecking
         case .disclosureUnavailable: return L10n.voiceSharingAccountDisclosureUnavailable
         case .confirmationRequired: return L10n.voiceSharingAccountConfirmDisclosure
         case .unavailable: return L10n.voiceSharingAccountOperationFailed
@@ -448,6 +449,14 @@ struct VoiceSharingAccountView: View {
         self.localModel = localModel
         self.surfaceEnabled = surfaceEnabled
         self.originatingSession = accountModel.accountActionSession
+    }
+
+    /// Test accessor (VoiceSharingAccountClientTests drives enroll/deleteAccepted through the
+    /// view): the actions live on the mounted sections view now, so tests call through it.
+    var sectionsForTesting: VoiceSharingAccountSections {
+        VoiceSharingAccountSections(
+            accountModel: accountModel, localModel: localModel,
+            surfaceEnabled: surfaceEnabled, originatingSession: originatingSession)
     }
 
     var body: some View {

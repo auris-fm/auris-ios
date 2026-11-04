@@ -18,7 +18,7 @@ final class VoiceSharingWithdrawalBindingTests: XCTestCase {
             .appendingPathComponent("vswithdraw-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defaults = UserDefaults(suiteName: root.absoluteString)
-        store = VoiceSharingDeletionFixture.enroll(
+        store = try VoiceSharingDeletionFixture.enroll(
             VoiceSharingEnrollmentStore(
                 defaults: defaults, accountScopeProvider: { "account-a" },
                 sessionIdentityProvider: { "gen-1" }),
@@ -65,6 +65,8 @@ final class VoiceSharingWithdrawalBindingTests: XCTestCase {
         let m = model()
         await m.withdraw()
         store.setLocalOptIn(true)
+        // The model observes the store through an async MainActor hop; drain it.
+        for _ in 0..<5 { await Task.yield() }
         XCTAssertEqual(m.locallyOptedIn, true, "re-enable is a local preference change, not blocked")
     }
 
@@ -88,4 +90,5 @@ final class VoiceSharingWithdrawalBindingTests: XCTestCase {
 /// is exactly the "withdrawal sent nowhere, locally stopped" state the binding must survive.
 private struct NeverTokenProvider: CloudTokenProviding {
     func token() async -> String? { nil }
+    func handleUnauthorized(rejectedToken: String?) async {}
 }
