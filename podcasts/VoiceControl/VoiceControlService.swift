@@ -39,9 +39,8 @@ class VoiceControlService: ObservableObject {
     ///
     /// This routes to the existing gate condition source rather than introducing a second state
     /// holder, so "disabled in settings" stays the same condition the gate already evaluates.
-    /// NOTE: the value is currently session-scoped — `LiveConditionMonitor` seeds `enabledByUser`
-    /// to `.allowed` on construction and no persisted preference exists yet, so the switch does
-    /// not survive a relaunch. Recording that here rather than implying it persists.
+    /// Persistence lives in `LiveConditionMonitor` (UserDefaults `VoiceControl.UserEnabled`),
+    /// which restores the choice at construction.
     func setUserEnabled(_ enabled: Bool) {
         conditionMonitor.updateUserEnabled(enabled)
     }

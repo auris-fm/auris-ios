@@ -262,38 +262,13 @@ class VoiceControlAssembly {
                     models: .init(vad: nil, wakeword: nil, asr: nil, translation: nil, router: nil),
                     conversionVersion: "v1") // spec ruling 2026-10-22: bounded string, not Int
             })
-        let allowanceRoot = queueRoot.deletingLastPathComponent().appendingPathComponent("CaptureUsage", isDirectory: true)
-        // CONNECTED CAPTURE ENTRY (scope correction 2026-11-03): the collector's admission
-        // authority comes from ONE real allowance request provisioned after the policy gate
-        // installs. Memory-only; absent a valid installed response admission fails closed.
-        let captureLedger = VoiceSharingCaptureLedger(root: allowanceRoot)
-        let allowanceProvisioner = voiceSharingTokenProvider.map { provider in
-            VoiceSharingCaptureAllowanceProvisioner(
-                client: VoiceSharingCaptureAllowanceClient(tokenProvider: provider),
-                accountProvider: { ServerSettings.userId },
-                enrollmentEpochProvider: { VoiceSharingEnrollmentStore.shared.activeEnrollmentEpoch },
-                stampProvider: {
-                    guard let session = VoiceSharingSessionGeneration.shared.currentGeneration(),
-                          let epoch = VoiceSharingEnrollmentStore.shared.activeEnrollmentEpoch else { return nil }
-                    return VoiceSharingCaptureStamp(
-                        session: session,
-                        epoch: epoch,
-                        policyGeneration: VoiceSharingCoordinator.shared.policy.currentLeaseGeneration)
-                },
-                ledger: captureLedger,
-                requestIdentityRoot: allowanceRoot.deletingLastPathComponent()
-                    .appendingPathComponent("CaptureRequests", isDirectory: true))
-        }
-        let captureAllowance = VoiceSharingCaptureAllowance(
-            ledger: captureLedger,
-            currentAuthorization: { allowanceProvisioner?.currentAuthorization() },
-            // DEMAND-DRIVEN (reviewer): a spent batch is discovered at charge time, which happens
-            // between policy exchanges. Route that demand to the same off-callback provisioner path,
-            // bounded and coalesced, so capture does not stall until the lease turns over.
-            capacityExhausted: { allowanceProvisioner?.noteCapacityExhausted() })
+        // No capture allowance (spec c74d7e30, "Actual upload usage"): daily quota is metered
+        // from ACTUAL accepted bytes at the server, so capture no longer acquires, reserves or
+        // checks any prepaid allocation. The ledger, provisioner and capability objects are not
+        // constructed at all — removing only the collector's guard would have left a provisioner
+        // still requesting allowances on every policy exchange.
         let contributionCollector = VoiceSharingCollector(
             policy: VoiceSharingCoordinator.shared.policy,
-            captureAllowance: captureAllowance,
             // CONNECTED CAPTURE ENTRY, second half (2026-11-03): admission ALSO requires the
             // completion wait limit — a nil limit closes the gate before the allowance is ever
             // consulted (collector: `guard outcomeWaitLimit != nil`). Without this the provisioned
@@ -328,20 +303,9 @@ class VoiceControlAssembly {
         // LAUNCH ENTRY (reviewer 0c3168fe): a process that is already signed in has neither a
         // recovery event nor an expiring lease — run one named exchange now so the policy
         // lease installs at launch. Failure reports through the exchange's own path.
-        // The allowance provisioner is driven from EVERY policy exchange, not just launch: the exchange
-        // is the one live signal that fires at launch, on identity recovery, and on lease renewal after
-        // expiry. Driving it only at launch meant a spent batch could not advance until the app was
-        // relaunched, even though the client had proven the exhaustion.
-        VoiceSharingFirebaseApp.connectAllowanceRefresh {
-            guard let allowanceProvisioner else { return }
-            Task { await allowanceProvisioner.provision() }
-        }
-        VoiceSharingFirebaseApp.performPolicyExchange(coordinator: .shared) { installed in
-            // The gate installed: fetch the REAL capture allowance now so a consented
-            // capture admits against a server-issued batch. Failure is surfaced by the
-            // provisioner itself; capture stays closed either way.
-            guard installed, let allowanceProvisioner else { return }
-            Task { await allowanceProvisioner.provision() }
+        VoiceSharingFirebaseApp.performPolicyExchange(coordinator: .shared) { _ in
+            // The policy exchange still runs (it gates collection); it no longer provisions a
+            // capture allowance, because none exists to provision.
         }
         if let uploadTrigger {
             installVoiceSharingGateLoss(

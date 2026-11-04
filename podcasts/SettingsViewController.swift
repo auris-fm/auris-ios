@@ -177,13 +177,17 @@ class SettingsViewController: PCViewController, UITableViewDataSource, UITableVi
         case .storageAndDataUse:
             navigationController?.pushViewController(StorageAndDataUseViewController(), animated: true)
         case .voiceControl:
-            // ONE destination for Voice Control. The Account entry is removed, so this is the only
-            // route to the surface (spec 40c96ff0 / 233c0d02).
-            guard let controller = AccountViewController.makeVoiceSharingController() else {
-                FileLog.shared.addMessage("[VoiceSharing] Voice Control entry visible but controller unavailable")
+            // ONE destination for Voice Control: the FULL screen (enable, models, status, sharing),
+            // not the sharing-only account controller (reviewer on 4b2f60468). Ordinary Voice
+            // Control settings must open while signed out — only sharing participation inside the
+            // screen requires an account, and that section is optional in the view.
+            guard let service = VoiceControlService.shared else {
+                FileLog.shared.addMessage("[VoiceControl] Settings entry visible but service unavailable")
                 return
             }
-            navigationController?.pushViewController(controller, animated: true)
+            let host = UIHostingController(rootView: VoiceControlSettingsView(service: service))
+            host.title = L10n.voiceSharingAccountTitle
+            navigationController?.pushViewController(host, animated: true)
         case .autoAddToUpNext:
             navigationController?.pushViewController(AutoAddToUpNextViewController(), animated: true)
         case .autoArchive:
