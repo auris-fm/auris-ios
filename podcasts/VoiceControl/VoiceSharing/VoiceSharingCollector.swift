@@ -221,32 +221,25 @@ final class VoiceSharingCollector {
     // MARK: - Gate
 
     /// Re-read at EVERY decision. Cached permission is exactly what the spec forbids.
-    /// Called WITHOUT `lock` held. Returns the epoch when collection is permitted, so the value frozen into
-    /// the capture is the same one that authorized it.
-    private func permittedEpoch() -> String? {
-        // DIAGNOSTIC (temporary, this build only): the gate is silent, so "consent is live but
-        // nothing was captured" is indistinguishable from three different refusals.
-        guard outcomeWaitLimit != nil else {
-            FileLog.shared.addMessage("[VoiceSharing] gate closed: no outcome wait limit")
-            return nil
-        }
-        guard isCollectionPermitted() else {
-            FileLog.shared.addMessage("[VoiceSharing] gate closed: consent (session/sharing choice)")
-            return nil
-        }
-        guard let epoch = epochProvider(), !epoch.isEmpty else {
-            FileLog.shared.addMessage("[VoiceSharing] gate closed: no enrollment epoch")
-            return nil
-        }
-        return epoch
+    /// Called WITHOUT `lock` held.
+    ///
+    /// CONSENT IS THE ONLY ADMISSION DECISION (spec 4afc6e43). The retired readiness gates are gone:
+    /// a missing `outcomeWaitLimit` no longer refuses admission (the timeout is a fixed annotation
+    /// deadline), and a missing enrollment epoch no longer refuses it either (the epoch is stamped on
+    /// the record as PROVENANCE, never consulted to decide whether audio may be kept).
+    private func collectionPermitted() -> Bool {
+        isCollectionPermitted()
     }
 
     /// The gate rule that stops an ALREADY-OPEN capture: "Unknown/stale must stop before another SEGMENT" is
     /// necessary but not sufficient — an open partial must also stop when the gate moves under it. Every
     /// non-start signal passes through here. Does NOT take `lock`; callers hold it.
+    /// The epoch frozen into the capture is NOT compared here: a re-enrollment moves the server's
+    /// opaque epoch without invalidating what this account already captured (spec 4afc6e43). What
+    /// must still hold is the ACCOUNT and the user's live consent.
     private func stillPermitted(for c: FrozenCapture) -> Bool {
-        guard let epoch = permittedEpoch() else { return false }
-        return epoch == c.epoch && sessionIdentity() == c.session
+        guard collectionPermitted() else { return false }
+        return sessionIdentity() == c.session
     }
 
     // MARK: - Pipeline signals
@@ -255,11 +248,13 @@ final class VoiceSharingCollector {
     /// freeze into its utterance Task — or opens nothing (returns nil) when the gate is closed.
     @discardableResult
     func speechStarted(confirmationFrameSamples: Int) -> CaptureContext? {
-        guard let epoch = permittedEpoch() else {
+        guard collectionPermitted() else {
             abandonForGateMove(context: currentCaptureContext())
             return nil
         }
         let session = sessionIdentity()
+        // PROVENANCE, not a gate: an unknown epoch is stamped empty and the record still carries it.
+        let epoch = epochProvider() ?? ""
         let stamp = VoiceSharingCaptureStamp(session: session, epoch: epoch, policyGeneration: 0)
         // No capture allowance is requested before retaining audio (spec c74d7e30, "Actual upload
         // usage"): daily quota is metered from ACTUAL accepted bytes at the server, so there is
@@ -527,8 +522,8 @@ final class VoiceSharingCollector {
             lock.unlock()
             return
         }
-        let sameConsent = (rec.capture.epoch == epochProvider())
-            && (rec.capture.session == sessionIdentity())
+        // The ACCOUNT and live consent decide; the provenance epoch is not consulted (spec 4afc6e43).
+        let sameConsent = (rec.capture.session == sessionIdentity())
             && isCollectionPermitted()
         guard sameConsent else { lock.unlock(); return }
         cancelOutcomeDeadlineLocked(context.id)
@@ -851,8 +846,8 @@ return }
         // Late attribution honors the CURRENT gate: if identity moved on (account transition rotated the
         // epoch) the predecessor's completion stays dropped, exactly as before. The reviewer's case — A
         // queued-not-executed while B starts under the SAME consent — is what this path exists for.
-        let sameConsent = (rec.capture.epoch == epochProvider())
-            && (rec.capture.session == sessionIdentity())
+        // The ACCOUNT and live consent decide; the provenance epoch is not consulted (spec 4afc6e43).
+        let sameConsent = (rec.capture.session == sessionIdentity())
             && isCollectionPermitted()
         guard sameConsent else { lock.unlock(); return false }
         // DEFER (spec 2dcf8c5b, review 6fe6d773): the capture's downstream stages (ASR, translation,

@@ -1370,7 +1370,10 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     /// STARTUP BEFORE PROJECTION (reviewer fd6b8036): a BOUND queue whose identity cannot be
     /// established yet (signed out, epoch not loaded) must refuse every entry.
     func test_boundQueueRefusesEntriesUntilTheIdentityIsKnown() throws {
+        // ACCOUNT, not epoch, is the binding (spec 4afc6e43): the failure this control models is
+        // "no account is established yet", so the box holds no identity at all.
         let box = IdentityBox(account: "acct-A", nil)
+        box.current = nil
         let q = VoiceSharingUploadQueue(rootDirectory: root, currentIdentity: { box.current })
         // Prepared while sign-in has NOT landed, so the entry records no owner: that is the real
         // startup order, and it is why the entry must be refused until ownership is known.
@@ -1378,10 +1381,10 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
 
         XCTAssertNil(try q.admitAttempt(entry), "no identity yet ⇒ nothing is admitted")
 
-        // Sign-in later establishes the identity; the entry still carries no owner, so it stays
+        // Sign-in later establishes the ACCOUNT; the entry still carries no owner, so it stays
         // refused. Advertising admission here would mean admitting an entry whose account is
         // unknown, which is precisely the hole this binding closes.
-        box.setEpoch("epoch-1")
+        box.setEpoch(nil)
         XCTAssertNil(try q.admitAttempt(entry),
                      "an entry with no recorded owner cannot be attributed to any account")
 
@@ -1391,35 +1394,47 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                         "an entry prepared under a known identity is admitted")
     }
 
-    /// RE-ENROLLMENT: after A→B, a NEW entry captured under B is admitted while the surviving A
-    /// entry is refused. A construction-time pin cannot express this — it blocks both or admits both.
-    func test_reEnrollmentAdmitsNewEpochEntriesAndRefusesSurvivingOldOnes() throws {
+    /// RE-ENROLLMENT IS NOT A CHANGE OF OWNER (spec 4afc6e43): a re-enrollment moves the server's
+    /// opaque epoch for the SAME account, so an entry captured before it is still that account's to
+    /// send — the epoch in its metadata is provenance, not a fence. This is the inverse of the
+    /// previous expectation and it is deliberate: refusing it would strand audio the user consented
+    /// to contribute simply because the server rotated a token.
+    func test_reEnrollmentUnderTheSameAccountStillAdmitsTheSurvivingEntry() throws {
         let box = IdentityBox(account: "acct-A", "epoch-1")
         let q = VoiceSharingUploadQueue(rootDirectory: root, currentIdentity: { box.current })
         let oldEntry = try makeCompleteEntry(q, epoch: "epoch-1")
         // Admit AND SETTLE it, so the lease is released: otherwise the second admission would be
-        // refused merely because the first lease is still held, and the control would not be
-        // testing the epoch at all (that is exactly how an earlier version passed its mutant).
-        let firstAdmission = try XCTUnwrap(try q.admitAttempt(oldEntry), "the A entry is admitted under A")
+        // refused merely because the first lease is still held.
+        let firstAdmission = try XCTUnwrap(try q.admitAttempt(oldEntry), "the entry is admitted under A")
         try q.applyAttemptResult(oldEntry, lease: firstAdmission.lease, outcome: .retryableFailure)
 
         box.setEpoch("epoch-2")
-        XCTAssertNil(try q.admitAttempt(oldEntry), "the surviving A entry is refused under B")
+        XCTAssertNotNil(try q.admitAttempt(oldEntry),
+                        "the same account still owns the entry after re-enrollment")
         let newEntry = try makeCompleteEntry(q, epoch: "epoch-2")
-        XCTAssertNotNil(try q.admitAttempt(newEntry), "a new B entry is admitted under B")
+        XCTAssertNotNil(try q.admitAttempt(newEntry), "a new entry stamped under the new epoch is admitted")
     }
 
-    /// RESTART WITH A SURVIVING OLD ENTRY: a FRESH queue over the same durable root, whose live
-    /// identity is already B, must still refuse a surviving A entry.
-    func test_freshQueueOnTheSameDiskStillRefusesASurvivingOldEpochEntry() throws {
+    /// RESTART WITH A SURVIVING ENTRY (spec 4afc6e43): a FRESH queue over the same durable root
+    /// admits a surviving entry while the SAME account is signed in, even though the server's epoch
+    /// moved after the entry was captured. What a fresh process must still refuse is an entry owned
+    /// by a DIFFERENT account.
+    func test_freshQueueOnTheSameDiskAdmitsASurvivingEntryForItsOwnAccount() throws {
         let box = IdentityBox(account: "acct-A", "epoch-1")
         let first = VoiceSharingUploadQueue(rootDirectory: root, currentIdentity: { box.current })
         let oldEntry = try makeCompleteEntry(first, epoch: "epoch-1")
 
         box.setEpoch("epoch-2")
         let restarted = VoiceSharingUploadQueue(rootDirectory: root, currentIdentity: { box.current })
-        XCTAssertNil(try restarted.admitAttempt(oldEntry),
-                     "a fresh process must not admit a stale-epoch entry just because it started under B")
+        XCTAssertNotNil(try restarted.admitAttempt(oldEntry),
+                        "the owning account still owns its entry after a restart and an epoch move")
+
+        // The account switch is the real refusal, and a fresh process must honour it.
+        let other = VoiceSharingUploadQueue(rootDirectory: root,
+                                            currentIdentity: { VoiceSharingUploadIdentity(
+                                                accountScope: "acct-B", enrollmentEpoch: "epoch-2") })
+        XCTAssertNil(try other.admitAttempt(oldEntry),
+                     "a fresh process must not admit another account's entry")
     }
 
     func test_entryIsRemovedWhenAttemptsAreExhausted() throws {

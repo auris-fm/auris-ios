@@ -1117,18 +1117,17 @@ final class VoiceSharingUploadQueue {
             guard inFlightAttempts[entry] == nil else { return nil }
             let discovered = try strictOwnerCoverageLocked()
             guard discovered.contains(entry) else { return nil }
-            // PER-ENTRY IDENTITY BINDING (reviewer fd6b8036): an entry carries the enrollment
-            // epoch it was CAPTURED under in its own durable metadata. Admission compares that
-            // against the live identity NOW, so a surviving entry from a previous epoch is refused
-            // after a transition, while a NEW entry under the current epoch is admitted — the
-            // decision follows the entry, not the process's construction time.
-            // Resolve the entry's own identity ONCE; the same value is what this attempt is
-            // fenced to for its whole lifetime (no second parse that could drift).
+            // ORDINARY ACCOUNT OWNERSHIP (spec 4afc6e43): an entry belongs to the account that
+            // created it, and only that account may send it. The enrollment EPOCH in the entry's
+            // durable metadata is PROVENANCE stamped on the record, never an admission gate: a
+            // re-enrollment moves the server's opaque epoch without invalidating audio this
+            // account already captured, so a surviving entry is not refused merely because the
+            // epoch moved.
+            // Resolve the entry's own binding ONCE; it is what this attempt is fenced to for its
+            // whole lifetime (no second parse that could drift).
             var admittedIdentity: VoiceSharingUploadIdentity?
             if let readIdentity = currentIdentityLocked {
-                // A BOUND queue refuses when the identity cannot be established at all. Both halves
-                // are compared structurally: an equal epoch under a different account is not the
-                // same identity (reviewer 2b121320).
+                // A BOUND queue refuses when an account cannot be established at all.
                 guard let live = readIdentity() else { return nil }
                 let bound = try boundIdentityLocked(of: entry)
                 // ABSENT owner means this entry predates sign-in and belongs to no account yet:
@@ -1136,10 +1135,9 @@ final class VoiceSharingUploadQueue {
                 guard case .present(let capturedScope) = try ownerScopeLocked(for: entry) else {
                     return nil
                 }
-                let captured = VoiceSharingUploadIdentity(
+                guard capturedScope == live.accountScope else { return nil }
+                admittedIdentity = VoiceSharingUploadIdentity(
                     accountScope: capturedScope, enrollmentEpoch: bound.enrollmentEpoch)
-                guard captured == live else { return nil }
-                admittedIdentity = captured
             }
             guard let lease = try acquireLeaseLocked(for: entry) else { return nil }
             do {

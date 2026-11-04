@@ -106,18 +106,20 @@ final class VoiceSharingUploaderTests: XCTestCase {
             currentIdentity: { box.current },
             endpoint: { URL(string: "https://unit.test/api/v1/contributions") },
             transport: { _, _, _ in
-                // The account re-enrolls while this request is in flight.
+                // A DIFFERENT ACCOUNT takes over while this request is in flight. A same-account
+                // re-enrollment is explicitly NOT this case (spec 4afc6e43): the epoch is
+                // provenance, so it must not settle or refuse anything.
                 box.current = VoiceSharingUploadIdentity(
-                    accountScope: "acct-A", enrollmentEpoch: "epoch-2")
+                    accountScope: "acct-B", enrollmentEpoch: "epoch-1")
                 return .response(statusCode: 201, body: receipt)
             })
 
         let outcome = await uploader.upload(entry)
         guard case .revoked = outcome else {
-            return XCTFail("a late success for a retired identity must not settle, got \(outcome)")
+            return XCTFail("a late success for a retired account must not settle, got \(outcome)")
         }
         XCTAssertTrue(owned.readyEntries().contains { $0.name == entry.name },
-                      "the entry is retained: not delivered under the old identity")
+                      "the entry is retained: not delivered under another account")
     }
 
     /// LAUNCH FENCE (reviewer ee5b4547): the identity moves AFTER admission but BEFORE the
@@ -139,9 +141,9 @@ final class VoiceSharingUploaderTests: XCTestCase {
             isAuthorized: { true },
             currentIdentity: { box.current },
             endpoint: { () -> URL? in
-                // The move happens here: admission has already seen A.
+                // The ACCOUNT move happens here: admission has already seen A.
                 box.current = VoiceSharingUploadIdentity(
-                    accountScope: "acct-A", enrollmentEpoch: "epoch-2")
+                    accountScope: "acct-B", enrollmentEpoch: "epoch-1")
                 return URL(string: "https://unit.test/api/v1/contributions")
             },
             transport: { _, _, _ in
