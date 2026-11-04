@@ -1384,7 +1384,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         // Sign-in later establishes the ACCOUNT; the entry still carries no owner, so it stays
         // refused. Advertising admission here would mean admitting an entry whose account is
         // unknown, which is precisely the hole this binding closes.
-        box.setEpoch(nil)
+        box.setEpoch("epoch-1")
         XCTAssertNil(try q.admitAttempt(entry),
                      "an entry with no recorded owner cannot be attributed to any account")
 

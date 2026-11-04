@@ -15,12 +15,14 @@ struct VoiceSharingUploadIdentity: Equatable {
     /// to decide whether an entry may be sent — that is the account's decision.
     let enrollmentEpoch: String
 
-    /// The ACCOUNT must be present: an entry with no owner cannot be attributed. The epoch is
-    /// provenance and may be absent — an empty string records that it was unknown at capture time
-    /// (spec 4afc6e43), and the entry still travels.
+    /// Both components must be present. The ACCOUNT is what binds the entry (spec 4afc6e43); the
+    /// epoch is provenance carried to the server, and the deployed record schema refuses an empty
+    /// one (`invalid_enrollment_epoch`), so there is no useful "unknown epoch" identity.
     init?(accountScope: String?, enrollmentEpoch: String?) {
-        guard let accountScope, !accountScope.isEmpty else { return nil }
+        guard let accountScope, !accountScope.isEmpty,
+              let enrollmentEpoch, !enrollmentEpoch.isEmpty
+        else { return nil }
         self.accountScope = accountScope
-        self.enrollmentEpoch = enrollmentEpoch ?? ""
+        self.enrollmentEpoch = enrollmentEpoch
     }
 }

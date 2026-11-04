@@ -654,7 +654,16 @@ class VoiceAsrEngine {
                 mic: utterance,
                 reference: observation?.samples ?? [],
                 segmentEndOffset: segmentEndOffset) {
-                contributionCollector?.engineReported(stage: "bleed", outcome: .init(state: "not_run", reason: "playback_bleed"), context: utteranceContext, decision: "overlap")
+                // BLEED STAGE REASON MUST BE ENUMERATED (spec 1e79e5b4). The deployed record schema
+                // and `VoiceSharingRecordBinding` both accept only
+                // no_playback_reference | reference_unavailable | bleed_detector_disabled |
+                // outcome_wait_expired here. The previous "playback_bleed" was in neither, so every
+                // bleed-rejected segment failed validation and was dropped silently at the sink —
+                // the fact that reached the dataset was nothing at all. The detector DID consult a
+                // playback reference and DID produce a verdict; the reason why recognition did not
+                // run is carried separately on the ASR stage as `rejected_by_bleed` (set by the
+                // collector alongside `.rejectedBleed`).
+                contributionCollector?.engineReported(stage: "bleed", outcome: .init(state: "unknown", reason: "no_playback_reference"), context: utteranceContext, decision: "overlap")
                 contributionCollector?.segmentRejected(kind: .rejectedBleed, samples: utterance.count, context: utteranceContext)
                 FileLog.shared.addMessage("[VoicePipeline] → drop (bleed filter)")
                 return

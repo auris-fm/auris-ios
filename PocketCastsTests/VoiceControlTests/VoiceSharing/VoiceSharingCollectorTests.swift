@@ -147,11 +147,13 @@ final class VoiceSharingCollectorTests: XCTestCase {
     }
 
 
-    /// THE EPOCH IS PROVENANCE (spec 4afc6e43): an unknown epoch no longer refuses admission. The
-    /// capture still happens, and the record carries an empty epoch so the server can see it was
-    /// unknown at capture time. Refusing here would discard audio the user consented to contribute
-    /// because a server-issued token had not landed yet.
-    func test_missingEpoch_stillCollectsAndStampsTheRecordEmpty() {
+    /// NO PLACEHOLDER EPOCH (spec 4afc6e43, @spec 48a928f0): a record must carry the real epoch the
+    /// account holds. With none available there is nothing truthful to stamp and ordinary record
+    /// construction fails — it is not replaced by `""`, which the deployed schema refuses
+    /// (`invalid_enrollment_epoch`). This is a record-validity condition, NOT a collection-readiness
+    /// lifecycle: consent remains the only admission DECISION, and the control below shows the same
+    /// path collecting as soon as a real epoch exists.
+    func test_missingEpoch_producesNoRecordRatherThanAPlaceholder() {
         activateLease()
         let collector = makeCollector()
         enrolledState(true)
@@ -161,14 +163,12 @@ final class VoiceSharingCollectorTests: XCTestCase {
         let th = [Float](repeating: 1, count: 3_200)
         collector.appendSamples(th, reportedTotal: 3_200)
         collector.speechCompleted(th, context: collector.currentCaptureContextForTesting)
-        XCTAssertFalse(snapshot().isEmpty, "consent is the admission decision; a missing epoch is not a refusal")
-        XCTAssertEqual(snapshot().first?.enrollmentEpoch, "",
-                       "the record states the epoch was unknown, rather than claiming one")
+        XCTAssertEqual(snapshot(), [], "no unsupported record value is ever written")
 
         epoch = "epoch-1"
         collector.speechStarted(confirmationFrameSamples: 320)
         XCTAssertEqual(snapshot().last?.enrollmentEpoch, "epoch-1",
-                       "control: a known epoch is stamped as provenance when present")
+                       "control: the real epoch is stamped as provenance when available")
     }
 
     // MARK: - Real bounded PCM retention (blocker 1)

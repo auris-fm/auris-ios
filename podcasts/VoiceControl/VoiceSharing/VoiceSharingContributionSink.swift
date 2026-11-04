@@ -177,7 +177,7 @@ final class VoiceSharingContributionSink {
             try queue.finalize(entry)
         } catch {
             FileLog.shared.addMessage(
-                "[VoiceSharing] contribution dropped kind=\(pending.event.kind) capture=\(pending.event.captureID) error=\(String(describing: type(of: error)))"
+                "[VoiceSharing] contribution dropped kind=\(pending.event.kind) capture=\(pending.event.captureID) error=\(String(describing: type(of: error))) detail=\(error)"
             )
         }
     }
