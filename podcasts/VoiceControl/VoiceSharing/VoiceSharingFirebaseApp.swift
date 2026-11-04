@@ -97,6 +97,7 @@ enum VoiceSharingFirebaseApp {
     static func performPolicyExchange(coordinator: VoiceSharingCoordinator = .shared,
                                       expiration: TimeInterval = 0,
                                       accountClient: VoiceSharingAccountClient? = nil,
+                                      pretakenLookup: VoiceSharingCoordinator.EnrollmentLookup? = nil,
                                       completion: ((Bool, Int) -> Void)? = nil) {
         // A new exchange supersedes any pending transient retry (a newer real refresh drives
         // its own outcome), and the outcome classification starts clean for THIS exchange.
@@ -123,7 +124,7 @@ enum VoiceSharingFirebaseApp {
             completion?(false, 0)
             return
         }
-        let lookup = coordinator.beginEnrollmentLookup()
+        let lookup = pretakenLookup ?? coordinator.beginEnrollmentLookup()
         let exchangeGeneration = lookup.generation
         let policyToken = coordinator.policyTokenForFetchStart()
         let fetchStartedAt = coordinator.nowForFreshnessCheck()
@@ -199,6 +200,23 @@ enum VoiceSharingFirebaseApp {
         coordinator.initiateIdentityRecoveryRefresh = { [weak coordinator] in
             guard let coordinator else { return }
             performPolicyExchange(coordinator: coordinator) { fresh, generation in
+                if !fresh {
+                    FileLog.shared.addMessage("[VoiceSharing] policy refresh did not install a snapshot")
+                }
+                coordinator.policyExchangeCompleted(fresh: fresh, exchangeGeneration: generation)
+            }
+        }
+        // OWNED RETRY ENTRY (spec 2ffd8026): the retry's claimed generation is validated and
+        // the exchange's lookup taken in ONE enrollmentLookupLock step — a retry owned by an
+        // older exchange cannot start after a newer authoritative answer or supersede a newer
+        // in-flight refresh.
+        coordinator.initiateOwnedRetryRefresh = { [weak coordinator] claimedGeneration in
+            guard let coordinator else { return }
+            guard let lookup = coordinator.beginRetryExchangeIfCurrent(claimedGeneration: claimedGeneration) else {
+                FileLog.shared.addMessage("[VoiceSharing] retry dropped: claimed generation \(claimedGeneration) no longer owns the gate")
+                return
+            }
+            performPolicyExchange(coordinator: coordinator, pretakenLookup: lookup) { fresh, generation in
                 if !fresh {
                     FileLog.shared.addMessage("[VoiceSharing] policy refresh did not install a snapshot")
                 }
