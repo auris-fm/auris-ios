@@ -889,11 +889,16 @@ extension VoiceSharingUploadTransportTests {
         let uploader = VoiceSharingUploader(queue: queue, networkGate: gate,
             retryPolicy: .init(retryBaseDelay: 1, retryMaximumDelay: 1, random: { 1 }), isAuthorized: { true },
             endpoint: { URL(string: "https://unit.test") }, transport: { _, _, _ in sends += 1; return .transportFailure })
-        _ = await uploader.upload(entry)
-        gate.update(.init(satisfied: true, interfaces: [.wifi], expensive: false, constrained: false))
+        // UNKNOWN (no path yet): still refused, and no attempt is spent.
         _ = await uploader.upload(entry)
         XCTAssertEqual(sends, 0)
         XCTAssertEqual(try queue.attemptCount(for: entry), 0)
+        // Bare gate + SATISFIED path: allowed now (spec 4afc6e43 happy path).
+        gate.update(.init(satisfied: true, interfaces: [.wifi], expensive: false, constrained: false))
+        _ = await uploader.upload(entry)
+        XCTAssertEqual(sends, 1)
+        // The satisfied-path attempt IS spent (transportFailure keeps the entry queued).
+        XCTAssertEqual(try queue.attemptCount(for: entry), 1)
         XCTAssertEqual(queue.readyEntries(), [entry])
         let selected = permittedNetwork()
         var credentials = 0
@@ -911,11 +916,26 @@ extension VoiceSharingUploadTransportTests {
                      .init(satisfied: true, interfaces: [.wifi], expensive: false, constrained: true)] {
             selected.update(path)
             XCTAssertFalse(selected.isAllowed)
+            let before = try queue.attemptCount(for: entry)
             _ = await selectedUploader.upload(entry)
-            XCTAssertEqual(try queue.attemptCount(for: entry), 0)
+            XCTAssertEqual(try queue.attemptCount(for: entry), before)
             XCTAssertEqual(credentials, 0)
             XCTAssertEqual(UploadRecordingURLProtocol.requestCount, 0)
         }
+    }
+
+    /// SIMPLIFIED CONTRACT (spec 4afc6e43): a bare production gate (no explicit allowance) must
+    /// allow any SATISFIED path — the previous `?? false` refused forever and silently blocked
+    /// every drain. RED first: with the old behavior this failed on the first assertion.
+    func test_bareNetworkGateAllowsAnySatisfiedPath() {
+        let gate = VoiceSharingUploadNetworkGate(monitorPath: false)
+        XCTAssertFalse(gate.isAllowed, "before the first path update nothing is known yet")
+        gate.update(.init(satisfied: true, interfaces: [.wifi], expensive: true, constrained: true))
+        XCTAssertTrue(gate.isAllowed, "a satisfied path must pass a bare gate")
+        gate.update(.init(satisfied: true, interfaces: [.cellular], expensive: false, constrained: false))
+        XCTAssertTrue(gate.isAllowed)
+        gate.update(.init(satisfied: false, interfaces: [.wifi], expensive: false, constrained: false))
+        XCTAssertFalse(gate.isAllowed, "an unsatisfied path must still be refused")
     }
 
     func test_networkLossRecoveryWhileCredentialWaitsCannotLaunchOldGeneration() async throws {

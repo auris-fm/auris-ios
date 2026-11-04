@@ -153,6 +153,13 @@ final class VoiceSharingUploadTrigger {
     /// The guarded entry a lifecycle event reaches. Also callable directly (background task
     /// expiration, push-to-sync) with the SAME gates — there is no unguarded path.
     func triggerDrainIfPermitted() {
+        if !surfaceEnabled() {
+            FileLog.shared.addMessage("[VoiceSharing] drain refused: surface disabled")
+        } else if !(networkGate?.isAllowed ?? true) {
+            FileLog.shared.addMessage("[VoiceSharing] drain refused: network gate")
+        } else if !isAuthorized() {
+            FileLog.shared.addMessage("[VoiceSharing] drain refused: unauthorized (session/consent)")
+        }
         triggerDrainIfPermitted(matchingGeneration: nil)
     }
 
@@ -393,11 +400,14 @@ final class VoiceSharingUploadNetworkGate {
 
     func update(_ path: Path) {
         lock.lock()
-        let next = allowance.map {
-            path.satisfied && !path.interfaces.isDisjoint(with: $0.interfaces)
+        // NIL ALLOWANCE = NO RESTRICTION beyond a satisfied path (spec 4afc6e43 happy path):
+        // the previous `?? false` made a bare production gate refuse forever, which silently
+        // blocked every drain. Restriction now requires an explicit allowance.
+        let next = path.satisfied && (allowance.map {
+            !path.interfaces.isDisjoint(with: $0.interfaces)
                 && (!path.expensive || $0.allowsExpensive)
                 && (!path.constrained || $0.allowsConstrained)
-        } ?? false
+        } ?? true)
         let changed = next != allowed
         if changed { generation += 1 }
         allowed = next
