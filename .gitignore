@@ -57,3 +57,5 @@ ThirdParty/llama-cpp-build/
 
 # Local-only operator harnesses: live-network probes are never committed
 LocalMintTokenProbe.swift
+__pycache__/
+*.pyc
