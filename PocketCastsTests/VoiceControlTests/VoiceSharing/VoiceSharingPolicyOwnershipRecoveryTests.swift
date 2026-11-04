@@ -30,6 +30,14 @@ final class VoiceSharingPolicyOwnershipRecoveryTests: XCTestCase {
         }
     }
 
+    /// Minimal thread-safe flag (mirror of the canonical suite's LockedFlag).
+    private final class AdvancedFlag {
+        private let lock = NSLock()
+        private var value = false
+        func set(_ v: Bool) { lock.lock(); value = v; lock.unlock() }
+        func get() -> Bool { lock.lock(); defer { lock.unlock() }; return value }
+    }
+
     private final class StubBearerTokens: CloudTokenProviding {
         func token() async -> String? { "test-bearer" }
         func prepare() async {}
@@ -359,35 +367,73 @@ final class VoiceSharingPolicyOwnershipRecoveryTests: XCTestCase {
                        "a stale completion must not reset the newer outage's backoff")
     }
 
-    /// LEASE EXPIRY → FAILED FETCH → RECOVERY (spec e42d2959 / reviewer 974f4958): the
-    /// expiry renewal goes through the SAME centralized settlement, so a transient fetch
-    /// failure schedules recovery without an app restart. Authoritative-disable cancellation
-    /// on this path is covered by test_authoritativeDisabledDoesNotScheduleRetry.
-    func test_leaseExpiryWithFailedFetchRecoversWithoutRestart() throws {
-        let (coordinator, _) = makeEnrolledStack()
+    /// LEASE EXPIRY → FAILED FETCH → DELIVERED RETRY → FRESH INSTALLED POLICY
+    /// (spec f734c75c / e42d2959 / reviewer 974f4958): the expiry renewal goes through the
+    /// SAME centralized settlement; a transient fetch failure schedules recovery, and the
+    /// DELIVERED retry — through the real owned handoff and exchange — ends with a fresh
+    /// installed policy lease.
+    func test_leaseExpiryWithFailedFetchRecoversToAFreshInstalledPolicy() throws {
+        let (coordinator, store) = makeEnrolledStack()
         VoiceSharingSessionGeneration.shared.ensureLifecycle()
         defer { VoiceSharingSessionGeneration.shared.clear() }
         let firApp = try XCTUnwrap(
             VoiceSharingFirebaseApp.configure(plistPath: TestSupport.makeVoiceSharingPlist()))
-        let delivered = deliverImmediately(coordinator)
         XCTAssertNotNil(firApp)
+        let delivered = deliverImmediately(coordinator)
         VoiceSharingFirebaseApp.connectIdentityRecoveryRefresh(coordinator: coordinator)
+        // Phase 1: the renewal fetch FAILS transiently → recovery scheduled.
         VoiceSharingFirebaseApp.policyFetchActor = { _, handler in
             DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) {
                 handler(.failure, NSError(domain: "test", code: 1))
             }
         }
-        defer {
-            VoiceSharingFirebaseApp.policyFetchActor = nil
-        }
-        // The production expiry path: renewal runs the exchange; fetch fails transiently.
         coordinator.leaseRenewalAfterExpiry()
-        let waited = NSPredicate { _, _ in !delivered.value.isEmpty }
-        wait(for: [XCTNSPredicateExpectation(predicate: waited, object: nil)], timeout: 10)
+        let scheduled = NSPredicate { _, _ in !delivered.value.isEmpty }
+        wait(for: [XCTNSPredicateExpectation(predicate: scheduled, object: nil)], timeout: 10)
         XCTAssertEqual(delivered.value.count, 1,
                        "an expiry renewal with a failed fetch must schedule recovery")
-        XCTAssertTrue(delivered.value[0].delay >= 30)
-        XCTAssertNotNil(firApp)
+
+        // Phase 2: the delivered retry runs the REAL owned handoff + exchange; the stub
+        // now answers fresh, remote, activated, and enrolled — the lease must INSTALL.
+        let advanced = AdvancedFlag()
+        coordinator.lastFetchTimeProvider = { advanced.get() ? Date() : nil }
+        VoiceSharingFirebaseApp.policyFetchActor = { _, handler in
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) {
+                advanced.set(true)
+                handler(.success, nil as Error?)
+            }
+        }
+        VoiceSharingFirebaseApp.policyActivateActor = { handler in handler(true, nil) }
+        VoiceSharingFirebaseApp.policyValueProvenanceActor = { true }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [VoiceSharingStubProtocol.self]
+        VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] = .init(
+            status: 200,
+            body: ["schema_version": 1, "membership_revision": "r1", "plan": "pro",
+                   "voice_sharing_enrolled": true, "withdrawal_state": "active",
+                   "enrollment_epoch": "e1" as Any, "accepted_disclosure_version": "voice-sharing-v1" as Any])
+        VoiceSharingFirebaseApp.defaultAccountClientOverride = { coordinator in
+            VoiceSharingAccountClient(
+                baseURLProvider: { "https://api.example.test" },
+                tokenProvider: StubBearerTokens(),
+                session: URLSession(configuration: config),
+                sessionIdentity: { "gen-A" },
+                membershipStore: store)
+        }
+        defer {
+            VoiceSharingFirebaseApp.policyFetchActor = nil
+            VoiceSharingFirebaseApp.policyActivateActor = nil
+            VoiceSharingFirebaseApp.policyValueProvenanceActor = nil
+            VoiceSharingFirebaseApp.defaultAccountClientOverride = nil
+            VoiceSharingStubProtocol.replies.removeAll()
+        }
+        delivered.value[0].item.perform()
+        // First settlement applies the CHANGED membership (deferred follow-up drives the
+        // install); wait for the lease to appear via the auto-driven follow-up.
+        let installed = NSPredicate { _, _ in coordinator.policy.installedLeaseExpiry != nil }
+        wait(for: [XCTNSPredicateExpectation(predicate: installed, object: nil)], timeout: 10)
+        XCTAssertNotNil(coordinator.policy.installedLeaseExpiry,
+                        "the delivered retry must end in a fresh installed policy")
     }
 
     /// SDK THROTTLE BOUNDARY (reviewer blocker 3): a fetch error carrying
