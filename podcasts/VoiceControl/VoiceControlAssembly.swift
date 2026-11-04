@@ -197,12 +197,12 @@ class VoiceControlAssembly {
         // SIMPLIFIED CONTRACT (spec 4afc6e43): one authorization gate — the ordinary
         // authenticated session plus the user's sharing choice. The policy snapshot/lease no
         // longer gates uploads; the server re-checks enrollment/enablement at accept.
+        // THE ONE CONSENT DECISION (spec 4afc6e43, reviewer ee48cdfe): shared by capture, sink
+        // and upload. Ordinary session + affirmative sharing choice + no explicit consent loss.
+        // The server re-checks enrollment at accept; no policy/readiness check.
         let uploadAuthorized: () -> Bool = {
-            // ONE CONSENT DECISION (spec 4afc6e43): the user's sharing choice, under the ordinary
-            // authenticated session. The server re-checks enrollment/enablement at accept; the
-            // client no longer gates on projection/enrollment-membership readiness.
             ServerSettings.userId != nil
-                && VoiceSharingEnrollmentStore.shared.currentState.localOptIn
+                && VoiceSharingEnrollmentStore.shared.consentAllowsCollection
         }
         // ONE identity reader for the whole upload path: queue, uploader and transport all
         // consult it, so the fence spans admission, credential acquisition and settlement.
@@ -235,7 +235,7 @@ class VoiceControlAssembly {
         // renders as `unknown` rather than inventing an opt-out.
         let settingsModel = VoiceSharingSettingsModel(
             queue: contributionQueue,
-            isCollectionPermitted: { VoiceSharingCoordinator.shared.policy.permitsCollection },
+            isCollectionPermitted: { uploadAuthorized() },
             // TRI-STATE: no authoritative projection yet ⇒ unknown, not "not enrolled".
             isAccountEnrolled: { VoiceSharingEnrollmentStore.shared.currentEnrollmentAnswer },
             isLocallyOptedIn: { VoiceSharingEnrollmentStore.shared.currentState.localOptIn },
@@ -245,21 +245,17 @@ class VoiceControlAssembly {
             coherenceAccount: { ServerSettings.userId },
             coherenceGeneration: { VoiceSharingEnrollmentStore.shared.currentEnrollmentGeneration },
             coherenceVersion: { VoiceSharingEnrollmentStore.shared.activeEnrollmentEpoch },
-            policyLeaseGeneration: { VoiceSharingCoordinator.shared.policy.currentLeaseGeneration },
             queueHoldGeneration: { contributionQueue.currentHoldGeneration })
         // Time-driven freshness: the queue's next age boundary and the policy's lease deadline.
         settingsModel.nextAgeBoundarySeconds = { [weak contributionQueue] in
             contributionQueue?.secondsUntilNextAgeBoundary()
-        }
-        settingsModel.nextLeaseExpirySeconds = {
-            VoiceSharingCoordinator.shared.policy.secondsUntilLeaseExpiry
         }
         settingsModel.scheduleTimeDrivenRefresh = { delay, body in
             DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: body)
         }
         let contributionSink = VoiceSharingContributionSink(
             queue: contributionQueue,
-            isEnabled: { VoiceSharingCoordinator.shared.policy.permitsCollection },
+            isEnabled: { uploadAuthorized() },
             encoderProvenance: {
                 VoiceSharingContributionEncoder.Provenance(
                     platform: "ios",

@@ -190,11 +190,9 @@ final class VoiceSharingCollector {
 
     init(
         isCollectionPermitted: @escaping () -> Bool = {
-            // Session + the user's choice, with explicit consent loss (local opt-out, server
-            // withdrawal) stopping immediately (spec e1529db9). Unknown projection is TRANSIENT:
-            // capture proceeds and the server re-checks enrollment at accept.
+            // THE one consent decision, shared with upload (reviewer ee48cdfe).
             ServerSettings.userId != nil
-                && !VoiceSharingEnrollmentStore.shared.consentGoneForPurge
+                && VoiceSharingEnrollmentStore.shared.consentAllowsCollection
         },
         outcomeWaitLimit: OutcomeWaitLimit? = nil,
         monotonicNow: @escaping () -> DispatchTime = DispatchTime.now,
