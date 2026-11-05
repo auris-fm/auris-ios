@@ -621,24 +621,6 @@ final class VoiceSharingAccountModel: ObservableObject {
         updateMembership()
     }
 
-    /// What a resume may do right now. The three cases exist because only two of them are the
-    /// same fact (reviewer 2ba0220e): a missing session or credential is TEMPORARY and must keep
-    /// the pending intent, while a credential the provider reports as definitively refused is the
-    /// caller's answer to act on. Absence of a credential is never a refusal.
-    private enum Authorization { case authorized, unavailable, definitive }
-
-    private func authorization() async -> Authorization {
-        guard session() != nil else { return .unavailable }
-        if refreshUnavailable {
-            // The provider is not serving a token right now: a retry would be a guess.
-            return .unavailable
-        }
-        guard let credential = await client.currentCredential(), !credential.isEmpty else {
-            return .unavailable
-        }
-        return .authorized
-    }
-
     private func updateMembership() {
         let state = store.currentAuthoritativeState
         membership = state?.membership
@@ -766,26 +748,13 @@ final class VoiceSharingAccountModel: ObservableObject {
                 if stamp == sent { mutation = nil; busy = false; membershipStatus = .unavailable }
                 return
             }
-            // Authorization re-checked BEFORE the resume: a retry must never dial a request the
-            // account cannot authorize, whatever the last recorded outcome was (incident review).
-            // The check AWAITS, so ownership is re-tested afterwards: while it suspended, a newer
-            // local move or account operation may have replaced this stamp, and a stale completion
-            // must neither clear nor dispatch that newer work (reviewer 2ba0220e).
-            switch await authorization() {
-            case .authorized:
-                break
-            case .unavailable:
-                // Temporary: KEEP the intent so a later resume can send the same operation.
-                if stamp == sent { busy = false; membershipStatus = .unavailable }
-                return
-            case .definitive:
-                if stamp == sent { mutation = nil; busy = false; membershipStatus = .unauthorized }
-                return
-            }
-            guard stamp == sent, mutation?.requestID == operation.requestID else {
-                // Superseded while the check was suspended: touch nothing.
-                return
-            }
+            // NO PREFLIGHT (spec c2d2f7fe). `VoiceSharingAccountClient` already acquires the
+            // credential inside request construction, dials nothing when it is unavailable, reports
+            // that case as `.unavailableBackend`, and fences the account around its own await. A
+            // separate check here duplicated that decision, and a separate one I wrote EARLIER also
+            // gated on `refreshUnavailable` — a flag that records a failed read, not credential
+            // validity, which blocked retries after the network had recovered. The operation is
+            // handed over unchanged, so its request identity survives; the completion is fenced.
             await performMutation(operation, under: sent)
         } else if withdrawing {
             guard let sent = begin() else { return }
@@ -849,21 +818,10 @@ final class VoiceSharingAccountModel: ObservableObject {
     func retryDeletion() async {
         storeChanged()
         guard deletionStatus != .sending, let operation = deletion else { return }
-        switch await authorization() {
-        case .authorized:
-            break
-        case .unavailable:
-            // Temporary: the request ID and cutoff must survive for an IDENTICAL retry.
-            deletionStatus = .unavailable
-            return
-        case .definitive:
-            if deletion?.requestID == operation.requestID { deletion = nil }
-            deletionStatus = .unauthorized
-            return
-        }
-        // Ownership re-tested after the await: a stale completion must not dispatch a superseded
-        // operation nor disturb newer state.
-        guard deletion?.requestID == operation.requestID else { return }
+        // The operation is handed to the client unchanged, so its request ID and cutoff are
+        // preserved by construction. `performDeletion` fences on ownership AFTER its credential
+        // await and reports a missing credential as `.unavailableBackend`, which keeps the
+        // operation pending for an identical retry instead of clearing it (reviewer 4546a238).
         await performDeletion(operation)
     }
 
@@ -871,13 +829,36 @@ final class VoiceSharingAccountModel: ObservableObject {
         guard session() == operation.originatingGeneration else { return }
         deletionStatus = .sending
         let result = await client.performDeletion(operation)
-        guard session() == operation.originatingGeneration, deletion?.requestID == operation.requestID else { storeChanged(); return }
+        // FENCE EVERY BRANCH (reviewer 4546a238): `performDeletion` awaited a credential inside the
+        // client, and a NEWER deletion may have replaced this one meanwhile. A stale completion must
+        // not write status for an operation that is no longer current.
+        guard session() == operation.originatingGeneration else { storeChanged(); return }
+        guard deletion?.requestID == operation.requestID else { return }
         switch result {
         case .pending(let id): deletion = nil; deletionStatus = .pending(id)
         case .unauthorized: deletion = nil; deletionStatus = .unauthorized
         case .refused(let reason): deletion = nil; deletionStatus = .refused(reason)
+        // Temporary: the operation is RETAINED so an identical retry can be sent later.
         case .unavailableBackend: deletionStatus = .unavailable
         }
+    }
+
+    // MARK: - Control accessors
+    //
+    // Narrow, read-only views of retry state so a control can observe identity preservation and
+    // stale-completion fencing without asserting on private storage. There is no corresponding
+    // setter: a control cannot put the model into a state production could not reach.
+
+    /// The request ID of the deletion operation currently awaiting completion, if any.
+    var pendingDeletionRequestIDForTesting: String? { deletion?.requestID }
+
+    /// Begins a deletion exactly as the button does, without awaiting it.
+    func beginDeletionForTesting() {
+        guard let generation = session(), begin() != nil else { return }
+        guard let operation = client.beginDeletion() else { return }
+        _ = generation
+        deletion = operation
+        deletionStatus = .unavailable
     }
 
     deinit { if let observer { store.removeObserver(observer) } }

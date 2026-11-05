@@ -292,7 +292,7 @@ final class VoiceSharingBearerTraceControls: XCTestCase {
         let entry = try makeReadyEntry(queue)
 
         var logged: [String] = []
-        let coordinator = VoiceSharingCoordinator(enrollmentStore: store)
+        let coordinator = VoiceSharingCoordinator(enrollmentStore: store, scheduledWorkObserver: .init { _ in })
         let trigger = VoiceControlAssembly().makeVoiceSharingUploadTrigger(
             queue: queue, isAuthorized: { true },
             currentIdentity: { nil }, tokenProvider: StaticToken())
@@ -329,7 +329,7 @@ final class VoiceSharingBearerTraceControls: XCTestCase {
             loginStateReadable: { true })
         defer { uninstall() }
         // The COLD-START refresh the installation scheduled itself.
-        await coordinator.awaitScheduledRefreshes()
+        await coordinator.settleObservedWork()
         XCTAssertFalse(StubServer.snapshot().isEmpty,
                        "the installation's own cold-start refresh really ran")
 
@@ -337,7 +337,7 @@ final class VoiceSharingBearerTraceControls: XCTestCase {
         // (a) THE REAL NOTIFICATION, and AWAIT the task it schedules.
         let delivered = center.post(name: .userLoginDidChange)
         XCTAssertGreaterThan(delivered, 0, "the coordinator registered for the identity notification")
-        await coordinator.awaitScheduledRefreshes()
+        await coordinator.settleObservedWork()
 
         // Sequence through that same recovery: reads only, and no withdrawal/enrollment request.
         let recoveryRequests = Array(StubServer.snapshot().dropFirst(before))
@@ -361,7 +361,7 @@ final class VoiceSharingBearerTraceControls: XCTestCase {
             session: makeSession(), sessionIdentity: { "acct-1" }, membershipStore: store)
         let refusedDelivered = center.post(name: .userLoginDidChange)
         XCTAssertGreaterThan(refusedDelivered, 0)
-        await coordinator.awaitScheduledRefreshes()
+        await coordinator.settleObservedWork()
         // The injected client is the recovered one; drive the refusal explicitly through the same
         // boundary's client type so the stanza is deterministic.
         await coordinator.refreshProjectionFromServer(accountClient: refreshStale)
