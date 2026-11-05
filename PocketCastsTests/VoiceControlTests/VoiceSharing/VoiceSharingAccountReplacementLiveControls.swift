@@ -182,7 +182,14 @@ final class VoiceSharingAccountReplacementLiveControls: XCTestCase {
         // not-yet-due before reaching ownership — so the control could never have exercised the
         // fence it claims to test. Advancing one clock past that deadline makes the entry DUE.
         let clock = LocalClock(start: Date(timeIntervalSince1970: 1_700_000_000))
-        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: { clock.now() })
+        // A BOUND QUEUE (reviewer 4dacabfa): without `currentIdentity` the queue writes and enforces
+        // no `owner.account`, so the ownership check under test cannot run at all. Same reader as
+        // the trigger, so queue and transport agree on who is signed in.
+        let queue = VoiceSharingUploadQueue(
+            rootDirectory: root, clock: { clock.now() },
+            currentIdentity: {
+                VoiceSharingUploadIdentity(accountScope: liveAccount, enrollmentEpoch: "epoch-1")
+            })
         let entry = try makeReadyEntry(queue)
         XCTAssertEqual(queue.readyEntries(), [entry], "account 1 has one ready recording")
 
@@ -196,7 +203,11 @@ final class VoiceSharingAccountReplacementLiveControls: XCTestCase {
             },
             baseURLProvider: { "https://unit.test" },
             tokenProvider: LiveAccountTokens(account: { liveAccount }),
-            session: makeSession())
+            session: makeSession(),
+            // THE SAME CLOCK (reviewer 4dacabfa): with the default `Date.init` the 503 wrote a
+            // real-time retry deadline while the queue sat at its injected time, so advancing the
+            // queue clock could never make this entry due.
+            clock: { clock.now() })
 
         let center = RecordingNotificationCenter()
         let uninstall = coordinator.installIdentityInvalidation(
@@ -285,7 +296,14 @@ final class VoiceSharingAccountReplacementLiveControls: XCTestCase {
         let uploads = afterSwitch.filter { $0.path == VoiceSharingUploadTransport.uploadPath }
         XCTAssertTrue(uploads.isEmpty,
                       "account 2 must not attempt account 1's recording: \(uploads.map { "\($0.method) \($0.path) \($0.bearer ?? "-")" })")
-        // 3. The queue's own binding refuses the attempt before any request is built.
+        // 3. The queue's OWN OWNERSHIP CHECK refuses the attempt, and the recording is retained
+        // rather than moved or destroyed by the switch. This is the refusal itself, asked of the
+        // real admission path under account 2 — not merely "no request was seen", which an
+        // authorization gate or a backoff could also produce.
+        let retained = try XCTUnwrap(queue.readyEntries().first,
+                                     "the recording survives the account switch")
+        let refused = try queue.admitAttempt(retained)
+        XCTAssertNil(refused, "account 2's admission of account 1's recording is REFUSED")
         XCTAssertEqual(queue.readyEntries().count, 1,
                        "the recording is retained, not moved or destroyed by the switch")
 
