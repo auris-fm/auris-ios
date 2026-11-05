@@ -516,9 +516,13 @@ class VoiceControlAssembly {
     ) {
         collector.gateLostSubscription = coordinator.registerGateLostHandler {
             [weak collector, weak sink, weak uploadTrigger] in
-            // ROOT CAUSE OF THE SILENT QUEUE WIPES (confirmed against staging: 32 entries removed,
-            // zero accepted): this handler fired on EVERY gate closure — including the old policy
-            // snapshot flapping "no installed snapshot" — and purged ALL durable recordings. Under
+            // THE SUSPECTED CAUSE OF THE SILENT QUEUE WIPES, AND NOT A CONFIRMED ONE. On 2026-11-05
+            // staging lost ~32 durable entries with zero accepted records, and this handler purged
+            // on EVERY gate closure — including the old policy snapshot flapping "no installed
+            // snapshot". That is a mechanism that WOULD explain the loss, but the incident's cause
+            // remains UNRESOLVED (the retention behaviour observed afterwards does not identify
+            // which path removed those entries). Do not cite this as the established root cause.
+            // Under
             // the simplified contract (spec 4afc6e43) gate closure is not consent withdrawal; the
             // only purge is the user's explicit opt-out (settings) — see SettingsModel.
             sink?.noteRevocation()
@@ -644,7 +648,7 @@ final class VoiceSharingLifetime {
         self.uploadTrigger = uploadTrigger
         self.enrollmentStore = enrollmentStore
         self.queue = queue
-        enrollmentObserver = enrollmentStore.addObserver { [weak settingsModel] _ in
+        enrollmentObserver = enrollmentStore.addObserver { [weak settingsModel] _, _ in
             settingsModel?.refreshLiveState()
         }
         queueObserver = queue.addContentObserver { [weak settingsModel] in

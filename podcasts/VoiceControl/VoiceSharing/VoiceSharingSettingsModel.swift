@@ -615,7 +615,7 @@ final class VoiceSharingAccountModel: ObservableObject {
         self.session = session
         self.purgeLocal = purgeLocal
         account = session()
-        observer = store.addObserver { [weak self] _ in
+        observer = store.addObserver { [weak self] _, _ in
             Task { @MainActor [weak self] in self?.storeChanged() }
         }
         updateMembership()
