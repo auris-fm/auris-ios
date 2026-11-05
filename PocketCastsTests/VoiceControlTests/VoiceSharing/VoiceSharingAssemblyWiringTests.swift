@@ -806,7 +806,15 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
     /// ASSEMBLED CREDENTIAL-WINDOW CONTROL (reviewer 1244fd5e): the direct-send test above proves
     /// the transport check; this one drives the PRODUCTION path — assembly-built uploader and
     /// transport, real admission, real fence forwarding — with the move inside the token await.
-    func test_assembledUploadStopsWhenIdentityMovesDuringCredentialAwait() async throws {
+    /// THE CONTRACT: a credential-window move to a DIFFERENT ACCOUNT must stop the upload before a
+    /// byte leaves (spec 4afc6e43 — the account is what binds an entry).
+    ///
+    /// Corrected per spec 6e4f77c5. The earlier version moved only the ENROLLMENT EPOCH
+    /// (`acct-A/epoch-1` → `acct-A/epoch-2`) and demanded `.revoked`; the transport's fences compare
+    /// `accountScope`, so an epoch move is a re-enrollment by the SAME owner and is correctly
+    /// allowed through — the test was asserting a rule the spec deliberately removed. Moving the
+    /// ACCOUNT is the ownership change the fences exist for.
+    func test_assembledUploadStopsWhenIdentityMovesToAnotherAccountDuringCredentialAwait() async throws {
         let sharedRoot = root!
         let box = IdentityBox(VoiceSharingUploadIdentity(
             accountScope: "acct-A", enrollmentEpoch: "epoch-1"))
@@ -818,13 +826,12 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         configuration.protocolClasses = [AssemblyIntercept.self]
         let realTransport = VoiceSharingUploadTransport(
             baseURLProvider: { "https://unit.test" },
+            // The move lands INSIDE the credential await — the window the uploader cannot see.
             tokenProvider: SuspendingTokenProvider {
                 box.current = VoiceSharingUploadIdentity(
-                    accountScope: "acct-A", enrollmentEpoch: "epoch-2")
+                    accountScope: "acct-B", enrollmentEpoch: "epoch-1")
             },
             session: URLSession(configuration: configuration))
-        // Rebuild the uploader exactly as the assembly does, but with the real transport — the
-        // production closure signature forwards snapshot + fence unchanged.
         let uploader = VoiceSharingUploader(
             queue: queue,
             retryPolicy: VoiceSharingRetryPolicy(
@@ -844,13 +851,61 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         defer { AssemblyIntercept.responder = nil }
 
         let outcome = await uploader.upload(entry)
-        // The transport refusal surfaces as .retry; the uploader's own post-await fence then
-        // escalates the SAME move to .revoked — either way nothing was sent (asserted below).
         guard case .revoked = outcome else {
-            return XCTFail("the assembled upload must be revoked on a credential-window move, got \(outcome)")
+            return XCTFail("an ACCOUNT move during the credential await must revoke the attempt, got \(outcome)")
         }
+        // THE PROPERTY THAT MATTERS: A's bytes never left under B's authority.
         XCTAssertEqual(AssemblyIntercept.requestCount, 0,
-                       "assembled path emitted no request")
+                       "no request was emitted for a cross-account move")
+        XCTAssertTrue(queue.readyEntries().contains { $0.name == entry.name },
+                      "the entry is retained for its owning identity")
+    }
+
+    /// THE COMPLEMENT, so the fence is not over-strict: a RE-ENROLLMENT of the same account moves
+    /// the epoch, and that must NOT block the owner's own upload — it proceeds to the wire.
+    func test_assembledUploadProceedsWhenOnlyTheEpochMovesDuringCredentialAwait() async throws {
+        let sharedRoot = root!
+        let box = IdentityBox(VoiceSharingUploadIdentity(
+            accountScope: "acct-A", enrollmentEpoch: "epoch-1"))
+        let queue = VoiceSharingUploadQueue(
+            rootDirectory: sharedRoot, currentIdentity: { box.current })
+        let entry = try makeReadyEntryOwned(queue, root: sharedRoot)
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [AssemblyIntercept.self]
+        let realTransport = VoiceSharingUploadTransport(
+            baseURLProvider: { "https://unit.test" },
+            tokenProvider: SuspendingTokenProvider {
+                // SAME account, new epoch: a re-enrollment, not an ownership change.
+                box.current = VoiceSharingUploadIdentity(
+                    accountScope: "acct-A", enrollmentEpoch: "epoch-2")
+            },
+            session: URLSession(configuration: configuration))
+        let uploader = VoiceSharingUploader(
+            queue: queue,
+            retryPolicy: VoiceSharingRetryPolicy(
+                retryBaseDelay: 1, retryMaximumDelay: 60, random: { 0 }),
+            isAuthorized: { true }, currentIdentity: { box.current },
+            endpoint: { realTransport.endpoint },
+            transport: { request, admitted, fence in
+                await realTransport.send(
+                    request: request, admittedIdentity: admitted, identityFence: fence)
+            })
+
+        AssemblyIntercept.reset(for: "epoch-move-complement")
+        AssemblyIntercept.responder = { _ in
+            (HTTPURLResponse(url: URL(string: "https://unit.test/x")!, statusCode: 503,
+                             httpVersion: nil, headerFields: nil)!, Data())
+        }
+        defer { AssemblyIntercept.responder = nil }
+
+        let outcome = await uploader.upload(entry)
+        // THE PROPERTY: the epoch move is NOT treated as an ownership change, so the attempt is not
+        // revoked. (The stub answers 503, so the outcome settles as a retry — what matters is that
+        // the fence let the SAME account's upload proceed instead of refusing it.)
+        if case .revoked = outcome {
+            return XCTFail("an epoch-only change must not revoke the SAME account's own upload")
+        }
         XCTAssertTrue(queue.readyEntries().contains { $0.name == entry.name },
                       "the entry is retained for its owning identity")
     }

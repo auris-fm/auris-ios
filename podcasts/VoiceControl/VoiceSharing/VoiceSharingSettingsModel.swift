@@ -845,21 +845,15 @@ final class VoiceSharingAccountModel: ObservableObject {
 
     // MARK: - Control accessors
     //
-    // Narrow, read-only views of retry state so a control can observe identity preservation and
-    // stale-completion fencing without asserting on private storage. There is no corresponding
-    // setter: a control cannot put the model into a state production could not reach.
+    // A READ-ONLY view of retry state, so a control can observe identity preservation and
+    // stale-completion fencing without asserting on private storage. There is deliberately NO
+    // state-setting helper (reviewer fa9db8e9): an earlier `beginDeletionForTesting()` manufactured
+    // `pending`/`unavailable` state directly and bypassed the public action's `.sending` guard, so a
+    // control could replace an in-flight deletion the real button would refuse. Controls now drive
+    // the public entry points only.
 
     /// The request ID of the deletion operation currently awaiting completion, if any.
     var pendingDeletionRequestIDForTesting: String? { deletion?.requestID }
-
-    /// Begins a deletion exactly as the button does, without awaiting it.
-    func beginDeletionForTesting() {
-        guard let generation = session(), begin() != nil else { return }
-        guard let operation = client.beginDeletion() else { return }
-        _ = generation
-        deletion = operation
-        deletionStatus = .unavailable
-    }
 
     deinit { if let observer { store.removeObserver(observer) } }
 }

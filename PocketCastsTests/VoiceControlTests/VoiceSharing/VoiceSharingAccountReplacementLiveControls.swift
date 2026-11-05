@@ -205,28 +205,55 @@ final class VoiceSharingAccountReplacementLiveControls: XCTestCase {
                              "the coordinator registered for the identity notification")
         await coordinator.settleObservedWork()
 
-        // Account 2 now gets an ordinary drain opportunity — the same entry point the app uses.
-        trigger.triggerDrainIfPermitted()
-        // Bounded wait on the trigger's own observable state, not a sleep loop.
-        var spins = 0
-        while Wire.recorded().isEmpty && spins < 2_000 {
-            await Task.yield()
-            spins += 1
-        }
-        for _ in 0..<200 { await Task.yield() }
+        // ---------------------------------------------------------------------------------
+        // POSITIVE CONTROL FIRST (reviewer fa9db8e9): the SAME observation must be able to SEE an
+        // owning-account send. Without this, "no upload route observed" proves nothing — a filter
+        // matching the wrong path would pass the negative assertion too.
+        // ---------------------------------------------------------------------------------
+        // Back to account 1, which owns the recording and still holds its own consent.
+        liveAccount = "acct-1"
+        ServerSettings.userId = "acct-1"
+        ServerSettings.setSyncingEmail(email: "one@auris.test")
+        XCTAssertTrue(center.post(name: .userLoginDidChange) > 0)
+        await coordinator.settleObservedWork()
 
-        // THE ASSERTIONS, on the wire.
+        Wire.reset()
+        trigger.triggerDrainIfPermitted()
+        var spins = 0
+        while Wire.recorded().isEmpty && spins < 200_000 { await Task.yield(); spins += 1 }
+        for _ in 0..<200_000 { await Task.yield() }
+        let owningSend = Wire.recorded().filter { $0.path == VoiceSharingUploadTransport.uploadPath }
+        XCTAssertEqual(owningSend.count, 1,
+                       "the owning account's recording DOES reach the upload route — the observation works")
+        XCTAssertEqual(owningSend.first?.bearer, "tok-acct-1",
+                       "sent under the owning account's own credential")
+
+        // ---------------------------------------------------------------------------------
+        // THE NEGATIVE, now that the same observation is proven able to fail.
+        // ---------------------------------------------------------------------------------
+        liveAccount = "acct-2"
+        ServerSettings.userId = "acct-2"
+        ServerSettings.setSyncingEmail(email: "two@auris.test")
+        XCTAssertTrue(center.post(name: .userLoginDidChange) > 0)
+        await coordinator.settleObservedWork()
+
+        Wire.reset()
+        trigger.triggerDrainIfPermitted()
+        var spins2 = 0
+        while Wire.recorded().isEmpty && spins2 < 200_000 { await Task.yield(); spins2 += 1 }
+        for _ in 0..<200_000 { await Task.yield() }
+
         let afterSwitch = Wire.recorded()
         // 1. Account 2's session never presents account 1's credential, for anything.
         XCTAssertFalse(afterSwitch.contains { $0.bearer == "tok-acct-1" },
                        "account 2's session must never present account 1's credential: \(afterSwitch.map { "\($0.method) \($0.path) \($0.bearer ?? "-")" })")
-        // 2. Account 1's recording never reaches an upload route under account 2.
-        let uploads = afterSwitch.filter { $0.path.contains("/voice-contributions") || $0.path.contains("/contributions") }
+        // 2. Account 1's recording never reaches the REAL upload route under account 2.
+        let uploads = afterSwitch.filter { $0.path == VoiceSharingUploadTransport.uploadPath }
         XCTAssertTrue(uploads.isEmpty,
-                      "account 2 must not attempt account 1's recording: \(uploads.map(\.path))")
+                      "account 2 must not attempt account 1's recording: \(uploads.map { "\($0.method) \($0.path) \($0.bearer ?? "-")" })")
         // 3. The queue's own binding refuses the attempt before any request is built.
-        let outcome = await queue.readyEntries().count
-        XCTAssertEqual(outcome, 1, "the recording is retained, not moved or destroyed by the switch")
+        XCTAssertEqual(queue.readyEntries().count, 1,
+                       "the recording is retained, not moved or destroyed by the switch")
 
         // Account 2 has no collection permission of its own just because account 1 had one.
         XCTAssertFalse(store.consentAllowsCollection,
@@ -244,4 +271,3 @@ final class VoiceSharingAccountReplacementLiveControls: XCTestCase {
                       "account 1's choice survives the replacement round-trip")
     }
 }
-

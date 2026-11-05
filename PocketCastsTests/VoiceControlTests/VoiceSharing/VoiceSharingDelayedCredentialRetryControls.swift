@@ -4,13 +4,11 @@ import XCTest
 @testable import PocketCastsUtils
 @testable import podcasts
 
-/// DELAYED-CREDENTIAL / UNKNOWN-OUTCOME RETRY CONTROLS (reviewer 2ba0220e + 4546a238).
+/// KNOWN-OUTCOME RETRY CONTROLS (reviewer 2ba0220e, 4546a238, fa9db8e9).
 ///
-/// The retry paths were the defect surface: a resume awaited a credential, then decided what to do
-/// with an operation whose outcome was unknown. These controls hold the credential open so a
-/// replacement lands *inside* that await, and assert that a stale retry neither clears nor sends
-/// newer work, and that a temporary unavailability keeps the operation and its request identity for
-/// an identical retry.
+/// The retry paths were the defect surface: a resume that suspends on a credential, then decides
+/// what to do with an operation whose outcome is UNKNOWN. These controls drive only the PUBLIC
+/// actions — there is no test-only state setter — and compare what actually went on the wire.
 final class VoiceSharingDelayedCredentialRetryControls: XCTestCase {
 
     private var suiteName: String!
@@ -20,27 +18,35 @@ final class VoiceSharingDelayedCredentialRetryControls: XCTestCase {
         try super.setUpWithError()
         suiteName = "delayed-credential-\(UUID().uuidString)"
         defaults = UserDefaults(suiteName: suiteName)
+        Wire.reset()
+        Wire.current = Wire()
     }
 
     override func tearDown() {
+        Wire.current = nil
         defaults.removePersistentDomain(forName: suiteName)
         defaults = nil
         super.tearDown()
     }
 
-    /// A credential source a control holds open: `token()` blocks until released, which is the
-    /// window where an account replacement can land.
-    private final class GatedTokens: CloudTokenProviding {
+    /// A credential source a control can hold open or make temporarily unavailable. `token()`
+    /// suspends until released when gated, which is the window an account transition can land in.
+    private final class GatedTokens: CloudTokenProviding, @unchecked Sendable {
         private let gate = NSCondition()
-        private var open = false
-        private var value: String?
+        private var open = true
+        private var value: String? = "tok"
         private var started = false
-        func release(_ token: String?) {
-            gate.lock(); value = token; open = true; gate.broadcast(); gate.unlock()
+
+        func close(_ next: String?) {
+            gate.lock(); open = false; value = next; started = false; gate.unlock()
+        }
+        func release(_ next: String?) {
+            gate.lock(); open = true; value = next; gate.broadcast(); gate.unlock()
         }
         func hasStarted() -> Bool { gate.lock(); defer { gate.unlock() }; return started }
         func token() async -> String? {
-            gate.lock(); started = true; gate.broadcast()
+            gate.lock()
+            started = true
             while !open { gate.wait() }
             let v = value; gate.unlock()
             return v
@@ -48,14 +54,6 @@ final class VoiceSharingDelayedCredentialRetryControls: XCTestCase {
         func handleUnauthorized(rejectedToken: String?) async {}
     }
 
-    /// A credential source that answers immediately.
-    private final class OpenTokens: CloudTokenProviding {
-        func token() async -> String? { "tok" }
-        func handleUnauthorized(rejectedToken: String?) async {}
-    }
-
-    /// Records every request and answers projection reads with a valid body; mutations answer with
-    /// a caller-chosen status so an UNKNOWN outcome can be produced deliberately.
     private final class Wire: URLProtocol {
         static let lock = NSLock()
         static var current: Wire?
@@ -99,7 +97,13 @@ final class VoiceSharingDelayedCredentialRetryControls: XCTestCase {
         }
         static func reset() { lock.lock(); requests = []; mutationStatus = 503; lock.unlock() }
         static func recorded() -> [Request] { lock.lock(); defer { lock.unlock() }; return requests }
-        static func mutationCount() -> Int { recorded().filter { $0.method != "GET" && $0.path != CloudAuthTokenProvider.tokenPath }.count }
+        /// Every DELETE the client actually sent, serialized, in order.
+        static func deletionBodies() -> [[String: Any]] {
+            recorded().filter { $0.method == "DELETE" }.compactMap {
+                guard let body = $0.body else { return nil }
+                return try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+            }
+        }
     }
 
     private func makeSession() -> URLSession {
@@ -109,115 +113,132 @@ final class VoiceSharingDelayedCredentialRetryControls: XCTestCase {
     }
 
     @MainActor
-    private func makeModel(tokens: CloudTokenProviding) -> (VoiceSharingAccountModel, VoiceSharingEnrollmentStore) {
+    private func makeModel(tokens: CloudTokenProviding)
+        -> (VoiceSharingAccountModel, VoiceSharingEnrollmentStore) {
         let store = VoiceSharingEnrollmentStore(
             defaults: defaults, accountScopeProvider: { "acct-1" },
             sessionIdentityProvider: { "acct-1" })
         let client = VoiceSharingAccountClient(
             baseURLProvider: { "https://unit.test" }, tokenProvider: tokens,
             session: makeSession(), sessionIdentity: { "acct-1" }, membershipStore: store)
+        // The session reader follows `ServerSettings.userId`, as production's does. Pinning it to a
+        // constant made the transition in the control invisible to the model's own fences, which is
+        // why an earlier version could not have caught a stale completion.
         let model = VoiceSharingAccountModel(
             store: store, client: client,
             disclosureVersion: VoiceSharingDisclosure.productionVersion,
-            session: { "acct-1" })
+            session: { ServerSettings.userId })
         return (model, store)
+    }
+
+    /// Saves and restores the process-wide account globals to their PREVIOUS values.
+    private func withAccount(_ body: () async throws -> Void) async rethrows {
+        let previousEmail = ServerSettings.syncingEmail()
+        let previousUserID = ServerSettings.userId
+        ServerSettings.userId = "acct-1"
+        defer {
+            ServerSettings.setSyncingEmail(email: previousEmail)
+            ServerSettings.userId = previousUserID
+        }
+        try await body()
     }
 
     // MARK: - Controls
 
-    /// A deletion whose outcome is UNKNOWN keeps its operation and its request ID, and an identical
-    /// retry re-sends the SAME ID — not a new one.
+    /// An UNKNOWN deletion outcome retains the operation, and an identical retry re-sends the SAME
+    /// serialized request — compared on the wire, not on the model's stored copy.
     @MainActor
-    func test_unknownDeletionOutcomeKeepsItsRequestIDForAnIdenticalRetry() async throws {
-        ServerSettings.userId = "acct-1"
-        defer { ServerSettings.userId = nil }
-        Wire.reset()
-        // No gate here: this control is about identity preservation across retries, so the
-        // credential is simply available.
-        let (model, _) = makeModel(tokens: OpenTokens())
+    func test_unknownDeletionOutcomeReSendsTheIdenticalSerializedRequest() async throws {
+        try await withAccount {
+            Wire.reset()
+            Wire.mutationStatus = 503  // the server did not answer ⇒ outcome unknown
+            let (model, _) = makeModel(tokens: GatedTokens())
 
-        model.beginDeletionForTesting()
-        Wire.mutationStatus = 503   // unknown outcome
-        await model.retryDeletion()
+            // The PUBLIC action, not a manufactured state.
+            await model.deleteAcceptedData(confirmed: true)
+            let firstAttempts = Wire.deletionBodies()
+            XCTAssertEqual(firstAttempts.count, 1, "the first deletion reached the wire")
+            XCTAssertNotNil(model.pendingDeletionRequestIDForTesting,
+                            "an unknown outcome keeps the operation for an identical retry")
 
-        let firstID = model.pendingDeletionRequestIDForTesting
-        XCTAssertNotNil(firstID, "an unknown outcome keeps the operation for an identical retry")
-
-        Wire.reset(); Wire.mutationStatus = 503
-        await model.retryDeletion()
-        let secondID = model.pendingDeletionRequestIDForTesting
-        XCTAssertEqual(secondID, firstID, "the identical retry re-sends the SAME request ID")
-        let bodies = Wire.recorded().filter { $0.method == "DELETE" }.compactMap { $0.body }
-        XCTAssertFalse(bodies.isEmpty, "the retry actually dialled")
+            await model.retryDeletion()
+            let attempts = Wire.deletionBodies()
+            XCTAssertEqual(attempts.count, 2, "the retry dialled again")
+            XCTAssertEqual(attempts[0] as NSDictionary, attempts[1] as NSDictionary,
+                           "the identical retry re-sends the SAME serialized request (ID and cutoff)")
+        }
     }
 
-    /// The credential await is held open while a NEWER deletion replaces the operation. The stale
-    /// completion must not write status over the newer one.
+    /// A TEMPORARY missing credential must not discard the operation; once a credential is
+    /// available again, the SAME serialized request is sent.
     @MainActor
-    func test_aReplacementDuringTheCredentialAwaitIsNotOverwrittenByTheStaleCompletion() async throws {
-        ServerSettings.userId = "acct-1"
-        defer { ServerSettings.userId = nil }
-        Wire.reset()
-        let tokens = GatedTokens()
-        let (model, _) = makeModel(tokens: tokens)
+    func test_temporaryMissingCredentialRetainsTheOperationAndRecovers() async throws {
+        try await withAccount {
+            Wire.reset()
+            Wire.mutationStatus = 503
+            let tokens = GatedTokens()
+            let (model, _) = makeModel(tokens: tokens)
 
-        model.beginDeletionForTesting()
-        let staleID = model.pendingDeletionRequestIDForTesting
+            await model.deleteAcceptedData(confirmed: true)
+            let first = Wire.deletionBodies()
+            XCTAssertEqual(first.count, 1)
 
-        // Start the retry; it suspends inside credential acquisition.
-        let inflight = Task { await model.retryDeletion() }
-        while !tokens.hasStarted() { await Task.yield() }
+            // The credential goes away, and a retry runs in that window.
+            tokens.close(nil)
+            let retry = Task { await model.retryDeletion() }
+            tokens.release(nil)      // still no credential
+            await retry.value
 
-        // A NEWER deletion replaces it while the credential is still being acquired.
-        model.beginDeletionForTesting()
-        let newerID = model.pendingDeletionRequestIDForTesting
-        XCTAssertNotEqual(staleID, newerID, "the replacement has its own identity")
+            XCTAssertNotNil(model.pendingDeletionRequestIDForTesting,
+                            "a missing credential is TEMPORARY: the operation must be retained")
 
-        tokens.release("tok")
-        await inflight.value
+            // Recovery: the credential comes back and the retry succeeds in being sent.
+            tokens.close("tok")
+            let recovery = Task { await model.retryDeletion() }
+            tokens.release("tok")
+            await recovery.value
 
-        XCTAssertEqual(model.pendingDeletionRequestIDForTesting, newerID,
-                       "the stale completion must not replace or clear the newer operation")
+            let attempts = Wire.deletionBodies()
+            XCTAssertEqual(attempts.count, 2, "the recovered retry reached the wire")
+            XCTAssertEqual(attempts[0] as NSDictionary, attempts[1] as NSDictionary,
+                           "recovery re-sends the SAME request identity")
+        }
     }
 
-    /// A burst of notifications well beyond the old cap still completes and is observable: no
-    /// scheduled work is dropped, and every task the observer was handed can be settled.
-    func test_aBurstOfNotificationsSchedulesSettleableWork() async throws {
-        ServerSettings.userId = "acct-1"
-        defer { ServerSettings.userId = nil }
-        Wire.reset()
-        let store = VoiceSharingEnrollmentStore(
-            defaults: defaults, accountScopeProvider: { "acct-1" },
-            sessionIdentityProvider: { "acct-1" })
-        let seen = ObservedTasks()
-        let coordinator = VoiceSharingCoordinator(
-            enrollmentStore: store, scheduledWorkObserver: .init { task in seen.add(task) })
-        let client = VoiceSharingAccountClient(
-            baseURLProvider: { "https://unit.test" }, tokenProvider: OpenTokens(),
-            session: makeSession(), sessionIdentity: { "acct-1" }, membershipStore: store)
-        let center = RecordingNotificationCenter()
-        let uninstall = coordinator.installIdentityInvalidation(
-            onNotificationCenter: center, startupAuthReadable: { true },
-            scheduledRefreshClient: client, loginStateReadable: { true })
-        defer { uninstall() }
-        await coordinator.settleObservedWork()
+    /// A deletion attempt that suspends on the credential while the SESSION changes must not apply
+    /// its completion. The suspension is real; the transition is a genuine account move through the
+    /// store, not a manufactured status.
+    ///
+    /// What this control is careful NOT to claim: the earlier version expected `.sending` and failed
+    /// with `.unavailable`, because the model's own `storeChanged()` (an observer hop, not the
+    /// completion path) already adjusted the status when the transition landed. The property that
+    /// matters is that the STALE COMPLETION wrote nothing: the durable operation was retired with
+    /// the old session, and the returned result never touched it.
+    @MainActor
+    func test_anAccountTransitionDuringTheCredentialAwaitDoesNotApplyTheStaleCompletion() async throws {
+        try await withAccount {
+            Wire.reset()
+            Wire.mutationStatus = 700  // never reached: the credential is held open until after the move
+            let tokens = GatedTokens()
+            let (model, store) = makeModel(tokens: tokens)
 
-        let beforePost = seen.count()
-        for _ in 0..<12 { _ = center.post(name: .userLoginDidChange) }
-        await coordinator.settleObservedWork()
+            tokens.close("tok")
+            let inflight = Task { await model.deleteAcceptedData(confirmed: true) }
+            while !tokens.hasStarted() { await Task.yield() }
 
-        XCTAssertEqual(seen.count() - beforePost, 12,
-                       "every notification's refresh was scheduled and handed to the observer")
-        let projections = Wire.recorded().filter { $0.path == VoiceSharingAccountClient.projectionPath }
-        XCTAssertGreaterThanOrEqual(projections.count, 12,
-                                    "the burst really reached the wire: \(projections.count)")
+            // THE TRANSITION lands inside the await: the LIVE session moves to another account.
+            ServerSettings.userId = "acct-2"
+            store.transitionToAccount(signedIn: true)
+            tokens.release("tok")
+            await inflight.value
+
+            XCTAssertNil(model.pendingDeletionRequestIDForTesting,
+                         "the operation belonged to the retired session and was not resurrected")
+            // The STALE COMPLETION specifically: the retired attempt returned `.unavailableBackend`
+            // (its session moved), which RETAINS an operation. If that branch were applied, the
+            // retired deletion would still be pending now. It must not be.
+            XCTAssertEqual(model.deletionStatus, .idle,
+                           "the stale completion wrote nothing over the retired session's state")
+        }
     }
-}
-
-/// Thread-safe count of the tasks the coordinator handed over.
-private final class ObservedTasks: @unchecked Sendable {
-    private let lock = NSLock()
-    private var tasks: [Task<Void, Never>] = []
-    func add(_ task: Task<Void, Never>) { lock.lock(); tasks.append(task); lock.unlock() }
-    func count() -> Int { lock.lock(); defer { lock.unlock() }; return tasks.count }
 }

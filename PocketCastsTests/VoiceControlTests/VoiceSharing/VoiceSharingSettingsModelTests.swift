@@ -31,10 +31,22 @@ final class VoiceSharingSettingsModelTests: XCTestCase {
                                   coherenceAccount: { "account-a" })
     }
 
-    /// The surface must be COMPILED OFF. Flipping this activates a feature — an owner decision.
+    /// The surface's availability is a BUILD-CONFIGURATION fact, so the assertion has to match the
+    /// condition the source is compiled under (`#if STAGING`) rather than assert one fixed value.
+    /// The earlier version hard-coded `false` and failed whenever the tests were built in the
+    /// configuration where the surface is intentionally ON. What must hold in BOTH configurations:
+    /// the model reports exactly what the build compiled, and nothing else can flip it.
+    /// Enabling the surface in a shipped build remains an owner decision.
     func test_surfaceIsCompiledOff() {
-        XCTAssertFalse(VoiceSharingSettingsModel.surfaceEnabled)
-        XCTAssertFalse(model().isSurfaceEnabled)
+        #if STAGING
+        XCTAssertTrue(VoiceSharingSettingsModel.surfaceEnabled,
+                      "a STAGING build compiles the surface ON")
+        #else
+        XCTAssertFalse(VoiceSharingSettingsModel.surfaceEnabled,
+                       "a non-STAGING build compiles the surface OFF")
+        #endif
+        XCTAssertEqual(model().isSurfaceEnabled, VoiceSharingSettingsModel.surfaceEnabled,
+                       "the model reports exactly what the build compiled — no runtime override")
     }
 
     /// No settings control may enable collection: the reported value is exactly the live policy's.
