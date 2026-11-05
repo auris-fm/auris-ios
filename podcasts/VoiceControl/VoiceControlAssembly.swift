@@ -509,7 +509,10 @@ class VoiceControlAssembly {
         // Injectable so the focused control can drive the PRODUCTION handler (reviewer 7318214c);
         // production resolves the real consent truth.
         sessionAlive: @escaping () -> Bool = { ServerSettings.userId != nil },
-        consentGone: @escaping () -> Bool = { VoiceSharingEnrollmentStore.shared.consentGoneForPurge }
+        consentGone: @escaping () -> Bool = { VoiceSharingEnrollmentStore.shared.consentGoneForPurge },
+        // Injectable diagnostic sink (incident 2026-11-05): production logs to FileLog; controls
+        // assert the exact purge decision line without touching the log store.
+        log: @escaping (String) -> Void = { FileLog.shared.addMessage($0) }
     ) {
         collector.gateLostSubscription = coordinator.registerGateLostHandler {
             [weak collector, weak sink, weak uploadTrigger] in
@@ -524,8 +527,17 @@ class VoiceControlAssembly {
             // SPEC e1529db9: explicit WITHDRAWAL (local opt-out, server withdrawal, sign-out)
             // still clears pending recordings; TEMPORARY loss (policy flap, network, listening)
             // must retain them. Consent truth, not the gate event, decides the purge.
-            if !sessionAlive() || consentGone() {
-                _ = queue.purgeAll()
+            // INCIDENT 2026-11-05 (staging): 32 durable entries were removed at 19:58 with ZERO
+            // log lines. Silence is its own defect: every purge decision — keep OR clear — is
+            // now logged with its cause and the reconciled counts. No audio, no credentials.
+            if !sessionAlive() {
+                let outcome = queue.purgeAll()
+                log("[VoiceSharing] durable queue PURGE cause=session-gone outcome=\(outcome)")
+            } else if consentGone() {
+                let outcome = queue.purgeAll()
+                log("[VoiceSharing] durable queue PURGE cause=consent-gone outcome=\(outcome)")
+            } else {
+                log("[VoiceSharing] gate lost (temporary) — durable queue RETAINED")
             }
         }
     }
