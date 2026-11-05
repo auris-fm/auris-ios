@@ -198,7 +198,23 @@ private struct VoiceSharingSectionHost: View {
                 localModel: localModel,
                 surfaceEnabled: { VoiceSharingSettingsModel.surfaceEnabled },
                 originatingSession: account.accountActionSession)
+                // The ONE ordinary account read (spec 35891d3d): this host is the sharing surface
+                // people actually open, and until now nothing refreshed its account model — the
+                // rows rendered whatever the store held and never asked the service. A read only:
+                // it issues the projection GET and never a withdrawal or enrollment POST, and the
+                // visible sharing controls stay exactly as they were. Fires once per appearance,
+                // which is every time the screen is opened.
+                .task { await refreshAccountOnce() }
         }
+    }
+
+    /// Read the account projection when the screen appears. Gated the same way the rows are, so a
+    /// disabled surface or a signed-out session issues no request at all.
+    private func refreshAccountOnce() async {
+        guard VoiceSharingSettingsModel.surfaceEnabled, account.canAct(in: account.accountActionSession) else {
+            return
+        }
+        await account.refresh()
     }
 }
 
