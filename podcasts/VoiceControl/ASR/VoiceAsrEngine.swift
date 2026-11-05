@@ -422,6 +422,13 @@ class VoiceAsrEngine {
         wireCaptureCallbacks()
     }
 
+    /// TEST SEAM (review d815be4a #3): feeds samples through the engine's OWN segmenter with
+    /// the production wiring installed, so a control can drive the real speech-start →
+    /// emission → delayed-ASR path instead of calling `processUtterance` by hand.
+    func feedSyntheticSamplesForTesting(_ samples: [Float]) {
+        segmenter.process(samples, capturedAt: nil)
+    }
+
     /// Single definition of the capture wiring, so the fault forwarding cannot exist on one path
     /// and be missing on another.
     private func wireCaptureCallbacks() {

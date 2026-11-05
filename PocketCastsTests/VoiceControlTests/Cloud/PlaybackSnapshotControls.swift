@@ -13,13 +13,14 @@ final class PlaybackSnapshotControls: XCTestCase {
 
     private func makeEngine(
         backend: AsrBackend,
-        translation: TranslationStage
+        translation: TranslationStage,
+        segmenter: NativeVadSegmenter = NativeVadSegmenter()
     ) -> VoiceAsrEngine {
         let grace = GracePeriodSignal()
         grace.onCommandRecognized()
         let engine = VoiceAsrEngine(
             capture: NativeAudioCapture(),
-            segmenter: NativeVadSegmenter(),
+            segmenter: segmenter,
             backend: backend,
             signalFilter: SignalFilter(),
             wakeWordDetector: ContinuousWakeStub(),
@@ -69,20 +70,26 @@ final class PlaybackSnapshotControls: XCTestCase {
                        "speech-start capture must precede emission, not accompany it")
     }
 
-    /// CONTROL (review bcb42c49 #1 + #3): playback moves WHILE ASR is suspended mid-run, and
-    /// the routing input still carries the SPEECH-START value. The capture is taken before
-    /// recognition runs; a suspended recognizer cannot turn into a resample.
-    func test_asrSuspensionWithPlaybackAdvance_stillCarriesSpeechStartSnapshot() async throws {
+    /// CONTROL (review bcb42c49 #1 + #3; d815be4a #3): the REAL engine/segmenter wiring.
+    /// Speech frames are fed through the engine's own segmenter with the production callbacks
+    /// installed: `onSpeechStart` captures, the utterance is emitted and ASR runs gated —
+    /// playback advances WHILE ASR is suspended — and the routing input still carries the
+    /// speech-start value with exactly one capture consult.
+    func test_productionWiring_speechStartSnapshotSurvivesGatedASR_andPlaybackAdvance() async throws {
         let gate = AsrGate()
         let backend = GatedAsrBackend(gate: gate, text: "what did they say", language: "en")
-        let engine = makeEngine(backend: backend, translation: stubTranslation())
+        let engine = makeEngine(
+            backend: backend,
+            translation: stubTranslation(),
+            segmenter: NativeVadSegmenter(silenceTimeoutMs: -1)
+        )
+        engine.installCaptureCallbacksForTesting()
 
         let speechStartSnapshot = PlaybackContext(
             episodeId: "ep-at-start", podcastId: "pod-a",
             referencePositionMs: 1_000, clientPositionMs: 1_000,
             recentReferencePositions: [900, 1_000], previousReferencePositionMs: 900
         )
-        // The "live" world the closure reports. It changes WHILE ASR is suspended below.
         var liveNow: PlaybackContext? = speechStartSnapshot
         var reads = 0
         engine.playbackContextSnapshot = {
@@ -93,36 +100,32 @@ final class PlaybackSnapshotControls: XCTestCase {
         var inputs: [IntentRoutingInput] = []
         engine.onRoutingInput = { inputs.append($0); return true }
 
-        // SPEECH-START CAPTURE: exactly what `onSpeechStart` does — one consult, value taken.
-        guard let capture = engine.playbackContextSnapshot else {
-            XCTFail("capture is wired")
-            return
-        }
-        let speechStartTimeValue = capture()
-        XCTAssertEqual(reads, 1, "capture consulted exactly once, at speech start")
+        let frame = [Float](repeating: 0.5, count: 320)
+        // Speech confirmed on the 5th energetic frame → onSpeechStart captures HERE.
+        for _ in 0..<6 { engine.feedSyntheticSamplesForTesting(frame) }
+        XCTAssertEqual(reads, 1, "capture ran at the speech-start confirmation frame")
+        XCTAssertEqual(inputs.count, 0, "nothing has been emitted yet")
 
-        // The utterance's task carries THAT value (as `onUtterance` hands it over); ASR then
-        // suspends, and the world changes underneath it.
-        let utterance = Array(repeating: Float(0.01), count: 1600)
-        guard let captured = speechStartTimeValue else {
-            XCTFail("something was playing at speech start")
-            return
-        }
-        let run = Task {
-            await engine.processUtterance(utterance, utterancePlayback: .captured(captured))
-        }
-        // ASR is now suspended inside transcribe. Playback "advances" in the real world.
-        await gate.waitEntered()
+        // The user keeps "speaking"; playback advances in the real world.
         liveNow = PlaybackContext(
             episodeId: "ep-later", podcastId: "pod-later",
             referencePositionMs: 60_000, clientPositionMs: 60_000,
             recentReferencePositions: [59_000, 60_000], previousReferencePositionMs: 59_000
         )
-        gate.release()
-        await run.value
 
-        XCTAssertEqual(reads, 1, "the suspended ASR run did NOT consult playback again")
-        let input = try XCTUnwrap(inputs.first)
+        // One sub-threshold frame closes the utterance (timeout -1) → emission → gated ASR.
+        engine.feedSyntheticSamplesForTesting([Float](repeating: 0, count: 320))
+        await gate.waitEntered()
+        XCTAssertEqual(inputs.count, 0, "ASR is still suspended mid-run")
+        gate.release()
+
+        // Bounded wait for the routing input.
+        for _ in 0..<100 where inputs.isEmpty {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+
+        XCTAssertEqual(reads, 1, "the suspended run never consulted playback again")
+        let input = try XCTUnwrap(inputs.first, "no routing input arrived")
         XCTAssertEqual(input.playbackContext, speechStartSnapshot,
                        "the input carries the SPEECH-START snapshot even though playback "
                        + "advanced while ASR was suspended")
@@ -161,6 +164,37 @@ final class PlaybackSnapshotControls: XCTestCase {
         XCTAssertEqual(mapper.matchedReferenceContextCallCount, 1,
                        "position and version are resolved in ONE atomic read")
         XCTAssertEqual(context?.referenceAssetVersion, "abc123")
+        XCTAssertEqual(context?.referencePositionMs, 42_000)
+    }
+
+    /// CONTROL (review d815be4a #1): the atomic read carries the mapped EPISODE, and the
+    /// provider rejects a map that belongs to a different episode — a stale episode A map is
+    /// never attached to newly playing episode B while a queued reset/reprepare has not run.
+    func test_staleEpisodeMap_isRejectedForNewlyPlayingEpisode() {
+        let mapper = PairedMapperDouble(position: 42.0, version: "abc123", episodeUuid: "ep-old")
+        let provider = DefaultPlaybackContextProvider(
+            playbackState: AlwaysPlayingState(episodeId: "ep-new"),
+            fingerprintMapper: mapper,
+            cloudPlaybackContextState: CloudPlaybackContextState()
+        )
+        let context = provider.current()
+        XCTAssertEqual(mapper.matchedReferenceContextCallCount, 1)
+        XCTAssertNil(context?.referencePositionMs,
+                     "episode B must not inherit episode A's mapped position")
+        XCTAssertNil(context?.referenceAssetVersion,
+                     "episode B must not inherit episode A's reference version")
+    }
+
+    /// CONTROL (review d815be4a #1): a map whose episode is unknown still serves the position
+    /// for the captured episode (providers that predate episode identity).
+    func test_unknownEpisodeMap_stillServesPosition() {
+        let mapper = PairedMapperDouble(position: 42.0, version: nil, episodeUuid: nil)
+        let provider = DefaultPlaybackContextProvider(
+            playbackState: AlwaysPlayingState(episodeId: "ep-a"),
+            fingerprintMapper: mapper,
+            cloudPlaybackContextState: CloudPlaybackContextState()
+        )
+        let context = provider.current()
         XCTAssertEqual(context?.referencePositionMs, 42_000)
     }
 
@@ -206,6 +240,22 @@ final class PlaybackSnapshotControls: XCTestCase {
         let context = try XCTUnwrap(payload["context"] as? [String: Any])
         XCTAssertNil(context["reference_asset_version"],
                      "unknown provenance is omitted, not invented")
+    }
+
+    /// CONTROL (review d815be4a #2): the pairing invariant is ENFORCED at serialization —
+    /// a version without its mapped position is omitted from the actual request, even if a
+    /// caller supplied one.
+    func test_serializedRequest_omitsVersionWithoutItsMappedPosition() throws {
+        let payload = try envelopePayload(context: CloudRouteContext(
+            episodeId: "ep-a", podcastId: nil,
+            referencePositionMs: nil, clientPositionMs: 5_000,
+            recentReferencePositions: [], previousReferencePositionMs: nil,
+            referenceAssetVersion: "abc123"
+        ))
+        let context = try XCTUnwrap(payload["context"] as? [String: Any])
+        XCTAssertNil(context["reference_position_ms"])
+        XCTAssertNil(context["reference_asset_version"],
+                     "a version without its mapped position names nothing and is omitted")
     }
 
     // MARK: - Fixtures
@@ -314,11 +364,13 @@ private final class GatedAsrBackend: AsrBackend {
 private final class PairedMapperDouble: FingerprintMappingProviding {
     let position: TimeInterval
     let version: String?
+    let episodeUuid: String?
     private(set) var matchedReferenceContextCallCount = 0
 
-    init(position: TimeInterval, version: String?) {
+    init(position: TimeInterval, version: String?, episodeUuid: String? = nil) {
         self.position = position
         self.version = version
+        self.episodeUuid = episodeUuid
     }
 
     func matchedReferenceTime(forPlaybackTime playbackTime: TimeInterval) -> TimeInterval? { position }
@@ -326,9 +378,9 @@ private final class PairedMapperDouble: FingerprintMappingProviding {
     func playbackTime(forReferenceTime referenceTime: TimeInterval) -> TimeInterval? { nil }
 
     func matchedReferenceContext(forPlaybackTime playbackTime: TimeInterval)
-        -> (position: TimeInterval, referenceAssetVersion: String?)? {
+        -> (position: TimeInterval, referenceAssetVersion: String?, episodeUuid: String?)? {
         matchedReferenceContextCallCount += 1
-        return (position, version)
+        return (position, version, episodeUuid)
     }
 }
 

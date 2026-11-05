@@ -100,6 +100,10 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         /// never leave an old position paired with a new version. Nil = provenance unknown;
         /// an otherwise valid mapped position still serves.
         var referenceAssetVersion: String? = nil
+        /// The episode the map was built FOR (review d815be4a): carried with the map so a
+        /// read can never attach episode A's map to newly playing episode B while a queued
+        /// reset/reprepare has not run yet.
+        var episodeUuid: String? = nil
         var filterLastTrusted: TimeMappingEntry?
         var filterCandidatePool: [TimeMappingEntry] = []
         #if DEBUG
@@ -315,6 +319,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         context = newContext
         // PROVENANCE: stamped with the map it describes, under the same lock acquisition.
         main.referenceAssetVersion = FingerprintMappingCache.referenceAssetVersion(of: newContext.referenceData)
+        main.episodeUuid = newContext.episodeUuid
         resetFilterState()
         startStream(context: newContext, fromPosition: position)
     }
@@ -380,15 +385,16 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         }
     }
 
-    /// TASK 90 PROVENANCE: the mapped position AND the reference version of the map that
-    /// produced it, read under ONE lock acquisition. Two separate reads could straddle a
-    /// map/reference replacement and pair an old position with a new version — the exact
-    /// defect the source contract forbids. Nil version = provenance unknown; the position
-    /// still serves.
+    /// TASK 90 PROVENANCE: the mapped position, the reference version AND the episode the
+    /// map was built for, read under ONE lock acquisition. Two separate reads could straddle
+    /// a map/reference replacement and pair an old position with a new version — the exact
+    /// defect the source contract forbids — and the episode lets the caller reject a map that
+    /// belongs to a DIFFERENT episode than the one now captured (review d815be4a). Nil
+    /// version = provenance unknown; the position still serves.
     func matchedReferenceContext(forPlaybackTime playbackTime: Double)
-        -> (position: Double, referenceAssetVersion: String?)? {
+        -> (position: Double, referenceAssetVersion: String?, episodeUuid: String?)? {
         dispatchPrecondition(condition: .notOnQueue(queue))
-        return queue.sync { () -> (position: Double, referenceAssetVersion: String?)? in
+        return queue.sync { () -> (position: Double, referenceAssetVersion: String?, episodeUuid: String?)? in
             guard Self.isWithinMatchedContent(forPlaybackTime: playbackTime, in: main.playbackToReference) else {
                 return nil
             }
@@ -398,7 +404,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
                 keyPath: \.playbackTime,
                 valuePath: \.referenceTime
             ) ?? 0
-            return (position, main.referenceAssetVersion)
+            return (position, main.referenceAssetVersion, main.episodeUuid)
         }
     }
 
@@ -1085,6 +1091,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         context = newContext
         // PROVENANCE: stamped with the map it describes, under the same lock acquisition.
         main.referenceAssetVersion = FingerprintMappingCache.referenceAssetVersion(of: newContext.referenceData)
+        main.episodeUuid = newContext.episodeUuid
 
         if preparationStartDate == nil {
             preparationStartDate = Date()
@@ -1122,6 +1129,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
             main.playbackToReference = cached.entries
             main.referenceToPlayback = cached.entries.sorted { $0.referenceTime < $1.referenceTime }
             main.referenceAssetVersion = cached.referenceAssetVersion
+            main.episodeUuid = episode.uuid
 
             if isWithinMappedRange(currentTime) {
                 main.filterLastTrusted = cached.entries.last

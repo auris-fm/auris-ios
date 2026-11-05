@@ -15,20 +15,21 @@ protocol FingerprintMappingProviding {
     func matchedReferenceTime(forPlaybackTime playbackTime: TimeInterval) -> TimeInterval?
     /// Reverse map: reference (transcript) time → playback time. Nil when unmapped.
     func playbackTime(forReferenceTime referenceTime: TimeInterval) -> TimeInterval?
-    /// TASK 90 PROVENANCE: the mapped position and the reference version of the map that
-    /// produced it, resolved ATOMICALLY (one lock acquisition) so a map/reference replacement
-    /// can never pair an old position with a new version. Nil when unmapped. Nil version =
+    /// TASK 90 PROVENANCE: the mapped position, the reference version AND the episode the
+    /// map was built for, resolved ATOMICALLY (one lock acquisition) so a map/reference
+    /// replacement can never pair an old position with a new version, and a stale episode's
+    /// map can never serve a newly captured episode. Nil when unmapped. Nil version =
     /// provenance unknown; the position still serves.
     func matchedReferenceContext(forPlaybackTime playbackTime: TimeInterval)
-        -> (position: TimeInterval, referenceAssetVersion: String?)?
+        -> (position: TimeInterval, referenceAssetVersion: String?, episodeUuid: String?)?
 }
 
 extension FingerprintMappingProviding {
     /// Default for providers/seams that predate provenance: the position from the existing
-    /// map read, version unknown (omitted on the wire, never invented).
+    /// map read, version and episode unknown (omitted on the wire, never invented).
     func matchedReferenceContext(forPlaybackTime playbackTime: TimeInterval)
-        -> (position: TimeInterval, referenceAssetVersion: String?)? {
-        matchedReferenceTime(forPlaybackTime: playbackTime).map { ($0, nil) }
+        -> (position: TimeInterval, referenceAssetVersion: String?, episodeUuid: String?)? {
+        matchedReferenceTime(forPlaybackTime: playbackTime).map { ($0, nil, nil) }
     }
 }
 
@@ -92,11 +93,15 @@ struct DefaultPlaybackContextProvider: PlaybackContextProvider {
         let clientPositionMs = Self.milliseconds(fromSeconds: currentTimeSeconds)
         guard clientPositionMs >= 0 else { return nil }
 
-        // ATOMIC position+version read: the version only ever travels WITH the position it
-        // was mapped under (spec 351dd308; review bcb42c49 pairing defect).
+        // ATOMIC position+version+episode read (review d815be4a): the version only ever
+        // travels WITH the position it was mapped under, and the map must belong to THE
+        // EPISODE NOW CAPTURED — a stale episode A map is rejected rather than attached to
+        // newly playing episode B while a queued reset/reprepare has not run.
         let matched = fingerprintMapper.matchedReferenceContext(forPlaybackTime: currentTimeSeconds)
-        let referencePositionMs = matched.map { Self.milliseconds(fromSeconds: $0.position) }
-        let referenceAssetVersion = matched?.referenceAssetVersion
+        let mapMatchesEpisode = matched?.episodeUuid == nil || matched?.episodeUuid == episode.uuid
+        let validMatch = mapMatchesEpisode ? matched : nil
+        let referencePositionMs = validMatch.map { Self.milliseconds(fromSeconds: $0.position) }
+        let referenceAssetVersion = validMatch?.referenceAssetVersion
 
         let state = cloudPlaybackContextState.snapshot()
         let podcastId = podcastId(for: episode)
