@@ -135,7 +135,11 @@ final class VoiceSharingSettingsModel {
     /// account-wide deletion — accepted data on the server is a separate operation the client does
     /// not perform here (spec: local removal never stands for server completion).
     func deletePendingRecordingsOnThisDevice() -> DeleteResult {
-        switch queue.purgeAll() {
+        let outcome = queue.purgeAll()
+        // Reviewer e66c294a: the gate-loss handler is not the only purge path. This user-initiated
+        // deletion records the same diagnostic, so no purge anywhere on the app is silent.
+        FileLog.shared.addMessage("[VoiceSharing] durable queue PURGE cause=user-request outcome=\(outcome)")
+        switch outcome {
         case .reconciled(let removed, let retained):
             // `retained` here are entries whose removal failed but whose disqualification IS
             // durable: they stay on disk, provably dead, and the UI must say both things.
