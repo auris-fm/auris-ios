@@ -72,6 +72,15 @@ final class PlaybackProvenanceReplacementControls: XCTestCase {
         XCTAssertEqual(first.referenceAssetVersion, version1,
                        "the served version is the digest of the exact reference bytes R1")
 
+        // Capture the FIRST map's position before tearing it down: the 2 s-gap replacement
+        // moves the mapped position, so the old and new (position, version) PAIRS are
+        // distinguishable — this is what proves SAME-INSTANCE replacement atomicity
+        // (review round 4).
+        let firstPair = try XCTUnwrap(
+            manager.matchedReferenceContext(forPlaybackTime: midpoint),
+            "an active map must serve position+version+episode"
+        )
+
         // RESET: stop() tears the map down. Both the map AND its version are gone — no read
         // can serve a position (or a version) from a torn-down map.
         manager.stop()
@@ -80,10 +89,9 @@ final class PlaybackProvenanceReplacementControls: XCTestCase {
         XCTAssertNil(manager.matchedReferenceContext(forPlaybackTime: midpoint),
                      "after reset neither position nor version is served")
 
-        // REPLACEMENT: a DIFFERENT reference (different bytes → different version), same
-        // episode. The new map serves V2 — never V1, and never a mixed pair. A fresh
-        // manager mirrors the real episode-replacement lifecycle (old manager stopped,
-        // new one prepares).
+        // REPLACEMENT on the SAME manager: a DIFFERENT reference (different bytes →
+        // different version, positions shifted by the 2 s gap), same episode. The reprepared
+        // map serves V2 with the shifted position — never V1, never V2 with V1's position.
         // Different bytes that still map: the same content with a 2 s leading gap —
         // a genuinely different reference (new digest) whose map shifts positions by 2 s.
         let gapFrames = Int(FingerprintFixtures.frameCount(forSeconds: 2))
@@ -100,17 +108,15 @@ final class PlaybackProvenanceReplacementControls: XCTestCase {
         let version2 = FingerprintMappingCache.referenceAssetVersion(of: referenceData2)
         XCTAssertNotEqual(version1, version2, "the replacement reference is genuinely different bytes")
 
-        let replacementManager = FingerprintTimingManager()
-        self.manager = replacementManager
-        replacementManager.prepareForCurrentEpisode()
-        await waitForPass(replacementManager)
-        guard case .active = replacementManager.state else {
-            XCTFail("expected .active after replacement pass, got \(replacementManager.state)")
+        manager.prepareForCurrentEpisode()
+        await waitForPass(manager)
+        guard case .active = manager.state else {
+            XCTFail("expected .active after replacement pass, got \(manager.state)")
             return
         }
 
         let second = try XCTUnwrap(
-            replacementManager.matchedReferenceContext(forPlaybackTime: midpoint),
+            manager.matchedReferenceContext(forPlaybackTime: midpoint),
             "the replacement map must serve position+version+episode"
         )
         XCTAssertEqual(second.episodeUuid, fixture.episode.uuid)
@@ -118,5 +124,52 @@ final class PlaybackProvenanceReplacementControls: XCTestCase {
                        "the replacement map serves ITS OWN reference version")
         XCTAssertNotEqual(second.referenceAssetVersion, version1,
                           "an old version never survives a map replacement")
+        // The pairs are DISTINCT: the version was replaced WITH the map, and the mapped
+        // position moved with it (+2 s gap) — a mixed read would pair one side of each.
+        XCTAssertEqual(second.position, firstPair.position + 2, accuracy: 1.0,
+                       "the replacement map shifts the mapped position by the 2 s gap: "
+                       + "\(firstPair.position) → \(second.position)")
+    }
+}
+
+/// UNKNOWN-VERSION preservation at a REAL production shape (review round 4): a mapper that
+/// only implements the pre-provenance surface — the protocol's default
+/// `matchedReferenceContext` must still serve the position with unknown version/episode,
+/// which the wire omits (never invents). This is the shape any conforming type predating
+/// provenance takes; it cannot arise inside the real manager because every real install
+/// stamps the digest of its exact reference bytes.
+private final class ProvenanceTestPlaybackState: PlaybackStateProviding {
+    let episodeId: String
+    init(episodeId: String) { self.episodeId = episodeId }
+    var currentEpisode: BaseEpisode? {
+        let episode = Episode()
+        episode.uuid = episodeId
+        return episode
+    }
+    func currentTimeSeconds() -> TimeInterval { 40.0 }
+}
+
+private final class LegacyConformanceMapper: FingerprintMappingProviding {
+    func matchedReferenceTime(forPlaybackTime playbackTime: TimeInterval) -> TimeInterval? {
+        playbackTime
+    }
+
+    func playbackTime(forReferenceTime referenceTime: TimeInterval) -> TimeInterval? {
+        referenceTime
+    }
+}
+
+extension PlaybackProvenanceReplacementControls {
+    func test_legacyProviderConformance_preservesPositionWithUnknownVersion() {
+        let provider = DefaultPlaybackContextProvider(
+            playbackState: ProvenanceTestPlaybackState(episodeId: "ep-a"),
+            fingerprintMapper: LegacyConformanceMapper(),
+            cloudPlaybackContextState: CloudPlaybackContextState()
+        )
+        let context = provider.current()
+        XCTAssertNotNil(context?.referencePositionMs,
+                        "unknown provenance preserves an otherwise valid mapped position")
+        XCTAssertNil(context?.referenceAssetVersion,
+                     "unknown provenance is omitted on the wire, never invented")
     }
 }
