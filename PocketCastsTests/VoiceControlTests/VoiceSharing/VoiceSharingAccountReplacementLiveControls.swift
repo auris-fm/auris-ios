@@ -118,6 +118,15 @@ final class VoiceSharingAccountReplacementLiveControls: XCTestCase {
         func handleUnauthorized(rejectedToken: String?) async {}
     }
 
+    /// A clock the control advances explicitly, shared by the queue so retry deadlines and the
+    /// control's notion of "now" cannot disagree.
+    private final class LocalClock {
+        private var current: Date
+        init(start: Date) { current = start }
+        func now() -> Date { current }
+        func advance(by interval: TimeInterval) { current = current.addingTimeInterval(interval) }
+    }
+
     @discardableResult
     private func makeReadyEntry(_ queue: VoiceSharingUploadQueue) throws
         -> VoiceSharingUploadQueue.Entry {
@@ -168,7 +177,12 @@ final class VoiceSharingAccountReplacementLiveControls: XCTestCase {
                 withdrawalState: .active),
             readUnder: try XCTUnwrap(store.projectionToken())))
 
-        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        // A COHERENT INJECTED CLOCK (spec 4babcc7d): the positive upload below answers 503, which
+        // records a retry deadline. With `Date.init` the negative drain would be refused as
+        // not-yet-due before reaching ownership — so the control could never have exercised the
+        // fence it claims to test. Advancing one clock past that deadline makes the entry DUE.
+        let clock = LocalClock(start: Date(timeIntervalSince1970: 1_700_000_000))
+        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: { clock.now() })
         let entry = try makeReadyEntry(queue)
         XCTAssertEqual(queue.readyEntries(), [entry], "account 1 has one ready recording")
 
@@ -219,9 +233,8 @@ final class VoiceSharingAccountReplacementLiveControls: XCTestCase {
 
         Wire.reset()
         trigger.triggerDrainIfPermitted()
-        var spins = 0
-        while Wire.recorded().isEmpty && spins < 200_000 { await Task.yield(); spins += 1 }
-        for _ in 0..<200_000 { await Task.yield() }
+        // AWAIT THE ACTUAL DRAIN (reviewer b4d5eb71) instead of yielding at it.
+        await trigger.awaitDrainCompletionForTesting()
         let owningSend = Wire.recorded().filter { $0.path == VoiceSharingUploadTransport.uploadPath }
         XCTAssertEqual(owningSend.count, 1,
                        "the owning account's recording DOES reach the upload route — the observation works")
@@ -237,11 +250,32 @@ final class VoiceSharingAccountReplacementLiveControls: XCTestCase {
         XCTAssertTrue(center.post(name: .userLoginDidChange) > 0)
         await coordinator.settleObservedWork()
 
+        // THE INHERITANCE PROPERTY IS ASSERTED BEFORE account 2 makes its own choice: switching
+        // accounts must not carry account 1's consent across. Asserting it afterwards would only
+        // restate the choice this control is about to set.
+        XCTAssertFalse(store.consentAllowsCollection,
+                       "account 2 does not inherit account 1's collection permission")
+        let inheritedCheck = VoiceSharingEnrollmentStore(
+            defaults: defaults, accountScopeProvider: { "acct-2" },
+            sessionIdentityProvider: { "acct-2" })
+        XCTAssertFalse(inheritedCheck.currentState.localOptIn,
+                       "account 2 does not inherit account 1's recorded choice")
+
+        // ACCOUNT 2 IS INDEPENDENTLY ELIGIBLE (reviewer b4d5eb71): it now makes its OWN sharing
+        // choice, so the drain below passes authorization and is stopped by OWNERSHIP — otherwise
+        // the negative assertion would only prove the authorization gate, not account isolation.
+        store.transitionToAccount(signedIn: true)
+        store.setLocalOptIn(true)
+        XCTAssertTrue(store.consentAllowsCollection,
+                      "account 2 is eligible on its own terms — the drain must reach the ownership check")
+
+        // THE ENTRY MUST BE DUE (spec 4babcc7d): the positive 503 recorded a retry deadline, so the
+        // clock is advanced past it. Otherwise the negative drain is refused for backoff and would
+        // pass while proving nothing about ownership.
+        clock.advance(by: 3600)
         Wire.reset()
         trigger.triggerDrainIfPermitted()
-        var spins2 = 0
-        while Wire.recorded().isEmpty && spins2 < 200_000 { await Task.yield(); spins2 += 1 }
-        for _ in 0..<200_000 { await Task.yield() }
+        await trigger.awaitDrainCompletionForTesting()
 
         let afterSwitch = Wire.recorded()
         // 1. Account 2's session never presents account 1's credential, for anything.
@@ -255,15 +289,7 @@ final class VoiceSharingAccountReplacementLiveControls: XCTestCase {
         XCTAssertEqual(queue.readyEntries().count, 1,
                        "the recording is retained, not moved or destroyed by the switch")
 
-        // Account 2 has no collection permission of its own just because account 1 had one.
-        XCTAssertFalse(store.consentAllowsCollection,
-                       "account 2 does not inherit account 1's collection permission")
-        let accountTwoState = VoiceSharingEnrollmentStore(
-            defaults: defaults, accountScopeProvider: { "acct-2" },
-            sessionIdentityProvider: { "acct-2" })
-        XCTAssertFalse(accountTwoState.currentState.localOptIn,
-                       "account 2 does not inherit account 1's recorded choice")
-        // And switching BACK restores account 1's own state — the choice was never destroyed.
+        // Switching BACK restores account 1's own state — the choice was never destroyed.
         let accountOneState = VoiceSharingEnrollmentStore(
             defaults: defaults, accountScopeProvider: { "acct-1" },
             sessionIdentityProvider: { "acct-1" })

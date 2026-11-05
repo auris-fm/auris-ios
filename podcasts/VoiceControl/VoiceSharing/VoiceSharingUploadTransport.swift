@@ -43,8 +43,15 @@ final class VoiceSharingUploadTransport {
             guard !cancellation.isCancelled, networkFence?() ?? true else { throw CancellationError() }
             // The parent fence precedes an unstructured-child scheduling boundary. Revalidate the
             // admitted identity here, after suspension and immediately before the actual transfer.
+            // ACCOUNT BINDING ONLY (spec 4afc6e43): this compares the ACCOUNT, matching the two
+            // fences above and the queue's admission rule. Comparing the whole snapshot made the
+            // provenance epoch an accidental gate — an epoch-only move for the SAME owner threw
+            // CancellationError here and the request never left, silently undoing the rule that a
+            // re-enrollment does not invalidate audio the account already captured.
             if let identityFence, let admittedIdentity {
-                guard identityFence() == admittedIdentity else { throw CancellationError() }
+                guard let live = identityFence(),
+                      live.accountScope == admittedIdentity.accountScope
+                else { throw CancellationError() }
             }
             let (bytes, response) = try await session.bytes(for: request)
             guard let http = response as? HTTPURLResponse else { return nil }
