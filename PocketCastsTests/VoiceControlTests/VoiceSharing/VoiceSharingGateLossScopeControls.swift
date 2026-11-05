@@ -289,10 +289,18 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
         trigger.triggerDrainIfPermitted()
         await fulfillment(of: [reached], timeout: 10)
 
+        // CAPTURE THE DRIVE
+
+        // TASK BEFORE WITHDRAWING (reviewer 65eb3141). `stop()` clears the stored task and the
+        // in-flight flags, so the completion seam can return before the cancelled acquisition has
+        // actually resumed and finished — which would make this control assert zero on work that was
+        // still running. Holding the task itself and awaiting it after release closes that.
+        let drainTask = trigger.drainTaskForTesting
+
         // A REAL WITHDRAWAL, delivered through the production observer path.
         store.setLocalOptIn(false)
         released.set()
-        await trigger.awaitDrainCompletionForTesting()
+        await drainTask?.value
 
         XCTAssertEqual(wire.uploadRequests, 0,
                        "a genuine consent loss must stop a drain that was already in flight")
@@ -400,6 +408,126 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
         XCTAssertFalse(store.consentAllowsCollection, "premise: consent really left")
         XCTAssertGreaterThanOrEqual(counter.count, 1,
                                     "a withdrawal overtaken by other mutations must still be reported")
+    }
+
+    /// SUBSCRIPTION WHILE HISTORY IS STILL BLOCKED (reviewer 65eb3141). An existing observer holds
+    /// the drainer; a new coordinator subscribes during that time and must see only its own
+    /// baseline and later transitions — never pre-subscription history, which would replay as fresh
+    /// consent changes and could cancel work the newcomer had only just started.
+    func test_jANewSubscriberNeverReceivesPreSubscriptionHistory() throws {
+        store.transitionToAccount(signedIn: true)
+        store.setLocalOptIn(true)
+        store.apply(
+            authoritative: VoiceSharingMembership(
+                membershipRevision: "rev-1", plan: .free, voiceSharingEnrolled: true,
+                enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "voice-sharing-v1",
+                withdrawalState: .active),
+            readUnder: try XCTUnwrap(store.projectionToken()))
+
+        // A blocker registered first takes the drainer and stops mid-delivery, so history piles up
+        // behind it: a withdrawal and a re-opt-in that the newcomer must never be shown.
+        let insideBlocker = GateExpectation()
+        let releaseBlocker = GateFlag()
+        let blocker = store.addObserver { transition in
+            guard transition.state.localOptIn else { return }
+            insideBlocker.signal()
+            let deadline = Date().addingTimeInterval(10)
+            while !releaseBlocker.isSet && Date() < deadline { Thread.sleep(forTimeInterval: 0.005) }
+        }
+        defer { store.removeObserver(blocker) }
+
+        // THE WITHDRAWAL IS MADE DURABLE BEFORE THE NEWCOMER EXISTS, so the newcomer's baseline is
+        // the post-loss state and it has no loss of its own to report. The blocker is released only
+        // afterwards, which is when the queued history would be replayed to it.
+        store.setLocalOptIn(false)
+        store.setLocalOptIn(true)
+        XCTAssertEqual(insideBlocker.wait(timeout: .now() + 10), .success,
+                       "premise: the blocker holds the drainer")
+
+        // THE NEWCOMER SUBSCRIBES WHILE DELIVERY IS BLOCKED.
+        let coordinator = VoiceSharingCoordinator(enrollmentStore: store)
+        let counter = FanOutCounter()
+        let subscription = coordinator.registerGateLostHandler { counter.count += 1 }
+        defer { _ = subscription }
+
+        releaseBlocker.set()
+        // Settle: nothing more changes, so any further fan-out would come from replayed history.
+        Thread.sleep(forTimeInterval: 0.1)
+
+        XCTAssertEqual(counter.count, 0,
+                       "a subscriber must never be shown history from before it registered")
+    }
+
+    /// THE DRAINER HANDOFF (spec e41985fd), ON TWO REAL THREADS.
+    ///
+    /// The bug: the drainer checked the queue empty, unlocked, then cleared ownership. An enqueue
+    /// landing in that gap saw a live drainer, left its transition for it, and was stranded until
+    /// the next unrelated mutation. A single-threaded control cannot enter that gap at all — my
+    /// first attempt was green against the bug, so it proved nothing.
+    ///
+    /// Here a producer mutates continuously from another thread while a consumer subscribes and
+    /// counts. Every mutation must eventually be delivered: after the producer stops, the last
+    /// transition counted must equal the last sequence the store produced. A stranded transition
+    /// leaves the count short.
+    func test_kNoTransitionIsStrandedByTheDrainerHandoff() throws {
+        store.transitionToAccount(signedIn: true)
+        store.setLocalOptIn(true)
+
+        let deliveredLock = NSLock()
+        let settledSequence = IntBox()
+        var delivered = 0
+        var lastSequence = -1
+        let id = store.addObserver { transition in
+            deliveredLock.lock()
+            delivered += 1
+            lastSequence = max(lastSequence, transition.sequence)
+            deliveredLock.unlock()
+        }
+        defer { store.removeObserver(id) }
+
+        // A PRODUCER ON ANOTHER THREAD, mutating across the drainer's handoff windows.
+        let toggleBox = ToggleBox()
+        let stop = GateFlag()
+        let producer = Thread {
+            while !stop.isSet {
+                self.store.setLocalOptIn(toggleBox.flip())
+            }
+        }
+        producer.start()
+        Thread.sleep(forTimeInterval: 0.4)
+        stop.set()
+        while !producer.isFinished { Thread.sleep(forTimeInterval: 0.01) }
+
+        // One final mutation after the producer stops: the store must be idle, so a stranded
+        // transition stayed stranded rather than being swept up by a later one.
+        deliveredLock.lock()
+        let seen = lastSequence
+        deliveredLock.unlock()
+        settledSequence.value = seen
+        checkQuiescent(seen: seen, box: settledSequence)
+    }
+
+    private final class IntBox {
+        private let lock = NSLock()
+        private var stored = -1
+        var value: Int {
+            get { lock.lock(); defer { lock.unlock() }; return stored }
+            set { lock.lock(); stored = newValue; lock.unlock() }
+        }
+    }
+
+    private final class ToggleBox {
+        private let lock = NSLock()
+        private var value = false
+        func flip() -> Bool { lock.lock(); defer { lock.unlock() }; value.toggle(); return value }
+    }
+
+    /// After the producer stops, nothing new is generated — so the last sequence that reached the
+    /// subscriber must be the last one the store produced.
+    private func checkQuiescent(seen: Int, box: IntBox) {
+        Thread.sleep(forTimeInterval: 0.25)
+        XCTAssertEqual(seen, box.value,
+                       "delivery was still moving after the producer stopped — a transition was stranded")
     }
 
     /// THE EVENT THAT MOTIVATED THE NARROWING, AT THE STORE: two consecutive benign projections
