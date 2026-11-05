@@ -74,18 +74,16 @@ final class VoiceSharingEnrollmentStore {
     private let defaults: UserDefaults
     private var state = State()
     private var authoritativeLifecycle: String?
+    /// Each subscriber records the sequence of ITS OWN baseline; anything at or below it is
+    /// pre-subscription history and is never delivered to that subscriber (reviewer 65eb3141).
     private var observers: [UUID: (Transition) -> Void] = [:]
+    private var observerBaselines: [UUID: Int] = [:]
     /// Monotonic position in the state's history. Every mutation bumps it under the state lock, so
     /// two transitions can never claim the same position or be delivered out of order.
     private var transitionSequence: Int = 0
     /// TRANSITIONS AWAITING DELIVERY, captured at the mutation and drained in sequence order.
-    /// Held by `lock`; drained by whichever thread currently owns `draining`.
-    private var pendingTransitions: [Transition] = []
-    /// The single-drainer gate. An observer that mutates the store re-enters a mutator, which
-    /// enqueues and then tries to drain; it must NOT take the drainer (it is on the draining
-    /// thread) and must NOT wait for it — the outer drain picks its transition up. Nothing is ever
-    /// delivered while either `lock` or this lock is held.
-    private let drainStateLock = NSLock()
+    private var pendingDeliveries: [Delivery] = []
+    /// The single-drainer gate, owned by the SAME lock as the queue and the state.
     private var draining = false
 
     private enum Key {
@@ -211,100 +209,100 @@ final class VoiceSharingEnrollmentStore {
 
     // MARK: - Observing
 
+    /// A queued delivery: the transition and the exact subscribers that must receive it.
+    ///
+    /// THE RECIPIENTS ARE FROZEN WHEN THE TRANSITION IS CAPTURED (spec b01608c6). A subscriber
+    /// records the position it registered at, and only transitions strictly AFTER that position are
+    /// addressed to it — so pre-subscription history can never be replayed to a newcomer, and a
+    /// baseline goes to the new subscriber alone.
+    private struct Delivery {
+        let transition: Transition
+        let recipients: [(Transition) -> Void]
+    }
+
     /// Called after every state change, on the thread that made it. The coordinator uses this to invalidate
     /// an in-flight refresh the moment membership moves.
+    ///
+    /// BASELINE AND SUBSCRIPTION ARE ONE STEP: the newcomer's first delivery is a baseline addressed
+    /// to itself, queued at its own position. Nothing can precede it, and nothing older can follow it.
     @discardableResult
     func addObserver(_ body: @escaping (Transition) -> Void) -> UUID {
         lock.lock()
-        let id = UUID()
-        // THE BASELINE AND THE SUBSCRIPTION ARE TAKEN UNDER ONE LOCK (spec 8a9c057f). Reading the
-        // state and the scope, releasing, then registering left a window in which a withdrawal
-        // could land: it was already inside the baseline, so the coordinator's first comparison
-        // found "no change" and the loss was never reported. Here the caller's baseline IS the
-        // snapshot the store is currently on, and every later change is queued to it by sequence.
+        transitionSequence += 1
         let baseline = Transition(
             sequence: transitionSequence,
             state: state,
             accountScope: accountScopeProvider(),
             sessionIdentity: sessionIdentityProvider())
-        // THE BASELINE JOINS THE SAME ORDERING AS EVERY LATER TRANSITION. It is appended to the
-        // pending queue at its own position while the state lock is held, and the subscriber is
-        // registered before it can be delivered — so the first transition the handler sees is the
-        // state at subscription, and no later change can overtake it.
-        transitionSequence += 1
-        pendingTransitions.append(Transition(
-            sequence: transitionSequence,
-            state: baseline.state,
-            accountScope: baseline.accountScope,
-            sessionIdentity: baseline.sessionIdentity))
+        let id = UUID()
         observers[id] = body
+        observerBaselines[id] = transitionSequence
+        // ADDRESSED TO THE NEW SUBSCRIBER ONLY, so nobody else sees a duplicate of their own past.
+        pendingDeliveries.append(Delivery(transition: baseline, recipients: [body]))
         lock.unlock()
-        drainTransitions()
+        drain()
         return id
     }
 
     func removeObserver(_ id: UUID) {
-        lock.lock(); observers.removeValue(forKey: id); lock.unlock()
+        lock.lock()
+        observers.removeValue(forKey: id)
+        observerBaselines.removeValue(forKey: id)
+        lock.unlock()
     }
 
-    /// Publishes one state change to every observer, IN MUTATION ORDER.
+    /// Captures the current state as the next transition. The CALLER MUST ALREADY HOLD `lock`.
     ///
-    /// A transition is captured UNDER THE STATE LOCK, at the moment of the mutation, together with
-    /// the account scope and session it belongs to — so the snapshot, its owner and its position
-    /// cannot disagree (spec 8a9c057f). Delivery then happens outside the lock, so a reentrant
-    /// handler cannot deadlock the store.
-    ///
-    /// ORDER IS PRESERVED, not merely protected: delivery is serialised by `deliveryLock`, and an
-    /// observer that is handed an older sequence than one it already held DISCARDS it. Without
-    /// this, an opt-out and a later opt-in racing on two threads could both be captured as
-    /// "permitted" (each taking its snapshot after the other's mutation), and the loss would never
-    /// be reported — a lost withdrawal is the failure direction that matters here.
-    /// Captures the current state as the next transition and drains the queue.
-    ///
-    /// TWO SEPARATE GUARANTEES, both required (spec 8a9c057f, reviewer 33a2a287):
-    ///
-    /// 1. CAPTURE HAPPENS UNDER THE MUTATION'S OWN LOCK. An opt-out that released the lock before
-    ///    capturing could be overtaken by a later opt-in, and both snapshots would then read
-    ///    "permitted" — the loss would never be announced. Callers therefore capture INSIDE their
-    ///    mutation's hold (`captureTransitionLocked()`), never after releasing it.
-    /// 2. DELIVERY HAPPENS OUTSIDE EVERY LOCK, IN ORDER, ON ONE DRAINER. A handler may mutate the
-    ///    store; if delivery held a lock across the call, that re-entry would deadlock. Instead
-    ///    transitions queue up and a single owner drains them; a re-entrant mutator only enqueues.
+    /// CAPTURE HAPPENS INSIDE THE MUTATION'S OWN HOLD, which is what stops an opt-out being
+    /// overtaken: it releases nothing until its snapshot — with its owning account scope — is on
+    /// the queue. Recipients are frozen here too, so delivery choices cannot disagree with the
+    /// state they belong to.
     private func captureTransitionLocked() {
         transitionSequence += 1
-        pendingTransitions.append(Transition(
+        let transition = Transition(
             sequence: transitionSequence,
             state: state,
             accountScope: accountScopeProvider(),
-            sessionIdentity: sessionIdentityProvider()))
+            sessionIdentity: sessionIdentityProvider())
+        var recipients: [(Transition) -> Void] = []
+        for (id, body) in observers {
+            guard let baseline = observerBaselines[id], transition.sequence > baseline
+            else { continue }
+            recipients.append(body)
+        }
+        pendingDeliveries.append(Delivery(transition: transition, recipients: recipients))
     }
 
-    /// Drains queued transitions to every observer, in sequence order, holding nothing.
-    private func drainTransitions() {
-        drainStateLock.lock()
+    /// Delivers queued transitions in order, holding NO lock while invoking a handler.
+    ///
+    /// ONE LOCK FOR THE QUEUE AND THE OWNERSHIP FLAG (spec b01608c6). Ownership is taken once per
+    /// pass and released under that same lock only after the queue is observed empty — so an
+    /// enqueue either finds a live drainer (which will see it) or finds the queue itself. A
+    /// re-entrant mutation from inside a handler only appends; this loop picks it up. Handlers are
+    /// never called with a lock held, so re-entry cannot deadlock.
+    private func notify() {
+        drain()
+    }
+
+    private func drain() {
+        lock.lock()
         if draining {
-            // Someone is already delivering on another thread: it will pick ours up, in order.
-            drainStateLock.unlock()
+            // The current drainer owns the queue and will deliver ours, in order.
+            lock.unlock()
             return
         }
         draining = true
-        drainStateLock.unlock()
         while true {
-            lock.lock()
-            let next = pendingTransitions.isEmpty ? nil : pendingTransitions.removeFirst()
-            let list = Array(observers.values)
+            guard !pendingDeliveries.isEmpty else {
+                draining = false          // clear ownership BEFORE unlocking: no window remains
+                lock.unlock()
+                return
+            }
+            let delivery = pendingDeliveries.removeFirst()
             lock.unlock()
-            guard let transition = next else { break }
-            for body in list { body(transition) }
+            for body in delivery.recipients { body(delivery.transition) }
+            lock.lock()
         }
-        drainStateLock.lock()
-        draining = false
-        drainStateLock.unlock()
-    }
-
-    /// Convenience for the mutators: notify after their state change, having already captured.
-    private func notify() {
-        drainTransitions()
     }
 
     // MARK: - Local intent
@@ -342,6 +340,8 @@ final class VoiceSharingEnrollmentStore {
         lock.lock()
         guard token.lifecycleGeneration == sessionIdentityProvider(),
               token.operationGeneration == operationGeneration else {
+            // NO TRANSITION, SO NO NOTIFY — but both locks must come back either way, or the next
+            // mutation deadlocks behind a queue lock this early return abandoned.
             lock.unlock()
             return false
         }
@@ -351,9 +351,14 @@ final class VoiceSharingEnrollmentStore {
         authoritativeLifecycle = token.lifecycleGeneration
         persist(projection)
         // IDENTICAL REPLAYS ANNOUNCE NOTHING; a first authority in this session must publish.
-        if changed { captureTransitionLocked() }
-        lock.unlock()
-        if changed { notify() }
+        if changed {
+            captureTransitionLocked()
+            lock.unlock()
+        notify()
+        } else {
+            // Identical replay: nothing to announce, but the locks still have to be released.
+            lock.unlock()
+        }
         return true
     }
 
