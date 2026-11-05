@@ -37,14 +37,55 @@ final class VoiceSharingCoordinator {
         let store = enrollmentStore ?? .shared
         self.enrollmentStore = store
         self.cohortPublisher = cohortPublisher ?? VoiceSharingCohortPublisher(store: store)
+        // SEED THE BASELINE BEFORE OBSERVING (spec d28fb334): the first notification must be
+        // compared against the state the coordinator started in, not swallowed as "first look".
+        // Seeded from the live store, so a cold start that already holds consent manufactures no
+        // spurious loss, while a withdrawal landing immediately after construction is still seen.
+        consentTruthLock.lock()
+        lastConsentTruth = Self.consentTruth(store.currentState)
+        lastConsentScope = store.currentScopeForObservers
+        consentTruthLock.unlock()
         // Membership moves reach the fan-out immediately: a withdrawal applied by a projection
         // refresh must stop collection at once (spec (a) "immediate local stop"). Whether
         // recordings are purged is the handler's consent predicate, not this event.
-        membershipObserverToken = store.addObserver { [weak self] _ in
+        membershipObserverToken = store.addObserver { [weak self] state, scopeNow in
             guard let self else { return }
             self.refreshCohortAttributes()
-            self.consentGateLost()
+            // THE FAN-OUT IS FOR A CONSENT LOSS, NOT FOR "SOMETHING CHANGED" (2026-11-05). This
+            // observer used to fire `consentGateLost()` on EVERY store notification — including a
+            // first authoritative projection and the ordinary sign-in transition. The foreground
+            // path refreshes the projection, the refresh applies the membership, `notify()` fires,
+            // and the handler called `uploadTrigger?.stop()` — cancelling the very drain the same
+            // foreground event had just started, ~1 ms later. Measured on a live build: 32 retained
+            // recordings could never drain because the routine refresh stopped them first.
+            //
+            // TWO triggers, both real losses (spec d28fb334): consent truth going permitted →
+            // not, OR the account itself changing — an ACCOUNT REPLACEMENT must cancel even when
+            // both accounts are opted in, because in-flight work belongs to the old owner. A
+            // same-account projection refresh is neither, so it stops nothing.
+            //
+            // The comparison and update happen under one hold (spec f81580be): `notify()` invokes
+            // callbacks on the mutating thread OUTSIDE the store lock, so two notifications can
+            // interleave and a read-modify-write without synchronization could drop a loss or
+            // invent one. `scopeNow` is supplied by the store under its own lock, so the state and
+            // the scope describe the SAME account moment.
+            let consentNow = Self.consentTruth(state)
+            var fire = false
+            self.consentTruthLock.lock()
+            if self.lastConsentTruth && !consentNow { fire = true }
+            if let previousScope = self.lastConsentScope, previousScope != scopeNow { fire = true }
+            self.lastConsentTruth = consentNow
+            self.lastConsentScope = scopeNow
+            self.consentTruthLock.unlock()
+            if fire { self.consentGateLost() }
         }
+    }
+
+    /// The consent predicate the gate-loss fan-out exists to detect. `state` is the store's snapshot,
+    /// read under its own lock, so this needs no extra synchronization.
+    static func consentTruth(_ state: VoiceSharingEnrollmentStore.State) -> Bool {
+        state.localOptIn && !state.explicitOptOut
+            && state.membership.withdrawalState != .withdrawn
     }
 
     // MARK: - Gate-loss fan-out
@@ -58,6 +99,14 @@ final class VoiceSharingCoordinator {
         func unregisterNow() { unregister() }
     }
 
+    /// Last observed consent truth, so the membership observer can tell a LOSS from any other
+    /// notification. Seeded on first notification rather than assumed, so a cold start that already
+    /// holds consent does not manufacture a spurious loss.
+    private var consentTruthLock = NSLock()
+    private var lastConsentTruth = false
+    /// The account scope the last notification described, so an ACCOUNT REPLACEMENT is told apart
+    /// from a same-account membership update even when both accounts hold consent.
+    private var lastConsentScope: String?
     private var gateLostHandlers: [UUID: () -> Void] = [:]
     private let gateLostHandlersLock = NSLock()
 

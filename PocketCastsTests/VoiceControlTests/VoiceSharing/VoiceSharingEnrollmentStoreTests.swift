@@ -283,7 +283,7 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
         store.setLocalOptIn(true)
         XCTAssertTrue(store.apply(authoritative: projection(revision: "r1"), readUnder: token(store)))
         var moves = 0
-        let tokenID = store.addObserver { _ in moves += 1 }
+        let tokenID = store.addObserver { _, _ in moves += 1 }
         defer { store.removeObserver(tokenID) }
         store.withdrawLocally(acceptedServerProjectionAfterward: true)
         XCTAssertEqual(moves, 1, "one membership move must notify observers exactly once")
@@ -298,7 +298,7 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
     func test_applyingTheSameRevisionTwice_isANoOp() {
         let store = makeStore()
         var notifications = 0
-        let id = store.addObserver { _ in notifications += 1 }
+        let id = store.addObserver { _, _ in notifications += 1 }
         defer { store.removeObserver(id) }
 
         store.apply(authoritative: projection(revision: "r7"), readUnder: token(store))

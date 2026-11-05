@@ -61,7 +61,7 @@ final class VoiceSharingEnrollmentStore {
     private let defaults: UserDefaults
     private var state = State()
     private var authoritativeLifecycle: String?
-    private var observers: [UUID: (State) -> Void] = [:]
+    private var observers: [UUID: (State, String) -> Void] = [:]
 
     private enum Key {
         static func scoped(_ base: String, _ accountScope: String) -> String { "\(base).\(accountScope)" }
@@ -110,6 +110,12 @@ final class VoiceSharingEnrollmentStore {
     }
 
     private var scope: String { accountScopeProvider() }
+
+    /// The account scope the CURRENT snapshot belongs to, read under the same hold as the state.
+    var currentScopeForObservers: String {
+        lock.lock(); defer { lock.unlock() }
+        return accountScopeProvider()
+    }
 
     // MARK: - Reading
 
@@ -183,7 +189,7 @@ final class VoiceSharingEnrollmentStore {
     /// Called after every state change, on the thread that made it. The coordinator uses this to invalidate
     /// an in-flight refresh the moment membership moves.
     @discardableResult
-    func addObserver(_ body: @escaping (State) -> Void) -> UUID {
+    func addObserver(_ body: @escaping (State, String) -> Void) -> UUID {
         lock.lock()
         let id = UUID()
         observers[id] = body
@@ -198,9 +204,13 @@ final class VoiceSharingEnrollmentStore {
     private func notify() {
         lock.lock()
         let snapshot = state
+        // THE SCOPE IS READ UNDER THE SAME LOCK AS THE SNAPSHOT (spec f81580be). Reading it later
+        // from the live provider would let a callback pair one account's state with another
+        // account's identity, which is exactly the incoherence the observer must not act on.
+        let scopeOfSnapshot = accountScopeProvider()
         let list = Array(observers.values)
         lock.unlock()
-        for body in list { body(snapshot) }
+        for body in list { body(snapshot, scopeOfSnapshot) }
     }
 
     // MARK: - Local intent
