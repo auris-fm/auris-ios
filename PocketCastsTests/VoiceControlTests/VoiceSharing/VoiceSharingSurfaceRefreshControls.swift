@@ -157,7 +157,8 @@ final class VoiceSharingSurfaceRefreshControls: XCTestCase {
         XCTAssertTrue(model.canAct(in: model.accountActionSession),
                       "an authenticated session must allow the account read")
 
-        await model.refresh()
+        // The EXACT decision the view makes on appearance, not a lookalike call.
+        await VoiceSharingSectionHost.appearanceRefresh(model)
 
         let requests = Wire.recorded()
         let projections = requests.filter { $0.path == VoiceSharingAccountClient.projectionPath }
@@ -167,6 +168,21 @@ final class VoiceSharingSurfaceRefreshControls: XCTestCase {
                        "the read must carry the bearer the provider actually yielded")
     }
 
+    /// The appearance entry point the view calls is what issues the read: with the `.task` line
+    /// removed from the view, this is the only caller, and the control fails because nothing is
+    /// dialled. (The body-level `.task` itself is not observable from a unit host.)
+    func test_theAppearanceEntryPointIsTheOneThatIssuesTheRead() async throws {
+        establishSession()
+        defer { clearSession() }
+        Wire.reset()
+        let model = makeHostModel()
+
+        await VoiceSharingSectionHost.appearanceRefresh(model)
+
+        XCTAssertEqual(Wire.recorded().filter { $0.path == VoiceSharingAccountClient.projectionPath }.count, 1,
+                       "appearance must issue the projection GET")
+    }
+
     /// The read is READ-ONLY: opening the surface must never dial withdrawal, enrollment or data.
     func test_theSurfaceReadNeverTouchesAMutatingRoute() async throws {
         establishSession()
@@ -174,7 +190,7 @@ final class VoiceSharingSurfaceRefreshControls: XCTestCase {
         Wire.reset()
         let model = makeHostModel()
 
-        await model.refresh()
+        await VoiceSharingSectionHost.appearanceRefresh(model)
 
         let mutating = Wire.recorded().filter {
             $0.path == VoiceSharingAccountClient.withdrawalPath
@@ -193,7 +209,7 @@ final class VoiceSharingSurfaceRefreshControls: XCTestCase {
         let model = makeHostModel()
         XCTAssertFalse(model.canAct(in: model.accountActionSession))
 
-        await model.refresh()
+        await VoiceSharingSectionHost.appearanceRefresh(model)
 
         XCTAssertTrue(Wire.recorded().isEmpty,
                       "a signed-out surface must not dial the service: \(Wire.recorded().map(\.path))")

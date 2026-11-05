@@ -169,7 +169,7 @@ struct VoiceControlSettingsView: View {
 /// Omitted entirely when sharing is compiled off or the local settings lifetime is absent —
 /// ordinary Voice Control settings still open and work signed out.
 @MainActor
-private struct VoiceSharingSectionHost: View {
+struct VoiceSharingSectionHost: View {
     @StateObject private var account: VoiceSharingAccountModel
     private let localModel: VoiceSharingSettingsModel?
 
@@ -188,6 +188,15 @@ private struct VoiceSharingSectionHost: View {
             }))
     }
 
+    /// Read the account projection when the screen appears. Gated the same way the rows are, so a
+    /// disabled surface or a signed-out session issues no request at all. Static so a control can
+    /// drive the exact decision the view makes, rather than a lookalike.
+    static func appearanceRefresh(_ account: VoiceSharingAccountModel) async {
+        guard VoiceSharingSettingsModel.surfaceEnabled else { return }
+        guard account.canAct(in: account.accountActionSession) else { return }
+        await account.refresh()
+    }
+
     var body: some View {
         if VoiceSharingSettingsModel.surfaceEnabled {
             // @ObservedObject expects the object to already exist; the view struct here holds
@@ -204,18 +213,11 @@ private struct VoiceSharingSectionHost: View {
                 // it issues the projection GET and never a withdrawal or enrollment POST, and the
                 // visible sharing controls stay exactly as they were. Fires once per appearance,
                 // which is every time the screen is opened.
-                .task { await refreshAccountOnce() }
+                .task { await VoiceSharingSectionHost.appearanceRefresh(account) }
         }
     }
 
-    /// Read the account projection when the screen appears. Gated the same way the rows are, so a
-    /// disabled surface or a signed-out session issues no request at all.
-    private func refreshAccountOnce() async {
-        guard VoiceSharingSettingsModel.surfaceEnabled, account.canAct(in: account.accountActionSession) else {
-            return
-        }
-        await account.refresh()
-    }
+
 }
 
 
