@@ -67,6 +67,12 @@ class NativeVadSegmenter {
     /// against the emitted reference; using the completing buffer's time would shift it by
     /// the segment's own length.
     var onUtterance: (([Float], MonotonicTime?) -> Void)?
+    /// TASK 90 SNAPSHOT (review bcb42c49 #1): fired at the SPEECH-START boundary — the frame
+    /// that confirms speech, after the pre-roll merge settles the true utterance start — NOT
+    /// at `emitUtterance`. Consumers that must describe the moment the utterance BEGAN (e.g.
+    /// the playback snapshot) read here; by emission time the user may already have spoken a
+    /// sentence and playback has moved on.
+    var onSpeechStart: (() -> Void)?
 
     /// Called when continuously-classified speech reaches the supported duration ceiling.
     ///
@@ -230,6 +236,7 @@ class NativeVadSegmenter {
                     preRollInstants.removeAll()
                     preRollCapturedAt = nil
                 }
+                onSpeechStart?()
             } else if !speechActive, !preRoll.isEmpty || preRollCapturedAt == nil {
                 // Still unconfirmed: keep holding this frame with the earlier ones so ordering
                 // is preserved, and let the buffer stay empty until confirmation.

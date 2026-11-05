@@ -189,6 +189,17 @@ class VoiceControlAssembly {
             fingerprintMapper: FingerprintTimingManager.shared,
             cloudPlaybackContextState: cloudPlaybackContextState
         )
+        // TASK 90 SNAPSHOT: the engine freezes the playback context ONCE per utterance, at
+        // admission — the same provider the executor used to resample at dispatch time. The
+        // executor now dispatches the frozen value verbatim (spec cloud-assistant.md).
+        asrEngine.playbackContextSnapshot = { [weak playbackManager] in
+            guard let playbackManager else { return nil }
+            return DefaultPlaybackContextProvider(
+                playbackState: playbackManager,
+                fingerprintMapper: FingerprintTimingManager.shared,
+                cloudPlaybackContextState: cloudPlaybackContextState
+            ).current()
+        }
 
         // Test-only injection: a control that must observe ACTUAL local execution (e.g. a pause
         // the router classified from an English utterance) supplies a recording sink. Nil in

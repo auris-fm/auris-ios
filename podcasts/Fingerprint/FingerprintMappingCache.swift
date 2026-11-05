@@ -18,6 +18,11 @@ enum FingerprintMappingCache {
     struct LoadResult {
         let entries: [FingerprintTimingManager.TimeMappingEntry]
         let referenceDuration: Double
+        /// TASK 90 PROVENANCE (spec 351dd308): the full lowercase SHA-256 hex digest of the
+        /// reference fingerprint bytes this map was validated against — the same bytes the
+        /// mapping was derived from. Travels WITH the map, atomically, so a map/reference
+        /// replacement can never pair an old position with a new version.
+        let referenceAssetVersion: String
     }
 
     private struct CachedMapping: Codable {
@@ -65,7 +70,8 @@ enum FingerprintMappingCache {
             )
             return nil
         }
-        guard cached.referenceHash == sha256(referenceData) else {
+        let referenceAssetVersion = referenceAssetVersion(of: referenceData)
+        guard cached.referenceHash == referenceAssetVersion else {
             FileLog.shared.addMessage(
                 "FingerprintMappingCache: reference hash mismatch at \(path) — discarding"
             )
@@ -104,7 +110,8 @@ enum FingerprintMappingCache {
                     score: $0.s
                 )
             },
-            referenceDuration: cached.referenceDuration
+            referenceDuration: cached.referenceDuration,
+            referenceAssetVersion: referenceAssetVersion
         )
     }
 
@@ -171,6 +178,13 @@ enum FingerprintMappingCache {
 
     private static func sha256(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// The `reference_asset_version` of fingerprint bytes: the full lowercase SHA-256 hex
+    /// digest (spec cloud-ingestion.md, same-reference transcript source binding). Used both
+    /// to validate the persisted cache and to stamp the live map with its provenance.
+    static func referenceAssetVersion(of referenceData: Data) -> String {
+        sha256(referenceData)
     }
 
     private static func fileAttributes(at path: String) -> (size: UInt64, mtime: Double)? {

@@ -1025,6 +1025,9 @@ class VoiceControlService: ObservableObject {
                     sourceLanguage: input.sourceLanguage,
                     // REQUEST OWNERSHIP: the captured utterance's identity travels with the turn.
                     utteranceId: input.utteranceId,
+                    // TASK 90 SNAPSHOT: the utterance-start playback context the input froze
+                    // ahead of ASR — never a live read here, which is post-routing.
+                    context: input.playbackContext,
                     origin: route.origin,
                     // The origin captured with the INPUT, not read here: this point is after the
                     // routing work, so a live read would attribute the turn to whichever window
@@ -1206,6 +1209,9 @@ class VoiceControlService: ObservableObject {
                         sourceLanguage: input.sourceLanguage,
                         // REQUEST OWNERSHIP: the fallback carries the same utterance identity.
                         utteranceId: input.utteranceId,
+                        // TASK 90 SNAPSHOT: same frozen context as the model-chosen path — an
+                        // escalation is the SAME utterance, so it describes the same moment.
+                        context: input.playbackContext,
                         origin: .routingFailure,
                         generation: dispatchGeneration,
                         // The turn's own provenance, carried as it is on the model-chosen path.

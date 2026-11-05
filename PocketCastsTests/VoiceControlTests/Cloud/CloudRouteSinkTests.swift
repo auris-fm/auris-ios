@@ -1616,6 +1616,52 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
 
 
+    /// TASK 90 CONTROL (review d815be4a #3): production-path serialized-frame evidence for a
+    /// retry/duplicate. The owner dispatch serializes the utterance-start snapshot; a duplicate
+    /// callback for the SAME utterance — arriving after the playing episode was "replaced" —
+    /// joins the owner and must NOT mint a second frame: exactly one serialized request, and
+    /// its context is the frozen snapshot, never the replacement episode.
+    func test_duplicateDispatchSendsExactlyOneFrameCarryingTheOwnersSnapshot() async throws {
+        let snapshot = PlaybackContext(
+            episodeId: "ep-frozen", podcastId: "pod-frozen",
+            referencePositionMs: 1_000, clientPositionMs: 1_100,
+            recentReferencePositions: [], previousReferencePositionMs: nil
+        )
+        let replacedPlayback = PlaybackContext(
+            episodeId: "ep-replaced", podcastId: "pod-replaced",
+            referencePositionMs: 70_000, clientPositionMs: 70_000,
+            recentReferencePositions: [69_000, 70_000], previousReferencePositionMs: 69_000
+        )
+
+        let sink = makeSink()
+        let ownership = await MainActor.run { sink.beginDispatch(utteranceId: "u-dup", origin: cloudTestOrigin) }
+        XCTAssertTrue(ownership.ownsDispatch, "the first callback owns the turn")
+
+        _ = await sink.routeToCloud(
+            request: "what did they say", tier: .free, context: snapshot,
+            origin: cloudTestOrigin, selection: nil, utteranceId: "u-dup", ownership: ownership)
+
+        // The duplicate arrives after the episode was replaced downstream. It carries the
+        // LIVE context, but must join the owner's already-prepared turn.
+        let duplicate = await MainActor.run { sink.beginDispatch(utteranceId: "u-dup", origin: cloudTestOrigin) }
+        XCTAssertFalse(duplicate.ownsDispatch, "a duplicate callback joins; it never owns")
+        _ = await sink.routeToCloud(
+            request: "what did they say", tier: .free, context: replacedPlayback,
+            origin: cloudTestOrigin, selection: nil, utteranceId: "u-dup", ownership: duplicate)
+
+        // Serialized-frame evidence: read the frames the production client actually SENT.
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let frames = capturedTask?.sentTextFrames ?? []
+        let contextFrames = frames.compactMap {
+            (try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any])?["context"]
+                as? [String: Any]
+        }
+        XCTAssertEqual(contextFrames.count, 1,
+                       "a duplicate/retry never mints another serialized frame: \(frames.count) sent")
+        XCTAssertEqual(contextFrames.first?["episode_id"] as? String, "ep-frozen",
+                       "the single frame carries the utterance-start episode, not the replacement")
+    }
+
     private func sampleContext() -> PlaybackContext {
         PlaybackContext(
             episodeId: "ep",
@@ -3490,7 +3536,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                 let built = CloudRouteClient.stubbed(
                     baseURL: cloudConfig.baseUrl, fixture: fixture, audioPayloads: audio
                 )
-                if let gate = self.pendingHeldGate {
+                                if let gate = self.pendingHeldGate {
                     // The held turn waits for frames; the test releases it later.
                     built.task.holdUntilReleased(gate)
                     self.heldTurn = (built.task, gate)

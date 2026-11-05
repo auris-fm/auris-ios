@@ -185,6 +185,24 @@ class VoiceAsrEngine {
     /// precheck would be a DIFFERENT operation from the one that takes ownership, so a stop landing
     /// between them could reject the enqueue with no owner left to release.
     var onRoutingInput: ((IntentRoutingInput) -> Bool)?
+    /// TASK 90 SNAPSHOT (review bcb42c49): called ONCE at the SPEECH-START boundary — the
+    /// segmenter's confirmation frame, before the user has finished speaking — NOT at emission
+    /// or admission. Nil (unset) means no capture is wired and the turn carries no snapshot.
+    /// A nil RESULT means capture RAN and nothing was playing: a present `.absent` snapshot,
+    /// which the executor must dispatch verbatim instead of resampling an episode that started
+    /// later.
+    var playbackContextSnapshot: (() -> PlaybackContext?)?
+
+    /// The playback snapshot taken at speech start for the utterance now being captured.
+    /// Written at the segmenter's `onSpeechStart` (audio thread, serialized per segmenter),
+    /// TAKEN at `emitUtterance`→`onUtterance` and carried into the utterance's task — a
+    /// delayed task never resamples.
+    enum UtterancePlaybackSnapshot {
+        case uncaptured
+        case captured(PlaybackContext)
+    }
+
+    private var pendingUtterancePlayback: UtterancePlaybackSnapshot = .uncaptured
 
     /// Invoked when a turn that was admitted leaves the engine WITHOUT reaching routing — a
     /// backend/recognition/translation drop or a cancellation. The routing path does not call it;
@@ -404,11 +422,33 @@ class VoiceAsrEngine {
         wireCaptureCallbacks()
     }
 
+    /// TEST SEAM (review d815be4a #3): feeds samples through the engine's OWN segmenter with
+    /// the production wiring installed, so a control can drive the real speech-start →
+    /// emission → delayed-ASR path instead of calling `processUtterance` by hand.
+    func feedSyntheticSamplesForTesting(_ samples: [Float]) {
+        segmenter.process(samples, capturedAt: nil)
+    }
+
     /// Single definition of the capture wiring, so the fault forwarding cannot exist on one path
     /// and be missing on another.
     private func wireCaptureCallbacks() {
+        // SPEECH-START CAPTURE (review bcb42c49 #1): the snapshot is taken when the segmenter
+        // CONFIRMS speech — potentially seconds before the utterance is emitted and ASR runs.
+        // A delayed task cannot resample: the value is taken at emission and carried.
+        segmenter.onSpeechStart = { [weak self] in
+            guard let self else { return }
+            if let capture = self.playbackContextSnapshot {
+                self.pendingUtterancePlayback = .captured(capture() ?? .absent)
+            } else {
+                self.pendingUtterancePlayback = .uncaptured
+            }
+        }
         segmenter.onUtterance = { [weak self] utterance, capturedAt in
             guard let self else { return }
+            // TAKE (not re-read): this utterance's speech-start snapshot, cleared so the next
+            // utterance cannot inherit it.
+            let utteranceSnapshot = self.pendingUtterancePlayback
+            self.pendingUtterancePlayback = .uncaptured
             // Fenced as well as the notifications: an utterance emitted from a stopped session
             // is stale PCM, and suppressing only its UI event would still let that audio reach
             // ASR and change the next turn.
@@ -425,7 +465,11 @@ class VoiceAsrEngine {
                     FileLog.shared.addMessage("[VoicePipeline] dropped utterance queued before a session change session=\(session) current=\(self.currentSession())")
                     return
                 }
-                await self.processUtterance(utterance, capturedAt: capturedAt)
+                await self.processUtterance(
+                    utterance,
+                    capturedAt: capturedAt,
+                    utterancePlayback: utteranceSnapshot
+                )
             }
         }
         // Segmentation faults are forwarded so the interruption is observable outside this
@@ -555,7 +599,11 @@ class VoiceAsrEngine {
     }
 
     /// Exposed for focused translate-drop tests (`@testable`).
-    func processUtterance(_ utterance: [Float], capturedAt: MonotonicTime? = nil) async {
+    func processUtterance(
+        _ utterance: [Float],
+        capturedAt: MonotonicTime? = nil,
+        utterancePlayback: UtterancePlaybackSnapshot = .uncaptured
+    ) async {
         stageTimer.mark() // VAD segment ready
         // ONE IDENTITY FROM ADMISSION (spec delta3b1def9): the utterance is admitted HERE, so its
         // identity is minted here — not rebuilt later. Retries/duplicates that re-emit the SAME
@@ -563,6 +611,15 @@ class VoiceAsrEngine {
         // trimming, router diagnostics, the prepared wire request_id and server diagnostics.
         let utteranceId = utteranceIdGeneratorForTesting?() ?? UUID().uuidString
         FileLog.shared.addMessage("[VoicePipeline] utterance admitted id=\(utteranceId)")
+        // TASK 90 SNAPSHOT: frozen at SPEECH START and carried through emission (review
+        // bcb42c49 #1). `.uncaptured` → nil input field (genuinely no capture wired);
+        // `.captured(.absent)` stays a PRESENT snapshot the executor must dispatch verbatim
+        // (review bcb42c49 #2). Later stages only carry this value; nothing re-reads playback.
+        let playbackSnapshot: PlaybackContext?
+        switch utterancePlayback {
+        case .uncaptured: playbackSnapshot = nil
+        case .captured(let context): playbackSnapshot = context
+        }
 
         if echoFilterRoute.appliesCorrelationWindow {
             // ONE CONSISTENT OBSERVATION (PR50 review r4357901593): samples, offset and anchor
@@ -732,7 +789,8 @@ class VoiceAsrEngine {
             routerText: finalized.text,
             translateNote: translateNote,
             selection: selection,
-            utteranceId: utteranceId
+            utteranceId: utteranceId,
+            playbackContext: playbackSnapshot
         )
         if onRoutingInput?(routingInput) ?? false {
             admissionHandedToRouting = true
@@ -746,7 +804,8 @@ class VoiceAsrEngine {
         routerText: String,
         translateNote: String?,
         selection: CloudConversationSelection? = nil,
-        utteranceId: String
+        utteranceId: String,
+        playbackContext: PlaybackContext? = nil
     ) -> IntentRoutingInput {
         if let translateNote, translateNote.hasPrefix("translate=skip(backend)") {
             return IntentRoutingInput(
@@ -755,7 +814,8 @@ class VoiceAsrEngine {
                 routerTranscript: routerText,
                 translationKind: .backend,
                 selection: selection,
-                utteranceId: utteranceId
+                utteranceId: utteranceId,
+                playbackContext: playbackContext
             )
         }
         if let translateNote,
@@ -767,7 +827,8 @@ class VoiceAsrEngine {
                 routerTranscript: routerText,
                 translationKind: .platform,
                 selection: selection,
-                utteranceId: utteranceId
+                utteranceId: utteranceId,
+                playbackContext: playbackContext
             )
         }
         // NO FABRICATED LANGUAGE: an unknown LID stays nil on the input (and is omitted on the
@@ -776,7 +837,8 @@ class VoiceAsrEngine {
             transcript: routerText,
             language: source.detectedLanguage,
             selection: selection,
-            utteranceId: utteranceId
+            utteranceId: utteranceId,
+            playbackContext: playbackContext
         )
     }
 
