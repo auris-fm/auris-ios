@@ -76,6 +76,30 @@ final class VoiceIntentExecutorTests: XCTestCase {
         )
     }
 
+    /// TASK 90 CONTROL (review bcb42c49 #2): a captured ABSENCE is a PRESENT snapshot. The
+    /// episode the provider would return now did not exist at speech start; the executor must
+    /// dispatch the captured absence verbatim and never resample.
+    func test_execute_capturedAbsence_survivesLaterPlaybackStart() async {
+        mockPlaybackContextProvider.context = PlaybackContext(
+            episodeId: "ep-started-later", podcastId: "pod-x",
+            referencePositionMs: 10_000, clientPositionMs: 10_000,
+            recentReferencePositions: [], previousReferencePositionMs: nil
+        )
+
+        _ = await executor.execute(CloudRouteIntent(
+            request: "what is this",
+            tier: .unknown,
+            context: PlaybackContext.absent,
+            origin: .routingFailure
+        ))
+
+        XCTAssertTrue(mockCloudRouteSink.routeToCloudCalled)
+        XCTAssertEqual(mockCloudRouteSink.lastContext, PlaybackContext.absent,
+                       "the dispatch carries the captured absence, not the later episode")
+        XCTAssertEqual(mockPlaybackContextProvider.consultCount, 0,
+                       "a present snapshot (even an absence) never triggers a resample")
+    }
+
     /// TASK 90 SNAPSHOT CONTROL (spec cloud-assistant.md, playback-snapshot): when the intent
     /// carries the utterance-start snapshot, the executor dispatches EXACTLY that context and
     /// does NOT consult the live provider at dispatch time — a provider consult here would be

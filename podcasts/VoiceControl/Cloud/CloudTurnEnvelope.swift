@@ -166,6 +166,9 @@ enum CloudRouteRequestBuilder {
         if let podcastId = context.podcastId { contextObject["podcast_id"] = podcastId }
         if let referencePositionMs = context.referencePositionMs { contextObject["reference_position_ms"] = referencePositionMs }
         if let previousReferencePositionMs = context.previousReferencePositionMs { contextObject["previous_reference_position_ms"] = previousReferencePositionMs }
+        // TASK 90 PROVENANCE: only ever sent WITH a mapped position (the pairing invariant is
+        // enforced at capture); unknown provenance is omitted, not invented.
+        if let referenceAssetVersion = context.referenceAssetVersion { contextObject["reference_asset_version"] = referenceAssetVersion }
 
         // No `recent_conversation`. The owning paragraph retains conversation history
         // SERVER-side and forbids client-supplied history in the frame, so sending ours

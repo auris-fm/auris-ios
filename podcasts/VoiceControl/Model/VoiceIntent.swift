@@ -199,4 +199,8 @@ struct PlaybackContext: Equatable {
     let clientPositionMs: Int64?
     let recentReferencePositions: [Int64]
     let previousReferencePositionMs: Int64?
+    /// TASK 90 PROVENANCE (spec 351dd308): the `reference_asset_version` of the fingerprint
+    /// bytes the mapped position was derived from, carried only when that position exists.
+    /// Nil = unknown provenance — omitted on the wire, never invented, never blocking.
+    var referenceAssetVersion: String? = nil
 }

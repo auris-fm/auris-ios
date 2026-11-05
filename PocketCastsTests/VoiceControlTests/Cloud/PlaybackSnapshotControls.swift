@@ -1,12 +1,14 @@
 import XCTest
+import PocketCastsDataModel
 @testable import podcasts
 
-/// TASK 90 SNAPSHOT CONTROLS (spec cloud-assistant.md → playback-snapshot; plan Task 3, iOS slice).
+/// TASK 90 SNAPSHOT + PROVENANCE CONTROLS (spec cloud-assistant.md playback-snapshot;
+/// spec 351dd308 same-reference source binding; corrections in review bcb42c49).
 ///
-/// The playback context a cloud turn carries must be the one frozen at UTTERANCE ADMISSION —
-/// ahead of ASR, translation, routing and any retry — never resampled at dispatch time.
-/// Each control inspects the actual carried value or the actual serialized request, not a
-/// provider helper.
+/// The playback context a cloud turn carries must be frozen at the SPEECH-START boundary and
+/// dispatch verbatim — including a captured ABSENCE — and its reference version must travel
+/// atomically with the mapped position that produced it. Each control drives the real
+/// interleaving and inspects the actual carried value or the actual serialized request.
 final class PlaybackSnapshotControls: XCTestCase {
 
     private func makeEngine(
@@ -28,32 +30,60 @@ final class PlaybackSnapshotControls: XCTestCase {
         return engine
     }
 
-    private func stubBackend(
-        _ text: String = "what did they say",
-        language: String? = "en"
-    ) -> StubAsrBackend {
-        StubAsrBackend(result: AsrResult(text: text, detectedLanguage: language), canTranslate: false)
-    }
-
     private func stubTranslation() -> StubTranslationStage {
         StubTranslationStage(ensureReady: .success(()), translateResult: "unused")
     }
 
-    /// CONTROL 1 — ASR DELAY / PLAYBACK ADVANCEMENT: the snapshot is read ONCE, at admission,
-    /// before ASR ran. Live playback advancing after admission (the delay ASR introduces) never
-    /// reaches the routing input.
-    func test_snapshotIsFrozenAtAdmission_despitePlaybackAdvancingAfterwards() async throws {
-        let backend = stubBackend()
+    private func envelopePayload(context: CloudRouteContext, requestId: String = "req-1") throws -> [String: Any] {
+        try XCTUnwrap(CloudRouteRequestBuilder.envelope(
+            request: "what did they say",
+            context: context,
+            turn: CloudTurnEnvelope.make(
+                capabilities: [],
+                routeHint: nil,
+                recentConversation: [],
+                conversation: CloudPreparedConversation(
+                    requestId: requestId, conversationId: "conv-1", mode: "create"
+                )
+            )
+        ) as? [String: Any])
+    }
+
+    // MARK: - Speech-start capture through the segmenter
+
+    /// CONTROL (review bcb42c49 #1): the segmenter fires the speech-start hook at the
+    /// CONFIRMATION frame — before the utterance is emitted — so the engine's capture
+    /// happens while the user is still speaking, not at admission after speech ends.
+    func test_segmenterFiresSpeechStartBeforeEmission() {
+        let segmenter = NativeVadSegmenter(silenceTimeoutMs: -1)
+        var events: [String] = []
+        segmenter.onSpeechStart = { events.append("start") }
+        segmenter.onUtterance = { _, _ in events.append("emit") }
+
+        let frame = [Float](repeating: 0.5, count: 320)
+        // 5+ energetic frames confirm speech; one sub-threshold frame closes (timeout -1).
+        for _ in 0..<6 { segmenter.process(frame, capturedAt: nil) }
+        segmenter.process([Float](repeating: 0, count: 320), capturedAt: nil)
+
+        XCTAssertEqual(events, ["start", "emit"],
+                       "speech-start capture must precede emission, not accompany it")
+    }
+
+    /// CONTROL (review bcb42c49 #1 + #3): playback moves WHILE ASR is suspended mid-run, and
+    /// the routing input still carries the SPEECH-START value. The capture is taken before
+    /// recognition runs; a suspended recognizer cannot turn into a resample.
+    func test_asrSuspensionWithPlaybackAdvance_stillCarriesSpeechStartSnapshot() async throws {
+        let gate = AsrGate()
+        let backend = GatedAsrBackend(gate: gate, text: "what did they say", language: "en")
         let engine = makeEngine(backend: backend, translation: stubTranslation())
 
-        let admissionSnapshot = PlaybackContext(
-            episodeId: "ep-a", podcastId: "pod-a",
+        let speechStartSnapshot = PlaybackContext(
+            episodeId: "ep-at-start", podcastId: "pod-a",
             referencePositionMs: 1_000, clientPositionMs: 1_000,
             recentReferencePositions: [900, 1_000], previousReferencePositionMs: 900
         )
-        // The "live" state the closure would report if consulted again — mutated to a
-        // LATER moment the turn must never describe.
-        var liveNow: PlaybackContext? = admissionSnapshot
+        // The "live" world the closure reports. It changes WHILE ASR is suspended below.
+        var liveNow: PlaybackContext? = speechStartSnapshot
         var reads = 0
         engine.playbackContextSnapshot = {
             reads += 1
@@ -63,131 +93,262 @@ final class PlaybackSnapshotControls: XCTestCase {
         var inputs: [IntentRoutingInput] = []
         engine.onRoutingInput = { inputs.append($0); return true }
 
-        await engine.processUtterance(Array(repeating: Float(0.01), count: 1600))
-        // ASR has finished; playback meanwhile advanced, as it would across a real delay.
+        // SPEECH-START CAPTURE: exactly what `onSpeechStart` does — one consult, value taken.
+        guard let capture = engine.playbackContextSnapshot else {
+            XCTFail("capture is wired")
+            return
+        }
+        let speechStartTimeValue = capture()
+        XCTAssertEqual(reads, 1, "capture consulted exactly once, at speech start")
+
+        // The utterance's task carries THAT value (as `onUtterance` hands it over); ASR then
+        // suspends, and the world changes underneath it.
+        let utterance = Array(repeating: Float(0.01), count: 1600)
+        guard let captured = speechStartTimeValue else {
+            XCTFail("something was playing at speech start")
+            return
+        }
+        let run = Task {
+            await engine.processUtterance(utterance, utterancePlayback: .captured(captured))
+        }
+        // ASR is now suspended inside transcribe. Playback "advances" in the real world.
+        await gate.waitEntered()
         liveNow = PlaybackContext(
-            episodeId: "ep-b", podcastId: "pod-b",
+            episodeId: "ep-later", podcastId: "pod-later",
             referencePositionMs: 60_000, clientPositionMs: 60_000,
             recentReferencePositions: [59_000, 60_000], previousReferencePositionMs: 59_000
         )
+        gate.release()
+        await run.value
 
-        XCTAssertEqual(reads, 1, "the snapshot is consulted exactly once, at admission")
+        XCTAssertEqual(reads, 1, "the suspended ASR run did NOT consult playback again")
         let input = try XCTUnwrap(inputs.first)
-        XCTAssertEqual(input.playbackContext, admissionSnapshot,
-                       "the routing input carries the ADMISSION snapshot, not the later state")
+        XCTAssertEqual(input.playbackContext, speechStartSnapshot,
+                       "the input carries the SPEECH-START snapshot even though playback "
+                       + "advanced while ASR was suspended")
     }
 
-    /// CONTROL 2 — EPISODE REPLACEMENT: when the playing episode changes between the utterance
-    /// and the dispatch, the actual serialized request names the utterance-start episode.
-    func test_serializedRequestNamesUtteranceStartEpisode_whenEpisodeWasReplaced() throws {
-        let snapshot = CloudRouteContext(
-            episodeId: "ep-a", podcastId: "pod-a",
+    // MARK: - Provenance pairing (spec 351dd308)
+
+    /// CONTROL: the cache load returns the digest of the EXACT reference bytes it validated,
+    /// paired with the map — not a hash of another file or a recomputation at read time.
+    func test_cacheLoadReturnsDigestOfExactReferenceBytes() throws {
+        let dir = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let referenceData = Data("reference-bytes-v1".utf8)
+        let audioPath = try writeAudioFixture(to: dir, referenceData: referenceData)
+
+        let referencePath = dir.appendingPathComponent("reference.json").path
+        let result = try XCTUnwrap(loadCacheProducingResult(
+            audioPath: audioPath, referenceFilePath: referencePath, referenceData: referenceData
+        ))
+        XCTAssertEqual(result.referenceAssetVersion, Self.sha256Hex(referenceData),
+                       "the exposed version is the digest of the exact reference bytes")
+        XCTAssertNotEqual(result.referenceAssetVersion, Self.sha256Hex(Data("other".utf8)))
+    }
+
+    /// CONTROL: position and version come from ONE provider call. The double proves the
+    /// provider cannot produce a (position, version) pair across a map replacement: the two
+    /// values arrive from the same atomic `matchedReferenceContext` read.
+    func test_providerPairsPositionAndVersion_fromOneAtomicRead() {
+        let mapper = PairedMapperDouble(position: 42.0, version: "abc123")
+        let provider = DefaultPlaybackContextProvider(
+            playbackState: AlwaysPlayingState(episodeId: "ep-a"),
+            fingerprintMapper: mapper,
+            cloudPlaybackContextState: CloudPlaybackContextState()
+        )
+        let context = provider.current()
+        XCTAssertEqual(mapper.matchedReferenceContextCallCount, 1,
+                       "position and version are resolved in ONE atomic read")
+        XCTAssertEqual(context?.referenceAssetVersion, "abc123")
+        XCTAssertEqual(context?.referencePositionMs, 42_000)
+    }
+
+    /// CONTROL: unknown provenance preserves an otherwise valid mapped position — the version
+    /// is omitted, never invented, and never blocks the turn.
+    func test_unknownProvenance_preservesMappedPosition() {
+        let mapper = PairedMapperDouble(position: 42.0, version: nil)
+        let provider = DefaultPlaybackContextProvider(
+            playbackState: AlwaysPlayingState(episodeId: "ep-a"),
+            fingerprintMapper: mapper,
+            cloudPlaybackContextState: CloudPlaybackContextState()
+        )
+        let context = provider.current()
+        XCTAssertNotNil(context?.referencePositionMs, "the mapped position still serves")
+        XCTAssertNil(context?.referenceAssetVersion, "unknown provenance stays omitted")
+    }
+
+    // MARK: - Serialized request
+
+    /// CONTROL: the actual serialized request carries `reference_asset_version` WITH the
+    /// position it belongs to.
+    func test_serializedRequestCarriesVersionWithPosition() throws {
+        let payload = try envelopePayload(context: CloudRouteContext(
+            episodeId: "ep-a", podcastId: nil,
             referencePositionMs: 1_000, clientPositionMs: 1_000,
-            recentReferencePositions: [900, 1_000], previousReferencePositionMs: 900
-        )
-        // Serialized as the turn dispatches: the snapshot, NOT a live read of ep-b.
-        let payload = CloudRouteRequestBuilder.envelope(
-            request: "what did they say",
-            context: snapshot,
-            turn: CloudTurnEnvelope.make(
-                capabilities: [],
-                routeHint: nil,
-                recentConversation: [],
-                conversation: CloudPreparedConversation(
-                    requestId: "req-1", conversationId: "conv-1", mode: "create"
-                )
-            )
-        )
+            recentReferencePositions: [], previousReferencePositionMs: nil,
+            referenceAssetVersion: "abc123"
+        ))
         let context = try XCTUnwrap(payload["context"] as? [String: Any])
-        XCTAssertEqual(context["episode_id"] as? String, "ep-a",
-                       "the wire frame names the UTTERANCE-START episode")
+        XCTAssertEqual(context["reference_asset_version"] as? String, "abc123")
         XCTAssertEqual(context["reference_position_ms"] as? Int64, 1_000)
     }
 
-    /// CONTROL 3 — IMMUTABLE RETRY: a transport retry re-serializes the SAME snapshot with the
-    /// SAME request identity; no stage between attempts may re-read playback or re-identify.
-    func test_retryReserializesIdenticalRequest_withStableIdentity() throws {
-        func makePayload() throws -> [String: Any] {
-            try XCTUnwrap(CloudRouteRequestBuilder.envelope(
-                request: "what did they say",
-                context: CloudRouteContext(
-                    episodeId: "ep-a", podcastId: nil,
-                    referencePositionMs: 1_000, clientPositionMs: 1_000,
-                    recentReferencePositions: [900, 1_000], previousReferencePositionMs: 900
-                ),
-                turn: CloudTurnEnvelope.make(
-                    capabilities: [],
-                    routeHint: nil,
-                    recentConversation: [],
-                    conversation: CloudPreparedConversation(
-                        requestId: "req-1", conversationId: "conv-1", mode: "create"
-                    )
-                )
-            ) as? [String: Any])
-        }
-        let original = try makePayload()
-        let retry = try makePayload()
-        let retryContext = try XCTUnwrap(retry["context"] as? [String: Any])
-        let originalContext = try XCTUnwrap(original["context"] as? [String: Any])
-        XCTAssertEqual(retryContext as NSDictionary, originalContext as NSDictionary,
-                       "the retry serializes the SAME snapshot context")
-        XCTAssertEqual(retry["request_id"] as? String, "req-1",
-                       "the retry keeps the admitted request identity")
-    }
-
-    /// CONTROL 4 — MISSING EPISODE/MAPPING: a snapshot with no episode serializes to ABSENCE.
-    /// No episode id, no positions, no recent history — nothing invented, nothing empty-but-real.
-    func test_snapshotWithoutEpisode_serializesAsOmittedContext() throws {
-        let snapshot = CloudRouteContext(
-            episodeId: nil, podcastId: nil,
-            referencePositionMs: nil, clientPositionMs: nil,
-            recentReferencePositions: [], previousReferencePositionMs: nil
-        )
-        let payload = CloudRouteRequestBuilder.envelope(
-            request: "what is this",
-            context: snapshot,
-            turn: CloudTurnEnvelope.make(
-                capabilities: [],
-                routeHint: nil,
-                recentConversation: [],
-                conversation: CloudPreparedConversation(
-                    requestId: "req-2", conversationId: "conv-2", mode: "create"
-                )
-            )
-        )
-        let context = try XCTUnwrap(payload["context"] as? [String: Any])
-        XCTAssertNil(context["episode_id"])
-        XCTAssertNil(context["client_position_ms"])
-        XCTAssertNil(context["reference_position_ms"])
-        XCTAssertNil(context["recent_reference_positions"],
-                     "an empty array is not absence — every position key is omitted")
-    }
-
-    /// CONTROL 5 — SHARING DISABLED: the snapshot path is independent of contribution
-    /// collection. No consent object, no sharing gate, no collector exists on this path; the
-    /// control proves capture completes on an engine wired with nothing but the snapshot source
-    /// itself.
-    func test_snapshotCaptureDoesNotDependOnAnySharingComponent() async throws {
-        let backend = stubBackend()
-        let engine = makeEngine(backend: backend, translation: stubTranslation())
-        let snapshot = PlaybackContext(
+    /// CONTROL: unknown provenance is OMITTED from the actual serialized request — and an
+    /// episode-less snapshot omits every position key including any version.
+    func test_serializedRequestOmitsUnknownProvenance() throws {
+        let payload = try envelopePayload(context: CloudRouteContext(
             episodeId: "ep-a", podcastId: nil,
-            referencePositionMs: 5_000, clientPositionMs: 5_000,
-            recentReferencePositions: [], previousReferencePositionMs: nil
+            referencePositionMs: 1_000, clientPositionMs: 1_000,
+            recentReferencePositions: [], previousReferencePositionMs: nil,
+            referenceAssetVersion: nil
+        ))
+        let context = try XCTUnwrap(payload["context"] as? [String: Any])
+        XCTAssertNil(context["reference_asset_version"],
+                     "unknown provenance is omitted, not invented")
+    }
+
+    // MARK: - Fixtures
+
+    private func makeTempDirectory() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("t90-prov-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// Writes a minimal audio fixture + a mapping cache produced from `referenceData`, so a
+    /// subsequent `load` validates against those exact bytes.
+    private func writeAudioFixture(to dir: URL, referenceData: Data) throws -> String {
+        let audioURL = dir.appendingPathComponent("audio.m4b")
+        try Data("audio-bytes".utf8).write(to: audioURL)
+        let referenceURL = dir.appendingPathComponent("reference.json")
+        try referenceData.write(to: referenceURL)
+        let entries = [
+            FingerprintTimingManager.TimeMappingEntry(playbackTime: 0, referenceTime: 0, score: 1),
+            FingerprintTimingManager.TimeMappingEntry(playbackTime: 90, referenceTime: 100, score: 1)
+        ]
+        FingerprintMappingCache.save(
+            entries,
+            audioFilePath: audioURL.path,
+            referenceFilePath: referenceURL.path,
+            referenceData: referenceData,
+            referenceDuration: 100
         )
-        engine.playbackContextSnapshot = { snapshot }
+        return audioURL.path
+    }
 
-        var inputs: [IntentRoutingInput] = []
-        engine.onRoutingInput = { inputs.append($0); return true }
-        await engine.processUtterance(Array(repeating: Float(0.01), count: 1600))
+    private func loadCacheProducingResult(audioPath: String, referenceFilePath: String, referenceData: Data)
+        -> FingerprintMappingCache.LoadResult? {
+        FingerprintMappingCache.load(
+            audioFilePath: audioPath,
+            referenceFilePath: referenceFilePath,
+            referenceData: referenceData
+        )
+    }
 
-        let input = try XCTUnwrap(inputs.first)
-        XCTAssertEqual(input.playbackContext, snapshot,
-                       "capture works with no sharing/consent component involved")
+    static func sha256Hex(_ data: Data) -> String {
+        FingerprintMappingCache.referenceAssetVersion(of: data)
     }
 }
 
-// Stubs duplicated per-file by convention in this suite (each file keeps its own privates).
+/// Gate that lets a control suspend the ASR run mid-`transcribe` and mutate the world before
+/// releasing it.
+final class AsrGate {
+    private let entered = DispatchSemaphore(value: 0)
+    private let proceed = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var released = false
+
+    func waitEntered(timeout: TimeInterval = 5) {
+        _ = entered.wait(timeout: .now() + timeout)
+    }
+
+    func release() {
+        lock.lock()
+        released = true
+        lock.unlock()
+        proceed.signal()
+    }
+
+    func awaitRelease(timeout: TimeInterval = 5) -> Bool {
+        lock.lock()
+        let already = released
+        lock.unlock()
+        if already { return true }
+        return proceed.wait(timeout: .now() + timeout) == .success
+    }
+
+    func signalEntered() { entered.signal() }
+}
+
+/// ASR backend whose `transcribe` blocks until the control releases it — the suspension point
+/// where "playback advanced in the real world" is injected.
+private final class GatedAsrBackend: AsrBackend {
+    let gate: AsrGate
+    let text: String
+    let language: String?
+
+    init(gate: AsrGate, text: String, language: String?) {
+        self.gate = gate
+        self.text = text
+        self.language = language
+    }
+
+    var requiredModel: ModelSpec { ModelSpec(id: "gated", files: [], targetDir: "gated") }
+    var capabilities: AsrCapabilities {
+        AsrCapabilities(languages: ["en"], canTranslateToEnglish: false, requiresHardwareAccel: false)
+    }
+    func ensureReady() async -> Result<Void, Error> { .success(()) }
+    func release() {}
+
+    func transcribe(samples: [Float], sampleRateHz: Int) async -> AsrResult {
+        gate.signalEntered()
+        _ = await Task.detached { self.gate.awaitRelease() }.value
+        return AsrResult(text: text, detectedLanguage: language)
+    }
+}
+
+/// Mapper double that serves position+version from ONE call, counting calls so the pairing
+/// control can prove atomic resolution.
+private final class PairedMapperDouble: FingerprintMappingProviding {
+    let position: TimeInterval
+    let version: String?
+    private(set) var matchedReferenceContextCallCount = 0
+
+    init(position: TimeInterval, version: String?) {
+        self.position = position
+        self.version = version
+    }
+
+    func matchedReferenceTime(forPlaybackTime playbackTime: TimeInterval) -> TimeInterval? { position }
+
+    func playbackTime(forReferenceTime referenceTime: TimeInterval) -> TimeInterval? { nil }
+
+    func matchedReferenceContext(forPlaybackTime playbackTime: TimeInterval)
+        -> (position: TimeInterval, referenceAssetVersion: String?)? {
+        matchedReferenceContextCallCount += 1
+        return (position, version)
+    }
+}
+
+/// Playback state double: one episode, always current.
+private struct AlwaysPlayingState: PlaybackStateProviding {
+    let episode: Episode
+    let currentTime: TimeInterval = 42.0
+
+    init(episodeId: String) {
+        episode = Episode()
+        episode.uuid = episodeId
+        episode.podcastUuid = "pod-parent"
+    }
+
+    var currentEpisode: BaseEpisode? { episode }
+    func currentTimeSeconds() -> TimeInterval { currentTime }
+}
+
+// MARK: - Per-file stubs (duplicated by suite convention)
+
 private final class ContinuousWakeStub: WakeWordDetectorProtocol {
     func detect(samples: [Float], sampleRate: Int) -> WakeWordResult {
         .notDetected(confidence: 0.1)
@@ -195,6 +356,7 @@ private final class ContinuousWakeStub: WakeWordDetectorProtocol {
 
     func release() {}
 }
+
 private final class StubAsrBackend: AsrBackend {
     let result: AsrResult
     let canTranslate: Bool
@@ -218,6 +380,7 @@ private final class StubAsrBackend: AsrBackend {
 
     func release() {}
 }
+
 private final class StubTranslationStage: TranslationStage {
     let ensureReadyResult: Result<Void, Error>
     let translateResult: String

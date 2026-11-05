@@ -94,6 +94,12 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
     struct MappingAccumulator {
         var playbackToReference: [TimeMappingEntry] = []
         var referenceToPlayback: [TimeMappingEntry] = []
+        /// TASK 90 PROVENANCE (spec 351dd308): the `reference_asset_version` of the reference
+        /// bytes THIS map was derived from. Lives on the accumulator so it is installed,
+        /// replaced and discarded together with the mapping — a map/reference replacement can
+        /// never leave an old position paired with a new version. Nil = provenance unknown;
+        /// an otherwise valid mapped position still serves.
+        var referenceAssetVersion: String? = nil
         var filterLastTrusted: TimeMappingEntry?
         var filterCandidatePool: [TimeMappingEntry] = []
         #if DEBUG
@@ -307,6 +313,8 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
             isCancelled: { flag.isCancelled }
         )
         context = newContext
+        // PROVENANCE: stamped with the map it describes, under the same lock acquisition.
+        main.referenceAssetVersion = FingerprintMappingCache.referenceAssetVersion(of: newContext.referenceData)
         resetFilterState()
         startStream(context: newContext, fromPosition: position)
     }
@@ -369,6 +377,28 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
                 keyPath: \.playbackTime,
                 valuePath: \.referenceTime
             )
+        }
+    }
+
+    /// TASK 90 PROVENANCE: the mapped position AND the reference version of the map that
+    /// produced it, read under ONE lock acquisition. Two separate reads could straddle a
+    /// map/reference replacement and pair an old position with a new version — the exact
+    /// defect the source contract forbids. Nil version = provenance unknown; the position
+    /// still serves.
+    func matchedReferenceContext(forPlaybackTime playbackTime: Double)
+        -> (position: Double, referenceAssetVersion: String?)? {
+        dispatchPrecondition(condition: .notOnQueue(queue))
+        return queue.sync { () -> (position: Double, referenceAssetVersion: String?)? in
+            guard Self.isWithinMatchedContent(forPlaybackTime: playbackTime, in: main.playbackToReference) else {
+                return nil
+            }
+            let position = Self.interpolate(
+                time: playbackTime,
+                in: main.playbackToReference,
+                keyPath: \.playbackTime,
+                valuePath: \.referenceTime
+            ) ?? 0
+            return (position, main.referenceAssetVersion)
         }
     }
 
@@ -1053,6 +1083,8 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
             isCancelled: { flag.isCancelled }
         )
         context = newContext
+        // PROVENANCE: stamped with the map it describes, under the same lock acquisition.
+        main.referenceAssetVersion = FingerprintMappingCache.referenceAssetVersion(of: newContext.referenceData)
 
         if preparationStartDate == nil {
             preparationStartDate = Date()
@@ -1089,6 +1121,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
             // entry through `insertMapping`'s per-entry `Array.insert`.
             main.playbackToReference = cached.entries
             main.referenceToPlayback = cached.entries.sorted { $0.referenceTime < $1.referenceTime }
+            main.referenceAssetVersion = cached.referenceAssetVersion
 
             if isWithinMappedRange(currentTime) {
                 main.filterLastTrusted = cached.entries.last

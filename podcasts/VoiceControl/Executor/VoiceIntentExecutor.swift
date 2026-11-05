@@ -15,6 +15,21 @@ protocol FingerprintMappingProviding {
     func matchedReferenceTime(forPlaybackTime playbackTime: TimeInterval) -> TimeInterval?
     /// Reverse map: reference (transcript) time → playback time. Nil when unmapped.
     func playbackTime(forReferenceTime referenceTime: TimeInterval) -> TimeInterval?
+    /// TASK 90 PROVENANCE: the mapped position and the reference version of the map that
+    /// produced it, resolved ATOMICALLY (one lock acquisition) so a map/reference replacement
+    /// can never pair an old position with a new version. Nil when unmapped. Nil version =
+    /// provenance unknown; the position still serves.
+    func matchedReferenceContext(forPlaybackTime playbackTime: TimeInterval)
+        -> (position: TimeInterval, referenceAssetVersion: String?)?
+}
+
+extension FingerprintMappingProviding {
+    /// Default for providers/seams that predate provenance: the position from the existing
+    /// map read, version unknown (omitted on the wire, never invented).
+    func matchedReferenceContext(forPlaybackTime playbackTime: TimeInterval)
+        -> (position: TimeInterval, referenceAssetVersion: String?)? {
+        matchedReferenceTime(forPlaybackTime: playbackTime).map { ($0, nil) }
+    }
 }
 
 final class CloudPlaybackContextState {
@@ -77,9 +92,11 @@ struct DefaultPlaybackContextProvider: PlaybackContextProvider {
         let clientPositionMs = Self.milliseconds(fromSeconds: currentTimeSeconds)
         guard clientPositionMs >= 0 else { return nil }
 
-        let referencePositionMs = fingerprintMapper
-            .matchedReferenceTime(forPlaybackTime: currentTimeSeconds)
-            .map(Self.milliseconds(fromSeconds:))
+        // ATOMIC position+version read: the version only ever travels WITH the position it
+        // was mapped under (spec 351dd308; review bcb42c49 pairing defect).
+        let matched = fingerprintMapper.matchedReferenceContext(forPlaybackTime: currentTimeSeconds)
+        let referencePositionMs = matched.map { Self.milliseconds(fromSeconds: $0.position) }
+        let referenceAssetVersion = matched?.referenceAssetVersion
 
         let state = cloudPlaybackContextState.snapshot()
         let podcastId = podcastId(for: episode)
@@ -90,7 +107,8 @@ struct DefaultPlaybackContextProvider: PlaybackContextProvider {
             referencePositionMs: referencePositionMs,
             clientPositionMs: clientPositionMs,
             recentReferencePositions: state.recentReferencePositions,
-            previousReferencePositionMs: state.previousReferencePositionMs
+            previousReferencePositionMs: state.previousReferencePositionMs,
+            referenceAssetVersion: referenceAssetVersion
         )
     }
 
