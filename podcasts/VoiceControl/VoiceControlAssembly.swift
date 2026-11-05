@@ -648,7 +648,7 @@ final class VoiceSharingLifetime {
         self.uploadTrigger = uploadTrigger
         self.enrollmentStore = enrollmentStore
         self.queue = queue
-        enrollmentObserver = enrollmentStore.addObserver { [weak settingsModel] _, _ in
+        enrollmentObserver = enrollmentStore.addObserver { [weak settingsModel] _ in
             settingsModel?.refreshLiveState()
         }
         queueObserver = queue.addContentObserver { [weak settingsModel] in

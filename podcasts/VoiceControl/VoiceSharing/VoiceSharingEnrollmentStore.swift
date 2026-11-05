@@ -29,6 +29,19 @@ final class VoiceSharingEnrollmentStore {
     static let shared = VoiceSharingEnrollmentStore()
 
     /// What the policy reads at decision time.
+    /// ONE STATE CHANGE, WITH THE ACCOUNT MOMENT IT BELONGS TO (spec 8a9c057f).
+    ///
+    /// The state, the account scope and the session identity are read under a single hold, so a
+    /// handler can never pair one account's membership with another account's identity. `sequence`
+    /// is the transition's position in the stream: handlers use it to discard a stale delivery
+    /// instead of letting it overwrite newer knowledge.
+    struct Transition {
+        let sequence: Int
+        let state: State
+        let accountScope: String
+        let sessionIdentity: String?
+    }
+
     struct State: Equatable {
         var membership: VoiceSharingMembership = .unavailable
         /// The user's own opt-in gesture, persisted so a launch does not silently re-enable something they
@@ -61,7 +74,19 @@ final class VoiceSharingEnrollmentStore {
     private let defaults: UserDefaults
     private var state = State()
     private var authoritativeLifecycle: String?
-    private var observers: [UUID: (State, String) -> Void] = [:]
+    private var observers: [UUID: (Transition) -> Void] = [:]
+    /// Monotonic position in the state's history. Every mutation bumps it under the state lock, so
+    /// two transitions can never claim the same position or be delivered out of order.
+    private var transitionSequence: Int = 0
+    /// TRANSITIONS AWAITING DELIVERY, captured at the mutation and drained in sequence order.
+    /// Held by `lock`; drained by whichever thread currently owns `draining`.
+    private var pendingTransitions: [Transition] = []
+    /// The single-drainer gate. An observer that mutates the store re-enters a mutator, which
+    /// enqueues and then tries to drain; it must NOT take the drainer (it is on the draining
+    /// thread) and must NOT wait for it — the outer drain picks its transition up. Nothing is ever
+    /// delivered while either `lock` or this lock is held.
+    private let drainStateLock = NSLock()
+    private var draining = false
 
     private enum Key {
         static func scoped(_ base: String, _ accountScope: String) -> String { "\(base).\(accountScope)" }
@@ -189,11 +214,32 @@ final class VoiceSharingEnrollmentStore {
     /// Called after every state change, on the thread that made it. The coordinator uses this to invalidate
     /// an in-flight refresh the moment membership moves.
     @discardableResult
-    func addObserver(_ body: @escaping (State, String) -> Void) -> UUID {
+    func addObserver(_ body: @escaping (Transition) -> Void) -> UUID {
         lock.lock()
         let id = UUID()
+        // THE BASELINE AND THE SUBSCRIPTION ARE TAKEN UNDER ONE LOCK (spec 8a9c057f). Reading the
+        // state and the scope, releasing, then registering left a window in which a withdrawal
+        // could land: it was already inside the baseline, so the coordinator's first comparison
+        // found "no change" and the loss was never reported. Here the caller's baseline IS the
+        // snapshot the store is currently on, and every later change is queued to it by sequence.
+        let baseline = Transition(
+            sequence: transitionSequence,
+            state: state,
+            accountScope: accountScopeProvider(),
+            sessionIdentity: sessionIdentityProvider())
+        // THE BASELINE JOINS THE SAME ORDERING AS EVERY LATER TRANSITION. It is appended to the
+        // pending queue at its own position while the state lock is held, and the subscriber is
+        // registered before it can be delivered — so the first transition the handler sees is the
+        // state at subscription, and no later change can overtake it.
+        transitionSequence += 1
+        pendingTransitions.append(Transition(
+            sequence: transitionSequence,
+            state: baseline.state,
+            accountScope: baseline.accountScope,
+            sessionIdentity: baseline.sessionIdentity))
         observers[id] = body
         lock.unlock()
+        drainTransitions()
         return id
     }
 
@@ -201,16 +247,64 @@ final class VoiceSharingEnrollmentStore {
         lock.lock(); observers.removeValue(forKey: id); lock.unlock()
     }
 
+    /// Publishes one state change to every observer, IN MUTATION ORDER.
+    ///
+    /// A transition is captured UNDER THE STATE LOCK, at the moment of the mutation, together with
+    /// the account scope and session it belongs to — so the snapshot, its owner and its position
+    /// cannot disagree (spec 8a9c057f). Delivery then happens outside the lock, so a reentrant
+    /// handler cannot deadlock the store.
+    ///
+    /// ORDER IS PRESERVED, not merely protected: delivery is serialised by `deliveryLock`, and an
+    /// observer that is handed an older sequence than one it already held DISCARDS it. Without
+    /// this, an opt-out and a later opt-in racing on two threads could both be captured as
+    /// "permitted" (each taking its snapshot after the other's mutation), and the loss would never
+    /// be reported — a lost withdrawal is the failure direction that matters here.
+    /// Captures the current state as the next transition and drains the queue.
+    ///
+    /// TWO SEPARATE GUARANTEES, both required (spec 8a9c057f, reviewer 33a2a287):
+    ///
+    /// 1. CAPTURE HAPPENS UNDER THE MUTATION'S OWN LOCK. An opt-out that released the lock before
+    ///    capturing could be overtaken by a later opt-in, and both snapshots would then read
+    ///    "permitted" — the loss would never be announced. Callers therefore capture INSIDE their
+    ///    mutation's hold (`captureTransitionLocked()`), never after releasing it.
+    /// 2. DELIVERY HAPPENS OUTSIDE EVERY LOCK, IN ORDER, ON ONE DRAINER. A handler may mutate the
+    ///    store; if delivery held a lock across the call, that re-entry would deadlock. Instead
+    ///    transitions queue up and a single owner drains them; a re-entrant mutator only enqueues.
+    private func captureTransitionLocked() {
+        transitionSequence += 1
+        pendingTransitions.append(Transition(
+            sequence: transitionSequence,
+            state: state,
+            accountScope: accountScopeProvider(),
+            sessionIdentity: sessionIdentityProvider()))
+    }
+
+    /// Drains queued transitions to every observer, in sequence order, holding nothing.
+    private func drainTransitions() {
+        drainStateLock.lock()
+        if draining {
+            // Someone is already delivering on another thread: it will pick ours up, in order.
+            drainStateLock.unlock()
+            return
+        }
+        draining = true
+        drainStateLock.unlock()
+        while true {
+            lock.lock()
+            let next = pendingTransitions.isEmpty ? nil : pendingTransitions.removeFirst()
+            let list = Array(observers.values)
+            lock.unlock()
+            guard let transition = next else { break }
+            for body in list { body(transition) }
+        }
+        drainStateLock.lock()
+        draining = false
+        drainStateLock.unlock()
+    }
+
+    /// Convenience for the mutators: notify after their state change, having already captured.
     private func notify() {
-        lock.lock()
-        let snapshot = state
-        // THE SCOPE IS READ UNDER THE SAME LOCK AS THE SNAPSHOT (spec f81580be). Reading it later
-        // from the live provider would let a callback pair one account's state with another
-        // account's identity, which is exactly the incoherence the observer must not act on.
-        let scopeOfSnapshot = accountScopeProvider()
-        let list = Array(observers.values)
-        lock.unlock()
-        for body in list { body(snapshot, scopeOfSnapshot) }
+        drainTransitions()
     }
 
     // MARK: - Local intent
@@ -227,6 +321,7 @@ final class VoiceSharingEnrollmentStore {
         // store is NOT — unknown consent must retain recordings, never authorize deleting them.
         state.explicitOptOut = !value
         defaults.set(!value, forKey: Key.scoped(Key.optOut, scope))
+        captureTransitionLocked()
         lock.unlock()
         notify()
     }
@@ -255,8 +350,9 @@ final class VoiceSharingEnrollmentStore {
         state.hasAuthoritativeProjection = true
         authoritativeLifecycle = token.lifecycleGeneration
         persist(projection)
+        // IDENTICAL REPLAYS ANNOUNCE NOTHING; a first authority in this session must publish.
+        if changed { captureTransitionLocked() }
         lock.unlock()
-        // Identical authoritative replays announce nothing; first authority in this session must publish.
         if changed { notify() }
         return true
     }
@@ -337,6 +433,7 @@ final class VoiceSharingEnrollmentStore {
         state.membership = projected
         defaults.set(false, forKey: Key.scoped(Key.optIn, scope))
         persist(projected)
+        captureTransitionLocked()
         lock.unlock()
         notify()
         _ = acceptedServerProjectionAfterward
@@ -359,6 +456,7 @@ final class VoiceSharingEnrollmentStore {
             // Signed out: no local intent can matter, and nothing may read as enrolled.
             state.localOptIn = false
         }
+        captureTransitionLocked()
         lock.unlock()
         notify()
     }

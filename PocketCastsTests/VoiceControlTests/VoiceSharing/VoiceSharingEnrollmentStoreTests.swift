@@ -283,10 +283,12 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
         store.setLocalOptIn(true)
         XCTAssertTrue(store.apply(authoritative: projection(revision: "r1"), readUnder: token(store)))
         var moves = 0
-        let tokenID = store.addObserver { _, _ in moves += 1 }
+        let tokenID = store.addObserver { _ in moves += 1 }
         defer { store.removeObserver(tokenID) }
+        let afterBaseline = moves
         store.withdrawLocally(acceptedServerProjectionAfterward: true)
-        XCTAssertEqual(moves, 1, "one membership move must notify observers exactly once")
+        XCTAssertEqual(moves - afterBaseline, 1,
+                       "one membership move must notify observers exactly once")
         withExtendedLifetime(coordinator) {}
     }
 
@@ -298,10 +300,14 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
     func test_applyingTheSameRevisionTwice_isANoOp() {
         let store = makeStore()
         var notifications = 0
-        let id = store.addObserver { _, _ in notifications += 1 }
+        let id = store.addObserver { _ in notifications += 1 }
         defer { store.removeObserver(id) }
 
         store.apply(authoritative: projection(revision: "r7"), readUnder: token(store))
+        // THE BASELINE CALLBACK IS DELIVERED AT REGISTRATION (spec 8a9c057f), so the count from
+        // here on measures TRANSITIONS only. Without this subtraction the replay assertion below
+        // could not tell "one apply" from "one baseline".
+        XCTAssertEqual(notifications, 2, "premise: baseline plus one transition")
         let firstCount = notifications
         // Same revision, same fence: an identical replay must be accepted WITHOUT announcing a transition.
         XCTAssertTrue(store.apply(authoritative: projection(revision: "r7"), readUnder: token(store)),
