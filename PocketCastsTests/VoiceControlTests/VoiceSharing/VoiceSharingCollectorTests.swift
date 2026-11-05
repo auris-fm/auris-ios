@@ -324,8 +324,13 @@ final class VoiceSharingCollectorTests: XCTestCase {
         let entered = DispatchSemaphore(value: 0)
         var delivered: [VoiceSharingCollector.SegmentEvent] = []
         let deliverLock = NSLock()
+        // Withdrawal is modeled by REVOKING this closure (spec e1529db9: explicit withdrawal stops and
+        // purges). An earlier version of this control modeled withdrawal by nil-ing the epoch, which
+        // only worked while `drainNext` compared epochs — an admission gate that no longer exists.
+        // The epoch is provenance; the live consent closure is the dequeue refusal.
+        var consentLive = true
         let collector = VoiceSharingCollector(
-            isCollectionPermitted: { true }, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            isCollectionPermitted: { consentLive }, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.epoch },
             sessionIdentity: { "gen-A" },
@@ -346,6 +351,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         // Withdrawal lands while the completion still sits in the queue.
         enrolledState(false)
         epoch = nil
+        consentLive = false
 
         hold.signal()
         XCTAssertTrue(collector.waitForDrain(), "queue should drain after the sink frees")
