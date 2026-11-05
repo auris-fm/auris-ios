@@ -37,7 +37,10 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
         ServerSettings.userId = "acct-1"
         store = VoiceSharingEnrollmentStore(
             defaults: UserDefaults(suiteName: "GateLossScope-\(UUID().uuidString)")!,
-            accountScopeProvider: { ServerSettings.userId ?? "signed-out" },
+            accountScopeProvider: { [weak self] in
+                self?.consumeScopeSeam()
+                return ServerSettings.userId ?? "signed-out"
+            },
             sessionIdentityProvider: { ServerSettings.userId })
     }
 
@@ -168,11 +171,13 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
                                  + "the consent predicate alone cannot see it")
     }
 
-    /// THE ASSEMBLED-PATH CONTROL (spec f81580be): counting fan-outs proves the predicate, not the
-    /// COMPOSITION. Here an actual drain is in flight and a benign same-account projection lands
-    /// mid-flight; the drain must still reach the wire. Before the fix the fan-out called
-    /// `uploadTrigger.stop()`, which is what killed the live foreground drain after 1 ms.
-    func test_eAnInFlightDrainSurvivesABenignProjectionAndReachesTheWire() async throws {
+    /// THE ASSEMBLED-PATH CONTROL, WITH THE DRAIN GENUINELY SUSPENDED MID-FLIGHT (reviewer 33a2a287
+    /// #3). Calling `triggerDrainIfPermitted()` and immediately applying the projection only proves
+    /// that SCHEDULED work is cancelled. Here the REAL drain is suspended in credential acquisition —
+    /// after admission, inside the transfer path — the benign projection lands there, and only then
+    /// is it released. The upload must still reach the wire. That is the interleaving the live
+    /// defect produced.
+    func test_eASuspendedDrainSurvivesABenignProjectionAndReachesTheWire() async throws {
         store.transitionToAccount(signedIn: true)
         store.setLocalOptIn(true)
         store.apply(
@@ -183,9 +188,21 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
             readUnder: try XCTUnwrap(store.projectionToken()))
 
         let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-        let entry = try makeReadyEntry(queue)
+        _ = try makeReadyEntry(queue)
         let coordinator = VoiceSharingCoordinator(enrollmentStore: store)
         let wire = GateLossWire()
+        // SUSPEND THE REAL DRAIN INSIDE CREDENTIAL ACQUISITION (spec 9db9e74d): the token provider is
+        // consulted by the transport after the drain has been admitted and has begun, so this is
+        // genuinely inside the transfer path — not the pre-entry gate, which ran before drainOnce.
+        let reached = XCTestExpectation(description: "drain reached credential acquisition")
+        let released = GateFlag()
+        // A bounded spin on a flag: an expectation may only be awaited once, and a hard sleep would
+        // hide a real hang behind a timeout.
+        let gate = {
+            reached.fulfill()
+            let deadline = Date().addingTimeInterval(10)
+            while !released.isSet && Date() < deadline { Thread.sleep(forTimeInterval: 0.005) }
+        }
         let trigger = VoiceControlAssembly().makeVoiceSharingUploadTrigger(
             queue: queue,
             isAuthorized: { self.store.consentAllowsCollection },
@@ -194,7 +211,7 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
                     accountScope: ServerSettings.userId ?? "signed-out", enrollmentEpoch: "epoch-1")
             },
             baseURLProvider: { "https://unit.test" },
-            tokenProvider: GateLossTokens(),
+            tokenProvider: GateLossTokens(onAcquire: gate),
             session: wire.session)
         let subscription = coordinator.registerGateLostHandler {
             // THE PRODUCTION HANDLER'S EFFECT: this is the call that cancelled the live drain.
@@ -205,20 +222,230 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
 
         wire.reset()
         trigger.triggerDrainIfPermitted()
-        // THE BENIGN PROJECTION LANDS WHILE THE DRAIN IS IN FLIGHT.
+        await fulfillment(of: [reached], timeout: 10)
+
+        // THE BENIGN PROJECTION LANDS WHILE THE DRAIN IS SUSPENDED MID-TRANSFER-SEQUENCE.
         store.apply(
             authoritative: VoiceSharingMembership(
                 membershipRevision: "rev-2", plan: .free, voiceSharingEnrolled: true,
                 enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "voice-sharing-v1",
                 withdrawalState: .active),
             readUnder: try XCTUnwrap(store.projectionToken()))
+        released.set()
         await trigger.awaitDrainCompletionForTesting()
 
         XCTAssertEqual(wire.uploadRequests, 1,
-                       "the in-flight drain must survive a benign projection and reach the wire")
+                       "a drain suspended mid-flight must survive a benign projection and reach the wire")
         XCTAssertTrue(store.consentAllowsCollection, "premise: consent never left")
-        _ = entry
     }
+
+    /// THE CONTRAST THE SAME CONTROL NEEDS (reviewer 33a2a287 #3): actual loss must stop work that
+    /// is ALREADY suspended mid-flight, not merely prevent it from being scheduled. Without this,
+    /// `test_e` passing would also be satisfied by a trigger that ignores `stop()` entirely.
+    func test_fActualLossStopsASuspendedDrainBeforeTheWire() async throws {
+        store.transitionToAccount(signedIn: true)
+        store.setLocalOptIn(true)
+        store.apply(
+            authoritative: VoiceSharingMembership(
+                membershipRevision: "rev-1", plan: .free, voiceSharingEnrolled: true,
+                enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "voice-sharing-v1",
+                withdrawalState: .active),
+            readUnder: try XCTUnwrap(store.projectionToken()))
+
+        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        _ = try makeReadyEntry(queue)
+        let coordinator = VoiceSharingCoordinator(enrollmentStore: store)
+        let wire = GateLossWire()
+        // SUSPEND THE REAL DRAIN INSIDE CREDENTIAL ACQUISITION (spec 9db9e74d): the token provider is
+        // consulted by the transport after the drain has been admitted and has begun, so this is
+        // genuinely inside the transfer path — not the pre-entry gate, which ran before drainOnce.
+        let reached = XCTestExpectation(description: "drain reached credential acquisition")
+        let released = GateFlag()
+        // A bounded spin on a flag: an expectation may only be awaited once, and a hard sleep would
+        // hide a real hang behind a timeout.
+        let gate = {
+            reached.fulfill()
+            let deadline = Date().addingTimeInterval(10)
+            while !released.isSet && Date() < deadline { Thread.sleep(forTimeInterval: 0.005) }
+        }
+        let trigger = VoiceControlAssembly().makeVoiceSharingUploadTrigger(
+            queue: queue,
+            isAuthorized: { self.store.consentAllowsCollection },
+            currentIdentity: {
+                VoiceSharingUploadIdentity(
+                    accountScope: ServerSettings.userId ?? "signed-out", enrollmentEpoch: "epoch-1")
+            },
+            baseURLProvider: { "https://unit.test" },
+            tokenProvider: GateLossTokens(onAcquire: gate),
+            session: wire.session)
+        let subscription = coordinator.registerGateLostHandler {
+            trigger.stop()
+        }
+        defer { _ = subscription }
+        await coordinator.settleObservedWork()
+
+
+        wire.reset()
+        trigger.triggerDrainIfPermitted()
+        await fulfillment(of: [reached], timeout: 10)
+
+        // A REAL WITHDRAWAL, delivered through the production observer path.
+        store.setLocalOptIn(false)
+        released.set()
+        await trigger.awaitDrainCompletionForTesting()
+
+        XCTAssertEqual(wire.uploadRequests, 0,
+                       "a genuine consent loss must stop a drain that was already in flight")
+        XCTAssertFalse(store.consentAllowsCollection, "premise: consent really left")
+    }
+
+    /// THE INITIALISATION GAP (spec 8a9c057f, reviewer 33a2a287 #2), DRIVEN WITH TWO THREADS AND
+    /// NO REENTRANT STORE CALL. A withdrawal is issued on a second thread while a coordinator is
+    /// being constructed on this one — the reader/registrar window the old code left open. The loss
+    /// must be reported exactly once whichever side wins, because the baseline and the subscription
+    /// are now taken atomically and the withdrawal is a transition like any other.
+    ///
+    /// Nothing here mutates the store from inside a lock-held provider: that reenters the store's
+    /// non-recursive lock and deadlocks, which is what my previous attempt did and why it was
+    /// discarded rather than kept.
+    func test_gAWithdrawalRacingConstructionIsStillReported() throws {
+        store.transitionToAccount(signedIn: true)
+        store.setLocalOptIn(true)
+        store.apply(
+            authoritative: VoiceSharingMembership(
+                membershipRevision: "rev-1", plan: .free, voiceSharingEnrolled: true,
+                enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "voice-sharing-v1",
+                withdrawalState: .active),
+            readUnder: try XCTUnwrap(store.projectionToken()))
+        XCTAssertTrue(store.consentAllowsCollection, "premise: consent starts permitted")
+
+        // THE RACER STAYS LIVE THROUGH CONSTRUCTION AND PAST SUBSCRIPTION, so a withdrawal is
+        // certain to land inside the reader/registrar window AND while the handler is registered.
+        // Stopping it at construction time (my first attempt) raced the opposite way and produced a
+        // bare zero that proved nothing.
+        let started = DispatchSemaphore(value: 0)
+        let stopRacer = GateFlag()
+        let racer = Thread {
+            started.signal()
+            while !stopRacer.isSet {
+                self.store.setLocalOptIn(true)
+                self.store.setLocalOptIn(false)
+            }
+        }
+        racer.start()
+        started.wait()
+
+        let coordinator = VoiceSharingCoordinator(enrollmentStore: store)
+        let counter = FanOutCounter()
+        let subscription = coordinator.registerGateLostHandler { counter.count += 1 }
+        defer { _ = subscription }
+        // Let several withdrawal cycles run against a live subscription before stopping.
+        Thread.sleep(forTimeInterval: 0.05)
+        stopRacer.set()
+        // Join the racer before asserting, so the count is final rather than still moving.
+        while !racer.isFinished { Thread.sleep(forTimeInterval: 0.01) }
+
+        XCTAssertFalse(store.consentAllowsCollection, "premise: consent really left")
+        XCTAssertGreaterThanOrEqual(counter.count, 1,
+                                    "a withdrawal racing construction must be reported, not absorbed")
+    }
+
+    /// THE LOST-OPT-OUT WINDOW, DETERMINISTICALLY (reviewer 33a2a287 #1, spec 4e96ea77).
+    ///
+    /// The old mutators released the state lock and only THEN captured the snapshot, so an opt-out
+    /// that paused there could be overtaken by an opt-in: both captures then read "permitted" and
+    /// the loss was never announced. This control halts the opt-out EXACTLY inside its mutation —
+    /// `accountScopeProvider` is invoked there under the store's own lock — lets a competing opt-in
+    /// and opt-out complete on another thread, then releases it. Every withdrawal must be announced
+    /// exactly once, however the two interleave.
+    ///
+    /// The competitor runs on ITS OWN THREAD and is awaited. Issuing it from inside the provider
+    /// would re-enter the store's non-recursive lock and deadlock — the failure my earlier attempt
+    /// produced, which is why this design avoids it entirely.
+    func test_iAWithdrawalOvertakenByAnotherMutationIsStillReported() throws {
+        store.transitionToAccount(signedIn: true)
+        store.setLocalOptIn(true)
+        store.apply(
+            authoritative: VoiceSharingMembership(
+                membershipRevision: "rev-1", plan: .free, voiceSharingEnrolled: true,
+                enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "voice-sharing-v1",
+                withdrawalState: .active),
+            readUnder: try XCTUnwrap(store.projectionToken()))
+        let coordinator = VoiceSharingCoordinator(enrollmentStore: store)
+        let counter = FanOutCounter()
+        let subscription = coordinator.registerGateLostHandler { counter.count += 1 }
+        defer { _ = subscription }
+
+        // ARM THE SEAM: the next scope read (i.e. the opt-out below, mid-mutation) halts until
+        // the competing mutations have landed.
+        let paused = GateExpectation()
+        let resume = GateFlag()
+        armScopeSeam { 
+            paused.signal()
+            let deadline = Date().addingTimeInterval(10)
+            while !resume.isSet && Date() < deadline { Thread.sleep(forTimeInterval: 0.005) }
+        }
+
+        let optOut = Thread { self.store.setLocalOptIn(false) }
+        optOut.start()
+        XCTAssertEqual(paused.wait(timeout: .now() + 10), .success,
+                       "premise: the opt-out reached its mutation")
+
+        // COMPETING MUTATIONS, on this thread, while the opt-out is held mid-flight.
+        store.setLocalOptIn(true)
+        store.setLocalOptIn(false)
+        resume.set()
+        while !optOut.isFinished { Thread.sleep(forTimeInterval: 0.01) }
+
+        XCTAssertFalse(store.consentAllowsCollection, "premise: consent really left")
+        XCTAssertGreaterThanOrEqual(counter.count, 1,
+                                    "a withdrawal overtaken by other mutations must still be reported")
+    }
+
+    /// THE EVENT THAT MOTIVATED THE NARROWING, AT THE STORE: two consecutive benign projections
+    /// must not be observable as a loss at all — the coordinator's predicate is only meaningful if
+    /// the stream it reads is itself honest about ordering and ownership.
+    func test_hConsecutiveBenignProjectionsLeaveConsentTruthPermitted() throws {
+        store.transitionToAccount(signedIn: true)
+        store.setLocalOptIn(true)
+        for revision in ["rev-1", "rev-2", "rev-3"] {
+            store.apply(
+                authoritative: VoiceSharingMembership(
+                    membershipRevision: revision, plan: .free, voiceSharingEnrolled: true,
+                    enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "voice-sharing-v1",
+                    withdrawalState: .active),
+                readUnder: try XCTUnwrap(store.projectionToken()))
+            XCTAssertTrue(store.consentAllowsCollection, "benign projection \(revision) lost consent")
+        }
+    }
+
+    private var seamAction: (() -> Void)?
+
+    /// Arms a one-shot action to run inside the store's mutation, via its scope provider.
+    private func armScopeSeam(_ action: @escaping () -> Void) { seamAction = action }
+
+    /// Runs (once) the armed seam action, if any.
+    func consumeScopeSeam() {
+        guard let action = seamAction else { return }
+        seamAction = nil
+        action()
+    }
+
+    private final class GateExpectation {
+        private let semaphore = DispatchSemaphore(value: 0)
+        func signal() { semaphore.signal() }
+        func wait(timeout: DispatchTime) -> DispatchTimeoutResult { semaphore.wait(timeout: timeout) }
+    }
+
+    /// A bounded handoff between a test thread and a drain held inside its own task.
+    private final class GateFlag {
+        private let lock = NSLock()
+        private var set_ = false
+        var isSet: Bool { lock.lock(); defer { lock.unlock() }; return set_ }
+        func set() { lock.lock(); set_ = true; lock.unlock() }
+    }
+
+    private final class FanOutCounter { var count = 0 }
 
     /// A SIGNED-OUT transition is a real loss and must still fan out.
     func test_dSignOutStillFansOut() async throws {
@@ -313,7 +540,15 @@ private final class GateLossWire: URLProtocol {
 /// A token provider that hands back a fixed credential without a network round trip, so the control
 /// measures the upload path rather than its auth preamble.
 private final class GateLossTokens: CloudTokenProviding {
-    func token() async -> String? { "tok-acct-1" }
+    private let onAcquire: (() -> Void)?
+    init(onAcquire: (() -> Void)? = nil) { self.onAcquire = onAcquire }
+
+    func token() async -> String? {
+        // CREDENTIAL ACQUISITION happens inside the drain, after admission — the seam the assembled
+        // control uses to suspend real transfer work rather than merely scheduled work.
+        onAcquire?()
+        return "tok-acct-1"
+    }
     func prepare() async {}
     func handleUnauthorized(rejectedToken: String?) async {}
 }
