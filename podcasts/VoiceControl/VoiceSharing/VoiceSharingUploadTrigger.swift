@@ -127,20 +127,28 @@ final class VoiceSharingUploadTrigger {
     /// Read-only: it observes the trigger's own task instead of guessing with yields, so a control
     /// asserting "no foreign upload" knows the drain it was watching actually ran to completion.
     func awaitDrainCompletionForTesting() async {
-        while true {
+        // QUIESCENT = A DRAIN ACTUALLY FINISHED. The drain is published only after it begins, so a
+        // single read can see "in flight, nothing published yet" — a drain in progress, not an idle
+        // trigger. Awaiting the published task once is also not enough: the task clears the flags
+        // inside its own body, so the caller can win the race between the task returning and that
+        // cleanup. Poll for agreement within a bounded budget and fail LOUDLY rather than assert on
+        // a half-finished pass.
+        let deadline = ContinuousClock.now + .seconds(10)
+        while ContinuousClock.now < deadline {
             stateLock.lock()
             let task = drainTaskStorage
             let inFlight = drainInFlight
             stateLock.unlock()
             if let task { await task.value }
             stateLock.lock()
-            let stillInFlight = drainInFlight
-            let next = drainTaskStorage
+            let idle = !drainInFlight && drainTaskStorage == nil
             stateLock.unlock()
-            // No drain running and none published: the trigger is quiescent.
-            if !stillInFlight && next == nil { return }
-            if next == nil && !inFlight && !stillInFlight { return }
+            if idle && !inFlight { return }
+            await Task.yield()
         }
+        // Returns with work still in flight; the caller's assertions then fail on a real
+        // observation instead of this seam inventing a verdict.
+        assertionFailure("awaitDrainCompletionForTesting: a drain never quiesced")
     }
 
     /// CANCELLATION, exercised while the trigger is still alive (reviewer 280f4c52): drop any
