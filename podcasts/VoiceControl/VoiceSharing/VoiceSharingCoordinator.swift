@@ -117,7 +117,12 @@ final class VoiceSharingCoordinator {
 
     func installIdentityInvalidation(
         onNotificationCenter center: NotificationRegistering = NotificationCenter.default,
-        startupAuthReadable: @escaping () -> Bool = { SyncManager.isUserLoggedIn() }
+        startupAuthReadable: @escaping () -> Bool = { SyncManager.isUserLoggedIn() },
+        // The refresh the identity notifications SCHEDULE must be driveable by a control at the
+        // exact boundary where it happens, instead of being replaced afterwards by a separate call
+        // that never awaits those tasks (reviewer 6a607a01).
+        scheduledRefreshClient: VoiceSharingAccountClient? = nil,
+        loginStateReadable: @escaping () -> Bool = { SyncManager.isUserLoggedIn() }
     ) -> () -> Void {
         // Unregister from the center the PREVIOUS installation used — removing on the NEW center would
         // leave the old center with a live observer pointing at this coordinator.
@@ -135,9 +140,10 @@ final class VoiceSharingCoordinator {
             forName: .userLoginDidChange, object: nil, queue: .main
         ) { [weak self] _ in
             guard let self else { return }
-            if SyncManager.isUserLoggedIn() {
+            if loginStateReadable() {
                 self.enrollmentStore.transitionToAccount(signedIn: true)
-                Task { await self.refreshProjectionFromServer() }
+                let task = Task { await self.refreshProjectionFromServer(accountClient: scheduledRefreshClient) }
+                self.scheduledRefreshTasks.append(task)
             } else {
                 self.enrollmentStore.transitionToAccount(signedIn: false)
                 self.consentGateLost()
@@ -148,12 +154,25 @@ final class VoiceSharingCoordinator {
         // session that predates this process — settle the launch state now.
         if startupAuthReadable() {
             enrollmentStore.transitionToAccount(signedIn: true)
-            Task { await self.refreshProjectionFromServer() }
+            let task = Task { await self.refreshProjectionFromServer(accountClient: scheduledRefreshClient) }
+            scheduledRefreshTasks.append(task)
         }
         return { [weak self] in
             guard let self else { return }
             for o in self.identityObservers { center.removeObserver(o) }
             self.identityObservers.removeAll()
+        }
+    }
+
+    /// Tasks scheduled by identity notifications, exposed so a control can AWAIT the work the
+    /// notification actually started rather than racing it.
+    private(set) var scheduledRefreshTasks: [Task<Void, Never>] = []
+
+    func awaitScheduledRefreshes() async {
+        while !scheduledRefreshTasks.isEmpty {
+            let tasks = scheduledRefreshTasks
+            scheduledRefreshTasks.removeAll()
+            for task in tasks { await task.value }
         }
     }
 

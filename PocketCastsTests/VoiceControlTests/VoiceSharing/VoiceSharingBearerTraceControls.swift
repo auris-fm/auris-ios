@@ -70,10 +70,11 @@ final class VoiceSharingBearerTraceControls: XCTestCase {
 
         private func respond() {
             let path = request.url?.path ?? "?"
+            let method = request.httpMethod ?? "?"
             let bearer = request.value(forHTTPHeaderField: "Authorization")?
                 .replacingOccurrences(of: "Bearer ", with: "")
             StubServer.lock.lock()
-            StubServer.requests.append(.init(path: path, bearer: bearer))
+            StubServer.requests.append(.init(method: method, path: path, bearer: bearer))
             let accepted = StubServer.acceptedBearer
             let exchangeStatus = StubServer.exchangeStatus
             let staleExchangeServed = StubServer.serveStaleExchange
@@ -109,6 +110,7 @@ final class VoiceSharingBearerTraceControls: XCTestCase {
         }
 
         struct Request {
+            let method: String
             let path: String
             let bearer: String?
         }
@@ -260,20 +262,25 @@ final class VoiceSharingBearerTraceControls: XCTestCase {
                        "the auth calls carry no bearer header")
     }
 
-    /// The whole recovery runs through the REAL coordinator with the REAL durable queue wired to
-    /// the REAL production gate-loss/purge handler, driven by an actual identity notification:
-    /// a consented recording survives, no purge fires, and recovery alone never invents gate loss.
-    func test_coordinatorIdentityReloadRetainsQueueThroughProductionHandler() async throws {
-        // An authenticated session, so the store's session fence exists and identity notifications
-        // are meaningful. Restored in tearDown by the production code path itself.
+    /// The whole recovery runs through the REAL coordinator, at the boundary where its identity
+    /// notifications actually refresh: the controlled client is injected INTO that boundary, the
+    /// tasks it schedules are awaited, the complete auth state is established and restored, and the
+    /// only requests that ever appear are reads. Restart and account replacement are contrasted.
+    func test_coordinatorIdentityNotificationsRefreshThroughInjectedClientAndNeverMutate() async throws {
+        // Complete auth state, established and restored: the login callback reads syncingEmail.
+        let previousEmail = ServerSettings.syncingEmail()
+        let previousUserID = ServerSettings.userId
+        ServerSettings.setSyncingEmail(email: "ios-control@auris.test")
         ServerSettings.userId = "acct-1"
-        defer { ServerSettings.userId = nil }
+        defer {
+            ServerSettings.setSyncingEmail(email: previousEmail)
+            ServerSettings.userId = previousUserID
+        }
+
         StubServer.reset()
         StubServer.setAccepted("tok-from-refresh")
         StubServer.setStaleExchange(false)
         let store = makeStore()
-        // DIAG
-
         store.setLocalOptIn(true)
         XCTAssertTrue(store.apply(
             authoritative: VoiceSharingMembership(
@@ -289,73 +296,106 @@ final class VoiceSharingBearerTraceControls: XCTestCase {
         let trigger = VoiceControlAssembly().makeVoiceSharingUploadTrigger(
             queue: queue, isAuthorized: { true },
             currentIdentity: { nil }, tokenProvider: StaticToken())
-        // THE PRODUCTION HANDLER: the same one the app installs, wired to the real queue.
+        let collector = VoiceSharingCollector(
+            isCollectionPermitted: { store.consentAllowsCollection },
+            outcomeWaitLimit: .init(milliseconds: 1_000, ceilingMilliseconds: 1_000),
+            sink: { _ in })
+        let sink = VoiceSharingContributionSink(
+            queue: queue, isEnabled: { store.consentAllowsCollection },
+            encoderProvenance: {
+                .init(platform: "ios", appVersion: "test", build: "0",
+                      captureSessionID: "sess-1",
+                      models: .init(vad: nil, wakeword: nil, asr: nil,
+                                    translation: nil, router: nil),
+                      conversionVersion: "v1")
+            })
+        // THE PRODUCTION HANDLER, wired to the real queue; the collector and sink stay alive for the
+        // whole control so their callbacks run too.
         VoiceControlAssembly().installVoiceSharingGateLoss(
-            collector: VoiceSharingCollector(
-                isCollectionPermitted: { store.consentAllowsCollection },
-                outcomeWaitLimit: .init(milliseconds: 1_000, ceilingMilliseconds: 1_000),
-                sink: { _ in }),
-            sink: VoiceSharingContributionSink(
-                queue: queue, isEnabled: { store.consentAllowsCollection },
-                encoderProvenance: {
-                    .init(platform: "ios", appVersion: "test", build: "0",
-                          captureSessionID: "sess-1",
-                          models: .init(vad: nil, wakeword: nil, asr: nil,
-                                        translation: nil, router: nil),
-                          conversionVersion: "v1")
-                }),
-            uploadTrigger: trigger, queue: queue, coordinator: coordinator,
-            // The store is a CLASS: this reads the LIVE current state, not a snapshot taken here.
+            collector: collector, sink: sink, uploadTrigger: trigger,
+            queue: queue, coordinator: coordinator,
             sessionAlive: { true }, consentGone: { store.consentGoneForPurge },
             log: { logged.append($0) })
-        // The production client the coordinator would build, over the recovering provider.
-        let accountClient = VoiceSharingAccountClient(
+
+        // The controlled client, injected AT the notification's refresh boundary.
+        let controlledClient = VoiceSharingAccountClient(
             baseURLProvider: { "https://unit.test" }, tokenProvider: makeProvider(),
             session: makeSession(), sessionIdentity: { "acct-1" }, membershipStore: store)
-
-        // (a) A REAL identity notification (same account re-sign-in) through the coordinator.
         let center = RecordingNotificationCenter()
         let uninstall = coordinator.installIdentityInvalidation(
-            onNotificationCenter: center, startupAuthReadable: { true })
+            onNotificationCenter: center,
+            startupAuthReadable: { true },
+            scheduledRefreshClient: controlledClient,
+            loginStateReadable: { true })
         defer { uninstall() }
-        // Drive the RELOAD the coordinator itself schedules from that notification: it reads the
-        // projection through the same client path it builds in production.
+        // The COLD-START refresh the installation scheduled itself.
+        await coordinator.awaitScheduledRefreshes()
+        XCTAssertFalse(StubServer.snapshot().isEmpty,
+                       "the installation's own cold-start refresh really ran")
+
+        let before = StubServer.snapshot().count
+        // (a) THE REAL NOTIFICATION, and AWAIT the task it schedules.
         let delivered = center.post(name: .userLoginDidChange)
         XCTAssertGreaterThan(delivered, 0, "the coordinator registered for the identity notification")
-        await coordinator.refreshProjectionFromServer(accountClient: accountClient)
+        await coordinator.awaitScheduledRefreshes()
 
-        XCTAssertEqual(queue.readyEntries(), [entry],
-                       "the recording survives an identity-driven reload")
+        // Sequence through that same recovery: reads only, and no withdrawal/enrollment request.
+        let recoveryRequests = Array(StubServer.snapshot().dropFirst(before))
+        XCTAssertFalse(recoveryRequests.isEmpty,
+                       "the notification's refresh actually hit the wire: \(recoveryRequests)")
+        XCTAssertTrue(recoveryRequests.allSatisfy { $0.method == "GET" },
+                      "the identity refresh sends only GETs: \(recoveryRequests.map { "\($0.method) \($0.path)" })")
+        XCTAssertFalse(recoveryRequests.contains { $0.path.contains("/withdrawal") || $0.path.contains("/enrollment") },
+                       "recovery never mints a withdrawal/enrollment request")
+
+        XCTAssertEqual(queue.readyEntries(), [entry], "the recording survives the identity reload")
         XCTAssertFalse(store.consentGoneForPurge, "recovery alone never closes the consent gate")
         XCTAssertTrue(purgeDecisions(logged).isEmpty, "no purge decision was taken: \(logged)")
         XCTAssertEqual(store.currentAuthoritativeState?.membership.membershipRevision, "rev-2",
                        "the recovered projection is applied")
 
-        // (b) A REFUSED read (the incident): still no purge, still retained, still opted in. Here the
-        // exchange keeps minting the stale credential, so the read is refused exactly as at 19:58.
+        // (b) A REFUSED read (the incident shape): still no purge, still retained, choice unchanged.
         StubServer.reset()
-        await coordinator.refreshProjectionFromServer(accountClient: VoiceSharingAccountClient(
+        let refreshStale = VoiceSharingAccountClient(
             baseURLProvider: { "https://unit.test" }, tokenProvider: makeProvider(),
-            session: makeSession(), sessionIdentity: { "acct-1" }, membershipStore: store))
+            session: makeSession(), sessionIdentity: { "acct-1" }, membershipStore: store)
+        let refusedDelivered = center.post(name: .userLoginDidChange)
+        XCTAssertGreaterThan(refusedDelivered, 0)
+        await coordinator.awaitScheduledRefreshes()
+        // The injected client is the recovered one; drive the refusal explicitly through the same
+        // boundary's client type so the stanza is deterministic.
+        await coordinator.refreshProjectionFromServer(accountClient: refreshStale)
         XCTAssertEqual(queue.readyEntries(), [entry], "a refused read purges nothing")
-        XCTAssertEqual(queue.readyEntries(), [entry], "the recording is retained after recovery")
-
-        // (b2) A REFUSED read leaves the persisted choice and the gate open (the incident shape:
-        // one refused read must never become a withdrawal).
-        XCTAssertFalse(store.consentGoneForPurge,
-                       "a refused read is not a withdrawal")
-        XCTAssertFalse(store.currentState.explicitOptOut,
-                       "no opt-out was recorded by a refused read")
-        // The persisted CHOICE is unchanged; whether it currently permits capture also depends on the
-        // last applied projection, which the production code deliberately degrades to unknown after a
-        // failed read rather than guessing. The choice is the fact asserted here.
+        XCTAssertFalse(store.consentGoneForPurge, "a refused read is not a withdrawal")
+        XCTAssertFalse(store.currentState.explicitOptOut, "no opt-out was recorded by a refused read")
         let persisted = VoiceSharingEnrollmentStore(
             defaults: defaults, accountScopeProvider: { "acct-1" },
             sessionIdentityProvider: { "acct-1" })
         XCTAssertTrue(persisted.currentState.localOptIn,
                       "the user's sharing choice survives a refused read on disk")
+        XCTAssertTrue(purgeDecisions(logged).isEmpty, "still no purge decision: \(logged)")
 
-        // (c) CONTRAST — explicit withdrawal still purges, through the SAME production handler.
+        // (c) RESTART: a fresh store over the same persisted domain, and a fresh queue over the same
+        // root — the choice and the recording both survive.
+        let restartedStore = VoiceSharingEnrollmentStore(
+            defaults: defaults, accountScopeProvider: { "acct-1" },
+            sessionIdentityProvider: { "acct-1" })
+        XCTAssertTrue(restartedStore.currentState.localOptIn, "the choice survives a restart")
+        let restartedQueue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertEqual(restartedQueue.readyEntries(), [entry], "the recording survives a restart")
+
+        // (d) ACCOUNT REPLACEMENT: the other account inherits neither the choice nor the recordings.
+        let otherStore = VoiceSharingEnrollmentStore(
+            defaults: defaults, accountScopeProvider: { "acct-2" },
+            sessionIdentityProvider: { "acct-2" })
+        XCTAssertFalse(otherStore.currentState.localOptIn,
+                       "account 2 does not inherit account 1's recorded choice")
+        XCTAssertFalse(otherStore.currentState.explicitOptOut,
+                       "account 2 is not told account 1 withdrew")
+        XCTAssertEqual(queue.readyEntries(), [entry],
+                       "the recordings stay with the account they belong to")
+
+        // (e) CONTRAST — explicit withdrawal still purges through the SAME production handler.
         _ = store.withdrawLocally(acceptedServerProjectionAfterward: false)
         coordinator.consentGateLostForTesting()
         XCTAssertTrue(queue.readyEntries().isEmpty, "withdrawal clears pending recordings")

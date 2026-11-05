@@ -333,6 +333,13 @@ final class VoiceSharingAccountClient {
     /// itself, so there is exactly one pre-await capture per operation.
     private func op_body(of operation: DeletionOperation) -> [String: Any] { operation.body }
 
+    /// The credential this client would present right now, or nil when it has none. Exposed so a
+    /// caller can fail closed BEFORE dialling a resume, instead of learning about a missing or
+    /// rejected credential from the response it already sent (incident review).
+    func currentCredential() async -> String? {
+        await tokenProvider.token()
+    }
+
     private func makeRequest(path: String, method: String, body: [String: Any]?) async -> URLRequest? {
         guard let url = VoiceSharingOrigin.url(origin: baseURLProvider(), path: path) else { return nil }
         var request = URLRequest(url: url)

@@ -621,6 +621,14 @@ final class VoiceSharingAccountModel: ObservableObject {
         updateMembership()
     }
 
+    /// Fail closed: a resume needs a live credential AND an authenticated session. Without either,
+    /// nothing is dialled and the surface says "sign in again".
+    private func authorized() async -> Bool {
+        guard session() != nil else { return false }
+        guard let credential = await client.currentCredential(), !credential.isEmpty else { return false }
+        return true
+    }
+
     private func updateMembership() {
         let state = store.currentAuthoritativeState
         membership = state?.membership
@@ -748,6 +756,13 @@ final class VoiceSharingAccountModel: ObservableObject {
                 if stamp == sent { mutation = nil; busy = false; membershipStatus = .unavailable }
                 return
             }
+            // Authorization re-checked BEFORE the resume: a retry must never dial a request the
+            // account cannot authorize, whatever the last recorded outcome was (incident review).
+            guard await authorized() else {
+                mutation = nil
+                if stamp == sent { busy = false; membershipStatus = .unauthorized }
+                return
+            }
             await performMutation(operation, under: sent)
         } else if withdrawing {
             guard let sent = begin() else { return }
@@ -780,7 +795,12 @@ final class VoiceSharingAccountModel: ObservableObject {
             store.applyConflict(current: projection, readUnder: issuedUnder)
             mutation = nil // Never replay conflicted opt-in against a newer revision.
             membershipStatus = .conflict
-        case .unauthorized: membershipStatus = .unauthorized
+        case .unauthorized:
+            // INCIDENT 2026-11-05 (reviewer e66c294a): a refused mutation used to keep `mutation`
+            // alive, so any later resume re-sent it — under whatever credential existed then.
+            // A refused intent is DROPPED: the user's next attempt begins a NEW operation.
+            mutation = nil
+            membershipStatus = .unauthorized
         case .refused(let reason):
             FileLog.shared.addMessage("[VoiceSharing] enrollment refused by server: \(reason)")
             mutation = nil; membershipStatus = .refused(reason)
@@ -806,6 +826,9 @@ final class VoiceSharingAccountModel: ObservableObject {
     func retryDeletion() async {
         storeChanged()
         guard deletionStatus != .sending, let operation = deletion else { return }
+        guard await authorized() else {
+            deletion = nil; deletionStatus = .unauthorized; return
+        }
         await performDeletion(operation)
     }
 
@@ -816,7 +839,7 @@ final class VoiceSharingAccountModel: ObservableObject {
         guard session() == operation.originatingGeneration, deletion?.requestID == operation.requestID else { storeChanged(); return }
         switch result {
         case .pending(let id): deletion = nil; deletionStatus = .pending(id)
-        case .unauthorized: deletionStatus = .unauthorized
+        case .unauthorized: deletion = nil; deletionStatus = .unauthorized
         case .refused(let reason): deletion = nil; deletionStatus = .refused(reason)
         case .unavailableBackend: deletionStatus = .unavailable
         }
