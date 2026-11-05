@@ -654,16 +654,18 @@ class VoiceAsrEngine {
                 mic: utterance,
                 reference: observation?.samples ?? [],
                 segmentEndOffset: segmentEndOffset) {
-                // BLEED STAGE REASON MUST BE ENUMERATED (spec 1e79e5b4). The deployed record schema
-                // and `VoiceSharingRecordBinding` both accept only
-                // no_playback_reference | reference_unavailable | bleed_detector_disabled |
-                // outcome_wait_expired here. The previous "playback_bleed" was in neither, so every
-                // bleed-rejected segment failed validation and was dropped silently at the sink —
-                // the fact that reached the dataset was nothing at all. The detector DID consult a
-                // playback reference and DID produce a verdict; the reason why recognition did not
-                // run is carried separately on the ASR stage as `rejected_by_bleed` (set by the
-                // collector alongside `.rejectedBleed`).
-                contributionCollector?.engineReported(stage: "bleed", outcome: .init(state: "unknown", reason: "no_playback_reference"), context: utteranceContext, decision: "overlap")
+                // THE DETECTOR RAN AND RETURNED A VERDICT (reviewer 7f83f874): the bleed stage is
+                // `completed` with `decision: overlap` and NO reason, because that is what actually
+                // happened. An earlier version of this fix used `unknown`/`no_playback_reference`,
+                // which passes the deployed schema's membership check but asserts the OPPOSITE of
+                // the observed fact — "there was no reference" when the detector had just consulted
+                // one. A well-formed record that misstates an observation is worse than a rejected
+                // one, because it enters the dataset looking clean (@cloud 1cb92ee6). The original
+                // "playback_bleed" was in neither enumeration nor the deployed schema
+                // (`record_schema.ts:93`), so every bleed rejection failed validation and vanished.
+                // Why recognition did not run is carried separately, on the ASR stage, as
+                // `not_run`/`rejected_by_bleed`.
+                contributionCollector?.engineReported(stage: "bleed", outcome: .init(state: "completed", reason: nil), context: utteranceContext, decision: "overlap")
                 contributionCollector?.segmentRejected(kind: .rejectedBleed, samples: utterance.count, context: utteranceContext)
                 FileLog.shared.addMessage("[VoicePipeline] → drop (bleed filter)")
                 return

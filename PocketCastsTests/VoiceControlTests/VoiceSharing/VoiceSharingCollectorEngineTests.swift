@@ -27,6 +27,10 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
     /// closure, not a policy/lease object. The store state these controls set is PROVENANCE stamped on
     /// the emitted record, so it is still established here exactly as before.
     private func openGate(enrolled: Bool) -> Void {
+        // The ADMISSION decision is the consent closure, which these controls open and close directly;
+        // the store state below is provenance stamped on the record. Setting only the store left the
+        // closure closed, so every capture in this class was refused at `speechStarted`.
+        engineTestGateOpen = enrolled
         storeState.localOptIn = enrolled
         storeState.hasAuthoritativeProjection = enrolled
         if !enrolled { storeState.membership = .unavailable }
@@ -958,6 +962,10 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             -> [String: Any] {
             collector.segmentationEnded(ctx)
             collector.speechCompleted([Float](repeating: 0.01, count: 640), context: ctx)
+            // `segmentationEnded` arms deferred completion, so the segment emits only here; without
+            // this call the `.completed` event never exists and the unwrap below crashes (the crash
+            // was previously masked because the runner restarts and reports the suite as passed).
+            collector.finalizeDeferredCompletion(context: ctx)
             let completed = collectedEvents.first {
                 $0.captureID == ctx.id && $0.kind == .completed
             }
@@ -1718,6 +1726,13 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         let bleed = try XCTUnwrap(observations["bleed"] as? [String: Any])
         XCTAssertEqual(bleed["decision"] as? String, "overlap",
                        "the bleed stage keeps its own observed decision")
+        // THE DETECTOR RAN, SO THE STAGE IS COMPLETED (reviewer 7f83f874). Reporting
+        // `unknown`/`no_playback_reference` would satisfy the schema's membership check while
+        // asserting that no reference existed — the opposite of the overlap verdict observed here.
+        XCTAssertEqual(bleed["state"] as? String, "completed",
+                       "an observed verdict is a completed observation, not an unknown one")
+        XCTAssertNil(bleed["reason"],
+                     "a completed stage carries no reason; the skip reason belongs to ASR")
         _ = try queue.boundIdentity(of: ready[0])
         engine.stop()
     }
