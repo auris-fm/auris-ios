@@ -31,7 +31,9 @@ final class VoiceSharingCoordinator {
     func refreshCohortAttributes() { cohortPublisher.refresh() }
 
     init(enrollmentStore: VoiceSharingEnrollmentStore = .shared,
-         cohortPublisher: VoiceSharingCohortPublisher? = nil) {
+         cohortPublisher: VoiceSharingCohortPublisher? = nil,
+         scheduledWorkObserver: ScheduledWorkObserver? = nil) {
+        self.scheduledWorkObserver = scheduledWorkObserver
         let store = enrollmentStore ?? .shared
         self.enrollmentStore = store
         self.cohortPublisher = cohortPublisher ?? VoiceSharingCohortPublisher(store: store)
@@ -143,7 +145,7 @@ final class VoiceSharingCoordinator {
             if loginStateReadable() {
                 self.enrollmentStore.transitionToAccount(signedIn: true)
                 let task = Task { await self.refreshProjectionFromServer(accountClient: scheduledRefreshClient) }
-                self.track(task)
+                self.scheduleRefresh(task)
             } else {
                 self.enrollmentStore.transitionToAccount(signedIn: false)
                 self.consentGateLost()
@@ -155,7 +157,7 @@ final class VoiceSharingCoordinator {
         if startupAuthReadable() {
             enrollmentStore.transitionToAccount(signedIn: true)
             let task = Task { await refreshProjectionFromServer(accountClient: scheduledRefreshClient) }
-            track(task)
+            scheduleRefresh(task)
         }
         return { [weak self] in
             guard let self else { return }
@@ -164,43 +166,46 @@ final class VoiceSharingCoordinator {
         }
     }
 
-    /// Tasks scheduled by identity notifications. BOUNDED on purpose (reviewer 2ba0220e): every
-    /// app notification schedules one, so an unbounded list is a leak in normal operation. A
-    /// finished task retires itself, and the list is capped so even a stuck task cannot grow it.
-    private var scheduledRefreshTasks: [Task<Void, Never>] = []
-    private let scheduledRefreshLock = NSLock()
-    private static let scheduledRefreshLimit = 8
-
-    private func track(_ task: Task<Void, Never>) {
-        scheduledRefreshLock.lock()
-        scheduledRefreshTasks.append(task)
-        if scheduledRefreshTasks.count > Self.scheduledRefreshLimit {
-            scheduledRefreshTasks.removeFirst(scheduledRefreshTasks.count - Self.scheduledRefreshLimit)
-        }
-        scheduledRefreshLock.unlock()
-        // Retire on completion, so steady-state memory does not depend on a test draining it.
-        Task.detached { [weak self] in
-            _ = await task.value
-            self?.forget(task)
-        }
+    /// Scheduled-work OBSERVER (spec c2d2f7fe): the coordinator keeps NO registry of its refresh
+    /// tasks. Production passes nothing, so a notification's refresh is an ordinary fire-and-forget
+    /// `Task` that the runtime owns and releases — there is no list to grow, no cap to enforce and
+    /// no handle to leak. A control passes an observer to be handed each task as it is created, so
+    /// it can settle exactly the work the notification started.
+    ///
+    /// Why not a registry: an earlier version kept one and capped it. Capping discards handles for
+    /// work that is still running, so `awaitScheduledRefreshes()` could no longer await it
+    /// (reviewer 4546a238) — a test convenience that silently changes what is observable.
+    struct ScheduledWorkObserver {
+        let didSchedule: (Task<Void, Never>) -> Void
+        init(didSchedule: @escaping (Task<Void, Never>) -> Void) { self.didSchedule = didSchedule }
     }
 
-    private func forget(_ task: Task<Void, Never>) {
-        scheduledRefreshLock.lock()
-        scheduledRefreshTasks.removeAll { $0 == task }
-        scheduledRefreshLock.unlock()
-    }
+    private let scheduledWorkObserver: ScheduledWorkObserver?
 
-    /// Awaits the refreshes that identity notifications started. Safe in production (usually empty)
-    /// and used by controls to observe exactly the work a notification caused.
-    func awaitScheduledRefreshes() async {
+    /// Awaits the work a control's observer captured. Only meaningful when an observer was
+    /// injected; in production there is nothing to await and this returns immediately.
+    private var capturedWork: [Task<Void, Never>] = []
+    private let capturedWorkLock = NSLock()
+
+    func settleObservedWork() async {
         while true {
-            scheduledRefreshLock.lock()
-            let tasks = scheduledRefreshTasks
-            scheduledRefreshLock.unlock()
+            capturedWorkLock.lock()
+            let tasks = capturedWork
+            capturedWorkLock.unlock()
             guard !tasks.isEmpty else { return }
             for task in tasks { await task.value }
+            capturedWorkLock.lock()
+            capturedWork.removeAll { tasks.contains($0) }
+            capturedWorkLock.unlock()
         }
+    }
+
+    private func scheduleRefresh(_ task: Task<Void, Never>) {
+        guard let scheduledWorkObserver else { return }
+        capturedWorkLock.lock()
+        capturedWork.append(task)
+        capturedWorkLock.unlock()
+        scheduledWorkObserver.didSchedule(task)
     }
 
     // MARK: - Projection refresh

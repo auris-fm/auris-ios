@@ -44,6 +44,8 @@ final class VoiceSharingSurfaceRefreshControls: XCTestCase {
 
         struct Request { let method: String; let path: String; let bearer: String? }
         private static var requests: [Request] = []
+        /// When set, the NEXT projection GET answers 401 regardless of the bearer — a real refusal.
+        nonisolated(unsafe) static var denyNextProjection = false
 
         override class func canInit(with request: URLRequest) -> Bool { true }
         override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -62,7 +64,7 @@ final class VoiceSharingSurfaceRefreshControls: XCTestCase {
             switch path {
             case CloudAuthTokenProvider.tokenPath:
                 status = 200
-            case VoiceSharingAccountClient.projectionPath where bearer == "tok-surface":
+            case VoiceSharingAccountClient.projectionPath where !Wire.denyNextProjection && bearer == "tok-surface":
                 status = 200
             case VoiceSharingAccountClient.projectionPath:
                 status = 401
@@ -94,7 +96,7 @@ final class VoiceSharingSurfaceRefreshControls: XCTestCase {
         }
 
         static func reset() {
-            lock.lock(); requests = []; lock.unlock()
+            lock.lock(); requests = []; denyNextProjection = false; lock.unlock()
         }
         static func recorded() -> [Request] {
             lock.lock(); defer { lock.unlock() }
@@ -106,6 +108,24 @@ final class VoiceSharingSurfaceRefreshControls: XCTestCase {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [Wire.self]
         return URLSession(configuration: configuration)
+    }
+
+    /// A credential source a control can hold open: `token()` suspends until released, which is the
+    /// window a replacement can land in.
+    private final class GatedTokens: CloudTokenProviding {
+        private let gate = NSCondition()
+        private var open = false
+        private var value: String?
+        private var started = false
+        func release(_ token: String?) { gate.lock(); value = token; open = true; gate.broadcast(); gate.unlock() }
+        func hasStarted() -> Bool { gate.lock(); defer { gate.unlock() }; return started }
+        func token() async -> String? {
+            gate.lock(); started = true; gate.broadcast()
+            while !open { gate.wait() }
+            let v = value; gate.unlock()
+            return v
+        }
+        func handleUnauthorized(rejectedToken: String?) async {}
     }
 
     private func makeProvider() -> CloudAuthTokenProvider {
@@ -136,10 +156,23 @@ final class VoiceSharingSurfaceRefreshControls: XCTestCase {
     /// A real authenticated session: without one the rows render signed-out and the read is
     /// correctly not attempted, so every control below depends on this being set.
     private func establishSession() {
+        saveSession()
         ServerSettings.userId = "acct-surface"
         ServerSettings.setSyncingEmail(email: "surface@unit.test")
     }
 
+    /// Restores the PREVIOUS global account/email rather than clearing them (reviewer 4546a238):
+    /// other suites share these globals, and a control must not leave them blank.
+    private var previousEmail: String?
+    private var previousUserID: String?
+    private func saveSession() {
+        previousEmail = ServerSettings.syncingEmail()
+        previousUserID = ServerSettings.userId
+    }
+    private func restoreSession() {
+        ServerSettings.setSyncingEmail(email: previousEmail)
+        ServerSettings.userId = previousUserID
+    }
     private func clearSession() {
         ServerSettings.userId = nil
         ServerSettings.setSyncingEmail(email: nil)
@@ -151,7 +184,7 @@ final class VoiceSharingSurfaceRefreshControls: XCTestCase {
     /// carrying the credential the provider yielded.
     func test_openingTheSharingSurfaceIssuesTheAccountProjectionGet() async throws {
         establishSession()
-        defer { clearSession() }
+        defer { restoreSession() }
         Wire.reset()
         let model = makeHostModel()
         XCTAssertTrue(model.canAct(in: model.accountActionSession),
@@ -173,7 +206,7 @@ final class VoiceSharingSurfaceRefreshControls: XCTestCase {
     /// dialled. (The body-level `.task` itself is not observable from a unit host.)
     func test_theAppearanceEntryPointIsTheOneThatIssuesTheRead() async throws {
         establishSession()
-        defer { clearSession() }
+        defer { restoreSession() }
         Wire.reset()
         let model = makeHostModel()
 
@@ -186,7 +219,7 @@ final class VoiceSharingSurfaceRefreshControls: XCTestCase {
     /// The read is READ-ONLY: opening the surface must never dial withdrawal, enrollment or data.
     func test_theSurfaceReadNeverTouchesAMutatingRoute() async throws {
         establishSession()
-        defer { clearSession() }
+        defer { restoreSession() }
         Wire.reset()
         let model = makeHostModel()
 
@@ -215,11 +248,38 @@ final class VoiceSharingSurfaceRefreshControls: XCTestCase {
                       "a signed-out surface must not dial the service: \(Wire.recorded().map(\.path))")
     }
 
+    /// A REAL 401 (reviewer 4546a238: the earlier version sent two successful reads with the same
+    /// token, which tested nothing). The stub refuses the projection, and the surface must report
+    /// it without ever becoming a withdrawal or enrollment.
+    func test_aRealUnauthorizedProjectionIsReportedAndStaysReadOnly() async throws {
+        establishSession()
+        defer { restoreSession() }
+        Wire.reset()
+        Wire.lock.lock(); Wire.denyNextProjection = true; Wire.lock.unlock()
+        let model = makeHostModel()
+
+        await VoiceSharingSectionHost.appearanceRefresh(model)
+
+        let projections = Wire.recorded().filter { $0.path == VoiceSharingAccountClient.projectionPath }
+        XCTAssertEqual(projections.count, 1, "the refused read must actually reach the wire")
+        XCTAssertEqual(model.membershipStatus, .unavailable,
+                       "a 401 is reported as unavailable, not as a withdrawal")
+        // Credential acquisition legitimately POSTs to the auth routes; what must never appear is a
+        // request to the ACCOUNT's mutating routes.
+        let mutating = Wire.recorded().filter {
+            $0.path == VoiceSharingAccountClient.withdrawalPath
+                || $0.path == VoiceSharingAccountClient.enrollmentPath
+                || $0.path == VoiceSharingAccountClient.dataPath
+        }
+        XCTAssertTrue(mutating.isEmpty,
+                      "a refused read issues no account mutation: \(mutating.map { "\($0.method) \($0.path)" })")
+    }
+
     /// A refused read is applied as unavailable, and it does not become a mutation: this is the one
     /// path the incident actually exercised on the device.
     func test_aRefusedProjectionIsReportedAndStaysReadOnly() async throws {
         establishSession()
-        defer { clearSession() }
+        defer { restoreSession() }
         Wire.reset()
         let model = makeHostModel()
 
