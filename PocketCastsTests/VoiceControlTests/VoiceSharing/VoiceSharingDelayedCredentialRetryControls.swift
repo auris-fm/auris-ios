@@ -112,15 +112,18 @@ final class VoiceSharingDelayedCredentialRetryControls: XCTestCase {
         return URLSession(configuration: configuration)
     }
 
+    /// EVERY identity reader follows the live session (reviewer b4d5eb71). Pinning the client's
+    /// `sessionIdentity` to a constant made an account move invisible to the client's own token
+    /// fence, which is exactly the fence this control is meant to exercise.
     @MainActor
     private func makeModel(tokens: CloudTokenProviding)
         -> (VoiceSharingAccountModel, VoiceSharingEnrollmentStore) {
         let store = VoiceSharingEnrollmentStore(
-            defaults: defaults, accountScopeProvider: { "acct-1" },
-            sessionIdentityProvider: { "acct-1" })
+            defaults: defaults, accountScopeProvider: { ServerSettings.userId ?? "signed-out" },
+            sessionIdentityProvider: { ServerSettings.userId })
         let client = VoiceSharingAccountClient(
             baseURLProvider: { "https://unit.test" }, tokenProvider: tokens,
-            session: makeSession(), sessionIdentity: { "acct-1" }, membershipStore: store)
+            session: makeSession(), sessionIdentity: { ServerSettings.userId }, membershipStore: store)
         // The session reader follows `ServerSettings.userId`, as production's does. Pinning it to a
         // constant made the transition in the control invisible to the model's own fences, which is
         // why an earlier version could not have caught a stale completion.
@@ -234,6 +237,11 @@ final class VoiceSharingDelayedCredentialRetryControls: XCTestCase {
 
             XCTAssertNil(model.pendingDeletionRequestIDForTesting,
                          "the operation belonged to the retired session and was not resurrected")
+            // NO RETIRED DELETE REACHED THE WIRE: the client's token fence must have refused it,
+            // not merely the model's state.
+            let deletes = Wire.deletionBodies()
+            XCTAssertTrue(deletes.isEmpty,
+                          "the retired session's DELETE must not be sent: \(deletes)")
             // The STALE COMPLETION specifically: the retired attempt returned `.unavailableBackend`
             // (its session moved), which RETAINS an operation. If that branch were applied, the
             // retired deletion would still be pending now. It must not be.

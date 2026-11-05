@@ -123,6 +123,26 @@ final class VoiceSharingUploadTrigger {
         return drainInFlight
     }
 
+    /// Awaits the drain a lifecycle event started, or the coalesced follow-up it may schedule.
+    /// Read-only: it observes the trigger's own task instead of guessing with yields, so a control
+    /// asserting "no foreign upload" knows the drain it was watching actually ran to completion.
+    func awaitDrainCompletionForTesting() async {
+        while true {
+            stateLock.lock()
+            let task = drainTaskStorage
+            let inFlight = drainInFlight
+            stateLock.unlock()
+            if let task { await task.value }
+            stateLock.lock()
+            let stillInFlight = drainInFlight
+            let next = drainTaskStorage
+            stateLock.unlock()
+            // No drain running and none published: the trigger is quiescent.
+            if !stillInFlight && next == nil { return }
+            if next == nil && !inFlight && !stillInFlight { return }
+        }
+    }
+
     /// CANCELLATION, exercised while the trigger is still alive (reviewer 280f4c52): drop any
     /// pending completion registration, clear the slot, and refuse further work until cancelled
     /// tasks have drained. A cancelled trigger must neither send nor keep waking up.

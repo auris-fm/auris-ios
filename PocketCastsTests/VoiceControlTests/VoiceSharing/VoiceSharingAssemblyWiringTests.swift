@@ -728,9 +728,11 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         let realTransport = VoiceSharingUploadTransport(
             baseURLProvider: { "https://unit.test" },
             tokenProvider: SuspendingTokenProvider {
-                // The move lands INSIDE the credential await, provably.
+                // The move lands INSIDE the credential await, provably. It must be an ACCOUNT move:
+                // per spec 4afc6e43 an epoch-only move for the SAME owner is a re-enrollment and is
+                // deliberately NOT fenced, so an epoch-only move here asserts nothing.
                 box.current = VoiceSharingUploadIdentity(
-                    accountScope: "acct-A", enrollmentEpoch: "epoch-2")
+                    accountScope: "acct-B", enrollmentEpoch: "epoch-2")
             },
             session: URLSession(configuration: configuration))
 
@@ -747,6 +749,10 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
             request: request, admittedIdentity: admitted.identity,
             identityFence: { box.current })
 
+        // THE MOVE HAPPENED (the control's premise): the token provider ran and moved the ACCOUNT.
+        XCTAssertEqual(box.current?.accountScope, "acct-B",
+                       "the credential await really moved the account — otherwise this proves nothing")
+        print("DIAG7 result=\(result) count=\(AssemblyIntercept.requestCount) box=\(String(describing: box.current))")
         guard case .transportFailure = result else {
             return XCTFail("a moved identity at the credential boundary must send nothing, got \(result)")
         }
@@ -775,7 +781,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
             baseURLProvider: {
                 // This callback runs between the two fences — exactly where a move must be caught.
                 box.current = VoiceSharingUploadIdentity(
-                    accountScope: "acct-A", enrollmentEpoch: "epoch-2")
+                    accountScope: "acct-B", enrollmentEpoch: "epoch-2")
                 return "https://unit.test"
             },
             tokenProvider: StaticTokenProvider(token: "tok"),
@@ -873,6 +879,24 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
 
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [AssemblyIntercept.self]
+        // PROVE THE WIRE IS LIVE FIRST (reviewer b4d5eb71): a count of zero is also what a fixture
+        // that never reaches the wire produces, so this control asserts the intercept works before
+        // asserting the epoch move does not suppress it.
+        let probeTransport = VoiceSharingUploadTransport(
+            baseURLProvider: { "https://unit.test" }, tokenProvider: FixedTokenProvider("tok-probe"),
+            session: URLSession(configuration: configuration))
+        AssemblyIntercept.reset(for: "epoch-move-complement-probe")
+        AssemblyIntercept.responder = { _ in
+            (HTTPURLResponse(url: URL(string: "https://unit.test/x")!, statusCode: 200,
+                             httpVersion: nil, headerFields: nil)!, Data())
+        }
+        var probe = URLRequest(url: probeTransport.endpoint!)
+        probe.httpMethod = "POST"
+        probe.httpBody = Data("probe".utf8)
+        _ = try await URLSession(configuration: configuration).data(for: probe)
+        XCTAssertEqual(AssemblyIntercept.requestCount, 1,
+                       "POSITIVE CONTROL: the intercept observes a plain request, so 0 below means something")
+
         let realTransport = VoiceSharingUploadTransport(
             baseURLProvider: { "https://unit.test" },
             tokenProvider: SuspendingTokenProvider {
@@ -900,14 +924,24 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         defer { AssemblyIntercept.responder = nil }
 
         let outcome = await uploader.upload(entry)
-        // THE PROPERTY: the epoch move is NOT treated as an ownership change, so the attempt is not
-        // revoked. (The stub answers 503, so the outcome settles as a retry — what matters is that
-        // the fence let the SAME account's upload proceed instead of refusing it.)
+        // THE PROPERTY, asserted ON THE WIRE (reviewer b4d5eb71): "not revoked" would also accept an
+        // unavailable outcome, so the request itself must be observed reaching the intercept.
         if case .revoked = outcome {
             return XCTFail("an epoch-only change must not revoke the SAME account's own upload")
         }
+        XCTAssertEqual(AssemblyIntercept.requestCount, 1,
+                       "the SAME account's upload actually reached the wire despite the epoch move")
         XCTAssertTrue(queue.readyEntries().contains { $0.name == entry.name },
                       "the entry is retained for its owning identity")
+    }
+
+    /// A credential that always resolves, for the wire-liveness probe.
+    private final class FixedTokenProvider: CloudTokenProviding {
+        private let value: String
+        init(_ value: String) { self.value = value }
+        func token() async -> String? { value }
+        func prepare() async {}
+        func handleUnauthorized(rejectedToken: String?) async {}
     }
 
     /// Token provider that runs a hook inside `token()` — proves a move happens while the
