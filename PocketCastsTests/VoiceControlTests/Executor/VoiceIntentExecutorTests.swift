@@ -76,6 +76,44 @@ final class VoiceIntentExecutorTests: XCTestCase {
         )
     }
 
+    /// TASK 90 SNAPSHOT CONTROL (spec cloud-assistant.md, playback-snapshot): when the intent
+    /// carries the utterance-start snapshot, the executor dispatches EXACTLY that context and
+    /// does NOT consult the live provider at dispatch time — a provider consult here would be
+    /// the resample the spec forbids. Playback advanced between utterance start and dispatch
+    /// is simulated by provider context ≠ snapshot context.
+    func test_execute_snapshotContextIsDispatchedVerbatim_andProviderIsNotResampled() async {
+        let snapshot = PlaybackContext(
+            episodeId: "ep-at-utterance",
+            podcastId: "pod-at-utterance",
+            referencePositionMs: 1_000,
+            clientPositionMs: 1_000,
+            recentReferencePositions: [900, 1_000],
+            previousReferencePositionMs: 900
+        )
+        // Live playback moved on after the utterance: different episode, position advanced.
+        mockPlaybackContextProvider.context = PlaybackContext(
+            episodeId: "ep-later",
+            podcastId: "pod-later",
+            referencePositionMs: 45_000,
+            clientPositionMs: 45_000,
+            recentReferencePositions: [44_000, 45_000],
+            previousReferencePositionMs: 44_000
+        )
+
+        _ = await executor.execute(CloudRouteIntent(
+            request: "what did they say",
+            tier: .unknown,
+            context: snapshot,
+            origin: .routingFailure
+        ))
+
+        XCTAssertTrue(mockCloudRouteSink.routeToCloudCalled, "the turn still dispatches")
+        XCTAssertEqual(mockCloudRouteSink.lastContext, snapshot,
+                       "the dispatch carries the UTTERANCE-START snapshot, not live playback")
+        XCTAssertEqual(mockPlaybackContextProvider.consultCount, 0,
+                       "the executor must not resample playback at dispatch time")
+    }
+
     func test_execute_modelChosenCloudRouteRenewsTheWindow() async {
         mockPlaybackContextProvider.context = Self.context
         gracePeriodSignal.onWakeWordDetected()
@@ -706,9 +744,13 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
 
 private final class MockPlaybackContextProvider: PlaybackContextProvider {
     var context: PlaybackContext?
+    /// TASK 90: a dispatch-time consult is a forbidden resample. Counted so the
+    /// snapshot control can prove the provider was never read at dispatch.
+    private(set) var consultCount = 0
 
     func current() -> PlaybackContext? {
-        context
+        consultCount += 1
+        return context
     }
 }
 

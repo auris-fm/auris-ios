@@ -20,7 +20,8 @@ struct IntentRoutingInput: Equatable {
         routerTranscript: String,
         translationKind: TranslationKind,
         selection: CloudConversationSelection?,
-        utteranceId: String
+        utteranceId: String,
+        playbackContext: PlaybackContext? = nil
     ) {
         self.sourceTranscript = sourceTranscript
         self.sourceLanguage = sourceLanguage
@@ -28,6 +29,7 @@ struct IntentRoutingInput: Equatable {
         self.translationKind = translationKind
         self.selection = selection
         self.utteranceId = utteranceId
+        self.playbackContext = playbackContext
     }
 
     /// What SELECTED this utterance, carried from the gate decision that produced it.
@@ -38,12 +40,20 @@ struct IntentRoutingInput: Equatable {
     /// (`detected` true/false) and it is a property of the INPUT, so it travels with it.
     let selection: CloudConversationSelection?
 
+    /// TASK 90 SNAPSHOT: the playback context frozen at utterance start, before ASR and
+    /// routing ran. The cloud route must describe the turn as it was SPOKEN, not as playback
+    /// stands when the request is dispatched (spec cloud-assistant.md, playback-snapshot).
+    /// `nil` means no snapshot was captured; the turn then represents context absence like
+    /// any other turn rather than inventing one.
+    let playbackContext: PlaybackContext?
+
     /// Same source/router text with `.none` (native English path).
     static func english(
         transcript: String,
         language: String? = nil,
         selection: CloudConversationSelection? = nil,
-        utteranceId: String
+        utteranceId: String,
+        playbackContext: PlaybackContext? = nil
     ) -> IntentRoutingInput {
         IntentRoutingInput(
             sourceTranscript: transcript,
@@ -51,7 +61,8 @@ struct IntentRoutingInput: Equatable {
             routerTranscript: transcript,
             translationKind: .none,
             selection: selection,
-            utteranceId: utteranceId
+            utteranceId: utteranceId,
+            playbackContext: playbackContext
         )
     }
 }

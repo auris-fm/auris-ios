@@ -185,6 +185,11 @@ class VoiceAsrEngine {
     /// precheck would be a DIFFERENT operation from the one that takes ownership, so a stop landing
     /// between them could reject the enqueue with no owner left to release.
     var onRoutingInput: ((IntentRoutingInput) -> Bool)?
+    /// TASK 90 SNAPSHOT: called ONCE at utterance admission (next to the identity mint), so the
+    /// playback context describes the moment the utterance STARTED — not what plays after ASR,
+    /// translation and routing have consumed time. Nil (unset) means no snapshot is captured and
+    /// the routing input carries none, exactly like any other absent context.
+    var playbackContextSnapshot: (() -> PlaybackContext?)?
 
     /// Invoked when a turn that was admitted leaves the engine WITHOUT reaching routing — a
     /// backend/recognition/translation drop or a cancellation. The routing path does not call it;
@@ -563,6 +568,9 @@ class VoiceAsrEngine {
         // trimming, router diagnostics, the prepared wire request_id and server diagnostics.
         let utteranceId = utteranceIdGeneratorForTesting?() ?? UUID().uuidString
         FileLog.shared.addMessage("[VoicePipeline] utterance admitted id=\(utteranceId)")
+        // TASK 90 SNAPSHOT: frozen HERE, at admission, ahead of ASR and translation. Later
+        // stages only carry this value; nothing re-reads playback.
+        let playbackSnapshot = playbackContextSnapshot?()
 
         if echoFilterRoute.appliesCorrelationWindow {
             // ONE CONSISTENT OBSERVATION (PR50 review r4357901593): samples, offset and anchor
@@ -732,7 +740,8 @@ class VoiceAsrEngine {
             routerText: finalized.text,
             translateNote: translateNote,
             selection: selection,
-            utteranceId: utteranceId
+            utteranceId: utteranceId,
+            playbackContext: playbackSnapshot
         )
         if onRoutingInput?(routingInput) ?? false {
             admissionHandedToRouting = true
@@ -746,7 +755,8 @@ class VoiceAsrEngine {
         routerText: String,
         translateNote: String?,
         selection: CloudConversationSelection? = nil,
-        utteranceId: String
+        utteranceId: String,
+        playbackContext: PlaybackContext? = nil
     ) -> IntentRoutingInput {
         if let translateNote, translateNote.hasPrefix("translate=skip(backend)") {
             return IntentRoutingInput(
@@ -755,7 +765,8 @@ class VoiceAsrEngine {
                 routerTranscript: routerText,
                 translationKind: .backend,
                 selection: selection,
-                utteranceId: utteranceId
+                utteranceId: utteranceId,
+                playbackContext: playbackContext
             )
         }
         if let translateNote,
@@ -767,7 +778,8 @@ class VoiceAsrEngine {
                 routerTranscript: routerText,
                 translationKind: .platform,
                 selection: selection,
-                utteranceId: utteranceId
+                utteranceId: utteranceId,
+                playbackContext: playbackContext
             )
         }
         // NO FABRICATED LANGUAGE: an unknown LID stays nil on the input (and is omitted on the
@@ -776,7 +788,8 @@ class VoiceAsrEngine {
             transcript: routerText,
             language: source.detectedLanguage,
             selection: selection,
-            utteranceId: utteranceId
+            utteranceId: utteranceId,
+            playbackContext: playbackContext
         )
     }
 

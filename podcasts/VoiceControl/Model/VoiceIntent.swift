@@ -129,6 +129,11 @@ struct CloudRouteIntent: VoiceIntent, Equatable {
     /// restore the escalation allowance that permitted it, or one window could
     /// dispatch repeatedly. Mirrors Android's origin marker on the intent.
     let origin: CloudRouteOrigin
+    /// TASK 90 SNAPSHOT: the playback context frozen at utterance start and carried through
+    /// routing. Present ⇒ the executor uses EXACTLY this; it must not resample live playback
+    /// at dispatch time. `nil` on legacy constructions keeps the pre-snapshot behavior so
+    /// existing tests and call sites compile unchanged.
+    var context: PlaybackContext? = nil
     /// The grace-window generation this dispatch was issued under.
     ///
     /// Set for both origins: a fallback carries the generation whose allowance it
@@ -153,6 +158,7 @@ struct CloudRouteIntent: VoiceIntent, Equatable {
         sourceTranscript: String? = nil,
         sourceLanguage: String? = nil,
         utteranceId: String? = nil,
+        context: PlaybackContext? = nil,
         origin: CloudRouteOrigin = .modelCall,
         generation: Int? = nil,
         selection: CloudConversationSelection? = nil
@@ -162,6 +168,7 @@ struct CloudRouteIntent: VoiceIntent, Equatable {
         self.sourceTranscript = sourceTranscript
         self.sourceLanguage = sourceLanguage
         self.utteranceId = utteranceId
+        self.context = context
         self.origin = origin
         self.generation = generation
         self.selection = selection

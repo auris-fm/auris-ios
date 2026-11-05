@@ -224,7 +224,10 @@ class VoiceIntentExecutor {
             // interaction has nothing playing, and the contract describes that as absent
             // context rather than as an invented episode and position. Refusing here is what
             // made the discovery turn unreachable on the client.
-            let context = playbackContextProvider.current() ?? PlaybackContext.absent
+            // TASK 90 SNAPSHOT: the intent's utterance-start snapshot, when present, is the
+            // ONLY source — dispatching live playback here is the forbidden resample. The
+            // provider is consulted solely for constructions that predate the snapshot field.
+            let context = cr.context ?? playbackContextProvider.current() ?? PlaybackContext.absent
             // ONE AUTHORITATIVE ADMISSION decides both wire and effect ownership (reviewer
             // b2c09394): `beginDispatch` returns an ownership TOKEN fenced by the live origin,
             // and that SAME token is passed to the dispatch. Only the token owner runs the wire
