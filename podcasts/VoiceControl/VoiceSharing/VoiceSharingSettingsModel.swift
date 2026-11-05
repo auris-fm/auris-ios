@@ -621,12 +621,22 @@ final class VoiceSharingAccountModel: ObservableObject {
         updateMembership()
     }
 
-    /// Fail closed: a resume needs a live credential AND an authenticated session. Without either,
-    /// nothing is dialled and the surface says "sign in again".
-    private func authorized() async -> Bool {
-        guard session() != nil else { return false }
-        guard let credential = await client.currentCredential(), !credential.isEmpty else { return false }
-        return true
+    /// What a resume may do right now. The three cases exist because only two of them are the
+    /// same fact (reviewer 2ba0220e): a missing session or credential is TEMPORARY and must keep
+    /// the pending intent, while a credential the provider reports as definitively refused is the
+    /// caller's answer to act on. Absence of a credential is never a refusal.
+    private enum Authorization { case authorized, unavailable, definitive }
+
+    private func authorization() async -> Authorization {
+        guard session() != nil else { return .unavailable }
+        if refreshUnavailable {
+            // The provider is not serving a token right now: a retry would be a guess.
+            return .unavailable
+        }
+        guard let credential = await client.currentCredential(), !credential.isEmpty else {
+            return .unavailable
+        }
+        return .authorized
     }
 
     private func updateMembership() {
@@ -758,9 +768,22 @@ final class VoiceSharingAccountModel: ObservableObject {
             }
             // Authorization re-checked BEFORE the resume: a retry must never dial a request the
             // account cannot authorize, whatever the last recorded outcome was (incident review).
-            guard await authorized() else {
-                mutation = nil
-                if stamp == sent { busy = false; membershipStatus = .unauthorized }
+            // The check AWAITS, so ownership is re-tested afterwards: while it suspended, a newer
+            // local move or account operation may have replaced this stamp, and a stale completion
+            // must neither clear nor dispatch that newer work (reviewer 2ba0220e).
+            switch await authorization() {
+            case .authorized:
+                break
+            case .unavailable:
+                // Temporary: KEEP the intent so a later resume can send the same operation.
+                if stamp == sent { busy = false; membershipStatus = .unavailable }
+                return
+            case .definitive:
+                if stamp == sent { mutation = nil; busy = false; membershipStatus = .unauthorized }
+                return
+            }
+            guard stamp == sent, mutation?.requestID == operation.requestID else {
+                // Superseded while the check was suspended: touch nothing.
                 return
             }
             await performMutation(operation, under: sent)
@@ -826,9 +849,21 @@ final class VoiceSharingAccountModel: ObservableObject {
     func retryDeletion() async {
         storeChanged()
         guard deletionStatus != .sending, let operation = deletion else { return }
-        guard await authorized() else {
-            deletion = nil; deletionStatus = .unauthorized; return
+        switch await authorization() {
+        case .authorized:
+            break
+        case .unavailable:
+            // Temporary: the request ID and cutoff must survive for an IDENTICAL retry.
+            deletionStatus = .unavailable
+            return
+        case .definitive:
+            if deletion?.requestID == operation.requestID { deletion = nil }
+            deletionStatus = .unauthorized
+            return
         }
+        // Ownership re-tested after the await: a stale completion must not dispatch a superseded
+        // operation nor disturb newer state.
+        guard deletion?.requestID == operation.requestID else { return }
         await performDeletion(operation)
     }
 

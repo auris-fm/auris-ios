@@ -143,7 +143,7 @@ final class VoiceSharingCoordinator {
             if loginStateReadable() {
                 self.enrollmentStore.transitionToAccount(signedIn: true)
                 let task = Task { await self.refreshProjectionFromServer(accountClient: scheduledRefreshClient) }
-                self.scheduledRefreshTasks.append(task)
+                self.track(task)
             } else {
                 self.enrollmentStore.transitionToAccount(signedIn: false)
                 self.consentGateLost()
@@ -154,8 +154,8 @@ final class VoiceSharingCoordinator {
         // session that predates this process — settle the launch state now.
         if startupAuthReadable() {
             enrollmentStore.transitionToAccount(signedIn: true)
-            let task = Task { await self.refreshProjectionFromServer(accountClient: scheduledRefreshClient) }
-            scheduledRefreshTasks.append(task)
+            let task = Task { await refreshProjectionFromServer(accountClient: scheduledRefreshClient) }
+            track(task)
         }
         return { [weak self] in
             guard let self else { return }
@@ -164,14 +164,41 @@ final class VoiceSharingCoordinator {
         }
     }
 
-    /// Tasks scheduled by identity notifications, exposed so a control can AWAIT the work the
-    /// notification actually started rather than racing it.
-    private(set) var scheduledRefreshTasks: [Task<Void, Never>] = []
+    /// Tasks scheduled by identity notifications. BOUNDED on purpose (reviewer 2ba0220e): every
+    /// app notification schedules one, so an unbounded list is a leak in normal operation. A
+    /// finished task retires itself, and the list is capped so even a stuck task cannot grow it.
+    private var scheduledRefreshTasks: [Task<Void, Never>] = []
+    private let scheduledRefreshLock = NSLock()
+    private static let scheduledRefreshLimit = 8
 
+    private func track(_ task: Task<Void, Never>) {
+        scheduledRefreshLock.lock()
+        scheduledRefreshTasks.append(task)
+        if scheduledRefreshTasks.count > Self.scheduledRefreshLimit {
+            scheduledRefreshTasks.removeFirst(scheduledRefreshTasks.count - Self.scheduledRefreshLimit)
+        }
+        scheduledRefreshLock.unlock()
+        // Retire on completion, so steady-state memory does not depend on a test draining it.
+        Task.detached { [weak self] in
+            _ = await task.value
+            self?.forget(task)
+        }
+    }
+
+    private func forget(_ task: Task<Void, Never>) {
+        scheduledRefreshLock.lock()
+        scheduledRefreshTasks.removeAll { $0 == task }
+        scheduledRefreshLock.unlock()
+    }
+
+    /// Awaits the refreshes that identity notifications started. Safe in production (usually empty)
+    /// and used by controls to observe exactly the work a notification caused.
     func awaitScheduledRefreshes() async {
-        while !scheduledRefreshTasks.isEmpty {
+        while true {
+            scheduledRefreshLock.lock()
             let tasks = scheduledRefreshTasks
-            scheduledRefreshTasks.removeAll()
+            scheduledRefreshLock.unlock()
+            guard !tasks.isEmpty else { return }
             for task in tasks { await task.value }
         }
     }
