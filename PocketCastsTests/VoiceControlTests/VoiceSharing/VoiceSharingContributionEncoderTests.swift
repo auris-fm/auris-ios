@@ -208,6 +208,125 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
         try manifestData.write(to: base.appendingPathComponent("manifest.json"))
     }
 
+
+    /// PHASE 2 WIRE FIXTURE for cross-client parity (spec 94bf23b0). A NEW capture with NEW provenance
+    /// and the required `wake_required` root member, emitted from cleared head `7c2e67d4b`.
+    ///
+    /// SCOPE, stated exactly: these are ENCODER fixtures whose observations are TEST-SUPPLIED (the same
+    /// boundary as the f8 set). They pin the BYTES this client's encoder emits for the phase-2 record
+    /// shape so another implementation's intake can be checked against them. They are not engine output.
+    ///
+    /// Every case is BIND-VERIFIED before export, so a fixture that this client's own validator would
+    /// refuse can never leave the runner and be mistaken for an interoperable sample.
+    ///
+    /// Written to a FIXED runner-temporary location because host environment variables do not reach the
+    /// simulator test process; copied out afterwards with `simctl get_app_container`.
+    func test_exportPhase2WireFixturesForCrossClientParity() throws {
+        // NEW provenance, deliberately distinct from every earlier fixture capture.
+        let phase2Provenance = VoiceSharingContributionEncoder.Provenance(
+            platform: "ios", appVersion: "9.0", build: "1000", captureSessionID: "phase2-parity-7c2e67d4b",
+            models: VoiceSharingContributionEncoder.Models(
+                vad: .init(id: "vad-1", version: "1"), wakeword: .init(id: "wake-1", version: "1"),
+                asr: .init(id: "asr-1", version: "1"), translation: nil,
+                router: .init(id: "router-1", version: "1")),
+            conversionVersion: "v1")
+
+        func capture(_ id: String, wakeRequired: Bool) -> VoiceSharingCollector.SegmentEvent {
+            .init(kind: .completed, captureID: UUID(uuidString: id)!,
+                  enrollmentEpoch: "epoch-1", wakeRequired: wakeRequired,
+                  authorizationSession: "phase2-parity", retainedSamples: samples.count,
+                  truncated: false, droppedSpans: [], originalSampleCount: nil,
+                  audio: samples, isGateControl: false)
+        }
+
+        struct Case { let id: String; let wakeRequired: Bool
+                      let observations: [String: VoiceSharingContributionEncoder.StageOutcome] }
+        let cases: [(name: String, value: Case)] = [
+            // Speech that required the wake word, detector measured above threshold, command executed.
+            ("wake-required-command", Case(
+                id: "44444444-1111-2222-3333-444444444444", wakeRequired: true,
+                observations: [
+                    "wake": .init(state: "completed", score: 0.931, threshold: 0.8),
+                    "bleed": .init(state: "not_run", reason: "no_playback_reference"),
+                    "asr": .init(state: "completed", text: "play the news", sourceLanguage: "en",
+                                 routerInput: "play the news"),
+                    "translation": .init(state: "not_run", reason: "no_text"),
+                    "routing": .init(state: "completed", predictedIntent: "play", predictedTool: "play"),
+                    "execution": .init(state: "completed", outcome: "succeeded"),
+                ])),
+            // Grace active: heard WITHOUT a wake word. Same shape, wake_required false.
+            ("grace-no-wake", Case(
+                id: "55555555-1111-2222-3333-555555555555", wakeRequired: false,
+                observations: [
+                    "wake": .init(state: "completed", score: 0.402, threshold: 0.8),
+                    "bleed": .init(state: "not_run", reason: "no_playback_reference"),
+                    "asr": .init(state: "completed", text: "pause", sourceLanguage: "en",
+                                 routerInput: "pause"),
+                    "translation": .init(state: "not_run", reason: "no_text"),
+                    "routing": .init(state: "completed", predictedIntent: "pause", predictedTool: "pause"),
+                    "execution": .init(state: "completed", outcome: "succeeded"),
+                ])),
+            // A genuinely empty recognition that STILL reports the recogniser's language.
+            ("empty-result-with-language", Case(
+                id: "66666666-1111-2222-3333-666666666666", wakeRequired: true,
+                observations: [
+                    "wake": .init(state: "completed", score: 0.888, threshold: 0.8),
+                    "bleed": .init(state: "not_run", reason: "no_playback_reference"),
+                    "asr": .init(state: "completed", reason: "empty_result", sourceLanguage: "ja"),
+                    "translation": .init(state: "not_run", reason: "no_text"),
+                    "routing": .init(state: "not_run", reason: "no_candidates"),
+                    "execution": .init(state: "not_run", reason: "client_refused"),
+                ])),
+        ]
+
+        let base = URL(fileURLWithPath: NSTemporaryDirectory() + "/auris-phase2-wire-fixtures")
+        // A fresh directory every run (reviewer 9be75bf0: a stale fixture must never be mistaken for a
+        // freshly captured one). Absent on the first run, so the removal is best-effort.
+        if FileManager.default.fileExists(atPath: base.path) {
+            try FileManager.default.removeItem(at: base)
+        }
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+
+        var manifest: [[String: Any]] = []
+        for (name, value) in cases {
+            let encoded = try VoiceSharingContributionEncoder.encode(
+                event: capture(value.id, wakeRequired: value.wakeRequired),
+                provenance: phase2Provenance, observations: value.observations)
+            // SELF-CONSISTENCY GATE: the fixture must bind through this client's production validator.
+            let bound = try VoiceSharingRecordBinding.bind(
+                envelope: encoded.metadataEnvelope, audio: encoded.wav)
+            XCTAssertFalse(bound.recordSHA256.isEmpty)
+            let dir = base.appendingPathComponent(name)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try encoded.metadataEnvelope.write(to: dir.appendingPathComponent("metadata.json"))
+            try encoded.wav.write(to: dir.appendingPathComponent("audio.wav"))
+            // Digests are taken from the BOUND envelope, so a manifest can never disagree with the bytes.
+            manifest.append([
+                "case": name,
+                "capture_id": value.id,
+                "wake_required": value.wakeRequired,
+                "record_sha256": bound.recordSHA256,
+                "metadata_sha256": SHA256.hash(data: encoded.metadataEnvelope)
+                    .map { String(format: "%02x", $0) }.joined(),
+                "audio_sha256": SHA256.hash(data: encoded.wav)
+                    .map { String(format: "%02x", $0) }.joined(),
+                "audio_byte_count": encoded.wav.count,
+            ])
+        }
+        let manifestObject: [String: Any] = [
+            "client_head": "7c2e67d4b",
+            "schema_version": 1,
+            "scope": "encoder bytes with TEST-SUPPLIED observations; not engine output",
+            "provenance": [
+                "platform": "ios", "app_version": "9.0", "build": "1000",
+                "capture_session_id": "phase2-parity-7c2e67d4b", "conversion_version": "v1",
+            ],
+            "fixtures": manifest,
+        ]
+        let data = try JSONSerialization.data(withJSONObject: manifestObject, options: [.sortedKeys, .prettyPrinted])
+        try data.write(to: base.appendingPathComponent("manifest.json"))
+    }
+
     /// The PINNED f8 WIRE fixtures (spec 35da2677). SCOPE, stated exactly: these are ENCODER fixtures
     /// whose observations are TEST-SUPPLIED, not engine/branch producer output — they pin the bytes
     /// the encoder emits for the f8 stage-claim combinations, including ALL THREE translation skip
