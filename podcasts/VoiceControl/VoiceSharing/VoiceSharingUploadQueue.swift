@@ -1901,6 +1901,16 @@ final class VoiceSharingUploadQueue {
                 throw PrepareError.publicationUncertain
             case .absent:
                 // Pending ENTRY removal landed but was not confirmed: repeat the root barrier.
+                // Quarantine may NEVER take this path (reviewer 46971967): quarantine claims
+                // marker-present retention — an absent directory proves the bytes are GONE, so
+                // claiming quarantine success here would be a lie.
+                guard recorded.outcome != .quarantined else {
+                    FileLog.shared.addMessage(
+                        "[VoiceSharing] queue quarantine reconciliation entry=\(entry.name) "
+                            + "state=directory-absent outcome=uncertain")
+                    FileLog.shared.forceFlush()
+                    throw PrepareError.publicationUncertain
+                }
                 do { try confirmEntryRemovalDurability() } catch {
                     throw PrepareError.publicationUncertain
                 }
@@ -1923,6 +1933,26 @@ final class VoiceSharingUploadQueue {
                     throw PrepareError.publicationUncertain
                 case .absent:
                     // Pending LEASE-only removal landed but was not confirmed: repeat the barrier.
+                    // Quarantine participates (reviewer 46971967): the marker was written BEFORE
+                    // the lease release, so a pending quarantine with a gone lease reconciles by
+                    // RE-CONFIRMING the retained directory + marker — never resultStale.
+                    if recorded.outcome == .quarantined {
+                        guard Self.statKind(of: directory.appendingPathComponent(Self.failedName))
+                            == .present else {
+                            // Marker false can mean sync-failed-after-write, not absence (spec
+                            // de1b7a0f): log uncertainty, retain everything, refuse success.
+                            FileLog.shared.addMessage(
+                                "[VoiceSharing] queue quarantine reconciliation entry=\(entry.name) "
+                                    + "state=marker-unconfirmed retention=intact")
+                            FileLog.shared.forceFlush()
+                            throw PrepareError.publicationUncertain
+                        }
+                        do { try confirmLeaseRemovalDurability() } catch {
+                            throw PrepareError.publicationUncertain
+                        }
+                        try finishSettlement()
+                        return
+                    }
                     guard recorded.outcome == .retryableFailure else {
                         throw PrepareError.resultStale
                     }
@@ -1950,9 +1980,12 @@ final class VoiceSharingUploadQueue {
                         + "entry=\(entry.name) starting")
                 FileLog.shared.forceFlush()
                 guard disqualifyLocked(directory) else {
+                    // A false here can mean the marker write failed AFTER landing (sync failure),
+                    // so the state is UNKNOWN — log confirmation-failed, never "absent".
                     FileLog.shared.addMessage(
                         "[VoiceSharing] queue quarantine reason=contract-rejected "
-                            + "entry=\(entry.name) marker-state=absent retention=intact")
+                            + "entry=\(entry.name) marker-state=unknown confirmation-failed "
+                            + "retention=intact")
                     FileLog.shared.forceFlush()
                     throw PrepareError.publicationUncertain
                 }
