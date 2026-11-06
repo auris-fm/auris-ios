@@ -6,9 +6,15 @@ import XCTest
 /// requirement that was IN FORCE when the speech began, the detector's MEASURED score and threshold,
 /// and the recogniser's source language — including on empty and non-content results.
 ///
-/// Every assertion below is made against the PERSISTED record: the encoder's canonical JSON and the
-/// production binding, which is the same authority the queue applies to a stored entry. Nothing here
-/// asserts on an in-memory intermediate, so "the record says X" means a record on disk says X.
+/// EXECUTION BOUNDARY (reviewer 67ecb11e item 3). Every control here runs the PRODUCTION ENCODER and the
+/// PRODUCTION BINDING on canonically-encoded bytes, and asserts on the canonical JSON they produce. That is
+/// the serialization contract in full. It is NOT a file, an engine run, or a sink finalization: the
+/// `SegmentEvent` and the `observations` are CONSTRUCTED HERE, so a control in this file cannot show that
+/// the engine or collector produces these values — only that the record format carries them.
+///
+/// The producer half is covered by `VoiceSharingProductionPathControls` (real engine → collector → emitted
+/// event) and by the queue/sink suites (real entry on disk). Read together, the two halves are the record;
+/// neither half alone is.
 final class VoiceSharingNameSchemaControls: XCTestCase {
     private let samples: [Float] = [0, 0.25, -0.5, 0.99, -1, 0.5]
 
@@ -40,7 +46,8 @@ final class VoiceSharingNameSchemaControls: XCTestCase {
         "execution": .init(state: "completed", outcome: "succeeded"),
     ]
 
-    /// The persisted record's `observations.wake` block, read back out of the canonical JSON.
+    /// The encoded record's `observations.wake` block, read back out of the canonical JSON. "Encoded" is
+    /// deliberate: this is the bytes the encoder emits, before any queue write.
     private func persistedWake(_ encoded: VoiceSharingContributionEncoder.Encoded) throws -> [String: Any] {
         let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: encoded.recordJSON) as? [String: Any])
         return try XCTUnwrap((object["observations"] as? [String: Any])?["wake"] as? [String: Any])
@@ -52,8 +59,8 @@ final class VoiceSharingNameSchemaControls: XCTestCase {
 
     // MARK: - wake_required states the mode the speech began under
 
-    /// Wake word required: the record says `true` and still binds. Asserted from the persisted record, so a
-    /// dropped or renamed member fails here rather than at the server.
+    /// Wake word required: the ENCODED record says `true` and still binds. A dropped or renamed member fails
+    /// here rather than at the server. (Encoding + binding only — see the boundary note on this file.)
     func test_wakeRequiredTrueIsPersistedAndBinds() throws {
         let encoded = try VoiceSharingContributionEncoder.encode(
             event: event(wakeRequired: true), provenance: provenance, observations: wakePositiveObservations)
