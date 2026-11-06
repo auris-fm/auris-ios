@@ -2229,6 +2229,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
 
     private func makeChain(
         wake: WakeWordDetectorProtocol = DetectedWake(),
+        wakeThreshold: Float = 0.8,
         claims: @escaping () -> [String: VoiceSharingContributionEncoder.StageOutcome]
     ) -> (engine: VoiceAsrEngine, sink: VoiceSharingContributionSink,
           backend: EngineStubBackend, grace: GracePeriodSignal) {
@@ -2251,7 +2252,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             segmenter: NativeVadSegmenter(silenceTimeoutMs: 60),
             backend: backend, signalFilter: SignalFilter(),
             wakeWordDetector: wake, gracePeriodSignal: grace,
-            translationStage: nil)
+            wakeThreshold: wakeThreshold, translationStage: nil)
         engine.contributionCollector = collector
         backend.engine = engine
         // PRODUCTION WIRING: the service hands the capture to its routing consumer as part of the turn
@@ -2476,7 +2477,11 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     /// VALUE (not merely present), so a swapped or scale-broken measurement fails here.
     func test_durableRecordSaysWakeRequiredWhenSpeechBeganWithoutGrace() async throws {
         openGate(enrolled: true)
-        let chain = makeChain(wake: DetectedWake(), claims: { [self] in claims })
+        // A NON-DEFAULT threshold (the engine's default is 0.8): a record that echoed a constant, or the
+        // default, would not match, so this distinguishes what the engine was actually configured with.
+        let configuredThreshold: Float = 0.62
+        let chain = makeChain(wake: DetectedWake(), wakeThreshold: configuredThreshold,
+                              claims: { [self] in claims })
         chain.engine.listeningMode = .wakeWord
         let watermark = recordWatermark()
         await chain.backend.emitSpeechThenSilence(
@@ -2491,8 +2496,8 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                        "the durable record carries the detector's MEASURED score")
         let threshold = try XCTUnwrap(wake["threshold"] as? Double,
                                       "the threshold the score was judged against is recorded with it")
-        XCTAssertGreaterThan(threshold, 0, "a real threshold is a positive number")
-        XCTAssertLessThanOrEqual(threshold, 1, "and a confidence threshold lies within the score's range")
+        XCTAssertEqual(threshold, Double(configuredThreshold), accuracy: 0.0001,
+                       "the durable record carries the threshold the engine was CONFIGURED with, not a constant")
     }
 
     /// GRACE, ON DISK. Same engine, same detector, grace active: no wake word was required, and the durable
