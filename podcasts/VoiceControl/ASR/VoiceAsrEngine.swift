@@ -860,9 +860,16 @@ class VoiceAsrEngine {
             // (spec delta c6f3bdf7): `completed` carrying `empty_result`, with no text and no router
             // input. It is not `not_run` — the recogniser did run — and not `provider_error` — nothing
             // failed. The binding enforces exactly this pairing on every path.
+            //
+            // The LANGUAGE survives an empty transcript (reviewer 67ecb11e). An empty result means "it
+            // heard speech and recognised nothing", which is a different fact from "it could not tell
+            // what language was spoken" — and cleanly distinguishes silence-shaped output in a language
+            // that transcribes confidently empty from one whose recogniser never engaged. Dropping it
+            // here would make an empty transcript indistinguishable from an unknown language.
             contributionCollector?.engineReported(
                 stage: "asr",
-                outcome: .init(state: "completed", reason: VoiceSharingRecordBinding.emptyResultReasonForEngine),
+                outcome: .init(state: "completed", reason: VoiceSharingRecordBinding.emptyResultReasonForEngine,
+                               sourceLanguage: asrResult.detectedLanguage),
                 context: utteranceContext)
         }
 

@@ -676,6 +676,27 @@ final class VoiceSharingAccountModel: ObservableObject {
         membershipStatus = result == .success ? .idle : .unavailable
     }
 
+    /// Reads the projection as a PRECONDITION for a pending mutation, under the caller's fences.
+    ///
+    /// Distinct from `refresh()`: this does not publish `.loading`, does not overwrite the caller's
+    /// status on success, and leaves a failure visible to the caller as `false` so it can decide. It
+    /// reuses `begin()`/`current(_:)`, so an account change or a newer intent landing mid-read discards
+    /// the reply exactly as it would for any other operation, and the mutation is then abandoned rather
+    /// than sent against an unknown state.
+    private func readProjectionForMutation() async -> Bool {
+        guard let sent = begin() else { membershipStatus = .unavailable; return false }
+        let result = await refreshProjection(under: sent)
+        guard current(sent) else { storeChanged(); return false }
+        if result == .success {
+            // The caller now has a revision; it continues with its own operation.
+            busy = false
+            return true
+        }
+        busy = false
+        membershipStatus = .unavailable
+        return false
+    }
+
     private enum RefreshResult { case success, failure, stale }
     private func refreshProjection(under sent: Stamp) async -> RefreshResult {
         guard current(sent) else { return .stale }
@@ -695,7 +716,19 @@ final class VoiceSharingAccountModel: ObservableObject {
         storeChanged()
         guard disclosureConfirmed else { membershipStatus = .confirmationRequired; return }
         guard let disclosureVersion else { membershipStatus = .disclosureUnavailable; return }
-        guard !busy, let revision = store.currentAuthoritativeState?.membership.membershipRevision else { membershipStatus = .unavailable; return }
+        guard !busy else { membershipStatus = .unavailable; return }
+        // GET-BEFORE-PUT (reviewer 67ecb11e item 2; spec e3cfc8ae). `If-Match` is required, so an intent
+        // with no revision must READ first rather than refuse and leave the user's switch unexplained.
+        // The read runs under THIS intent's stamp, so an account transition or a competing intent that
+        // lands during it retires the read; if the read fails, nothing is sent and the switch stays off.
+        if store.currentAuthoritativeState?.membership.membershipRevision == nil {
+            guard await readProjectionForMutation() else { return }
+        }
+        guard let revision = store.currentAuthoritativeState?.membership.membershipRevision else {
+            membershipStatus = .unavailable
+            busy = false
+            return
+        }
         store.setLocalOptIn(true)
         guard let sent = begin(), let operation = client.beginMembership(
             enrolled: true, acceptedDisclosureVersion: disclosureVersion,
@@ -730,9 +763,27 @@ final class VoiceSharingAccountModel: ObservableObject {
         updateMembership()
         membershipStatus = .withdrawalUnconfirmed
         guard let sent = begin() else { busy = false; return }
+        // GET-BEFORE-PUT for a withdrawal too (reviewer 67ecb11e item 2). LOCAL STOP ALREADY HAPPENED
+        // above and is never undone by a failed read: collection has stopped and the pending bytes are
+        // purged, so the user's privacy decision holds regardless of what the server says next. What a
+        // failed read costs is only the CONFIRMATION, which the status already reports as unconfirmed.
+        var precondition = revision
+        if precondition == nil {
+            let read = await refreshProjection(under: sent)
+            guard current(sent) else { storeChanged(); return }
+            guard read == .success else {
+                // No revision to assert and none obtained: do not send. The withdrawal remains
+                // locally in force and visibly unconfirmed.
+                busy = false
+                membershipStatus = .withdrawalUnconfirmed
+                return
+            }
+            precondition = store.currentAuthoritativeState?.membership.membershipRevision
+        }
         guard let operation = client.beginMembership(
-            enrolled: false, acceptedDisclosureVersion: nil, lastReadRevision: revision) else {
+            enrolled: false, acceptedDisclosureVersion: nil, lastReadRevision: precondition) else {
             busy = false
+            membershipStatus = .withdrawalUnconfirmed
             return
         }
         mutation = operation
