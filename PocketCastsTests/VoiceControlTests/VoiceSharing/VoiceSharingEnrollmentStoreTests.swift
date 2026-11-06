@@ -345,6 +345,60 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
 
     /// Cold start with a remembered ACTIVE projection plus a remembered opt-in, and the session's GET is
     /// delayed (or refused). Collection must stay OFF the whole time; then a current-session reply turns it on.
+    /// PROVENANCE, NOT PERMISSION (spec 1bb73eac): a cold-started app that has NEVER received a
+    /// projection in this process must still be able to stamp the epoch it already persisted.
+    ///
+    /// The regression this pins: upload admission read `activeEnrollmentEpoch`, which needs
+    /// `hasAuthoritativeProjection` — always false after a relaunch — so a restarted app with
+    /// consent already given refused every queued upload, indefinitely, until some projection
+    /// round trip happened to succeed. The stored epoch is the account's own provenance.
+    func test_coldStart_provenanceEpochIsAvailableWithoutAnyProjectionThisSession() {
+        let sharedSuite = "VoiceSharingProvenance-\(UUID().uuidString)"
+        guard let persistent = UserDefaults(suiteName: sharedSuite) else {
+            return XCTFail("UserDefaults suite unavailable")
+        }
+        defer { persistent.removePersistentDomain(forName: sharedSuite) }
+
+        let first = VoiceSharingEnrollmentStore(
+            defaults: persistent,
+            accountScopeProvider: { "account-cold" },
+            sessionIdentityProvider: { "session-1" }
+        )
+        first.setLocalOptIn(true)
+        let firstToken = VoiceSharingEnrollmentStore.ProjectionToken(
+            lifecycleGeneration: "session-1",
+            operationGeneration: first.projectionToken()?.operationGeneration ?? 0
+        )
+        XCTAssertTrue(first.apply(authoritative: projection(revision: "r1", epoch: "epoch-1"),
+                                  readUnder: firstToken))
+        XCTAssertEqual(first.persistedEnrollmentEpochForProvenance, "epoch-1")
+
+        // Session 2: relaunch. NOTHING fetched in this process.
+        let relaunched = VoiceSharingEnrollmentStore(
+            defaults: persistent,
+            accountScopeProvider: { "account-cold" },
+            sessionIdentityProvider: { "session-2" }
+        )
+
+        // Premise: no projection has landed in this process, so the readiness gate is closed.
+        XCTAssertFalse(relaunched.currentEffectiveEnrolled,
+                       "premise: this session has no authoritative projection")
+        XCTAssertNil(relaunched.activeEnrollmentEpoch,
+                     "premise: the readiness-gated epoch refuses without a projection")
+
+        // The provenance epoch is available anyway — this is what upload stamps on the record.
+        XCTAssertEqual(relaunched.persistedEnrollmentEpochForProvenance, "epoch-1",
+                       "the account's persisted epoch is provenance and needs no round trip")
+
+        // POSITIVE CONTROL: the two must stay distinguishable. Opting out still answers nil, so
+        // this reader cannot be mistaken for an always-on value.
+        relaunched.setLocalOptIn(false) // also records the explicit opt-out
+        XCTAssertTrue(relaunched.currentState.explicitOptOut,
+                      "premise: turning the switch off is an explicit opt-out")
+        XCTAssertNil(relaunched.persistedEnrollmentEpochForProvenance,
+                     "an explicit opt-out must stop the provenance reader too")
+    }
+
     func test_coldStart_rememberedActiveProjection_doesNotEnableUntilThisSessionsGET() {
         let sharedSuite = "VoiceSharingColdStart-\(UUID().uuidString)"
         guard let persistent = UserDefaults(suiteName: sharedSuite) else {

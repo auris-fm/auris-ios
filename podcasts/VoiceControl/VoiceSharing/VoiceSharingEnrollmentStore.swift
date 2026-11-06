@@ -183,6 +183,28 @@ final class VoiceSharingEnrollmentStore {
         return state.membership.enrollmentEpoch
     }
 
+    /// The PERSISTED enrollment epoch, for use as upload PROVENANCE only.
+    ///
+    /// Deliberately NOT gated on `effectiveEnrolled` (spec 1bb73eac): that gate needs
+    /// `hasAuthoritativeProjection`, which is false after every cold start until a projection round
+    /// trip lands in THIS process. Requiring it here made a leftover readiness dependency — a
+    /// restarted app with consent already given could not admit a single upload, and a failed or
+    /// unavailable fetch would refuse indefinitely.
+    ///
+    /// This is provenance, not permission: the epoch is stamped on the record so the server can
+    /// attribute it. Upload permission is the authenticated account plus the user's own choice
+    /// (opt-in and not opted-out/withdrawn), enforced by the queue's account fence and re-checked
+    /// server-side. Nothing here may be used to authorise collection.
+    var persistedEnrollmentEpochForProvenance: String? {
+        lock.lock(); defer { lock.unlock() }
+        // Explicit withdrawal turns collection off locally and immediately; an opt-out is the
+        // user's own instruction and must stop the upload path without a round trip.
+        guard !state.explicitOptOut, state.membership.withdrawalState != .withdrawn else {
+            return nil
+        }
+        return state.membership.enrollmentEpoch
+    }
+
     /// Executes a bounded synchronous publication against one lock-held state/session snapshot.
     /// The callback must not reenter the store. No captured observer payload may publish later.
     func publishCurrentCohortAttributes(_ publish: (String?, String?) -> Void) {
@@ -340,8 +362,8 @@ final class VoiceSharingEnrollmentStore {
         lock.lock()
         guard token.lifecycleGeneration == sessionIdentityProvider(),
               token.operationGeneration == operationGeneration else {
-            // NO TRANSITION, SO NO NOTIFY — but both locks must come back either way, or the next
-            // mutation deadlocks behind a queue lock this early return abandoned.
+            // NO TRANSITION, SO NO NOTIFY — but the lock must still be released, or every later
+            // mutation blocks behind a refusal that never took anything.
             lock.unlock()
             return false
         }
@@ -354,9 +376,8 @@ final class VoiceSharingEnrollmentStore {
         if changed {
             captureTransitionLocked()
             lock.unlock()
-        notify()
+            notify()
         } else {
-            // Identical replay: nothing to announce, but the locks still have to be released.
             lock.unlock()
         }
         return true
