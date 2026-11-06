@@ -103,11 +103,16 @@ final class VoiceSharingUploader {
     func upload(_ entry: VoiceSharingUploadQueue.Entry) async -> Outcome {
         // AUTHORIZATION FIRST: no request is ever issued without a live permission.
         guard isAuthorized() else {
-            FileLog.shared.addMessage("[VoiceSharing] upload: unauthorized at entry (\(entry.name)) — revoked")
+            FileLog.shared.addMessage(
+                "[VoiceSharing] upload disposition entry=\(entry.name) reason=not-authorized disposition=refused")
+            FileLog.shared.forceFlush()
             return .revoked
         }
         let networkToken = networkGate?.admissionToken()
         guard !Task.isCancelled, networkGate == nil || networkToken != nil else {
+            FileLog.shared.addMessage(
+                "[VoiceSharing] upload disposition entry=\(entry.name) reason=network-blocked disposition=refused")
+            FileLog.shared.forceFlush()
             return .unavailable(reason: "network blocked")
         }
         // Ownership: taking the lease is what makes this attempt OURS. Note beginAttempt also
@@ -118,11 +123,17 @@ final class VoiceSharingUploader {
         let admitted: VoiceSharingUploadQueue.AdmittedAttempt
         do {
             guard let granted = try queue.admitAttempt(entry) else {
+                FileLog.shared.addMessage(
+                    "[VoiceSharing] upload disposition entry=\(entry.name) reason=admission-refused disposition=refused")
+                FileLog.shared.forceFlush()
                 return .unavailable(reason: "attempt refused (held, exhausted or owned)")
             }
             admitted = granted
         } catch {
             // Includes the enforced not-before refusal: a fresh owner is refused until due.
+            FileLog.shared.addMessage(
+                "[VoiceSharing] upload disposition entry=\(entry.name) reason=admission-error disposition=refused")
+            FileLog.shared.forceFlush()
             return .unavailable(reason: "attempt refused: \(type(of: error))")
         }
         let lease = admitted.lease
@@ -136,6 +147,9 @@ final class VoiceSharingUploader {
                 + "capture=\(entryCaptureIDForDiagnostics(entry)) attempt=\(attemptNumber)")
 
         guard let url = endpoint() else {
+            FileLog.shared.addMessage(
+                "[VoiceSharing] upload disposition entry=\(entry.name) reason=no-endpoint disposition=retry")
+            FileLog.shared.forceFlush()
             _ = try? queue.applyAttemptResult(entry, lease: lease, outcome: .retryableFailure)
             return .retry(serverRetryAfterSeconds: nil, attempt: attemptNumber)
         }
@@ -143,6 +157,9 @@ final class VoiceSharingUploader {
         do {
             request = try makeRequest(entry: entry, url: url)
         } catch {
+            FileLog.shared.addMessage(
+                "[VoiceSharing] upload disposition entry=\(entry.name) reason=request-build-failed disposition=retry")
+            FileLog.shared.forceFlush()
             _ = try? queue.applyAttemptResult(entry, lease: lease, outcome: .retryableFailure)
             return .unavailable(reason: "entry unreadable: \(type(of: error))")
         }
@@ -152,7 +169,9 @@ final class VoiceSharingUploader {
         // An identity move since admission must stop here: A's bytes are never launched under
         // B's authority, and a post-response check cannot repair that disclosure.
         if let admittedIdentity = admitted.identity, !isIdentityCurrent(admittedIdentity) {
-            FileLog.shared.addMessage("[VoiceSharing] upload: identity moved since admission (\(entry.name)) — revoked")
+            FileLog.shared.addMessage(
+                "[VoiceSharing] upload disposition entry=\(entry.name) reason=identity-moved-since-admission disposition=revoked")
+            FileLog.shared.forceFlush()
             _ = try? queue.applyAttemptResult(entry, lease: lease, outcome: .retryableFailure)
             return .revoked
         }
@@ -167,7 +186,25 @@ final class VoiceSharingUploader {
         let result = await transport(request, admitted.identity, currentIdentity, { [networkGate] in
             networkGate == nil || networkToken.map { networkGate!.isCurrent($0) } == true
         })
+
+        // DIAGNOSTIC — IMMEDIATELY after the await, BEFORE any cancellation/network/identity/
+        // authorization fence (reviewer fcbd232c): a received response must never vanish from the
+        // trace because a fence fired first. Content-free: status and fixed-vocabulary code only.
+        switch result {
+        case .transportFailure:
+            FileLog.shared.addMessage(
+                "[VoiceSharing] upload response entry=\(entry.name) response=none")
+        case .response(let statusCode, let body):
+            FileLog.shared.addMessage(
+                "[VoiceSharing] upload response entry=\(entry.name) status=\(statusCode) "
+                    + "code=\(Self.diagnosticCode(body))")
+        }
+        FileLog.shared.forceFlush()
+
         guard !Task.isCancelled, networkGate == nil || networkToken.map({ networkGate!.isCurrent($0) }) == true else {
+            FileLog.shared.addMessage(
+                "[VoiceSharing] upload disposition entry=\(entry.name) reason=cancelled-or-network-moved disposition=retry")
+            FileLog.shared.forceFlush()
             await beforeNetworkRetryForTesting?()
             return settleRetry(entry: entry, lease: lease, attempt: attemptNumber, serverRetryAfter: nil)
         }
@@ -178,6 +215,9 @@ final class VoiceSharingUploader {
         // identity has since changed. Only checked when the queue supplied an identity.
         if let admittedIdentity = admitted.identity, !isIdentityCurrent(admittedIdentity) {
             // The lease must still be released; the entry belongs to the retired identity.
+            FileLog.shared.addMessage(
+                "[VoiceSharing] upload disposition entry=\(entry.name) reason=identity-moved-in-flight disposition=revoked")
+            FileLog.shared.forceFlush()
             _ = try? queue.applyAttemptResult(entry, lease: lease, outcome: .retryableFailure)
             return .revoked
         }
@@ -185,50 +225,55 @@ final class VoiceSharingUploader {
         // that landed while the request was in flight must not be overridden by a late 2xx.
         if !isAuthorized() {
             // The lease must still be released; the entry is left for the revocation path.
+            FileLog.shared.addMessage(
+                "[VoiceSharing] upload disposition entry=\(entry.name) reason=revoked-in-flight disposition=revoked")
+            FileLog.shared.forceFlush()
             _ = try? queue.applyAttemptResult(entry, lease: lease, outcome: .retryableFailure)
             return .revoked
         }
 
         switch result {
         case .transportFailure:
-            // DIAGNOSTIC (content-free): distinguishes "bytes left but nothing came back" from
-            // "a response arrived and was judged". Transport failure is NOT a server rejection.
-            // Observable fact only: no response arrived. This does NOT establish whether bytes
-            // left the device — a connection can fail before or after the send.
+            // Final disposition of a response-less attempt. Observable fact only: no response
+            // arrived; this does NOT establish whether bytes left the device.
             FileLog.shared.addMessage(
-                "[VoiceSharing] upload outcome entry=\(entry.name) response=none")
-            // FORCE THE FLUSH: FileLog buffers 100 entries, so an outcome line may otherwise never
-            // reach disk before the app is backgrounded or terminated.
+                "[VoiceSharing] upload disposition entry=\(entry.name) reason=no-response disposition=retry")
             FileLog.shared.forceFlush()
             return settleRetry(entry: entry, lease: lease, attempt: attemptNumber,
                                serverRetryAfter: nil)
         case .response(let statusCode, let body):
-            // DIAGNOSTIC (content-free): status plus the PARSED error code only — never the raw
-            // body, which can carry server text we must not persist.
-            FileLog.shared.addMessage(
-                "[VoiceSharing] upload outcome entry=\(entry.name) status=\(statusCode) "
-                    + "code=\(Self.diagnosticCode(body))")
-            // FORCE THE FLUSH: the status line is the one most likely to be the last thing that
-            // happens before a termination, so it must not sit in a buffer.
-            FileLog.shared.forceFlush()
+            // Status/code were already logged immediately after the await (before the fences);
+            // each branch below logs its FINAL fixed-vocabulary disposition.
             switch statusCode {
             case 200, 201:
+            FileLog.shared.addMessage(
+                "[VoiceSharing] upload disposition entry=\(entry.name) reason=receipt-validation-pending disposition=accept-pending-receipt")
+            FileLog.shared.forceFlush()
                 // 201 = newly accepted, 200 = previously accepted (idempotent replay). Both are
                 // only trustworthy when the receipt body validates against OUR record identity.
                 return settleReceipt(entry: entry, lease: lease, body: body,
                                      statusCode: statusCode, attempt: attemptNumber)
             case 401:
+            FileLog.shared.addMessage(
+                "[VoiceSharing] upload disposition entry=\(entry.name) reason=unauthorized disposition=retry")
+            FileLog.shared.forceFlush()
                 // AUTHENTICATION, not a verdict on the record (reviewer 7dd1e357). The credential
                 // is refreshed out of band and the SAME immutable entry is retried; deleting it
                 // here would discard a valid recording because of a stale token.
                 return settleRetry(entry: entry, lease: lease, attempt: attemptNumber,
                                    serverRetryAfter: nil)
             case 503:
+            FileLog.shared.addMessage(
+                "[VoiceSharing] upload disposition entry=\(entry.name) reason=upload-pending disposition=retry")
+            FileLog.shared.forceFlush()
                 // "upload_pending": transient by contract, and the server may still tell us when.
                 // Its minimum is PRESERVED and ENFORCED through the persisted not-before stamp.
                 return settleRetry(entry: entry, lease: lease, attempt: attemptNumber,
                                    serverRetryAfter: Self.retryAfterSeconds(body))
             case 429:
+            FileLog.shared.addMessage(
+                "[VoiceSharing] upload disposition entry=\(entry.name) reason=quota-exceeded disposition=retry")
+            FileLog.shared.forceFlush()
                 // quota_exceeded (spec c74d7e30): the day is metered from ACTUAL accepted bytes
                 // and resets at next UTC midnight. A day-scale refusal is not something the
                 // exponential ladder should burn attempts against: the floor applies whether or
@@ -239,6 +284,9 @@ final class VoiceSharingUploader {
                                        statusCode: 429, body: body,
                                        hint: Self.retryAfterSeconds(body), now: Date()))
             case 408:
+            FileLog.shared.addMessage(
+                "[VoiceSharing] upload disposition entry=\(entry.name) reason=request-timeout disposition=retry")
+            FileLog.shared.forceFlush()
                 // Request timeout: transient by the owning table, never a judgement on the record.
                 return settleRetry(entry: entry, lease: lease, attempt: attemptNumber,
                                    serverRetryAfter: nil)
@@ -252,22 +300,38 @@ final class VoiceSharingUploader {
         let owning = code == Self.owningCode[statusCode]
             || (statusCode == 410 && code == "enrollment_retired")
         guard owning else {
+                    FileLog.shared.addMessage(
+                        "[VoiceSharing] upload disposition entry=\(entry.name) "
+                            + "reason=terminal-status-non-owning-body disposition=retain")
+                    FileLog.shared.forceFlush()
                     return unknownOutcome(entry: entry, lease: lease, attempt: attemptNumber,
                                           reason: "terminal status with non-owning body")
                 }
+                                    FileLog.shared.addMessage(
+                        "[VoiceSharing] upload disposition entry=\(entry.name) reason=owning-terminal-code disposition=abandon")
+                    FileLog.shared.forceFlush()
                 return settleTerminal(entry: entry, lease: lease, statusCode: statusCode)
             case 403:
                 // The table's stop disposition — only when the body names it:
                 // not_enrolled / collection_disabled. An unrelated 403 is just unknown.
                 guard let code = Self.errorCode(body),
                     code == "not_enrolled" || code == "collection_disabled" else {
+                                        FileLog.shared.addMessage(
+                        "[VoiceSharing] upload disposition entry=\(entry.name) reason=403-without-owning-code disposition=retain")
+                    FileLog.shared.forceFlush()
                     return unknownOutcome(entry: entry, lease: lease, attempt: attemptNumber,
                                           reason: "403 without owning code")
                 }
+                                    FileLog.shared.addMessage(
+                        "[VoiceSharing] upload disposition entry=\(entry.name) reason=owning-stop-code disposition=abandon")
+                    FileLog.shared.forceFlush()
                 return settleTerminal(entry: entry, lease: lease, statusCode: statusCode)
             default:
                 // Everything unmatched (unknown 4xx, 5xx other than 503, odd 3xx): the record's
                 // fate is unknown, so it is retained and retried with bounded backoff.
+                                    FileLog.shared.addMessage(
+                        "[VoiceSharing] upload disposition entry=\(entry.name) reason=unmatched-status disposition=retain-retry")
+                    FileLog.shared.forceFlush()
                 return settleRetry(entry: entry, lease: lease, attempt: attemptNumber,
                                    serverRetryAfter: Self.retryAfterSeconds(body))
             }
