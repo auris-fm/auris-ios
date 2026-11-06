@@ -698,10 +698,21 @@ final class VoiceSharingUploadQueue {
         case .absent:
             break
         }
+        // DIAGNOSTIC (content-free): an UNREADY entry is being discarded here. Caller-aggregate
+        // counts alone leave these entries unexplained (reviewer fcbd232c).
+        FileLog.shared.addMessage(
+            "[VoiceSharing] queue removal reason=discard-unready entry=\(entry.name) starting")
+        FileLog.shared.forceFlush()
         do {
             try fileManager.removeItem(at: directory)
+            FileLog.shared.addMessage(
+                "[VoiceSharing] queue removal reason=discard-unready entry=\(entry.name) removed=true")
+            FileLog.shared.forceFlush()
         } catch {
             // Cleanup failure: the entry REMAINS (charged, unready). Never collapse into gone.
+            FileLog.shared.addMessage(
+                "[VoiceSharing] queue removal reason=discard-unready entry=\(entry.name) removed=false — retained")
+            FileLog.shared.forceFlush()
             throw PrepareError.accountingUnavailable
         }
         return true
@@ -801,10 +812,24 @@ final class VoiceSharingUploadQueue {
                 }
             }
             do {
+                // DIAGNOSTIC (content-free): consent-revocation purge removes this entry. Logged
+                // per-entry — an aggregate count alone cannot attribute a named entry's removal.
+                FileLog.shared.addMessage(
+                    "[VoiceSharing] queue removal reason=consent-revocation-purge "
+                        + "entry=\(name) starting")
+                FileLog.shared.forceFlush()
                 try fileManager.removeItem(at: item)
                 removed += 1
+                FileLog.shared.addMessage(
+                    "[VoiceSharing] queue removal reason=consent-revocation-purge "
+                        + "entry=\(name) removed=true")
+                FileLog.shared.forceFlush()
             } catch {
                 retained += 1
+                FileLog.shared.addMessage(
+                    "[VoiceSharing] queue removal reason=consent-revocation-purge "
+                        + "entry=\(name) removed=false — retained")
+                FileLog.shared.forceFlush()
                 // A RECURSIVE removal can delete children (including publication.failed) before
                 // failing on another child, so the marker written above is NOT proof it survived.
                 // Re-establish durable disqualification on the SURVIVOR, or hold the owner
@@ -1867,12 +1892,12 @@ final class VoiceSharingUploadQueue {
                     try confirmEntryRemovalDurability()
                     FileLog.shared.addMessage(
                         "[VoiceSharing] queue removal reason=settled outcome=\(outcome) "
-                            + "entry=\(entry.name) removed=true durability=confirmed")
+                            + "entry=\(entry.name) removed=true flush=completed")
                     FileLog.shared.forceFlush()
                 } catch {
                     FileLog.shared.addMessage(
                         "[VoiceSharing] queue removal reason=settled outcome=\(outcome) "
-                            + "entry=\(entry.name) uncertain — publication state unresolved")
+                            + "entry=\(entry.name) uncertain — publication state unresolved, retained-pending")
                     FileLog.shared.forceFlush()
                     throw PrepareError.publicationUncertain
                 }
