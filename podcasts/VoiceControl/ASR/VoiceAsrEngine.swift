@@ -725,7 +725,7 @@ class VoiceAsrEngine {
             // capture would vanish instead of being recorded as a real no-wake observation.
             contributionCollector?.engineReported(
                 stage: "wake",
-                outcome: .init(state: "completed", reason: nil, decision: "no_wake_detected"),
+                outcome: .init(state: "completed", reason: nil, decision: "rejected"),
                 context: utteranceContext)
             contributionCollector?.segmentRejected(kind: .rejectedWake, samples: utterance.count, context: utteranceContext)
             return
@@ -740,7 +740,12 @@ class VoiceAsrEngine {
                 stage: "wake",
                 outcome: .init(
                     state: "completed", reason: nil,
-                    decision: detected ? nil : "no_wake_detected"),
+                    // SERVER SCHEMA (record_schema.ts validateWake): the decision enum is
+                    // {detected, rejected} — "no_wake_detected" here made every observed
+                    // negative wake a 400 invalid_request at observations.wake.decision
+                    // (incident 2026-11-05, all 16 removed records). A completed stage carries
+                    // no reason, so the verdict lives in decision under the schema's own value.
+                    decision: detected ? nil : "rejected"),
                 context: utteranceContext)
             if detected {
                 onWakeWordDetected?()
