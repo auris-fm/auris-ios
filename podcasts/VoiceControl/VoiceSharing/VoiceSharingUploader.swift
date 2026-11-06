@@ -128,6 +128,13 @@ final class VoiceSharingUploader {
         let lease = admitted.lease
         let attemptNumber = admitted.attemptNumber
 
+        // DIAGNOSTIC (content-free): the attempt is now OURS and has consumed budget. Without this
+        // line an attempt that never reaches the wire is invisible, and "no request" and "no drain"
+        // look identical from outside the process. Entry/capture only — no audio, no credentials.
+        FileLog.shared.addMessage(
+            "[VoiceSharing] upload attempt start entry=\(entry.name) "
+                + "capture=\(entryCaptureIDForDiagnostics(entry)) attempt=\(attemptNumber)")
+
         guard let url = endpoint() else {
             _ = try? queue.applyAttemptResult(entry, lease: lease, outcome: .retryableFailure)
             return .retry(serverRetryAfterSeconds: nil, attempt: attemptNumber)
@@ -184,9 +191,26 @@ final class VoiceSharingUploader {
 
         switch result {
         case .transportFailure:
+            // DIAGNOSTIC (content-free): distinguishes "bytes left but nothing came back" from
+            // "a response arrived and was judged". Transport failure is NOT a server rejection.
+            // Observable fact only: no response arrived. This does NOT establish whether bytes
+            // left the device — a connection can fail before or after the send.
+            FileLog.shared.addMessage(
+                "[VoiceSharing] upload outcome entry=\(entry.name) response=none")
+            // FORCE THE FLUSH: FileLog buffers 100 entries, so an outcome line may otherwise never
+            // reach disk before the app is backgrounded or terminated.
+            FileLog.shared.forceFlush()
             return settleRetry(entry: entry, lease: lease, attempt: attemptNumber,
                                serverRetryAfter: nil)
         case .response(let statusCode, let body):
+            // DIAGNOSTIC (content-free): status plus the PARSED error code only — never the raw
+            // body, which can carry server text we must not persist.
+            FileLog.shared.addMessage(
+                "[VoiceSharing] upload outcome entry=\(entry.name) status=\(statusCode) "
+                    + "code=\(Self.diagnosticCode(body))")
+            // FORCE THE FLUSH: the status line is the one most likely to be the last thing that
+            // happens before a termination, so it must not sit in a buffer.
+            FileLog.shared.forceFlush()
             switch statusCode {
             case 200, 201:
                 // 201 = newly accepted, 200 = previously accepted (idempotent replay). Both are
@@ -489,6 +513,30 @@ final class VoiceSharingUploader {
             default: return true
             }
         }
+    }
+
+    /// The protocol's fixed error-code vocabulary (specs/voice-recording-uploads.md). Only these
+    /// strings are ever logged: a server-supplied value outside the vocabulary is content and is
+    /// reported as `unknown` WITHOUT being echoed.
+    static let knownErrorCodes: Set<String> = [
+        "invalid_request", "capture_conflict", "record_gone", "enrollment_retired",
+        "payload_too_large", "unsupported_audio", "integrity_mismatch",
+        "not_enrolled", "collection_disabled", "quota_exceeded", "rate_limited",
+        "unauthorized", "upload_pending", "storage_unavailable", "protocol_capability",
+    ]
+
+    /// The logged form of a response code: a recognized protocol code, or `unknown` — never the
+    /// server's own string.
+    static func diagnosticCode(_ body: Data) -> String {
+        guard let code = errorCode(body), knownErrorCodes.contains(code) else { return "unknown" }
+        return code
+    }
+
+    /// The entry's capture identity for logs, or `unknown` when it cannot be read. This value is
+    /// already sent to the server in the record envelope, so logging it discloses nothing new —
+    /// audio, credentials, transcripts and raw bodies are deliberately excluded.
+    private func entryCaptureIDForDiagnostics(_ entry: VoiceSharingUploadQueue.Entry) -> String {
+        (try? queue.boundIdentity(of: entry))?.captureID ?? "unknown"
     }
 
     /// The owning status→code pairs (specs/voice-recording-uploads.md). A terminal disposition
