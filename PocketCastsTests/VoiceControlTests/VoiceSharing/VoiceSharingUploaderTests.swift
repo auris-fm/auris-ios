@@ -513,6 +513,108 @@ final class VoiceSharingUploaderTests: XCTestCase {
         }
     }
 
+    /// CONTRACT REJECTION (reviewer 12f353d1, incident 2026-11-06): a real 400 invalid_request
+    /// body must RETAIN the WAV/metadata through the durable quarantine — identical files on
+    /// disk, never selected again, and a fresh reconstruction still sees the bytes — while a
+    /// MATCHING DELIVERY RECEIPT still removes. Disposable production-path control.
+    func test_invalidRequest400QuarantinesWithoutDestroyingAndReceiptStillRemoves() async throws {
+        let entry = try makeReadyEntry()
+        let audioBefore = try queue.audio(of: entry)
+        let metadataBefore = try queue.metadata(of: entry)
+        let uploader = makeUploader(transport: { _, _, _ in
+            .response(statusCode: 400, body: Data(
+                "{\"schema_version\":1,\"code\":\"invalid_request\"}".utf8))
+        })
+        let outcome = await uploader.upload(entry)
+        guard case .abandoned(let reason) = outcome, reason.contains("quarantined") else {
+            return XCTFail("400 invalid_request must quarantine, got \(outcome)")
+        }
+        // Bytes IDENTICAL: quarantine retains, it does not mutate.
+        XCTAssertEqual(try queue.audio(of: entry), audioBefore, "WAV must be retained byte-identical")
+        XCTAssertEqual(try queue.metadata(of: entry), metadataBefore, "metadata retained byte-identical")
+        // Durable disqualification marker present.
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(
+            at: root.appendingPathComponent(entry.name), includingPropertiesForKeys: nil)
+            .map(\.lastPathComponent).contains("publication.failed"), true,
+            "publication.failed marker must be present")
+        // NOT selected again: neither ready listing nor a fresh reconstruction offers it.
+        guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("coverage known")
+        }
+        XCTAssertFalse(ready.contains(entry), "quarantined entry must be unservable")
+        let reborn = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        guard case .known(let rebornReady) = reborn.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("reconstruction coverage known")
+        }
+        XCTAssertFalse(rebornReady.contains(entry),
+                       "reconstruction must also refuse the quarantined entry")
+        XCTAssertNoThrow(try reborn.audio(of: entry),
+                         "reconstruction must RETAIN the bytes (recoverable by inspection)")
+
+        // A MATCHING DELIVERY RECEIPT still removes: the delivered path is untouched. Uses a
+        // FRESH entry — the quarantined one must refuse admission (that is the point).
+        let fresh = try makeReadyEntry()
+        let delivered = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let admitted = try XCTUnwrap(try delivered.admitAttempt(fresh))
+        try delivered.applyAttemptResult(fresh, lease: admitted.lease, outcome: .delivered)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: root.appendingPathComponent(fresh.name).path),
+            "a delivery settlement still removes the entry")
+        // Admission of the quarantined entry is REFUSED (nil), not thrown.
+        XCTAssertNil(try delivered.admitAttempt(entry),
+                     "the quarantined entry must never be servable")
+    }
+
+    /// DISPOSABLE REQUEST FIXTURE (spec 9917823a): ONE valid bound record through the REAL
+    /// production makeRequest/multipartBody; dumps the exact wire body + SAFE headers (no
+    /// credential, no owner data — synthetic WAV/metadata) for Cloud to feed the deployed
+    /// handler locally. No owner queue, no live upload.
+    func test_exportDisposableRequestFixtureForCloudHandlerProbe() throws {
+        let entry = try makeReadyEntry()
+        let url = URL(string: "https://staging.example/api/v1/voice-recordings")!
+        let uploader = makeUploader(transport: { _, _, _ in
+            .response(statusCode: 503, body: Data())
+        })
+        let request = try uploader.makeRequest(entry: entry, url: url)
+        let body = try XCTUnwrap(request.httpBody ?? request.httpBodyStream.map { stream in
+            stream.open()
+            defer { stream.close() }
+            var data = Data()
+            let bufferSize = 64 * 1024
+            let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
+            defer { buffer.deallocate() }
+            while stream.hasBytesAvailable {
+                let read = stream.read(buffer, maxLength: bufferSize)
+                guard read > 0 else { break }
+                data.append(buffer, count: read)
+            }
+            return data
+        })
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vs-fixture-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try body.write(to: dir.appendingPathComponent("body.bin"))
+        // SAFE HEADERS ONLY: every value is content-free by construction EXCEPT Authorization and
+        // Idempotency-Key, which are replaced with shape-preserving placeholders.
+        var safeHeaders: [String: String] = [:]
+        for (key, value) in request.allHTTPHeaderFields ?? [:] {
+            if key.caseInsensitiveCompare("Authorization") == .orderedSame {
+                let parts = value.split(separator: " ", maxSplits: 1)
+                safeHeaders[key] = parts.count == 2
+                    ? "\(parts[0]) <redacted-bearer-shape-only>" : "<redacted>"
+            } else if key.caseInsensitiveCompare("Idempotency-Key") == .orderedSame {
+                safeHeaders[key] = "<capture-id-uuid-shape>"
+            } else {
+                safeHeaders[key] = value
+            }
+        }
+        let headerData = try JSONSerialization.data(
+            withJSONObject: safeHeaders, options: [.prettyPrinted, .sortedKeys])
+        try headerData.write(to: dir.appendingPathComponent("safeheaders.json"))
+        print("FIXTURE_PATH: \(dir.path)")
+        print("FIXTURE_BODY_BYTES: \(body.count)")
+    }
+
     /// Holds survive TWO consecutive fresh initializations (reviewer 8ba9c45f): recovery must not
     /// delete the durable evidence it just read.
     func test_retryHoldSurvivesTwoRestarts() throws {

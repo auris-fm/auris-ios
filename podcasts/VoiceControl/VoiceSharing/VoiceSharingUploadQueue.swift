@@ -1540,6 +1540,12 @@ final class VoiceSharingUploadQueue {
         case retryableFailure
         /// Permanent failure: the entry is removed (content-free terminal state).
         case abandoned
+        /// Contract-level rejection (e.g. 400 invalid_request): the request was malformed but
+        /// the RECORD is intact and must NOT be destroyed for a fixable client/server mismatch
+        /// (reviewer 12f353d1, incident 2026-11-06: 16 recordings deleted on 400s). The entry is
+        /// disqualified in place via the existing durable `publication.failed` disposal: bytes
+        /// and metadata retained, never selected for another attempt, recoverable by inspection.
+        case quarantined
     }
 
     /// Applies an attempt result. The caller's lease is REVALIDATED under the entry's flock before
@@ -1674,6 +1680,13 @@ final class VoiceSharingUploadQueue {
                 case .retryableFailure:
                     stateOK = Self.statKind(
                         of: directory.appendingPathComponent(Self.attemptLeaseName)) == .absent
+                case .quarantined:
+                    // Quarantine completion = failed marker PRESENT (bytes retained, unservable)
+                    // AND lease gone. Marker absence means the disqualification did not land.
+                    stateOK = Self.statKind(
+                        of: directory.appendingPathComponent(Self.failedName)) == .present
+                        && Self.statKind(
+                            of: directory.appendingPathComponent(Self.attemptLeaseName)) == .absent
                 }
                 guard stateOK else { continue }
                 try? fileManager.removeItem(at: url)
@@ -1694,6 +1707,12 @@ final class VoiceSharingUploadQueue {
             }
         case .retryableFailure:
             guard Self.statKind(of: directory.appendingPathComponent(Self.attemptLeaseName)) == .absent
+            else {
+                throw PrepareError.accountingUnavailable
+            }
+        case .quarantined:
+            guard Self.statKind(of: directory.appendingPathComponent(Self.failedName)) == .present,
+                Self.statKind(of: directory.appendingPathComponent(Self.attemptLeaseName)) == .absent
             else {
                 throw PrepareError.accountingUnavailable
             }
@@ -1919,6 +1938,38 @@ final class VoiceSharingUploadQueue {
 
             // The lease is live and ours: apply the recorded outcome.
             switch outcome {
+            case .quarantined:
+                // RETAIN, don't destroy (reviewer 12f353d1): a contract rejection must not delete
+                // the recording. Disqualify in place — the durable publication.failed intent makes
+                // the entry unservable while keeping every byte — confirm the marker BEFORE the
+                // lease is released (a lease release without the marker would let the entry be
+                // selected again), then complete the settlement. A failed marker or barrier
+                // retains everything and propagates uncertainty: fail closed toward retention.
+                FileLog.shared.addMessage(
+                    "[VoiceSharing] queue quarantine reason=contract-rejected "
+                        + "entry=\(entry.name) starting")
+                FileLog.shared.forceFlush()
+                guard disqualifyLocked(directory) else {
+                    FileLog.shared.addMessage(
+                        "[VoiceSharing] queue quarantine reason=contract-rejected "
+                            + "entry=\(entry.name) marker-state=absent retention=intact")
+                    FileLog.shared.forceFlush()
+                    throw PrepareError.publicationUncertain
+                }
+                do { try synchronizer(rootDirectory, true) } catch {
+                    throw PrepareError.publicationUncertain
+                }
+                FileLog.shared.addMessage(
+                    "[VoiceSharing] queue quarantine reason=contract-rejected "
+                        + "entry=\(entry.name) retained=true unservable=true flush=completed")
+                FileLog.shared.forceFlush()
+                do {
+                    try fileManager.removeItem(at: leaseURL)
+                    try confirmLeaseRemovalDurability()
+                } catch {
+                    throw PrepareError.publicationUncertain
+                }
+                try finishSettlement()
             case .delivered, .abandoned:
                 // DIAGNOSTIC (content-free): logged BEFORE the operation so a deletion whose
                 // confirmation then throws is still attributable — the exact gap an unlogged

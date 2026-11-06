@@ -309,6 +309,16 @@ final class VoiceSharingUploader {
                     return unknownOutcome(entry: entry, lease: lease, attempt: attemptNumber,
                                           reason: "terminal status with non-owning body")
                 }
+                if statusCode == 400 && code == "invalid_request" {
+                        // CONTRACT REJECTION (reviewer 12f353d1): a malformed-request response
+                        // says nothing bad about the RECORD — the recording is intact and the
+                        // mismatch is fixable. Quarantine (retain + unservable), never abandon.
+                        FileLog.shared.addMessage(
+                            "[VoiceSharing] upload disposition entry=\(entry.name) "
+                                + "reason=contract-rejected disposition=quarantine")
+                        FileLog.shared.forceFlush()
+                        return settleQuarantine(entry: entry, lease: lease, statusCode: statusCode)
+                    }
                         FileLog.shared.addMessage(
                         "[VoiceSharing] upload disposition entry=\(entry.name) reason=owning-terminal-code disposition=abandon")
                     FileLog.shared.forceFlush()
@@ -433,6 +443,22 @@ final class VoiceSharingUploader {
             return .unavailable(reason: "settlement failed: \(type(of: error))")
         }
         return .retry(serverRetryAfterSeconds: delay, attempt: attempt)
+    }
+
+    /// Contract-level rejection: retain the record through the queue's durable quarantine
+    /// (publication.failed), release the lease only after the marker is confirmed.
+    private func settleQuarantine(
+        entry: VoiceSharingUploadQueue.Entry, lease: VoiceSharingUploadQueue.AttemptLease,
+        statusCode: Int
+    ) -> Outcome {
+        do {
+            try queue.applyAttemptResult(entry, lease: lease, outcome: .quarantined)
+        } catch VoiceSharingUploadQueue.PrepareError.resultStale {
+            return .staleAttempt
+        } catch {
+            return .unavailable(reason: "quarantine settlement failed: \(type(of: error))")
+        }
+        return .abandoned(reason: "http \(statusCode) quarantined")
     }
 
     private func settleTerminal(
