@@ -1,15 +1,16 @@
 import XCTest
 @testable import podcasts
 
-/// PRODUCTION-PATH controls for the phase-2 record fields (reviewer 67ecb11e item 3).
+/// EVENT-ONLY producer controls (reviewer 9be75bf0 — labelled so they are not mistaken for a durable path).
 ///
-/// These drive the REAL engine — real segmenter, real capture callback, real collector, real sink — and
-/// assert on the segment events the collector actually emitted. Nothing here constructs a `SegmentEvent` or
-/// a `StageOutcome` by hand, which is exactly the gap in the encoder-level controls: those proved my own
-/// glue, not that the producer reports the value.
+/// These drive the REAL engine — real segmenter, real capture callback, real collector — and STOP at the
+/// segment event the collector emitted, captured in a closure. No sink, no queue, no file. They prove the
+/// PRODUCER reports the value; they do NOT prove it survives into stored bytes.
 ///
-/// The boundary of each control is stated on it: engine → collector → emitted event. Encoding and binding
-/// are covered separately (`VoiceSharingNameSchemaControls`), and the two together are the record.
+/// Durable coverage lives in `VoiceSharingEndToEndEngineToDurableQueueTests` (`test_durableRecord*`): the
+/// same engine driven through the production sink to a ready queue entry, read back off disk and bound.
+/// Neither suite alone is the record; together they are. `VoiceSharingNameSchemaControls` covers the
+/// encoder and binding on canonical bytes.
 final class VoiceSharingProductionPathControls: XCTestCase {
     private var storeState = VoiceSharingEnrollmentStore.State()
     private var gateOpen = false
