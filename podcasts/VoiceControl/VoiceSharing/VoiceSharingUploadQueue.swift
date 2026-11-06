@@ -1139,6 +1139,16 @@ final class VoiceSharingUploadQueue {
     /// to a caller is not enforcement; this is.
     func admitAttempt(_ entry: Entry) throws -> AdmittedAttempt? {
         try serialQueue.sync { () -> AdmittedAttempt? in
+            // EVERY refusal below names its own fixed reason (spec c83a92fa). Without this, one
+            // generic "admission-refused" made distinct conditions indistinguishable in the log
+            // and forced inference from source instead of reading what actually happened. Fixed
+            // vocabulary only: no values from disk, no counts that identify content.
+            func refuse(_ reason: String) -> AdmittedAttempt? {
+                FileLog.shared.addMessage(
+                    "[VoiceSharing] admit refusal entry=\(entry.name) reason=\(reason)")
+                FileLog.shared.forceFlush()
+                return nil
+            }
             guard !revocationHoldLocked else { throw PrepareError.accountingUnavailable }
             guard !retryHoldLocked else { throw PrepareError.accountingUnavailable }
             guard entry.root == rootDirectory,
@@ -1146,9 +1156,9 @@ final class VoiceSharingUploadQueue {
                 !entry.name.contains("/")
             else { throw CocoaError(.fileNoSuchFile) }
             try refuseIfNotYetDueLocked(entry)
-            guard inFlightAttempts[entry] == nil else { return nil }
+            guard inFlightAttempts[entry] == nil else { return refuse("already-in-flight") }
             let discovered = try strictOwnerCoverageLocked()
-            guard discovered.contains(entry) else { return nil }
+            guard discovered.contains(entry) else { return refuse("not-in-owner-coverage") }
             // ORDINARY ACCOUNT OWNERSHIP (spec 4afc6e43): an entry belongs to the account that
             // created it, and only that account may send it. The enrollment EPOCH in the entry's
             // durable metadata is PROVENANCE stamped on the record, never an admission gate: a
@@ -1160,18 +1170,22 @@ final class VoiceSharingUploadQueue {
             var admittedIdentity: VoiceSharingUploadIdentity?
             if let readIdentity = currentIdentityLocked {
                 // A BOUND queue refuses when an account cannot be established at all.
-                guard let live = readIdentity() else { return nil }
+                guard let live = readIdentity() else { return refuse("live-identity-unavailable") }
                 let bound = try boundIdentityLocked(of: entry)
                 // ABSENT owner means this entry predates sign-in and belongs to no account yet:
                 // it cannot be attributed, so it is refused (never inherited by the current account).
                 guard case .present(let capturedScope) = try ownerScopeLocked(for: entry) else {
-                    return nil
+                    return refuse("entry-owner-absent")
                 }
-                guard capturedScope == live.accountScope else { return nil }
+                guard capturedScope == live.accountScope else {
+                    return refuse("account-mismatch")
+                }
                 admittedIdentity = VoiceSharingUploadIdentity(
                     accountScope: capturedScope, enrollmentEpoch: bound.enrollmentEpoch)
             }
-            guard let lease = try acquireLeaseLocked(for: entry) else { return nil }
+            guard let lease = try acquireLeaseLocked(for: entry) else {
+                return refuse("lease-held-or-unavailable")
+            }
             do {
                 guard try isAttemptableLocked(entry) else {
                     // Exhausted is a terminal disposition for this record: it stops serving so it
@@ -1190,7 +1204,7 @@ final class VoiceSharingUploadQueue {
                             FileLog.shared.forceFlush()
                     }
                     releaseLeaseLocked(for: entry, owner: lease)
-                    return nil
+                    return refuse("attempts-exhausted")
                 }
             } catch {
                 releaseLeaseLocked(for: entry, owner: lease)
