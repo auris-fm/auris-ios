@@ -1149,15 +1149,31 @@ final class VoiceSharingUploadQueue {
                 FileLog.shared.forceFlush()
                 return nil
             }
-            guard !revocationHoldLocked else { throw PrepareError.accountingUnavailable }
-            guard !retryHoldLocked else { throw PrepareError.accountingUnavailable }
+            guard !revocationHoldLocked else {
+                FileLog.shared.addMessage("[VoiceSharing] admit refusal reason=revocation-hold")
+                FileLog.shared.forceFlush()
+                throw PrepareError.accountingUnavailable
+            }
+            guard !retryHoldLocked else {
+                FileLog.shared.addMessage("[VoiceSharing] admit refusal reason=retry-hold")
+                FileLog.shared.forceFlush()
+                throw PrepareError.accountingUnavailable
+            }
             guard entry.root == rootDirectory,
                 UUID(uuidString: entry.name) != nil,
                 !entry.name.contains("/")
             else { throw CocoaError(.fileNoSuchFile) }
             try refuseIfNotYetDueLocked(entry)
+                // (the not-yet-due hold logs its own reason inside)
             guard inFlightAttempts[entry] == nil else { return refuse("already-in-flight") }
-            let discovered = try strictOwnerCoverageLocked()
+            let discovered: [Entry]
+            do {
+                discovered = try strictOwnerCoverageLocked()
+            } catch {
+                FileLog.shared.addMessage("[VoiceSharing] admit refusal reason=coverage-unavailable")
+                FileLog.shared.forceFlush()
+                throw error
+            }
             guard discovered.contains(entry) else { return refuse("not-in-owner-coverage") }
             // ORDINARY ACCOUNT OWNERSHIP (spec 4afc6e43): an entry belongs to the account that
             // created it, and only that account may send it. The enrollment EPOCH in the entry's
@@ -1204,7 +1220,10 @@ final class VoiceSharingUploadQueue {
                             FileLog.shared.forceFlush()
                     }
                     releaseLeaseLocked(for: entry, owner: lease)
-                    return refuse("attempts-exhausted")
+                    // isAttemptable false ALSO covers incomplete/unbound entries (reviewer 75da5baf):
+                    // the completeness branch above is the discriminator, so the refusal reason
+                    // must follow it, not assume exhaustion.
+                    return refuse(isCompleteEntryLocked(at: entry) ? "attempts-exhausted" : "entry-not-attemptable")
                 }
             } catch {
                 releaseLeaseLocked(for: entry, owner: lease)
@@ -1411,6 +1430,8 @@ final class VoiceSharingUploadQueue {
                 // NOT-YET-DUE must be DISTINGUISHABLE from "someone else owns this entry"
                 // (reviewer c7da2dbe's bounded-attempts evidence exposed the ambiguity): the
                 // caller's budget/stopping rules depend on knowing a delay is owed.
+                FileLog.shared.addMessage("[VoiceSharing] admit refusal reason=obligation-not-yet-due")
+                FileLog.shared.forceFlush()
                 throw PrepareError.notYetDue(retryAt: Date(timeIntervalSince1970: owed))
             }
             // Due: retire the obligation so it cannot outlive its purpose.
@@ -1434,6 +1455,8 @@ final class VoiceSharingUploadQueue {
             throw PrepareError.leaseHeld
         }
         if clock().timeIntervalSince1970 < stamp {
+            FileLog.shared.addMessage("[VoiceSharing] admit refusal reason=notbefore-not-yet-due")
+            FileLog.shared.forceFlush()
             throw PrepareError.notYetDue(retryAt: Date(timeIntervalSince1970: stamp))
         }
         // Due: retire the record so it cannot outlive its purpose.
