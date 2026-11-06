@@ -307,7 +307,7 @@ final class VoiceSharingUploader {
                     return unknownOutcome(entry: entry, lease: lease, attempt: attemptNumber,
                                           reason: "terminal status with non-owning body")
                 }
-                                    FileLog.shared.addMessage(
+                        FileLog.shared.addMessage(
                         "[VoiceSharing] upload disposition entry=\(entry.name) reason=owning-terminal-code disposition=abandon")
                     FileLog.shared.forceFlush()
                 return settleTerminal(entry: entry, lease: lease, statusCode: statusCode)
@@ -316,20 +316,20 @@ final class VoiceSharingUploader {
                 // not_enrolled / collection_disabled. An unrelated 403 is just unknown.
                 guard let code = Self.errorCode(body),
                     code == "not_enrolled" || code == "collection_disabled" else {
-                                        FileLog.shared.addMessage(
+                        FileLog.shared.addMessage(
                         "[VoiceSharing] upload disposition entry=\(entry.name) reason=403-without-owning-code disposition=retain")
                     FileLog.shared.forceFlush()
                     return unknownOutcome(entry: entry, lease: lease, attempt: attemptNumber,
                                           reason: "403 without owning code")
                 }
-                                    FileLog.shared.addMessage(
+                        FileLog.shared.addMessage(
                         "[VoiceSharing] upload disposition entry=\(entry.name) reason=owning-stop-code disposition=abandon")
                     FileLog.shared.forceFlush()
                 return settleTerminal(entry: entry, lease: lease, statusCode: statusCode)
             default:
                 // Everything unmatched (unknown 4xx, 5xx other than 503, odd 3xx): the record's
                 // fate is unknown, so it is retained and retried with bounded backoff.
-                                    FileLog.shared.addMessage(
+                        FileLog.shared.addMessage(
                         "[VoiceSharing] upload disposition entry=\(entry.name) reason=unmatched-status disposition=retain-retry")
                     FileLog.shared.forceFlush()
                 return settleRetry(entry: entry, lease: lease, attempt: attemptNumber,
