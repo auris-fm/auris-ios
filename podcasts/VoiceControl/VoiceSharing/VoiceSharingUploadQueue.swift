@@ -1897,7 +1897,7 @@ final class VoiceSharingUploadQueue {
                 } catch {
                     FileLog.shared.addMessage(
                         "[VoiceSharing] queue removal reason=settled outcome=\(outcome) "
-                            + "entry=\(entry.name) uncertain — publication state unresolved, retained-pending")
+                            + "entry=\(entry.name) removal-state=unknown")
                     FileLog.shared.forceFlush()
                     throw PrepareError.publicationUncertain
                 }
