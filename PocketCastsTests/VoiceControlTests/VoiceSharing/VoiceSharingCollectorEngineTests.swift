@@ -1356,7 +1356,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         }
         collector.engineReported(
             stage: "wake",
-            outcome: .init(state: "completed", reason: nil, decision: "no_wake_detected"),
+            outcome: .init(state: "completed", reason: nil, decision: "rejected"),
             context: ctx)
         collector.segmentationEnded(ctx)
         collector.speechCompleted([Float](repeating: 0.01, count: 640), context: ctx,
@@ -1368,7 +1368,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         }
         let wake = completed.reportedStages["wake"]
         XCTAssertEqual(wake?.state, "completed", "the open-capture report must ride the event")
-        XCTAssertEqual(wake?.decision, "no_wake_detected")
+        XCTAssertEqual(wake?.decision, "rejected")
         XCTAssertNil(wake?.reason, "a completed stage carries no reason")
     }
 
@@ -1415,8 +1415,9 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         }
         XCTAssertEqual(wake["state"] as? String, "completed",
                        "the engine's observed wake outcome must replace the caller's unknown claim")
-        XCTAssertEqual(wake["decision"] as? String, "no_wake_detected",
-                       "the OBSERVED negative decision must survive validation, not be relabelled")
+        XCTAssertEqual(wake["decision"] as? String, "rejected",
+                       "the OBSERVED negative decision must survive validation, not be relabelled; "
+                           + "server validateWake permits only detected/rejected")
         XCTAssertNil(wake["reason"],
                      "a completed stage carries no reason; the negative lives in decision")
     }
@@ -2040,8 +2041,8 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                 XCTAssertNil(wake?["reason"], "a completed wake stage must not carry a reason")
             }
         }
-        XCTAssertTrue(decisions.contains("no_wake_detected"),
-                      "a forwarded negative segment observed no wake; got \(decisions)")
+        XCTAssertTrue(decisions.contains("rejected"),
+                      "a forwarded negative segment observed no wake (schema value rejected); got \(decisions)")
     }
 
     /// OBSERVATION ASSOCIATION, STALE CONTEXT (reviewer 7c6e628e): a report that belongs to capture A must
