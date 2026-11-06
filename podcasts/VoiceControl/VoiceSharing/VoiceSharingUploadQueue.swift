@@ -1207,7 +1207,8 @@ final class VoiceSharingUploadQueue {
                     // Exhausted is a terminal disposition for this record: it stops serving so it
                     // is not retried forever. The removal is best-effort here — a failure leaves
                     // the entry visible-but-unservable via the attempt limit itself.
-                    if isCompleteEntryLocked(at: entry) {
+                    let complete = isCompleteEntryLocked(at: entry)
+                    if complete {
                         let marked = (try? validatedEntryDirectoryLocked(entry))
                             .map { disqualifyLocked($0) } ?? false
                         // DIAGNOSTIC (content-free): this is the ONLY admission path that
@@ -1223,7 +1224,9 @@ final class VoiceSharingUploadQueue {
                     // isAttemptable false ALSO covers incomplete/unbound entries (reviewer 75da5baf):
                     // the completeness branch above is the discriminator, so the refusal reason
                     // must follow it, not assume exhaustion.
-                    return refuse(isCompleteEntryLocked(at: entry) ? "attempts-exhausted" : "entry-not-attemptable")
+                    // Reuse the Boolean captured ONCE above (spec c8642d90): a second read after
+                    // disqualification could observe the mutated state and mislabel exhaustion.
+                    return refuse(complete ? "attempts-exhausted" : "entry-not-attemptable")
                 }
             } catch {
                 releaseLeaseLocked(for: entry, owner: lease)
