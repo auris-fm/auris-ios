@@ -161,16 +161,20 @@ final class VoiceSharingSwitchPutControls: XCTestCase {
         XCTAssertEqual(second.value(forHTTPHeaderField: "If-Match"), "r7")
     }
 
-    /// With nothing read yet there is no revision to assert, so the header is OMITTED. Sending an empty
-    /// `If-Match` would tell the server this client holds a precondition it never read.
-    func test_sendingWithNoPreconditionOmitsTheIfMatchHeader() async throws {
-        VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
-            Reply(status: 200, body: projectionBody("r1", enrolled: true, epoch: "e1"))
-        let op = try XCTUnwrap(client.beginMembership(
-            enrolled: true, acceptedDisclosureVersion: "2026-09", lastReadRevision: nil))
-        _ = await client.perform(op)
-        let request = try XCTUnwrap(putRequests.first)
-        XCTAssertNil(request.value(forHTTPHeaderField: "If-Match"))
+    /// `If-Match` is REQUIRED (spec core e3cfc8ae): a client that has not read the state cannot assert one,
+    /// so it must `GET` first. Sending the PUT anyway — with no header or an empty one — would ask the server
+    /// to apply a write with no precondition, which the contract forbids. The refusal is local: no request
+    /// reaches the wire.
+    func test_switchingWithNoRevisionReadIsRefusedLocally() async throws {
+        XCTAssertNil(client.beginMembership(
+            enrolled: true, acceptedDisclosureVersion: "2026-09", lastReadRevision: nil),
+            "no revision held means the client has not read the state, so it must GET first")
+        XCTAssertNil(client.beginMembership(
+            enrolled: false, acceptedDisclosureVersion: nil, lastReadRevision: nil))
+        XCTAssertNil(client.beginMembership(
+            enrolled: true, acceptedDisclosureVersion: "2026-09", lastReadRevision: ""),
+            "an empty revision is not a precondition")
+        XCTAssertTrue(putRequests.isEmpty)
     }
 
     // MARK: - 409 is terminal
@@ -191,6 +195,49 @@ final class VoiceSharingSwitchPutControls: XCTestCase {
         XCTAssertEqual(current?.membershipRevision, "r12")
         XCTAssertEqual(current?.voiceSharingEnrolled, false)
         XCTAssertEqual(putRequests.count, 1, "a conflict must not produce a second request")
+    }
+
+    /// Spec core 6965edf6: a request for the state ALREADY IN FORCE succeeds whatever its revision, so a
+    /// resend after a lost response is safe. The client must therefore treat the 200 it gets back as a plain
+    /// applied state — not look for a conflict, and not mint a new intent.
+    func test_resendAgainstAnAlreadyHeldStateIsAppliedNotConflicted() async throws {
+        VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
+            Reply(status: 200, body: projectionBody("r8", enrolled: true, epoch: "e8"))
+        // First send: the user's choice lands.
+        let first = try XCTUnwrap(client.beginMembership(
+            enrolled: true, acceptedDisclosureVersion: "2026-09", lastReadRevision: "r7"))
+        guard case .applied = await client.perform(first) else {
+            return XCTFail("the first switch-on should apply")
+        }
+        // Resend after an apparent network failure, now holding the revision that send produced.
+        let resend = try XCTUnwrap(client.beginMembership(
+            enrolled: true, acceptedDisclosureVersion: "2026-09", lastReadRevision: "r8"))
+        let outcome = await client.perform(resend)
+        guard case .applied(let membership, _) = outcome else {
+            return XCTFail("repeating the state in force must apply, got \(outcome)")
+        }
+        XCTAssertTrue(membership.voiceSharingEnrolled)
+        XCTAssertEqual(putRequests.count, 2)
+        XCTAssertEqual(putRequests.last?.value(forHTTPHeaderField: "If-Match"), "r8")
+    }
+
+    /// Spec core e3cfc8ae: the 409 body is the plain projection — the same shape `GET` returns, decoded by the
+    /// same strict decoder. A conflict answer wrapped in an envelope would leave the user's screen blank at
+    /// exactly the moment the server is telling them what the state really is.
+    func test_conflictBodyIsThePlainProjectionShapeThatGetReturns() async throws {
+        VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
+            Reply(status: 409, body: projectionBody("r12", enrolled: false, epoch: nil))
+        let op = try XCTUnwrap(client.beginMembership(
+            enrolled: true, acceptedDisclosureVersion: "2026-09", lastReadRevision: "r7"))
+        let outcome = await client.perform(op)
+
+        guard case .conflict(let current, _) = outcome else {
+            return XCTFail("expected conflict, got \(outcome)")
+        }
+        let projection = try XCTUnwrap(current, "the 409 body must decode as a projection")
+        XCTAssertEqual(projection.membershipRevision, "r12")
+        XCTAssertEqual(projection.withdrawalState, .withdrawn)
+        XCTAssertNil(projection.enrollmentEpoch)
     }
 
     // MARK: - local refusals
