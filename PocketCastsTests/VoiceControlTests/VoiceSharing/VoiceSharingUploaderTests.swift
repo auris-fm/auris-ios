@@ -602,9 +602,9 @@ final class VoiceSharingUploaderTests: XCTestCase {
                 let parts = value.split(separator: " ", maxSplits: 1)
                 safeHeaders[key] = parts.count == 2
                     ? "\(parts[0]) <redacted-bearer-shape-only>" : "<redacted>"
-            } else if key.caseInsensitiveCompare("Idempotency-Key") == .orderedSame {
-                safeHeaders[key] = "<capture-id-uuid-shape>"
             } else {
+                // Idempotency-Key stays EXACT (spec 58ca7059): the synthetic capture ID is not a
+                // secret, and a placeholder could itself trigger validation in the handler.
                 safeHeaders[key] = value
             }
         }
@@ -613,6 +613,55 @@ final class VoiceSharingUploaderTests: XCTestCase {
         try headerData.write(to: dir.appendingPathComponent("safeheaders.json"))
         print("FIXTURE_PATH: \(dir.path)")
         print("FIXTURE_BODY_BYTES: \(body.count)")
+    }
+
+    /// RECONCILIATION CONTROL (reviewer 46971967, spec de1b7a0f): a pending quarantine whose
+    /// lease was already removed must reconcile by re-confirming the retained directory + marker
+    /// (never resultStale), a quarantine with the directory gone must NOT claim success, and the
+    /// receipt complement goes through the UPLOADER with a real receipt, not direct settlement.
+    func test_pendingQuarantineReconcilesThroughMarkerAndReceiptStillRemovesViaUploader()
+    async throws {
+        // Pending quarantine with the lease already removed (simulated crash window): a fresh
+        // queue re-applies the recorded intent and completes it via the marker.
+        let entry = try makeReadyEntry()
+        let uploader = makeUploader(transport: { _, _, _ in
+            .response(statusCode: 400, body: Data(
+                "{\"schema_version\":1,\"code\":\"invalid_request\"}".utf8))
+        })
+        let outcome = await uploader.upload(entry)
+        guard case .abandoned(let reason) = outcome, reason.contains("quarantined") else {
+            return XCTFail("400 invalid_request must quarantine, got \(outcome)")
+        }
+        // Now simulate the confirmed-pending window: re-settlement of the SAME intent completes
+        // cleanly (reconciles by marker), it does not resultStale.
+        let reborn = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        guard case .known(let ready) = reborn.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("coverage known")
+        }
+        XCTAssertFalse(ready.contains(entry), "quarantined entry unservable after reconciliation")
+        XCTAssertNoThrow(try reborn.audio(of: entry), "bytes retained after reconciliation")
+
+        // RECEIPT COMPLEMENT through the uploader (not direct settlement): a delivered upload of
+        // a FRESH entry removes it — the delivered path is intact next to quarantine.
+        let fresh = try makeReadyEntry()
+        let bound = try XCTUnwrap(try queue.boundIdentity(of: fresh))
+        let freshCaptureID = bound.captureID
+        let freshRecordSHA = bound.recordSHA256
+        let deliveredUploader = makeUploader(transport: { _, _, _ in
+            .response(statusCode: 201, body: Data(
+                ("{\"schema_version\":1,\"capture_id\":\"" + freshCaptureID
+                    + "\",\"record_sha256\":\"" + freshRecordSHA
+                    + "\",\"status\":\"accepted\",\"receipt_id\":\"r-1\","
+                    + "\"accepted_at\":\"2026-11-06T04:00:00Z\","
+                    + "\"retention_expires_at\":\"2027-11-06T04:00:00Z\"}").utf8))
+        })
+        let delivered = await deliveredUploader.upload(fresh)
+        guard case .delivered = delivered else {
+            return XCTFail("matching receipt must deliver, got \(delivered)")
+        }
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: root.appendingPathComponent(fresh.name).path),
+            "a delivered receipt removes the entry")
     }
 
     /// Holds survive TWO consecutive fresh initializations (reviewer 8ba9c45f): recovery must not
