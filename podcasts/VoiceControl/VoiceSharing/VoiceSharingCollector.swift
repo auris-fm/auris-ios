@@ -206,7 +206,13 @@ final class VoiceSharingCollector {
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: $0, execute: $1)
         },
         membership: @escaping () -> VoiceSharingEnrollmentStore.State = { VoiceSharingEnrollmentStore.shared.currentState },
-        epochProvider: @escaping () -> String? = { VoiceSharingEnrollmentStore.shared.activeEnrollmentEpoch },
+        // PROVENANCE, NOT PERMISSION (spec 1bb73eac): this epoch is stamped on the record the
+        // account already holds. Gating it on `activeEnrollmentEpoch` made a cold-started app
+        // unable to OPEN a capture until a projection round trip landed in this process.
+        // Explicit opt-out and withdrawal still answer nil, so those stop capture immediately.
+        epochProvider: @escaping () -> String? = {
+            VoiceSharingEnrollmentStore.shared.persistedEnrollmentEpochForProvenance
+        },
         sessionIdentity: @escaping () -> String? = { VoiceSharingEnrollmentStore.currentSessionOwner() },
         sink: @escaping (SegmentEvent) -> Void = { _ in }
     ) {

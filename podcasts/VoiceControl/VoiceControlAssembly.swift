@@ -174,7 +174,14 @@ class VoiceControlAssembly {
             currentIdentity: {
                 VoiceSharingUploadIdentity(
                     accountScope: ServerSettings.userId,
-                    enrollmentEpoch: VoiceSharingEnrollmentStore.shared.activeEnrollmentEpoch)
+                    // PROVENANCE, NOT PERMISSION (spec 1bb73eac): the epoch is stamped on the
+                    // record so the server can attribute it. Using `activeEnrollmentEpoch` here
+                    // required a projection round trip in THIS process, which cold start never
+                    // has — so a restarted app with consent already given refused every upload
+                    // forever. Permission is the authenticated account (the queue's ownership
+                    // fence) plus the user's own choice, re-checked server-side.
+                    enrollmentEpoch: VoiceSharingEnrollmentStore.shared
+                        .persistedEnrollmentEpochForProvenance)
             })
         // PRODUCTION WIRE (spec 18:38Z): the real transport (bearer credential + the configured
         // endpoint, fail-closed on either) feeding the uploader feeding the serialized scheduler.
@@ -204,7 +211,13 @@ class VoiceControlAssembly {
         let uploadIdentity: () -> VoiceSharingUploadIdentity? = {
             VoiceSharingUploadIdentity(
                 accountScope: ServerSettings.userId,
-                enrollmentEpoch: VoiceSharingEnrollmentStore.shared.activeEnrollmentEpoch)
+                // PROVENANCE, NOT PERMISSION (spec 1bb73eac). See the queue's identity reader
+                // above: `activeEnrollmentEpoch` needs a projection round trip in THIS process,
+                // which cold start never has, so admission refused every entry forever.
+                // Explicit opt-out and explicit withdrawal still answer nil here — those are the
+                // user's own instructions and stop the path without waiting for a round trip.
+                enrollmentEpoch: VoiceSharingEnrollmentStore.shared
+                    .persistedEnrollmentEpochForProvenance)
         }
         // SPEC RULING 2026-11-03: Voice Sharing selects the Auris provider on EVERY build where
         // sharing is enabled, ignoring the assistant's routing flag and the gateway-cutover gate. With no
