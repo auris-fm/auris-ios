@@ -70,12 +70,19 @@ enum VoiceSharingContributionEncoder {
         let predictedTool: String?
         /// The executor's own verdict for the turn, from `executionOutcome`'s decision site.
         let outcome: String?
+        /// The wake detector's MEASURED score and the threshold it was judged against (spec phase 2,
+        /// name schema v1: the values exist whenever the detector ran, so the record must carry them
+        /// rather than `na`). Nil leaves the member absent — only a site that ran the detector may set
+        /// them, and only when it actually measured.
+        let score: Double?
+        let threshold: Double?
 
         init(state: String, reason: String? = nil, text: String? = nil, decision: String? = nil,
              translatedText: String? = nil, targetLanguage: String? = nil,
              routingDisposition: String? = nil, sourceLanguage: String? = nil,
              routerInput: String? = nil, predictedIntent: String? = nil,
-             predictedTool: String? = nil, outcome: String? = nil) {
+             predictedTool: String? = nil, outcome: String? = nil,
+             score: Double? = nil, threshold: Double? = nil) {
             self.state = state
             self.reason = reason
             self.text = text
@@ -88,12 +95,17 @@ enum VoiceSharingContributionEncoder {
             self.predictedIntent = predictedIntent
             self.predictedTool = predictedTool
             self.outcome = outcome
+            self.score = score
+            self.threshold = threshold
         }
 
         func withDecision(_ decision: String) -> StageOutcome {
+            // Measured values survive a decision amendment: a re-stated verdict never un-measures
+            // the detector's own score/threshold (phase 2: measured values are always recorded).
             StageOutcome(state: state, reason: reason, text: text, decision: decision,
                          translatedText: translatedText, targetLanguage: targetLanguage,
-                         routingDisposition: routingDisposition)
+                         routingDisposition: routingDisposition,
+                         score: score, threshold: threshold)
         }
     }
 
@@ -125,6 +137,7 @@ enum VoiceSharingContributionEncoder {
         let wav = try wavBytes(from: event.audio)
         let record: [String: Any] = [
             "schema_version": 1,
+            "wake_required": event.wakeRequired,
             "capture_id": event.captureID.uuidString,
             "enrollment_epoch": event.enrollmentEpoch,
             "platform": provenance.platform,
@@ -242,6 +255,8 @@ enum VoiceSharingContributionEncoder {
             if let reason = outcome.reason { entry["reason"] = reason }
             if let text = outcome.text { entry["text"] = text }
             if let decision = outcome.decision { entry["decision"] = decision }
+            if let score = outcome.score { entry["score"] = score }
+            if let threshold = outcome.threshold { entry["threshold"] = threshold }
             if let translated = outcome.translatedText { entry["translated_text"] = translated }
             if let target = outcome.targetLanguage { entry["target_language"] = target }
             if let disposition = outcome.routingDisposition {

@@ -112,8 +112,8 @@ enum VoiceSharingRecordBinding {
     // MARK: Record shape
 
     private static let requiredTopLevel: Set<String> = [
-        "schema_version", "capture_id", "enrollment_epoch", "platform", "app_version", "build",
-        "capture_session_id", "audio", "models", "observations",
+        "schema_version", "capture_id", "wake_required", "enrollment_epoch", "platform", "app_version",
+        "build", "capture_session_id", "audio", "models", "observations",
     ]
     /// `links` is the only optional top-level group; feedback is intentionally NOT accepted
     /// (a record must hash identically before and after annotation).
@@ -128,6 +128,13 @@ enum VoiceSharingRecordBinding {
         }
         guard let schemaVersion = record["schema_version"] as? Int, schemaVersion == 1 else {
             throw BindingError.invalidField("record.schema_version", "must be 1")
+        }
+        // PHASE 2 (name schema v1): `wake_required` is a REQUIRED boolean, not a nullable value. A
+        // missing or non-boolean member would let "no wake word was needed" and "we did not record
+        // the mode" look identical downstream, which is the exact ambiguity the field exists to
+        // remove — so the binding refuses both.
+        guard record["wake_required"] is Bool else {
+            throw BindingError.missingField("record.wake_required")
         }
         for key in ["platform", "app_version", "build", "capture_session_id"] {
             guard let string = record[key] as? String, !string.isEmpty else {

@@ -260,6 +260,8 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         let record: [String: Any] = [
             "schema_version": 1,
             "capture_id": captureID,
+            // Phase 2: a record must state the wake requirement in force when speech began.
+            "wake_required": false,
             "enrollment_epoch": epoch,
             "platform": "ios",
             "app_version": "8.0",
@@ -3087,6 +3089,7 @@ final class VoiceSharingRevocationRestartTests: XCTestCase {
         let record: [String: Any] = [
             "schema_version": 1,
             "capture_id": captureID,
+            "wake_required": false,
             "enrollment_epoch": "epoch-1",
             "platform": "ios",
             "app_version": "8.0",

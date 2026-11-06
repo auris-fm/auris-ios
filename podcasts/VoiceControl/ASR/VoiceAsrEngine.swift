@@ -437,7 +437,13 @@ class VoiceAsrEngine {
             }
         }
         segmenter.onSpeechStarted = { [weak self] count in
-            self?.contributionCollector?.speechStarted(confirmationFrameSamples: count)
+            // PHASE 2 (name schema v1): freeze the REAL grace state at segment start — this closure
+            // runs on the segmenter's start delivery, before any mode change, so the value is the
+            // state the speech actually began under. Wake-word mode without grace requires the wake
+            // word; anything else (grace window active, continuous mode) does not.
+            guard let self else { return }
+            let wakeRequired = listeningMode == .wakeWord && !gracePeriodSignal.isActive
+            contributionCollector?.speechStarted(confirmationFrameSamples: count, wakeRequired: wakeRequired)
         }
         segmenter.onSpeechAccumulated = { [weak self] samples, total in
             self?.contributionCollector?.appendSamples(samples, reportedTotal: total)
@@ -689,6 +695,10 @@ class VoiceAsrEngine {
         stageTimer.mark() // wake result
 
         let score = wakeScore(of: result)
+        // PHASE 2 (name schema v1): whenever the detector ran it MEASURED a score against a threshold,
+        // and the record must carry both values rather than `na`. A detector error measured nothing,
+        // so the pair stays nil there.
+        let measuredWake: (score: Double, threshold: Double)? = score.map { (Double($0), Double(wakeThreshold)) }
         let wakeCmp: String = {
             guard let score else { return "error" }
             let op = score >= wakeThreshold ? ">=" : "<"
@@ -725,7 +735,8 @@ class VoiceAsrEngine {
             // capture would vanish instead of being recorded as a real no-wake observation.
             contributionCollector?.engineReported(
                 stage: "wake",
-                outcome: .init(state: "completed", reason: nil, decision: "rejected"),
+                outcome: .init(state: "completed", reason: nil, decision: "rejected",
+                               score: measuredWake?.score, threshold: measuredWake?.threshold),
                 context: utteranceContext)
             contributionCollector?.segmentRejected(kind: .rejectedWake, samples: utterance.count, context: utteranceContext)
             return
@@ -745,7 +756,8 @@ class VoiceAsrEngine {
                     // negative wake a 400 invalid_request at observations.wake.decision
                     // (incident 2026-11-05, all 16 removed records). A completed stage carries
                     // no reason, so the verdict lives in decision under the schema's own value.
-                    decision: detected ? nil : "rejected"),
+                    decision: detected ? nil : "rejected",
+                    score: measuredWake?.score, threshold: measuredWake?.threshold),
                 context: utteranceContext)
             if detected {
                 onWakeWordDetected?()

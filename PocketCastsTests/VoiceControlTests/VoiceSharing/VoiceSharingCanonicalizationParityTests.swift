@@ -79,7 +79,15 @@ final class VoiceSharingCanonicalizationParityTests: XCTestCase {
     /// The exact record the REAL Worker intake accepted (helper-evidence/worker-parity/RESULT.txt),
     /// reproduced from the same inputs. The Worker computed `recordSha256` independently, so
     /// agreeing on this value is interoperability evidence rather than self-consistency.
-    func test_recordDigestMatchesTheValueTheWorkerIntakeAccepted() throws {
+    ///
+    /// PHASE 2 DEVIATION, stated rather than papered over: clients now MUST send `wake_required`, so this
+    /// captured record is no longer one a client may send — it is the SERVER's authority on
+    /// canonicalization only, and the captured digest therefore pins the canonicalizer, not the current
+    /// record shape. The shape is pinned by `VoiceSharingNameSchemaControls` (which binds through the
+    /// production validator). Re-capturing a wake_required digest needs a Worker that requires the field;
+    /// see `test_theDeployedWorkerStillRefusesWakeRequired_soDeployOrderMatters` for why that is not
+    /// available yet.
+    func test_theCapturedDigestStillPinsTheCanonicalizerToTheWorker() throws {
         let audio = Self.clientWav(frames: 1600)
         let record = Self.workerAcceptedRecord(audio: audio)
         let canonical = try VoiceSharingRecordBinding.canonicalize(record)
@@ -91,6 +99,25 @@ final class VoiceSharingCanonicalizationParityTests: XCTestCase {
         XCTAssertEqual(SHA256.hash(data: audio).map { String(format: "%02x", $0) }.joined(),
                        "2976da01e205a110c9fa41d47659e238a5c6d3c3f3137582f2949853faa201dd",
                        "must equal the Worker's reported audio sha256")
+    }
+
+    /// RED CONTROL, DEPLOY-ORDER EVIDENCE: the record a phase-2 client MUST send is refused by the Worker as
+    /// deployed at core `cloud-voice-uploads` (record_schema.ts REQUIRED_TOP_LEVEL has no `wake_required`, and
+    /// anything outside REQUIRED∪OPTIONAL is an unknown field). So a client carrying the required field
+    /// cannot upload until the Worker ships the matching schema — the server and the clients must deploy
+    /// TOGETHER, and neither may roll out alone.
+    func test_theDeployedWorkerStillRefusesWakeRequired_soDeployOrderMatters() throws {
+        let audio = Self.clientWav(frames: 1600)
+        var record = Self.workerAcceptedRecord(audio: audio)
+        record["wake_required"] = false
+        let serverTopLevel: Set<String> = [
+            "schema_version", "capture_id", "enrollment_epoch", "platform", "app_version", "build",
+            "capture_session_id", "audio", "models", "observations", "links",
+        ]
+        let unknown = Set(record.keys).subtracting(serverTopLevel)
+        XCTAssertEqual(unknown, ["wake_required"],
+                       "the deployed Worker accepts every member except wake_required — pin this until it ships, "
+                       + "then replace this control with a re-captured digest")
     }
 
     /// The Worker's intake refused this record until a completed ASR stage carried its text. A
@@ -166,6 +193,9 @@ final class VoiceSharingCanonicalizationParityTests: XCTestCase {
         let audio = Self.clientWav(frames: 1600)
         func bind(withArguments arguments: Any?, intent: String) throws {
             var record = Self.workerAcceptedRecord(audio: audio)
+            // This control drives the ROUTING rules through the CURRENT record shape, so it states the
+            // phase-2 member the client must send rather than inheriting the captured Worker record.
+            record["wake_required"] = false
             var observations = try XCTUnwrap(record["observations"] as? [String: Any])
             var routing = try XCTUnwrap(observations["routing"] as? [String: Any])
             routing["state"] = "completed"

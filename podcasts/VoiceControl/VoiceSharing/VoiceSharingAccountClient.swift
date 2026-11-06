@@ -11,9 +11,13 @@ import PocketCastsUtils
 /// The transport is injected so the production `URLSession` path and the race controls drive the SAME
 /// decoding/status handling; a stub that only returns pre-decided enums would prove nothing about the wire.
 final class VoiceSharingAccountClient {
+    /// ONE path for enrollment AND withdrawal (phase 2, single-PUT contract): the client sends the DESIRED
+    /// state and the server derives the transition. Separate POST routes made a caller responsible for
+    /// picking the right verb for what it wanted, which is how a repeat opt-in became a second mutation.
+    static let membershipPath = "/api/v1/account/voice-sharing"
+    /// The read of the same resource (GET): same path, different verb.
     static let projectionPath = "/api/v1/account/voice-sharing"
-    static let enrollmentPath = "/api/v1/account/voice-sharing/enrollment"
-    static let withdrawalPath = "/api/v1/account/voice-sharing/withdrawal"
+    /// True enrollment only — a separate operation with its own identity and its own confirmation.
     static let dataPath = "/api/v1/account/voice-sharing/data"
     static let defaultTimeoutSeconds: TimeInterval = 15
 
@@ -27,7 +31,13 @@ final class VoiceSharingAccountClient {
         static let acceptedDisclosure = "accepted_disclosure_version"
         static let withdrawalState = "withdrawal_state"
         static let requestId = "request_id"
-        static let expectedRevision = "expected_membership_revision"
+        static let disclosureVersion = "disclosure_version"
+        /// The desired-state member: `true` enrolls, `false` withdraws. Its absence is meaningless, so the
+        /// body always carries it.
+        static let enrolledDesired = "enrolled"
+        /// The precondition travels as the HTTP `If-Match` header, not as a body field: a server-side
+        /// optimistic concurrency check must be evaluable before the body is applied.
+        static let ifMatch = "If-Match"
         static let deletionRequestId = "deletion_request_id"
         static let status = "status"
     }
@@ -131,7 +141,7 @@ final class VoiceSharingAccountClient {
         let issuedUnder: VoiceSharingEnrollmentStore.ProjectionToken
     }
 
-    // MARK: - POST enrollment / withdrawal
+    // MARK: - Single PUT: desired membership state
 
     /// An operation's identity and body are IMMUTABLE once created, so a lost response can be retried with
     /// the SAME `request_id` and body — which is what makes the server's idempotency rule reachable from the
@@ -142,6 +152,10 @@ final class VoiceSharingAccountClient {
         let path: String
         /// Body must never contain credential material; it carries only contract fields.
         let body: [String: Any]
+        /// Optimistic-concurrency precondition, sent as `If-Match`. NIL means "I have not read a
+        /// projection, so I assert nothing" — the header is then OMITTED rather than sent empty, because
+        /// an empty/weak precondition would make the server treat an unread state as a claim about it.
+        let ifMatch: String?
         /// Non-secret generation of the session that BEGAN this operation, retained across retries. A
         /// `perform` under a different current generation refuses before touching the transport, so account
         /// A's enrollment/withdrawal/deletion intent can never be sent while account B is signed in.
@@ -154,41 +168,39 @@ final class VoiceSharingAccountClient {
         let issuedUnder: VoiceSharingEnrollmentStore.ProjectionToken
     }
 
-    /// One enrollment operation. Retry by calling `perform(_:)` again with the SAME operation (bounded
-    /// backoff), never by beginning another.
-    func beginEnrollment(acceptedDisclosureVersion: String, expectedMembershipRevision: String) -> MutationOperation? {
+    /// One membership operation, expressed as the DESIRED STATE (phase 2). Retry by calling `perform(_:)`
+    /// again with the SAME operation (bounded backoff), never by beginning another: the body is unchanged,
+    /// so a repeated opt-in is a resend of identical bytes and the server's idempotent PUT applies.
+    ///
+    /// `acceptedDisclosureVersion` is required to enroll and must be absent to withdraw: the disclosure the
+    /// user consented to belongs to the enrollment, and sending one on a withdrawal would record consent
+    /// for a state the user is leaving.
+    ///
+    /// `lastReadRevision` is the `membership_revision` from the newest projection this client applied —
+    /// NONE asserts no precondition, and the request then sends no `If-Match`.
+    func beginMembership(enrolled: Bool, acceptedDisclosureVersion: String?, lastReadRevision: String?) -> MutationOperation? {
+        // Refuse locally rather than let the server report it: turning sharing ON without a consent
+        // version would enroll a user under a disclosure they were never shown.
+        if enrolled, (acceptedDisclosureVersion ?? "").isEmpty { return nil }
+        if !enrolled, acceptedDisclosureVersion != nil { return nil }
         // Both fence halves are captured HERE, before any await, and travel with the operation forever.
         guard let issuedUnder = membershipStore.projectionToken() else { return nil }
         let generation = issuedUnder.lifecycleGeneration
         let id = requestIDFactory()
+        // One key on the wire, and nothing else about the previous state: the server derives whether this
+        // is an enrollment, a repeat, a withdrawal, or a withdrawal of nothing.
+        var body: [String: Any] = [Field.enrolledDesired: enrolled]
+        if let acceptedDisclosureVersion, enrolled {
+            body[Field.disclosureVersion] = acceptedDisclosureVersion
+        }
         return MutationOperation(
             requestID: id,
-            path: Self.enrollmentPath,
-            body: [
-                Field.requestId: id,
-                Field.expectedRevision: expectedMembershipRevision,
-                Field.acceptedDisclosure: acceptedDisclosureVersion,
-            ],
+            path: Self.membershipPath,
+            body: body,
+            ifMatch: lastReadRevision.flatMap { $0.isEmpty ? nil : $0 },
             originatingGeneration: generation,
             issuedUnder: issuedUnder
         )
-    }
-
-    /// `epoch` is nullable BY CONTRACT: null is valid only when the expected projection has no active
-    /// epoch, which is what lets an opt-out invalidate an outstanding opt-in. Neither form may withdraw a
-    /// later enrollment — that ordering is enforced server-side by the revision check.
-    func beginWithdrawal(enrollmentEpoch: String?, expectedMembershipRevision: String) -> MutationOperation? {
-        guard let issuedUnder = membershipStore.projectionToken() else { return nil }
-        let generation = issuedUnder.lifecycleGeneration
-        let id = requestIDFactory()
-        var body: [String: Any] = [
-            Field.requestId: id,
-            Field.expectedRevision: expectedMembershipRevision,
-        ]
-        // Explicit null on the wire when absent, so "no active epoch" is stated rather than omitted.
-        body[Field.epoch] = enrollmentEpoch ?? NSNull()
-        return MutationOperation(requestID: id, path: Self.withdrawalPath, body: body,
-                                 originatingGeneration: generation, issuedUnder: issuedUnder)
     }
 
     /// Performs an operation. Safe to call again with the SAME operation to retry a lost response: the
@@ -205,6 +217,7 @@ final class VoiceSharingAccountClient {
         return await mutate(
             path: operation.path,
             body: operation.body,
+            ifMatch: operation.ifMatch,
             originatingGeneration: operation.originatingGeneration,
             issuedUnder: operation.issuedUnder
         )
@@ -274,15 +287,19 @@ final class VoiceSharingAccountClient {
     private func mutate(
         path: String,
         body: [String: Any],
+        ifMatch: String? = nil,
         originatingGeneration: SessionIdentity,
         issuedUnder: VoiceSharingEnrollmentStore.ProjectionToken
     ) async -> VoiceSharingMutationOutcome {
         // The operation's own generation is the authority; `identityAtStart` is only the value observed right
         // now, and both must agree before anything is sent.
         guard sessionIdentity() == originatingGeneration else { return .refusedStaleSession }
-        guard let request = await makeRequest(path: path, method: "POST", body: body) else {
+        // PUT, not POST (phase 2): the body is the desired state, so a resend IS the same request. The
+        // precondition rides on the header — omitted entirely when nothing was read.
+        guard var request = await makeRequest(path: path, method: "PUT", body: body) else {
             return .unavailableBackend
         }
+        if let ifMatch { request.setValue(ifMatch, forHTTPHeaderField: Field.ifMatch) }
         guard sessionIdentity() == originatingGeneration else { return .refusedStaleSession }
         // NOTE: `mutate` is entered only after makeRequest() succeeded, which already required a non-nil
         // identity; callers capture it before the credential await and pass it in so every comparison uses

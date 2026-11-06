@@ -85,6 +85,10 @@ final class VoiceSharingCollector {
         let kind: SignalKind
         let captureID: UUID
         let enrollmentEpoch: String
+        /// PHASE 2 (name schema v1): the grace state frozen at segment start — carried on the record
+        /// as the required `wake_required` field. Captured once at capture open; never inferred.
+        /// Defaults to `true` so synthetic/test events state the default mode explicitly.
+        var wakeRequired: Bool = true
         /// Session that authorized this record, frozen with the epoch. Queued events are checked against the
         /// LIVE session at dequeue; a mismatch means the account moved while this event waited, and the sink
         /// never sees it.
@@ -161,6 +165,10 @@ final class VoiceSharingCollector {
         /// Without this, the record is emitted at segmentation time and can never carry a downstream stage.
         /// OPT-IN: a consumer that emits directly (and never finalizes) keeps the immediate behaviour.
         var deferEmissionUntilFinalized = false
+        /// PHASE 2 (name schema v1): the REAL grace state when this segment started — true means a wake
+        /// word was required for the speech to be heard; false means grace was active and speech was
+        /// heard without one. Set once at capture open; never inferred later.
+        var wakeRequired = true
     }
 
     /// ONE consent gate (spec 4afc6e43): the user's sharing choice under the ordinary session.
@@ -259,7 +267,7 @@ final class VoiceSharingCollector {
     /// Confirmed speech start. Assigns `capture_id` here and returns the immutable context the engine must
     /// freeze into its utterance Task — or opens nothing (returns nil) when the gate is closed.
     @discardableResult
-    func speechStarted(confirmationFrameSamples: Int) -> CaptureContext? {
+    func speechStarted(confirmationFrameSamples: Int, wakeRequired: Bool = true) -> CaptureContext? {
         guard collectionPermitted() else {
             // Capture-side refusal names its own reason (spec c83a92fa): "did the collector
             // decline" and "was the utterance unbuildable" are different decisions and must not
@@ -289,6 +297,7 @@ final class VoiceSharingCollector {
                                    retained: [], sawStart: true, original: confirmationFrameSamples)
         frozen.clipSampleCeiling = Self.maxRetainedSamples
         frozen.metadataByteCeiling = VoiceSharingUploadQueue.maxMetadataBytes
+        frozen.wakeRequired = wakeRequired
         lock.lock()
         guard stillPermitted(for: frozen) else {
             lock.unlock()
@@ -953,6 +962,7 @@ return }
         // can never become a contribution, so its record states identity + counts and carries no audio.
         let audio = kind == .cancelled ? [] : c.retained
         return SegmentEvent(kind: kind, captureID: c.id, enrollmentEpoch: c.epoch,
+                            wakeRequired: c.wakeRequired,
                             authorizationSession: c.session, retainedSamples: c.retained.count,
                             truncated: !dropped.isEmpty, droppedSpans: dropped,
                             originalSampleCount: c.original, audio: audio,
