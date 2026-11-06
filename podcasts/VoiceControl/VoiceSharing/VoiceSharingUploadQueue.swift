@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import PocketCastsUtils
 
 /// Durable upload queue persistence (spec §Client queue and scheduling, docs commit 270dfa5 lineage).
 ///
@@ -641,7 +642,13 @@ final class VoiceSharingUploadQueue {
                 }
                 return Entry(root: rootDirectory, name: name)
             } catch {
-                try? fileManager.removeItem(at: entryDirectory)
+                let rolledBack = (try? fileManager.removeItem(at: entryDirectory)) != nil
+                FileLog.shared.addMessage(
+                    "[VoiceSharing] queue removal reason=prepare-rollback "
+                        + "entry=\(name) removed=\(rolledBack)")
+                    // FORCE THE FLUSH (FileLog buffers 100 entries): a removal line must be on disk
+                    // before the process can be terminated, or the diagnosis dies with it.
+                    FileLog.shared.forceFlush()
                 throw error
             }
         }
@@ -1146,7 +1153,16 @@ final class VoiceSharingUploadQueue {
                     // is not retried forever. The removal is best-effort here — a failure leaves
                     // the entry visible-but-unservable via the attempt limit itself.
                     if isCompleteEntryLocked(at: entry) {
-                        _ = try? disqualifyLocked(try validatedEntryDirectoryLocked(entry))
+                        let marked = (try? validatedEntryDirectoryLocked(entry))
+                            .map { disqualifyLocked($0) } ?? false
+                        // DIAGNOSTIC (content-free): this is the ONLY admission path that
+                        // quarantines. Without it an entry can stop serving with no trace of why.
+                        FileLog.shared.addMessage(
+                            "[VoiceSharing] queue quarantine reason=attempts-exhausted "
+                                + "entry=\(entry.name) marked=\(marked)")
+                            // FORCE THE FLUSH (FileLog buffers 100 entries): a removal line must be on disk
+                            // before the process can be terminated, or the diagnosis dies with it.
+                            FileLog.shared.forceFlush()
                     }
                     releaseLeaseLocked(for: entry, owner: lease)
                     return nil
@@ -1425,7 +1441,15 @@ final class VoiceSharingUploadQueue {
                 guard try isAttemptableLocked(entry) else {
                     if isCompleteEntryLocked(at: entry),
                        try attemptCountLocked(for: entry) >= attemptLimits.maxUploadAttempts {
-                        try? fileManager.removeItem(at: entryDirectoryLocked(for: entry))
+                        let removed = (try? fileManager.removeItem(
+                            at: entryDirectoryLocked(for: entry))) != nil
+                        // DIAGNOSTIC (content-free): this path DELETES a complete entry.
+                        FileLog.shared.addMessage(
+                            "[VoiceSharing] queue removal reason=attempts-exhausted "
+                                + "entry=\(entry.name) removed=\(removed)")
+                            // FORCE THE FLUSH (FileLog buffers 100 entries): a removal line must be on disk
+                            // before the process can be terminated, or the diagnosis dies with it.
+                            FileLog.shared.forceFlush()
                     }
                     releaseLeaseLocked(for: entry, owner: lease)
                     return false
@@ -1831,10 +1855,25 @@ final class VoiceSharingUploadQueue {
             // The lease is live and ours: apply the recorded outcome.
             switch outcome {
             case .delivered, .abandoned:
+                // DIAGNOSTIC (content-free): logged BEFORE the operation so a deletion whose
+                // confirmation then throws is still attributable — the exact gap an unlogged
+                // removal would leave.
+                FileLog.shared.addMessage(
+                    "[VoiceSharing] queue removal reason=settled outcome=\(outcome) "
+                        + "entry=\(entry.name) starting")
+                FileLog.shared.forceFlush()
                 do {
                     try fileManager.removeItem(at: directory)
                     try confirmEntryRemovalDurability()
+                    FileLog.shared.addMessage(
+                        "[VoiceSharing] queue removal reason=settled outcome=\(outcome) "
+                            + "entry=\(entry.name) removed=true durability=confirmed")
+                    FileLog.shared.forceFlush()
                 } catch {
+                    FileLog.shared.addMessage(
+                        "[VoiceSharing] queue removal reason=settled outcome=\(outcome) "
+                            + "entry=\(entry.name) uncertain — publication state unresolved")
+                    FileLog.shared.forceFlush()
                     throw PrepareError.publicationUncertain
                 }
                 try finishSettlement()
@@ -2464,6 +2503,13 @@ final class VoiceSharingUploadQueue {
             defer { bumpHoldGenerationForContentChange() }
             _ = try validatedEntryDirectoryLocked(entry)
             try fileManager.removeItem(at: entryDirectoryLocked(for: entry))
+            // DIAGNOSTIC (content-free): the ONLY deliberate purge of complete recordings.
+            // Every purge names its cause, so a consented recording never disappears unexplained.
+            FileLog.shared.addMessage(
+                "[VoiceSharing] queue removal reason=explicit-purge entry=\(entry.name) removed=true")
+                // FORCE THE FLUSH (FileLog buffers 100 entries): a removal line must be on disk
+                // before the process can be terminated, or the diagnosis dies with it.
+                FileLog.shared.forceFlush()
         }
     }
 
@@ -2838,7 +2884,15 @@ final class VoiceSharingUploadQueue {
                 if fileManager.fileExists(atPath: directory.appendingPathComponent(Self.failedName).path) {
                     continue
                 }
-                try? fileManager.removeItem(at: directory)
+                let removed = (try? fileManager.removeItem(at: directory)) != nil
+                // DIAGNOSTIC (content-free): recovery DELETES an incomplete entry. An entry that
+                // vanishes between runs with no removal line cannot be told from one never written.
+                FileLog.shared.addMessage(
+                    "[VoiceSharing] queue removal reason=incomplete-on-recovery "
+                        + "entry=\(entry.name) removed=\(removed)")
+                    // FORCE THE FLUSH (FileLog buffers 100 entries): a removal line must be on disk
+                    // before the process can be terminated, or the diagnosis dies with it.
+                    FileLog.shared.forceFlush()
                 continue
             }
             // Ordering uses the immutable creation instant; age is already enforced by the
@@ -2848,7 +2902,17 @@ final class VoiceSharingUploadQueue {
         }
         if complete.count > Self.maxQueueEntries {
             for stale in complete.sorted(by: { $0.readyDate < $1.readyDate }).prefix(complete.count - Self.maxQueueEntries) {
-                try? fileManager.removeItem(at: entryDirectoryLocked(for: stale.entry))
+                let removed = (try? fileManager.removeItem(
+                    at: entryDirectoryLocked(for: stale.entry))) != nil
+                // DIAGNOSTIC (content-free): the capacity ceiling removes OLDEST-READY entries.
+                // A count drop that matches this must be attributable, not inferred from silence.
+                FileLog.shared.addMessage(
+                    "[VoiceSharing] queue removal reason=over-capacity "
+                        + "entry=\(stale.entry.name) ceiling=\(Self.maxQueueEntries) "
+                        + "removed=\(removed)")
+                    // FORCE THE FLUSH (FileLog buffers 100 entries): a removal line must be on disk
+                    // before the process can be terminated, or the diagnosis dies with it.
+                    FileLog.shared.forceFlush()
             }
         }
         // Stray regular files directly under the root are not entries; remove them so the root
