@@ -123,6 +123,8 @@ final class VoiceSharingUploader {
         let admitted: VoiceSharingUploadQueue.AdmittedAttempt
         do {
             guard let granted = try queue.admitAttempt(entry) else {
+                // The queue logs the PRECISE refusal reason (admit refusal reason=…); this line
+                // records only that the upload attempt ended there (spec c83a92fa).
                 FileLog.shared.addMessage(
                     "[VoiceSharing] upload disposition entry=\(entry.name) reason=admission-refused disposition=refused")
                 FileLog.shared.forceFlush()

@@ -261,6 +261,11 @@ final class VoiceSharingCollector {
     @discardableResult
     func speechStarted(confirmationFrameSamples: Int) -> CaptureContext? {
         guard collectionPermitted() else {
+            // Capture-side refusal names its own reason (spec c83a92fa): "did the collector
+            // decline" and "was the utterance unbuildable" are different decisions and must not
+            // look the same. Fixed vocabulary, no values.
+            FileLog.shared.addMessage("[VoiceSharing] capture refused reason=collection-not-permitted")
+            FileLog.shared.forceFlush()
             abandonForGateMove(context: currentCaptureContext())
             return nil
         }
@@ -271,6 +276,7 @@ final class VoiceSharingCollector {
         // than writing an unsupported value the server refuses. This is NOT a readiness lifecycle: it
         // is the same "cannot build a valid record" condition as any other.
         guard let epoch = epochProvider(), !epoch.isEmpty else {
+            FileLog.shared.addMessage("[VoiceSharing] capture refused reason=no-enrollment-epoch")
             abandonForGateMove(context: currentCaptureContext())
             return nil
         }
