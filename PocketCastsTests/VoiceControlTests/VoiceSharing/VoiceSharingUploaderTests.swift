@@ -615,31 +615,104 @@ final class VoiceSharingUploaderTests: XCTestCase {
         print("FIXTURE_BODY_BYTES: \(body.count)")
     }
 
-    /// RECONCILIATION CONTROL (reviewer 46971967, spec de1b7a0f): a pending quarantine whose
-    /// lease was already removed must reconcile by re-confirming the retained directory + marker
-    /// (never resultStale), a quarantine with the directory gone must NOT claim success, and the
-    /// receipt complement goes through the UPLOADER with a real receipt, not direct settlement.
-    func test_pendingQuarantineReconcilesThroughMarkerAndReceiptStillRemovesViaUploader()
+    /// RECONCILIATION CONTROL (reviewer 016bb90b / 46971967): the pending quarantine journal is
+    /// constructed FOR REAL — an injected lease-removal-barrier failure leaves the exact pending
+    /// state on disk — and the recorded lease is then REAPPLIED to completion. A second fixture
+    /// from the same construction with the entry directory gone proves the pending quarantine
+    /// REFUSES instead of claiming success. The receipt complement still goes through the
+    /// uploader with a full real receipt.
+    func test_pendingQuarantineJournalReplaysWithRecordedLeaseAndAbsentDirectoryRefuses()
     async throws {
-        // Pending quarantine with the lease already removed (simulated crash window): a fresh
-        // queue re-applies the recorded intent and completes it via the marker.
+        func pendingJournal(
+            entry: VoiceSharingUploadQueue.Entry
+        ) async throws -> (generation: String, owner: Int32) {
+            // Injected fault: in the quarantine settle path the entry-directory barrier is
+            // synced TWICE — disqualify's marker publication (call 1) and the lease-removal
+            // barrier (call 2). Failing ONLY call 2 lands the real pending window: journal
+            // pending, marker durable, lease file already removed.
+            var directoryBarrierCalls = 0
+            var lastWasRootBarrier = false
+            let faulted = VoiceSharingUploadQueue(
+                rootDirectory: root, clock: Date.init,
+                synchronizer: { [weak self] path, isDirectory in
+                    // The LEASE-REMOVAL barrier is the entry-directory barrier that immediately
+                    // follows the settlement's root barrier (root barrier → lease barrier), so
+                    // the fault is anchored to the exact settle step, not to a call count.
+                    defer { lastWasRootBarrier = (isDirectory && path == self!.root) }
+                    if isDirectory && lastWasRootBarrier
+                        && path.lastPathComponent == entry.name {
+                        throw NSError(domain: "test-lease-barrier", code: 1)
+                    }
+                    try VoiceSharingUploadQueue.testSynchronizer(path: path, isDirectory: isDirectory)
+                })
+            queue = faulted
+            let uploader = makeUploader(transport: { _, _, _ in
+                .response(statusCode: 400, body: Data(
+                    "{\"schema_version\":1,\"code\":\"invalid_request\"}".utf8))
+            })
+            let outcome = await uploader.upload(entry)
+            guard case .unavailable = outcome else {
+                XCTFail("settle uncertainty must surface as unavailable, got \(outcome)")
+                throw NSError(domain: "test-precondition", code: 2)
+            }
+            // ASSERTED PRECONDITIONS, read from disk (never assumed):
+            let journalURL = root.appendingPathComponent(
+                VoiceSharingUploadQueue.settlementRecordName(for: entry.name))
+            let directory = root.appendingPathComponent(entry.name)
+            let journalData = try Data(contentsOf: journalURL)
+            let record = try XCTUnwrap(
+                VoiceSharingUploadQueue.SettlementRecord.parse(journalData))
+            XCTAssertEqual(record.outcome, .quarantined, "journal records the quarantine intent")
+            XCTAssertEqual(record.phase, .pending, "the transition is unconfirmed")
+            XCTAssertEqual(
+                VoiceSharingUploadQueue.statKind(
+                    of: directory.appendingPathComponent("publication.failed")),
+                .present, "the disqualification marker is durable")
+            XCTAssertEqual(
+                VoiceSharingUploadQueue.statKind(
+                    of: directory.appendingPathComponent("attempt.lease")),
+                .absent, "the lease file is already removed")
+            return (record.generation, record.owner)
+        }
+
+        // FIXTURE A — reapply the recorded lease: completion via marker, bytes retained.
         let entry = try makeReadyEntry()
-        let uploader = makeUploader(transport: { _, _, _ in
-            .response(statusCode: 400, body: Data(
-                "{\"schema_version\":1,\"code\":\"invalid_request\"}".utf8))
-        })
-        let outcome = await uploader.upload(entry)
-        guard case .abandoned(let reason) = outcome, reason.contains("quarantined") else {
-            return XCTFail("400 invalid_request must quarantine, got \(outcome)")
+        let recorded = try await pendingJournal(entry: entry)
+        let replayQueue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        queue = replayQueue
+        let replayLease = VoiceSharingUploadQueue.AttemptLease(
+            generation: recorded.generation, acquiredAt: Date(), owner: recorded.owner)
+        XCTAssertNoThrow(try queue.applyAttemptResult(
+            entry, lease: replayLease, outcome: .quarantined),
+            "the recorded lease reconciles the pending quarantine")
+        let directory = root.appendingPathComponent(entry.name)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: root.appendingPathComponent(
+                VoiceSharingUploadQueue.settlementRecordName(for: entry.name)).path),
+            "the journal is retired after reconciliation")
+        XCTAssertEqual(
+            VoiceSharingUploadQueue.statKind(
+                of: directory.appendingPathComponent("publication.failed")),
+            .present, "the marker survives reconciliation")
+        XCTAssertNoThrow(try queue.audio(of: entry), "bytes retained after reconciliation")
+        XCTAssertNil(try queue.admitAttempt(entry),
+            "the quarantined entry is unservable after reconciliation")
+
+        // FIXTURE B — directory gone under the same pending construction: refuse, journal stays.
+        let goneEntry = try makeReadyEntry()
+        let goneRecorded = try await pendingJournal(entry: goneEntry)
+        let goneDirectory = root.appendingPathComponent(goneEntry.name)
+        try FileManager.default.removeItem(at: goneDirectory)
+        XCTAssertThrowsError(try queue.applyAttemptResult(
+            goneEntry, lease: VoiceSharingUploadQueue.AttemptLease(
+                generation: goneRecorded.generation, acquiredAt: Date(),
+                owner: goneRecorded.owner),
+            outcome: .quarantined),
+            "an absent directory must refuse, never claim quarantine success") { error in
+            guard case VoiceSharingUploadQueue.PrepareError.publicationUncertain = error else {
+                return XCTFail("expected publicationUncertain, got \(error)")
+            }
         }
-        // Now simulate the confirmed-pending window: re-settlement of the SAME intent completes
-        // cleanly (reconciles by marker), it does not resultStale.
-        let reborn = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-        guard case .known(let ready) = reborn.readyEntriesReportingUnknownCoverage() else {
-            return XCTFail("coverage known")
-        }
-        XCTAssertFalse(ready.contains(entry), "quarantined entry unservable after reconciliation")
-        XCTAssertNoThrow(try reborn.audio(of: entry), "bytes retained after reconciliation")
 
         // RECEIPT COMPLEMENT through the uploader (not direct settlement): a delivered upload of
         // a FRESH entry removes it — the delivered path is intact next to quarantine.
