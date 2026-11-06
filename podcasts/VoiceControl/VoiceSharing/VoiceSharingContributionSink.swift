@@ -31,6 +31,14 @@ final class VoiceSharingContributionSink {
     private let isEnabled: () -> Bool
     private let encoderProvenance: () -> VoiceSharingContributionEncoder.Provenance
     private let observations: () -> [String: VoiceSharingContributionEncoder.StageOutcome]
+    /// PUBLICATION → DRAIN (spec 5ffbfdd5). A durably published entry is uploadable work, and the
+    /// upload trigger's only other entrances are lifecycle/network events — so a recording made in
+    /// an already-foreground app would wait for the owner to leave and return. Invoked ONCE per
+    /// successful `finalize`, on the narrow success path only: retry / removal / quarantine also
+    /// change queue content, so subscribing to generic content changes would loop. The trigger
+    /// keeps its own gates, single-flight and workPending coalescing; this callback adds no
+    /// readiness, no polling and no second scheduler.
+    private let requestUploadDrain: () -> Void
     private let workerQueue = DispatchQueue(label: "fm.auris.voicesharing.contribution-sink")
 
     /// TWO locks, deliberately (reviewer 70e5fc58): `slotLock` is held ONLY for the short
@@ -63,12 +71,14 @@ final class VoiceSharingContributionSink {
         queue: VoiceSharingUploadQueue,
         isEnabled: @escaping () -> Bool,
         encoderProvenance: @escaping () -> VoiceSharingContributionEncoder.Provenance,
-        observations: @escaping () -> [String: VoiceSharingContributionEncoder.StageOutcome] = { [:] }
+        observations: @escaping () -> [String: VoiceSharingContributionEncoder.StageOutcome] = { [:] },
+        requestUploadDrain: @escaping () -> Void = {}
     ) {
         self.queue = queue
         self.isEnabled = isEnabled
         self.encoderProvenance = encoderProvenance
         self.observations = observations
+        self.requestUploadDrain = requestUploadDrain
     }
 
     /// Consent revocation signal (withdrawal, sign-out, switch-off, lease loss). Bumps the
@@ -175,6 +185,9 @@ final class VoiceSharingContributionSink {
                 return
             }
             try queue.finalize(entry)
+            // ONLY after `finalize` RETURNED: the entry is then durably ready, so this is the
+            // narrow success path (a thrown finalize never reaches it).
+            requestUploadDrain()
         } catch {
             FileLog.shared.addMessage(
                 "[VoiceSharing] contribution dropped kind=\(pending.event.kind) capture=\(pending.event.captureID) error=\(String(describing: type(of: error))) detail=\(error)"

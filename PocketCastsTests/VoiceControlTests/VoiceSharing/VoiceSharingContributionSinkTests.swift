@@ -62,6 +62,60 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         ]
     }
 
+    /// PUBLICATION → DRAIN (spec 5ffbfdd5): a durable publication REACHES THE TRANSPORT with no
+    /// lifecycle event at all. The assembly wires the sink's success callback to the existing
+    /// upload trigger; here the same seam is wired to a real trigger over a real scheduler, and the
+    /// transport records the request. A RED failure under a sink that never calls back proves the
+    /// control bites.
+    func test_successfulPublicationRequestsADrainAndReachesTheTransport() async throws {
+        var drainRequests = 0
+        let transportCalls = TransportCallBox()
+        let uploader = VoiceSharingUploader(
+            queue: queue,
+            retryPolicy: VoiceSharingRetryPolicy(retryBaseDelay: 1, retryMaximumDelay: 60, random: { 0 }),
+            isAuthorized: { true }, currentIdentity: { nil },
+            endpoint: { URL(string: "https://unit.test/api/v1/voice-recordings") },
+            transport: { _, _, _ in
+                await transportCalls.record()
+                return .response(statusCode: 503, body: Data())
+            })
+        let scheduler = VoiceSharingUploadScheduler(queue: queue, uploader: uploader,
+                                                   isAuthorized: { true })
+        // The production trigger, with its real gates; NO app lifecycle event is delivered here.
+        let trigger = VoiceSharingUploadTrigger(
+            scheduler: scheduler, surfaceEnabled: { true }, isAuthorized: { true })
+        let sink = VoiceSharingContributionSink(
+            queue: queue,
+            isEnabled: { true },
+            encoderProvenance: { [self] in provenance },
+            observations: { [self] in observations },
+            requestUploadDrain: {
+                drainRequests += 1
+                trigger.triggerDrainIfPermitted()
+            })
+        lastSink = sink
+        sink.handle(event())
+        drain()
+
+        // The publication must have become a READY entry (premise: not an empty no-op).
+        guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage(),
+            !ready.isEmpty else {
+            return XCTFail("premise: publication produced no ready entry")
+        }
+        XCTAssertEqual(drainRequests, 1, "exactly one drain request per successful publication")
+        await trigger.awaitDrainCompletionForTesting()
+        let reached = await transportCalls.count()
+        XCTAssertGreaterThanOrEqual(reached, 1,
+            "the publication's drain must reach the transport with no lifecycle event")
+    }
+
+    final class TransportCallBox {
+        private let lock = NSLock()
+        private var calls = 0
+        func record() { lock.lock(); calls += 1; lock.unlock() }
+        func count() -> Int { lock.lock(); defer { lock.unlock() }; return calls }
+    }
+
     func test_gateClosedBetweenPrepareAndFinalizeDiscardsTheUnreadyEntry() throws {
         // Reviewer 5357d089: the gate must be re-checked after prepare — consent loss during the
         // queue transaction must not publish. The gate flips closed on its THIRD read (encode,

@@ -272,7 +272,12 @@ class VoiceControlAssembly {
                     captureSessionID: UUID().uuidString,
                     models: .init(vad: nil, wakeword: nil, asr: nil, translation: nil, router: nil),
                     conversionVersion: "v1") // spec ruling 2026-10-22: bounded string, not Int
-            })
+            },
+            // A durably published recording is uploadable work: request a drain through the
+            // EXISTING trigger (spec 5ffbfdd5), so an already-foreground app does not wait for a
+            // leave-and-return lifecycle event. The trigger keeps its gates, single-flight and
+            // workPending coalescing — no new mechanism.
+            requestUploadDrain: { [weak uploadTrigger] in uploadTrigger?.triggerDrainIfPermitted() })
         // No capture allowance (spec c74d7e30, "Actual upload usage"): daily quota is metered
         // from ACTUAL accepted bytes at the server, so capture no longer acquires, reserves or
         // checks any prepaid allocation. The ledger, provisioner and capability objects are not
