@@ -1422,6 +1422,90 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                      "a completed stage carries no reason; the negative lives in decision")
     }
 
+    /// DISPOSABLE NEGATIVE-RECORD SERVER-SCHEMA FIXTURE (spec 444ead48): the CORRECTED
+    /// engine-to-durable pipeline produces a real synthetic record whose completion states
+    /// wake decision="rejected" (asserted PRESENT before export), then the REAL production
+    /// makeRequest builds the exact wire body + SAFE headers for Cloud's existing local rig.
+    /// No owner record, no live upload, no new harness.
+    func test_exportCorrectedNegativeWakeRecordFixtureForServerSchemaProof() async throws {
+        let claims: [String: VoiceSharingContributionEncoder.StageOutcome] = [
+            "wake": .init(state: "unknown", reason: "observation_unavailable"),
+            "bleed": .init(state: "unknown", reason: "observation_unavailable"),
+            "asr": .init(state: "unknown", reason: "observation_unavailable"),
+            "translation": .init(state: "unknown", reason: "observation_unavailable"),
+            "routing": .init(state: "unknown", reason: "observation_unavailable"),
+            "execution": .init(state: "unknown", reason: "observation_unavailable"),
+        ]
+        let chain = makeChain(wake: NotDetectedWake(), claims: { claims })
+        chain.backend.stubTranscript = "play the latest episode"
+        chain.engine.listeningMode = .continuous
+        await chain.backend.emitSpeechThenSilence(
+            level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
+        _ = waitForReadyEntries(1)
+
+        guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage(),
+            !entries.isEmpty else { return XCTFail("an observed negative wake must still publish") }
+        // Pick the COMPLETION entry and ASSERT the corrected decision is actually present.
+        var exportEntry: VoiceSharingUploadQueue.Entry?
+        for entry in entries {
+            let metadataURL = entry.root.appendingPathComponent(entry.name)
+                .appendingPathComponent("metadata.json")
+            guard let envelope = try? JSONSerialization.jsonObject(
+                with: Data(contentsOf: metadataURL), options: []) as? [String: Any],
+                let record = envelope["record"] as? [String: Any],
+                let wake = (record["observations"] as? [String: Any])?["wake"] as? [String: Any],
+                wake["state"] as? String == "completed" else { continue }
+            XCTAssertEqual(wake["decision"] as? String, "rejected",
+                           "the corrected producer value must be on the durable record")
+            XCTAssertNil(wake["reason"], "completed carries no reason")
+            exportEntry = entry
+            break
+        }
+        let entry = try XCTUnwrap(exportEntry, "no completion entry with wake decision=rejected")
+
+        let uploader = VoiceSharingUploader(
+            queue: queue,
+            retryPolicy: VoiceSharingRetryPolicy(
+                retryBaseDelay: 1, retryMaximumDelay: 60, random: { 0 }),
+            isAuthorized: { true }, currentIdentity: { nil },
+            endpoint: { URL(string: "https://staging.example/api/v1/voice-recordings") },
+            transport: { _, _, _ in .response(statusCode: 503, body: Data()) })
+        let request = try uploader.makeRequest(
+            entry: entry, url: URL(string: "https://staging.example/api/v1/voice-recordings")!)
+        let body = try XCTUnwrap(request.httpBody ?? request.httpBodyStream.map { stream in
+            stream.open()
+            defer { stream.close() }
+            var data = Data()
+            let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: 64 * 1024)
+            defer { buffer.deallocate() }
+            while stream.hasBytesAvailable {
+                let read = stream.read(buffer, maxLength: 64 * 1024)
+                guard read > 0 else { break }
+                data.append(buffer, count: read)
+            }
+            return data
+        })
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vs-negative-fixture-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try body.write(to: dir.appendingPathComponent("body.bin"))
+        var safeHeaders: [String: String] = [:]
+        for (key, value) in (request.allHTTPHeaderFields ?? [:]) {
+            if key.caseInsensitiveCompare("Authorization") == .orderedSame {
+                let parts = value.split(separator: " ", maxSplits: 1)
+                safeHeaders[key] = parts.count == 2
+                    ? "\(parts[0]) <redacted-bearer-shape-only>" : "<redacted>"
+            } else {
+                safeHeaders[key] = value
+            }
+        }
+        try JSONSerialization.data(
+            withJSONObject: safeHeaders, options: [.prettyPrinted, .sortedKeys])
+            .write(to: dir.appendingPathComponent("safeheaders.json"))
+        print("FIXTURE_PATH: \(dir.path)")
+        print("FIXTURE_BODY_BYTES: \(body.count)")
+    }
+
     /// THE PERSISTED ENVELOPE, WITH A RECOMPUTED DIGEST (review 2f8e5d90). Validating an observations
     /// dictionary proves the observation rule; it does not prove a REAL record carrying the contradiction
     /// is refused when it comes back through `bind`. Each envelope is re-sealed with the PRODUCTION
