@@ -152,10 +152,10 @@ final class VoiceSharingAccountClient {
         let path: String
         /// Body must never contain credential material; it carries only contract fields.
         let body: [String: Any]
-        /// Optimistic-concurrency precondition, sent as `If-Match`. NIL means "I have not read a
-        /// projection, so I assert nothing" — the header is then OMITTED rather than sent empty, because
-        /// an empty/weak precondition would make the server treat an unread state as a claim about it.
-        let ifMatch: String?
+        /// Optimistic-concurrency precondition, sent as `If-Match`. ALWAYS present: the contract requires
+        /// it (spec core e3cfc8ae), so a client with no revision must `GET` first rather than write without
+        /// a precondition. An empty value is not a precondition either, which is why `begin` refuses it.
+        let ifMatch: String
         /// Non-secret generation of the session that BEGAN this operation, retained across retries. A
         /// `perform` under a different current generation refuses before touching the transport, so account
         /// A's enrollment/withdrawal/deletion intent can never be sent while account B is signed in.
@@ -176,13 +176,17 @@ final class VoiceSharingAccountClient {
     /// user consented to belongs to the enrollment, and sending one on a withdrawal would record consent
     /// for a state the user is leaving.
     ///
-    /// `lastReadRevision` is the `membership_revision` from the newest projection this client applied —
-    /// NONE asserts no precondition, and the request then sends no `If-Match`.
+    /// `lastReadRevision` is the `membership_revision` from the newest projection this client applied. It is
+    /// REQUIRED: `If-Match` is mandatory, so a caller holding no revision must read the state with
+    /// `fetchProjection()` first, and that read is what supplies the value. Refusing here keeps an
+    /// unpreconditioned write from ever being constructed, let alone sent.
     func beginMembership(enrolled: Bool, acceptedDisclosureVersion: String?, lastReadRevision: String?) -> MutationOperation? {
         // Refuse locally rather than let the server report it: turning sharing ON without a consent
         // version would enroll a user under a disclosure they were never shown.
         if enrolled, (acceptedDisclosureVersion ?? "").isEmpty { return nil }
         if !enrolled, acceptedDisclosureVersion != nil { return nil }
+        // An empty revision is not a read: it would send `If-Match: ` and ask the server to check nothing.
+        guard let lastReadRevision, !lastReadRevision.isEmpty else { return nil }
         // Both fence halves are captured HERE, before any await, and travel with the operation forever.
         guard let issuedUnder = membershipStore.projectionToken() else { return nil }
         let generation = issuedUnder.lifecycleGeneration
@@ -197,7 +201,7 @@ final class VoiceSharingAccountClient {
             requestID: id,
             path: Self.membershipPath,
             body: body,
-            ifMatch: lastReadRevision.flatMap { $0.isEmpty ? nil : $0 },
+            ifMatch: lastReadRevision,
             originatingGeneration: generation,
             issuedUnder: issuedUnder
         )
@@ -287,7 +291,7 @@ final class VoiceSharingAccountClient {
     private func mutate(
         path: String,
         body: [String: Any],
-        ifMatch: String? = nil,
+        ifMatch: String,
         originatingGeneration: SessionIdentity,
         issuedUnder: VoiceSharingEnrollmentStore.ProjectionToken
     ) async -> VoiceSharingMutationOutcome {
@@ -299,7 +303,7 @@ final class VoiceSharingAccountClient {
         guard var request = await makeRequest(path: path, method: "PUT", body: body) else {
             return .unavailableBackend
         }
-        if let ifMatch { request.setValue(ifMatch, forHTTPHeaderField: Field.ifMatch) }
+        request.setValue(ifMatch, forHTTPHeaderField: Field.ifMatch)
         guard sessionIdentity() == originatingGeneration else { return .refusedStaleSession }
         // NOTE: `mutate` is entered only after makeRequest() succeeded, which already required a non-nil
         // identity; callers capture it before the credential await and pass it in so every comparison uses
