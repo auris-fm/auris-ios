@@ -697,8 +697,9 @@ final class VoiceSharingAccountModel: ObservableObject {
         guard let disclosureVersion else { membershipStatus = .disclosureUnavailable; return }
         guard !busy, let revision = store.currentAuthoritativeState?.membership.membershipRevision else { membershipStatus = .unavailable; return }
         store.setLocalOptIn(true)
-        guard let sent = begin(), let operation = client.beginEnrollment(
-            acceptedDisclosureVersion: disclosureVersion, expectedMembershipRevision: revision) else {
+        guard let sent = begin(), let operation = client.beginMembership(
+            enrolled: true, acceptedDisclosureVersion: disclosureVersion,
+            lastReadRevision: revision) else {
             // Diagnostic (spec c3f8fcb4): name WHY enrollment could not begin — the two guards above
             // are silent, and "unsupported_disclosure" from the server is indistinguishable from a
             // local precondition failure without this line.
@@ -716,8 +717,9 @@ final class VoiceSharingAccountModel: ObservableObject {
     func withdraw() async {
         storeChanged()
         let original = store.currentAuthoritativeState?.membership
+        // The precondition is the revision this client last READ. The epoch is no longer sent: the body
+        // states the desired state, and the server derives the epoch transition from it.
         let revision = original?.membershipRevision
-        let epoch = original?.enrollmentEpoch
         serial += 1
         stamp = nil
         mutation = nil
@@ -728,8 +730,11 @@ final class VoiceSharingAccountModel: ObservableObject {
         updateMembership()
         membershipStatus = .withdrawalUnconfirmed
         guard let sent = begin() else { busy = false; return }
-        guard let revision, let operation = client.beginWithdrawal(
-            enrollmentEpoch: epoch, expectedMembershipRevision: revision) else { busy = false; return }
+        guard let operation = client.beginMembership(
+            enrolled: false, acceptedDisclosureVersion: nil, lastReadRevision: revision) else {
+            busy = false
+            return
+        }
         mutation = operation
         await performMutation(operation, under: sent)
     }
