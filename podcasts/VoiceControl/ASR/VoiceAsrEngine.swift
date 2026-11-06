@@ -849,11 +849,20 @@ class VoiceAsrEngine {
             // The language is the RECOGNISER'S OWN observation and router_input is the exact text
             // handed onward as the command input (spec 78480a17: existing schema fields, stated by
             // the site that produced them). `empty_result` never carries either member.
+            // NON-CONTENT (reviewer 9be75bf0, found through the durable-output control): a transcript
+            // with no letter or number is discarded below, before translation, the router, or any cloud
+            // work — so NO command input was ever produced. Reporting `router_input` here claimed a
+            // command that never proceeded; a reader of the record would see "?!" as the input to a
+            // router that was never called. `text` still carries what the recogniser heard, which is the
+            // ASR stage's own result; the command input is absent because there was none.
+            let commandInput: String? = Self.isNonContent(trimmedText)
+                ? nil
+                : (trimmedText.isEmpty ? rawText : trimmedText)
             contributionCollector?.engineReported(
                 stage: "asr",
                 outcome: .init(state: "completed", reason: nil, text: rawText,
                                sourceLanguage: asrResult.detectedLanguage,
-                               routerInput: trimmedText.isEmpty ? rawText : trimmedText),
+                               routerInput: commandInput),
                 context: utteranceContext)
         } else {
             // A GENUINELY EMPTY recogniser result is a SUCCESSFUL recognition with nothing usable in it

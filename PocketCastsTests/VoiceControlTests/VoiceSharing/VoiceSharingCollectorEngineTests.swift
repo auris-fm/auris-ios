@@ -2398,6 +2398,200 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         XCTAssertEqual(ready.count, 0,
                        "a record the validator refuses must never become ready, even from the real engine")
     }
+    // MARK: - PHASE 2 DURABLE OUTPUT (reviewer 9be75bf0 item 3)
+    //
+    // The controls above in `VoiceSharingProductionPathControls` stop at the emitted event. These do not:
+    // every one drives the REAL engine's capture callback into the PRODUCTION sink, and then reads the
+    // metadata bytes of a READY queue entry off disk, binds them through the production record binding,
+    // and asserts on the decoded record. What is asserted is what a server would receive.
+    //
+    // Each control states which producer state it sets, and every one requires an entry to EXIST: a test
+    // that silently examines nothing when the pipeline drops the capture would prove nothing.
+
+    /// Reads every READY entry's `metadata.json` off disk and returns the decoded RECORD objects, keyed by
+    /// capture id. Fails the calling control if the queue is not ready or an entry will not bind — an
+    /// unbindable record is not a record the server would accept, so it cannot count as evidence.
+    private func durableRecords(_ file: StaticString = #filePath, line: UInt = #line) throws
+        -> [String: [String: Any]] {
+        sinkUnderTest?.waitForIdleForTesting()
+        guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage() else {
+            XCTFail("premise: the queue reports known coverage", file: file, line: line)
+            return [:]
+        }
+        var records: [String: [String: Any]] = [:]
+        for entry in entries {
+            let directory = entry.root.appendingPathComponent(entry.name)
+            let metadata = try Data(contentsOf: directory.appendingPathComponent("metadata.json"))
+            let audio = try Data(contentsOf: directory.appendingPathComponent("audio.wav"))
+            // The production binding: the same authority the server's intake applies.
+            let bound = try VoiceSharingRecordBinding.bind(envelope: metadata, audio: audio)
+            let envelope = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: metadata) as? [String: Any],
+                "the entry's metadata is a JSON object", file: file, line: line)
+            let record = try XCTUnwrap(envelope["record"] as? [String: Any],
+                                       "the envelope carries a record", file: file, line: line)
+            records[bound.captureID] = record
+        }
+        return records
+    }
+
+    /// Durable records that appeared AFTER this control started looking.
+    ///
+    /// Identity is the only safe filter here. Other controls in this class publish synthetic records
+    /// through the same queue, and several reuse ONE fixed capture UUID — so selecting "the record with
+    /// asr reason X" silently picked a fixture whose `wake_required` is the default, which made a
+    /// grace control fail while passing in isolation. Each control calls this once before driving audio,
+    /// and only captures not already present are considered its own.
+    private func recordWatermark() -> Set<String> {
+        sinkUnderTest?.waitForIdleForTesting()
+        guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage() else { return [] }
+        return Set(entries.map { $0.name })
+    }
+
+    private func durableRecordsSince(_ watermark: Set<String>, _ file: StaticString = #filePath,
+                                     line: UInt = #line) throws -> [[String: Any]] {
+        let records = try durableRecords(file, line: line)
+        guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("premise: known coverage", file: file, line: line) as! [[String: Any]]
+        }
+        let fresh = Set(entries.map { $0.name }).subtracting(watermark)
+        XCTAssertFalse(fresh.isEmpty,
+                       "the capture this control drove must reach a durable entry", file: file, line: line)
+        var mine: [[String: Any]] = []
+        for entry in entries where fresh.contains(entry.name) {
+            let directory = entry.root.appendingPathComponent(entry.name)
+            let metadata = try Data(contentsOf: directory.appendingPathComponent("metadata.json"))
+            let audio = try Data(contentsOf: directory.appendingPathComponent("audio.wav"))
+            _ = try VoiceSharingRecordBinding.bind(envelope: metadata, audio: audio)
+            let envelope = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: metadata) as? [String: Any])
+            mine.append(try XCTUnwrap(envelope["record"] as? [String: Any]))
+        }
+        XCTAssertFalse(mine.isEmpty, "a fresh entry decodes to a record", file: file, line: line)
+        return mine
+    }
+
+    /// WAKE REQUIRED, ON DISK. Wake-word mode with no grace: the speech that began needed a wake word, and
+    /// the durable record says so at the root. The detector's measured score and threshold are asserted by
+    /// VALUE (not merely present), so a swapped or scale-broken measurement fails here.
+    func test_durableRecordSaysWakeRequiredWhenSpeechBeganWithoutGrace() async throws {
+        openGate(enrolled: true)
+        let chain = makeChain(wake: DetectedWake(), claims: { [self] in claims })
+        chain.engine.listeningMode = .wakeWord
+        let watermark = recordWatermark()
+        await chain.backend.emitSpeechThenSilence(
+            level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
+
+        let record = try XCTUnwrap(try durableRecordsSince(watermark).first)
+        XCTAssertEqual(record["wake_required"] as? Bool, true,
+                       "wake-word mode without grace: the speech needed a wake word")
+        let wake = try XCTUnwrap((record["observations"] as? [String: Any])?["wake"] as? [String: Any])
+        // The stub detector reports 0.95 confidence; the engine compares it to its own configured threshold.
+        XCTAssertEqual(try XCTUnwrap(wake["score"] as? Double), 0.95, accuracy: 0.0001,
+                       "the durable record carries the detector's MEASURED score")
+        let threshold = try XCTUnwrap(wake["threshold"] as? Double,
+                                      "the threshold the score was judged against is recorded with it")
+        XCTAssertGreaterThan(threshold, 0, "a real threshold is a positive number")
+        XCTAssertLessThanOrEqual(threshold, 1, "and a confidence threshold lies within the score's range")
+    }
+
+    /// GRACE, ON DISK. Same engine, same detector, grace active: no wake word was required, and the durable
+    /// record says so. Paired with the control above, this is the both-states requirement measured on bytes
+    /// rather than on an in-memory event.
+    func test_durableRecordSaysWakeNotRequiredWhenSpeechBeganUnderGrace() async throws {
+        openGate(enrolled: true)
+        let chain = makeChain(wake: DetectedWake(), claims: { [self] in claims })
+        chain.engine.listeningMode = .wakeWord
+        // The production entry that opens a window; the engine reads `isActive` at segment start.
+        chain.grace.onWakeWordDetected()
+        let watermark = recordWatermark()
+        await chain.backend.emitSpeechThenSilence(
+            level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
+
+        let record = try XCTUnwrap(try durableRecordsSince(watermark).first)
+        XCTAssertEqual(record["wake_required"] as? Bool, false,
+                       "grace is active: the speech did not need a wake word")
+        XCTAssertNotNil((record["observations"] as? [String: Any])?["wake"] as? [String: Any],
+                        "the detector still ran, so its measurement is still recorded")
+    }
+
+    /// THE COMBINED UTTERANCE, ON DISK: "Auris, <command>" in one breath. The wake word is part of the
+    /// utterance, so the record must carry both the wake the detector measured AND the transcript the
+    /// recogniser produced — the two facts a server needs to tell a command from a false trigger.
+    func test_durableRecordCarriesBothTheWakeAndTheCommandFromOneUtterance() async throws {
+        openGate(enrolled: true)
+        let chain = makeChain(wake: DetectedWake(), claims: { [self] in claims })
+        chain.engine.listeningMode = .wakeWord
+        chain.backend.stubTranscript = "Auris play the news"
+        chain.backend.stubLanguage = "en"
+        let watermark = recordWatermark()
+        await chain.backend.emitSpeechThenSilence(
+            level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
+
+        let commanded = try durableRecordsSince(watermark).filter {
+            let asr = ($0["observations"] as? [String: Any])?["asr"] as? [String: Any]
+            return (asr?["text"] as? String)?.contains("play the news") == true
+        }
+        XCTAssertEqual(commanded.count, 1, "one durable record carries the recognised command")
+        let record = try XCTUnwrap(commanded.first)
+        // BOTH facts on the SAME record: the wake that let the utterance through, and the command in it.
+        XCTAssertEqual(record["wake_required"] as? Bool, true)
+        let wake = try XCTUnwrap((record["observations"] as? [String: Any])?["wake"] as? [String: Any])
+        XCTAssertEqual(try XCTUnwrap(wake["score"] as? Double), 0.95, accuracy: 0.0001)
+        let asr = try XCTUnwrap((record["observations"] as? [String: Any])?["asr"] as? [String: Any])
+        XCTAssertEqual(asr["state"] as? String, "completed")
+        XCTAssertEqual(asr["text"] as? String, "Auris play the news",
+                       "the command text reaches the durable record")
+        XCTAssertEqual(asr["source_language"] as? String, "en")
+    }
+
+    /// GENUINELY EMPTY, ON DISK. The recogniser heard speech and returned nothing but DID report a language.
+    /// The durable record must be `completed`/`empty_result` with NO text, and must KEEP the language — the
+    /// producer defect the reviewer found, asserted at the far end of the pipeline instead of at its source.
+    func test_durableRecordForAnEmptyResultKeepsTheRecognizerLanguageAndNoText() async throws {
+        openGate(enrolled: true)
+        let chain = makeChain(wake: DetectedWake(), claims: { [self] in claims })
+        chain.engine.listeningMode = .wakeWord
+        chain.backend.stubTranscript = ""
+        chain.backend.stubLanguage = "ja"
+        let watermark = recordWatermark()
+        await chain.backend.emitSpeechThenSilence(
+            level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
+
+        let record = try XCTUnwrap(try durableRecordsSince(watermark).first)
+        let asr = try XCTUnwrap((record["observations"] as? [String: Any])?["asr"] as? [String: Any])
+        XCTAssertEqual(asr["state"] as? String, "completed",
+                       "an empty recognition is a result, not a missing observation")
+        XCTAssertNil(asr["text"], "an empty result carries no transcript")
+        XCTAssertEqual(asr["source_language"] as? String, "ja",
+                       "the language the recogniser reported survives an empty transcript, on disk")
+    }
+
+    /// NON-CONTENT OUTPUT, ON DISK. The recogniser returns punctuation only. That is not a command, so no
+    /// router input may be recorded, but it IS a completed recognition and its language and text belong in
+    /// the record. The server's contract for a non-content result is what is checked here, in bytes.
+    func test_durableRecordForNonContentOutputRecordsNoCommandInput() async throws {
+        openGate(enrolled: true)
+        let chain = makeChain(wake: DetectedWake(), claims: { [self] in claims })
+        chain.engine.listeningMode = .wakeWord
+        chain.backend.stubTranscript = "?!"
+        chain.backend.stubLanguage = "en"
+        let watermark = recordWatermark()
+        await chain.backend.emitSpeechThenSilence(
+            level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
+
+        let matching = try durableRecordsSince(watermark).filter {
+            (($0["observations"] as? [String: Any])?["asr"] as? [String: Any])?["text"] as? String == "?!"
+        }
+        XCTAssertEqual(matching.count, 1, "the non-content transcription reaches exactly one durable record")
+        let record = try XCTUnwrap(matching.first)
+        let asr = try XCTUnwrap((record["observations"] as? [String: Any])?["asr"] as? [String: Any])
+        XCTAssertEqual(asr["state"] as? String, "completed")
+        XCTAssertNil(asr["router_input"],
+                     "punctuation is not a command, so no router input may be recorded")
+        XCTAssertEqual(asr["source_language"] as? String, "en")
+    }
+
 }
 
 final class EngineStubBackend: AsrBackend {
