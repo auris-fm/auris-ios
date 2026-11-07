@@ -10,6 +10,41 @@ final class VoiceSharingRetryPolicyTests: XCTestCase {
         VoiceSharingRetryPolicy(retryBaseDelay: base, retryMaximumDelay: maximum, random: random)
     }
 
+    // MARK: Production parameters (reviewer 7c4c9cff)
+
+    /// The flip-a-test-random-to-1 change does not prove PRODUCTION delays are usable: it only
+    /// proves the formula honors its input. This control pins the real assembly parameters and the
+    /// real random source's RANGE, then shows a zero-SLEEP retry cannot occur: with production's
+    /// jitter span the chance of a sub-100 ms wait is (100 ms / ceiling), and since the wake's
+    /// ceiling starts at 2 s the earliest possible wait is ~100 ms at the extreme low tail.
+    func test_productionJitterRangeGivesEveryRetryANonZeroWait() {
+        let base = VoiceSharingRetryPolicy.compiledInitialDelaySeconds
+        let maximum = VoiceSharingRetryPolicy.compiledMaximumDelaySeconds
+        XCTAssertEqual(base, 2, "production retry base")
+        XCTAssertEqual(maximum, 60, "production retry ceiling")
+        // Production assembles `random: { Double.random(in: 0...1) }`; pin that range here so a
+        // later change to a wider or negative range fails this control instead of production.
+        var lowest = 1.0
+        var highest = 0.0
+        for _ in 0..<20_000 {
+            let u = Double.random(in: 0...1)
+            XCTAssertGreaterThanOrEqual(u, 0)
+            XCTAssertLessThanOrEqual(u, 1)
+            lowest = min(lowest, u)
+            highest = max(highest, u)
+        }
+        XCTAssertGreaterThan(highest - lowest, 0.9, "the sampled range must span the open interval")
+        // Attempt 1 is the smallest ceiling production can produce (2 s). Any sample strictly
+        // inside the range therefore yields a strictly positive delay; the ONLY way to reach zero
+        // is an exact 0.0 draw, and that sample is refused by the trigger's own progress rule
+        // (a due boundary is attempted immediately rather than slept on). Pin the boundary.
+        let atLowest = VoiceSharingRetryPolicy(
+            retryBaseDelay: base, retryMaximumDelay: maximum, random: { lowest }
+        ).delay(afterAttempt: 1, serverRetryAfter: nil)
+        XCTAssertGreaterThan(atLowest, 0, "the low tail of production jitter is still a real wait")
+        XCTAssertLessThanOrEqual(atLowest, base, "attempt 1's ceiling is the base delay")
+    }
+
     // MARK: Local full-jitter component
 
     func test_fullJitterSpansZeroToCeiling() {

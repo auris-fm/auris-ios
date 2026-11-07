@@ -397,12 +397,110 @@ final class VoiceSharingUploadQueue {
     /// passing" re-invoke to callers. Nil = no outstanding boundary. An unaccountable root
     /// (listing failure/overflow) or an unparseable stamp reports 0 — wake now; admission
     /// re-checks everything fail-closed, so an early wake can never send anything prematurely.
+    /// Whether a retry wake would make PROGRESS for this entry (reviewer 7c4c9cff).
+    ///
+    /// A wake is worth arming only for work the NEXT PASS CAN ATTEMPT. A boundary is not "due
+    /// work" merely because its instant has passed: if admission will refuse the entry, the next
+    /// pass changes nothing, re-arms at the same instant, and the trigger spins in a zero-sleep
+    /// self-reoffer loop that keeps the app awake while uploading nothing.
+    ///
+    /// Answers `nil` when the entry's servability cannot be DETERMINED (unreadable state): that is
+    /// "unknown", never "no work" and never "due now". A wake for unknown state would loop for the
+    /// same reason, so unknown arms nothing and waits for an ordinary signal instead — a lifecycle
+    /// event, a new publication, or a state change (the uploader's completion re-offers by itself).
+    /// The caller does not need to distinguish the two here: neither produces a wake.
+    private func retryWorkProgressLocked(forEntryNamed entryName: String, at now: TimeInterval) -> TimeInterval?? {
+        guard UUID(uuidString: entryName) != nil else { return .some(nil) } // not an entry: debris
+        let entryDir = rootDirectory.appendingPathComponent(entryName, isDirectory: true)
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: entryDir.path, isDirectory: &isDirectory),
+            isDirectory.boolValue else { return .some(nil) } // purged entry: orphan debris
+        let entry = Entry(root: rootDirectory, name: entryName)
+        guard isCompleteEntryLocked(at: entry) else { return .some(nil) } // not yet ready to serve
+        // Servability: an entry whose budget is spent (or whose state cannot be read) can never be
+        // attempted again, so no boundary over it is progress.
+        guard let spent = try? attemptCountLocked(for: entry) else {
+            return nil // UNKNOWN count: wait for a real signal, do not spin
+        }
+        guard spent < attemptLimits.maxUploadAttempts else {
+            // Budget spent: admission disqualifies it, so no retry wake can make progress.
+            return .some(nil)
+        }
+        let obligationURL = rootDirectory.appendingPathComponent(Self.obligationPrefix + entryName)
+        switch readObligationKindLocked(at: obligationURL) {
+        case .absent:
+            break
+        case .unknown:
+            return nil // UNKNOWN owed delay: not "due now"
+        case .owed(let instant):
+            if instant.isNaN { return nil }
+            // The obligation is authoritative and strictly earlier than the stamp: this is when
+            // admission opens, so it is the boundary that matters.
+            return .some(.some(max(0, instant - now)))
+        }
+        let url = rootDirectory.appendingPathComponent(Self.notBeforeName(for: entryName))
+        switch Self.statKind(of: url) {
+        case .absent:
+            return .some(nil)
+        case .failure:
+            return nil // UNKNOWN: cannot tell whether a delay is owed
+        case .present:
+            break
+        }
+        guard let size = fileSizeIfRegularLocked(at: url), size.isRegular,
+            size.bytes > 0, size.bytes <= Self.maxSettlementRecordBytes,
+            let data = try? Data(contentsOf: url),
+            let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+            let stamp = object["notBefore"] as? Double, stamp.isFinite else {
+            return nil // UNKNOWN owed delay: not "due now"
+        }
+        return .some(.some(max(0, stamp - now)))
+    }
+
+    /// What the durable obligation record says about a owed delay.
+    enum OwedDelayKind {
+        case absent
+        case owed(TimeInterval)
+        /// Present but unreadable: the delay is UNKNOWN, which is not permission to proceed.
+        case unknown
+    }
+
+    /// Reads an obligation record WITHOUT retiring it. Mirrors the admission reader's fail-closed
+    /// discipline: an unreadable record is unknown, never absent.
+    private func readObligationKindLocked(at url: URL) -> OwedDelayKind {
+        switch Self.statKind(of: url) {
+        case .absent: return .absent
+        case .failure: return .unknown
+        case .present: break
+        }
+        guard let size = fileSizeIfRegularLocked(at: url), size.isRegular, size.bytes > 0,
+            size.bytes <= Self.maxSettlementRecordBytes,
+            let data = try? Data(contentsOf: url),
+            let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+            let owed = object["notBefore"] as? Double else { return .unknown }
+        return .owed(owed)
+    }
+
+    /// The seconds until the next retry boundary that a wake could actually ACT ON, or `nil` when
+    /// there is none.
+    ///
+    /// Reviewer 7c4c9cff — the PROGRESS RULE. Only boundaries over entries the next pass can
+    /// attempt count. An unreadable root listing, an unreadable owed delay, or an unknown attempt
+    /// count answer `nil`: "unknown" must never be reported as `0`, because a zero delay becomes a
+    /// zero-sleep Task in the trigger that re-offers itself forever without progress. Unknown
+    /// state waits for an ordinary signal (lifecycle event, new publication, or the uploader's own
+    /// completion re-offer) instead of polling; those paths already exist.
+    ///
+    /// Debris is skipped in every direction: an unparseable stamp, a stamp over a purged entry, a
+    /// malformed entry name. A DUE boundary over a servable entry reports `0` so the next pass
+    /// attempts it — admission re-checks fail-closed on arrival, so an early wake can never spend
+    /// an early attempt.
     func secondsUntilNextRetryBoundary() -> TimeInterval? {
         serialQueue.sync {
             guard let listed = try? listDirectoryBounded(rootDirectory, [], Self.maxDirectoryEntries),
-                !listed.overflowed else { return 0 }
-            var earliest: TimeInterval?
+                !listed.overflowed else { return nil }
             let now = clock().timeIntervalSince1970
+            var earliest: TimeInterval?
             for url in listed.urls {
                 let recordName = url.lastPathComponent
                 guard recordName.hasPrefix(Self.notBeforePrefix) else { continue }
@@ -413,20 +511,17 @@ final class VoiceSharingUploadQueue {
                 // produce a wake.
                 guard UUID(uuidString: entryName) != nil else { continue }
                 guard let size = fileSizeIfRegularLocked(at: url), size.isRegular,
-                    size.bytes > 0, size.bytes <= Self.maxSettlementRecordBytes,
-                    let data = try? Data(contentsOf: url),
-                    let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-                    let stamp = object["notBefore"] as? Double, stamp.isFinite else { continue }
-                // A stamp whose entry no longer exists is orphan debris in every direction —
-                // expired or not — and is skipped entirely (the simulator holds ten).
-                let entryDir = rootDirectory.appendingPathComponent(entryName, isDirectory: true)
-                var isDirectory: ObjCBool = false
-                guard fileManager.fileExists(atPath: entryDir.path, isDirectory: &isDirectory),
-                    isDirectory.boolValue else { continue }
-                // A DUE boundary over a LIVE entry is work: report 0 so the next pass attempts
-                // it. Admission re-checks fail-closed on arrival, so an early wake can never
-                // spend an early attempt.
-                earliest = min(earliest ?? .infinity, max(0, stamp - now))
+                    size.bytes > 0, size.bytes <= Self.maxSettlementRecordBytes else { continue }
+                switch retryWorkProgressLocked(forEntryNamed: entryName, at: now) {
+                case nil:
+                    // UNKNOWN servability: wait for a real signal; arming now would spin.
+                    continue
+                case .some(nil):
+                    // Debris, an unready entry, or work that is exhausted: not due work.
+                    continue
+                case .some(.some(let delay)):
+                    earliest = min(earliest ?? .infinity, delay)
+                }
             }
             return earliest
         }
