@@ -456,7 +456,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
     func test_upload401ReportsExactTokenRefreshesOnceThenRetriesSameEntry() async throws {
         let tokens = RefreshingTokenProvider(tokens: ["stale-token", "fresh-token"])
         let chain = makeChain(policyPermits: { true }, tokenProvider: tokens,
-                              attemptLimits: .init(maxUploadAttempts: 4))
+                              attemptLimits: .init(optionalCap: 4))
         let entry = try makeReadyEntry(chain.queue)
         var seenTokens: [String] = []
         let accepted = Self.acceptedReceiptResponder()
@@ -478,7 +478,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
                        "the 401 itself triggers exactly one refresh, before any retry")
         // The retry happens on the next pass, once the backoff boundary the 401 published passes.
         let later = advanceAndResume(chain, tokenProvider: tokens,
-                                     attemptLimits: .init(maxUploadAttempts: 4), by: 120)
+                                     attemptLimits: .init(optionalCap: 4), by: 120)
         try await runPass(later)
         XCTAssertEqual(seenTokens, ["stale-token", "fresh-token"],
                        "the retry presents the REFRESHED credential")
@@ -503,7 +503,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
             accountScope: { account }, enrollmentEpoch: { epoch })
         var now = Date()
         let chain = makeChain(policyPermits: { pin.isCurrent }, tokenProvider: tokens,
-                              attemptLimits: .init(maxUploadAttempts: 4), now: { now })
+                              attemptLimits: .init(optionalCap: 4), now: { now })
         let entry = try makeReadyEntry(chain.queue)
         // SHARED-STATE DISCIPLINE (the cause of the intermittent full-suite failure): the
         // intercepted session runs on URLSession's own threads, so a fixture that mutates its
@@ -625,7 +625,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
                 return isoNow
             },
             tokenProvider: StaticTokenProvider(token: "tok"),
-            attemptLimits: .init(maxUploadAttempts: 4),
+            attemptLimits: .init(optionalCap: 4),
             now: { currentTime })
         let entry = try makeReadyEntry(chain.queue)
         var attempts = 0

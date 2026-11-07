@@ -1444,7 +1444,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         let q = VoiceSharingUploadQueue(
             rootDirectory: root,
             aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32),
-            attemptLimits: VoiceSharingUploadQueue.AttemptLimits(maxUploadAttempts: 2))
+            attemptLimits: VoiceSharingUploadQueue.AttemptLimits(optionalCap: 2))
         let prep = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
         try q.finalize(prep)
 
@@ -1512,7 +1512,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         let q = VoiceSharingUploadQueue(
             rootDirectory: root, clock: Date.init,
             aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32),
-            attemptLimits: VoiceSharingUploadQueue.AttemptLimits(maxUploadAttempts: 100))
+            attemptLimits: VoiceSharingUploadQueue.AttemptLimits(optionalCap: 100))
         let prep = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
         try q.finalize(prep)
         // The largest count that fits the record's byte bound must still fit the per-entry reserve.
@@ -1613,7 +1613,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
             rootDirectory: root,
             clock: Date.init,
             aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32),
-            attemptLimits: VoiceSharingUploadQueue.AttemptLimits(maxUploadAttempts: 1))
+            attemptLimits: VoiceSharingUploadQueue.AttemptLimits(optionalCap: 1))
         let prep = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
         try q.finalize(prep)
         try q.recordAttempt(prep)
@@ -1862,7 +1862,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         let q = VoiceSharingUploadQueue(
             rootDirectory: root, clock: Date.init,
             aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32),
-            attemptLimits: VoiceSharingUploadQueue.AttemptLimits(maxUploadAttempts: 1))
+            attemptLimits: VoiceSharingUploadQueue.AttemptLimits(optionalCap: 1))
         let prep = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
         try q.finalize(prep)
         // A NOT-READY entry is refused AFTER the lease is claimed, and this refusal does NOT delete
@@ -2021,7 +2021,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         let limited = VoiceSharingUploadQueue(
             rootDirectory: root, clock: Date.init,
             aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32),
-            attemptLimits: VoiceSharingUploadQueue.AttemptLimits(maxUploadAttempts: 2))
+            attemptLimits: VoiceSharingUploadQueue.AttemptLimits(optionalCap: 2))
         try limited.recordAttempt(prep) // count -> 2 = exhausted (q already spent 1)
         _ = try? limited.beginAttempt(prep) // refused after claiming; removes the entry
         XCTAssertFalse(FileManager.default.fileExists(
@@ -2044,7 +2044,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
             let q = VoiceSharingUploadQueue(
                 rootDirectory: root, clock: Date.init,
                 aggregateLimits: limits,
-                attemptLimits: VoiceSharingUploadQueue.AttemptLimits(maxUploadAttempts: 1))
+                attemptLimits: VoiceSharingUploadQueue.AttemptLimits(optionalCap: 1))
             let audio = cycle % 2 == 0 ? audioA : audioB
             let prep = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audio), audio: audio)
             try q.finalize(prep)
@@ -2092,7 +2092,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
             VoiceSharingUploadQueue(
                 rootDirectory: root, clock: Date.init,
                 aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32),
-                attemptLimits: VoiceSharingUploadQueue.AttemptLimits(maxUploadAttempts: 100))
+                attemptLimits: VoiceSharingUploadQueue.AttemptLimits(optionalCap: 100))
         }
         let barrier = DispatchGroup()
         let failures = UploadQueueLockedBox<[Error]>([])
@@ -2967,6 +2967,84 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
             atPath: entry.root.appendingPathComponent(entry.name)
                 .appendingPathComponent("publication.failed").path),
             "no attempts-exhausted quarantine exists once the cap is retired")
+    }
+
+    /// REVIEWER 34aae0fa item 2: crossing the SATURATION point is not a cliff. The counter stops
+    /// growing (so the record's number stays representable) and the attempt PROCEEDS; nothing is
+    /// refused or disqualified for a large count. RED on f3f5f70ec, where the 1,001st admission
+    /// threw `attempts-exhausted` and the entry could be deleted for it.
+    func test_crossingOneThousandAttemptsNeitherRefusesNorDeletes() throws {
+        var q = makeQueue()
+        _ = try prepareAndFinalize(q, metadata: validRecord(audio: audioA), audio: audioA)
+        let entry = try XCTUnwrap(q.readyEntries().first)
+        // Seed the stored count just below saturation rather than looping 1,000 times: the
+        // transition under test is the ONE that crosses the boundary.
+        let seeded = VoiceSharingUploadQueue.attemptCountSaturation - 1
+        try JSONSerialization.data(withJSONObject: ["attempts": seeded]).write(
+            to: entry.root.appendingPathComponent(entry.name)
+                .appendingPathComponent("attempts.json"), options: .atomic)
+        // The attempt that CROSSES the boundary.
+        let crossing = try XCTUnwrap(q.admitAttempt(entry),
+                                     "an entry at the saturation point is still admitted")
+        XCTAssertEqual(crossing.attemptNumber, VoiceSharingUploadQueue.attemptCountSaturation,
+                       "the attempt number reports the saturated count")
+        try q.applyAttemptResult(entry, lease: crossing.lease, outcome: .retryableFailure)
+        // Still servable, and the count is SATURATED rather than refused.
+        XCTAssertTrue(try q.isAttemptable(entry), "saturation must never make an entry unservable")
+        let after = try XCTUnwrap(q.admitAttempt(entry), "the next attempt is admitted too")
+        try q.applyAttemptResult(entry, lease: after.lease, outcome: .retryableFailure)
+        let raw = try Data(contentsOf: entry.root.appendingPathComponent(entry.name)
+            .appendingPathComponent("attempts.json"))
+        let dict = try XCTUnwrap(JSONSerialization.jsonObject(with: raw) as? [String: Any])
+        XCTAssertEqual(dict["attempts"] as? Int, VoiceSharingUploadQueue.attemptCountSaturation,
+                       "the diagnostic counter saturates instead of growing without bound")
+        XCTAssertTrue(q.readyEntries().contains(entry),
+                      "nothing may be deleted for having failed many times")
+    }
+
+    /// REVIEWER 34aae0fa item 3: retention DELETES in the running process, not only at
+    /// reconstruction. On f3f5f70ec the age bound was visibility-only: the expired entry stopped
+    /// serving but its bytes stayed on disk until a fresh queue swept them, which a resident
+    /// process never does. This drives the live sweep on the SAME instance. RED before it existed
+    /// (file still present after the sweep).
+    func test_theLiveSweepDeletesAnEntryAtExactlyTheSevenDayBound() throws {
+        let q = makeQueue()
+        _ = try prepareAndFinalize(q, metadata: validRecord(audio: audioA), audio: audioA)
+        let entryDir = try soleEntryDirectory()
+        XCTAssertEqual(q.readyEntries().count, 1, "premise: one served entry")
+        // EXACTLY at the bound: `maxEntryAge` is the inclusive edge of serving, so a recording not
+        // accepted within seven days of capture is deleted.
+        let atBound = Date().timeIntervalSince1970 - VoiceSharingUploadQueue.maxEntryAge - 1
+        try String(String(atBound)).write(
+            to: entryDir.appendingPathComponent("created.at"), atomically: true, encoding: .utf8)
+        XCTAssertEqual(q.expireAgedOutEntries(), 1, "the live sweep removes the aged-out entry")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: entryDir.path),
+                       "the expired recording's files are GONE from this instance, not just hidden")
+        // ACCOUNTING RELEASED: the entry no longer occupies a queue slot, and its deletion intent
+        // is RETIRED with a root barrier rather than left behind (absence alone is not durable
+        // retirement, reviewer 243ef92d).
+        XCTAssertEqual(q.readyEntries().count, 0, "expiry releases the entry's queue slot")
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: q.expiredIntentPathForTesting(name: entryDir.lastPathComponent)),
+            "the deletion intent is retired with a root barrier, not left dangling")
+    }
+
+    /// The live sweep must not delete on an UNRESOLVED age: a future or unreadable instant is not
+    /// evidence of expiry, and deletion is the one irreversible mistake available here.
+    func test_theLiveSweepNeverDeletesOnAnUnreadableOrFutureInstant() throws {
+        let q = makeQueue()
+        _ = try prepareAndFinalize(q, metadata: validRecord(audio: audioA), audio: audioA)
+        let entryDir = try soleEntryDirectory()
+        let future = Date().timeIntervalSince1970 + 3600
+        try String(String(future)).write(
+            to: entryDir.appendingPathComponent("created.at"), atomically: true, encoding: .utf8)
+        XCTAssertEqual(q.expireAgedOutEntries(), 0, "a future instant is not expiry")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: entryDir.path))
+        try "not-a-number".write(
+            to: entryDir.appendingPathComponent("created.at"), atomically: true, encoding: .utf8)
+        XCTAssertEqual(q.expireAgedOutEntries(), 0, "an unreadable instant is not expiry")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: entryDir.path),
+                      "an unreadable age must never delete a recording")
     }
 
     /// SPEC 05ff27d0: the backoff ceiling is ONE HOUR — retries must still be retries (bounded,

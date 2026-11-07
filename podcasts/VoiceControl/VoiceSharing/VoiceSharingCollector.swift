@@ -1104,7 +1104,16 @@ return }
         if pending.count >= Self.maxPendingSignals
             || aggregateAudioSamples + event.audio.count > Self.maxAggregateRetainedSamples {
             overflowCount += 1
+            // Reviewer 34aae0fa (4): a silent discard here was a live candidate for the 10:00:21
+            // capture stop — the record simply vanished with no line. The reason distinguishes the
+            // two bounds, because they have different causes and different fixes.
+            let why = pending.count >= Self.maxPendingSignals ? "fifo-full" : "sample-budget"
+            logDecisionProgressLocked(force: true)
             lock.unlock()
+            FileLog.shared.addMessage(
+                "[VoiceSharing] capture refused reason=queue-overflow-\(why) "
+                    + "capture=\(event.captureID.uuidString)")
+            FileLog.shared.forceFlush()
             return
         }
         aggregateAudioSamples += event.audio.count
@@ -1133,8 +1142,18 @@ return }
                 && isCollectionPermitted())
         lock.unlock()
         guard stillValid else {
-            lock.lock(); aggregateAudioSamples -= event.audio.count; lock.unlock()
-            return   // drop silently: its consent moved on while it waited
+            lock.lock()
+            aggregateAudioSamples -= event.audio.count
+            // Reviewer 34aae0fa (4): this drop used to be SILENT. It names its bound so the two
+            // cases are separable: the account/session moved, or consent closed behind the event.
+            let why = event.authorizationSession == sessionIdentity()
+                ? "consent-not-permitted" : "session-moved"
+            FileLog.shared.addMessage(
+                "[VoiceSharing] capture refused reason=dequeue-\(why) "
+                    + "capture=\(event.captureID.uuidString)")
+            lock.unlock()
+            FileLog.shared.forceFlush()
+            return
         }
         deliverUnderSinkOwnership(event)
     }
@@ -1144,9 +1163,11 @@ return }
     private func deliverUnderSinkOwnership(_ event: SegmentEvent) {
         let n = event.audio.count
         lock.lock()
-        // A gate-control record carries no audio and is not a captured segment; everything else
-        // that reaches the sink IS a capture emitted.
-        if !event.isGateControl {
+        // Reviewer 34aae0fa (4): count CONTRIBUTIONS, not events. The sink ignores `.started`, so
+        // counting every non-gate-control event counted one segment twice (start then completion)
+        // before a single contribution existed. A completed segment is the thing that can become a
+        // contribution; a cancelled one is a disposal record and is not counted as emitted.
+        if event.kind == .completed {
             capturesEmittedCount += 1
             logDecisionProgressLocked()
         }

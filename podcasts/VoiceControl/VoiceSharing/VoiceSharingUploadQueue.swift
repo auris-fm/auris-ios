@@ -96,18 +96,24 @@ final class VoiceSharingUploadQueue {
 
     /// Attempt bounds. Compiled implementation defaults, NOT owner-approved activation values.
     struct AttemptLimits {
-        /// NO FIXED ATTEMPT CAP (spec 05ff27d0). Retrying is bounded by the backoff schedule and
-        /// by retention (`maxEntryAge`), not by a count: a recording that has failed a hundred
-        /// times is still retried, because the failures that matter here are TRANSIENT (the
-        /// server answering 503 for hours) and a count turns a temporary outage into permanent
-        /// data loss. The stored counter remains a diagnostic and keeps the record's numeric
-        /// ceiling; it no longer refuses anything.
-        let maxUploadAttempts: Int
+        /// NO ATTEMPT CAP AT ALL (spec 05ff27d0, reviewer 34aae0fa item 2). Retrying is bounded by
+        /// the backoff schedule and by retention (`maxEntryAge`), never by a count. The failures
+        /// that matter here are TRANSIENT — a server answering 503 for hours — and any count turns
+        /// a temporary outage into permanent data loss. Raising the old five to a thousand only
+        /// moved the cliff, so production passes nil and there is nothing to compare against.
+        ///
+        /// A caller that genuinely needs a budget (a control pinning bounded behaviour) can still
+        /// pass one.
+        let optionalCap: Int?
 
-        /// Unbounded: the ceiling of the stored representation, which is a record bound, not a
-        /// policy budget.
-        static let `default` = AttemptLimits(
-            maxUploadAttempts: VoiceSharingUploadQueue.maxUploadAttemptsCeiling)
+        static let `default` = AttemptLimits(optionalCap: nil)
+    }
+
+    /// Whether the stored count still permits another attempt. With no cap this is always true:
+    /// the count saturates instead of refusing.
+    private func admitCountPermits(_ count: Int) -> Bool {
+        guard let cap = attemptLimits.optionalCap else { return true }
+        return count < cap
     }
 
     /// Upper bound on bytes this queue itself writes for one entry, excluding the caller's audio and
@@ -245,8 +251,13 @@ final class VoiceSharingUploadQueue {
     }
 
     static let attemptLeaseDuration: TimeInterval = 120
-    /// Absolute ceiling on a stored attempt count. Compiled bound, NOT an activation value.
-    static let maxUploadAttemptsCeiling = 1_000
+    /// SATURATION point of the stored attempt counter (spec 05ff27d0, reviewer 34aae0fa item 2).
+    ///
+    /// This is NOT a cap and NOT a budget: the counter increments up to this value and then stays
+    /// put, and NOTHING is refused for reaching it. It exists only so the record's JSON number
+    /// cannot grow without bound, and so the count remains readable PERMANENTLY as a diagnostic:
+    /// "this recording has failed at least N times".
+    static let attemptCountSaturation = 1_000
     /// Present when publication failed and its cleanup could not complete. Such an entry is never
     /// exposed as ready, even if the ready marker survived.
     /// Present when this attempt definitively failed. Written BEFORE any removal attempt.
@@ -413,54 +424,81 @@ final class VoiceSharingUploadQueue {
     /// passing" re-invoke to callers. Nil = no outstanding boundary. An unaccountable root
     /// (listing failure/overflow) or an unparseable stamp reports 0 — wake now; admission
     /// re-checks everything fail-closed, so an early wake can never send anything prematurely.
-    /// Whether a retry wake would make PROGRESS for this entry (reviewer 7c4c9cff).
+    /// Whether a retry wake would make PROGRESS for this entry (reviewer 7c4c9cff, 34aae0fa).
     ///
     /// A wake is worth arming only for work the NEXT PASS CAN ATTEMPT. A boundary is not "due
-    /// work" merely because its instant has passed: if admission will refuse the entry, the next
-    /// pass changes nothing, re-arms at the same instant, and the trigger spins in a zero-sleep
+    /// work" merely because its instant has passed: if admission will refuse, the next pass
+    /// changes nothing, re-arms at the same instant, and the trigger spins in a zero-sleep
     /// self-reoffer loop that keeps the app awake while uploading nothing.
     ///
-    /// Answers `nil` when the entry's servability cannot be DETERMINED (unreadable state): that is
-    /// "unknown", never "no work" and never "due now". A wake for unknown state would loop for the
-    /// same reason, so unknown arms nothing and waits for an ordinary signal instead — a lifecycle
-    /// event, a new publication, or a state change (the uploader's completion re-offers by itself).
-    /// The caller does not need to distinguish the two here: neither produces a wake.
-    private func retryWorkProgressLocked(forEntryNamed entryName: String, at now: TimeInterval) -> TimeInterval?? {
-        guard UUID(uuidString: entryName) != nil else { return .some(nil) } // not an entry: debris
+    /// So this mirrors `admitAttempt`'s NON-MUTATING gates, in the same order, and answers:
+    ///   * `.dueWork(delay)` — admission would attempt it now or at `delay`;
+    ///   * `.notWork` — a fact that admission refuses on and that no wake can change (debris,
+    ///     unready entry, spent count, a hold over this entry's owner);
+    ///   * `.unknown` — a fact that could not be READ. Unknown is never "due now" and never
+    ///     "nothing to do": it arms nothing and waits for an ordinary signal (lifecycle event, new
+    ///     publication, or the uploader's own completion re-offer), because polling on unknown
+    ///     state is exactly the loop this rule forbids.
+    ///
+    /// Deliberately shared with admission rather than restated: `revocationHoldLocked`,
+    /// `retryHoldLocked`, `strictOwnerCoverageLocked`, `inFlightAttempts` and the count ceiling are
+    /// the SAME facts `admitAttempt` consults (VoiceSharingUploadQueue.swift:1335-1360). A private
+    /// copy would drift and re-open the loop.
+    private enum RetryWakeProspect {
+        case dueWork(TimeInterval)
+        case notWork
+        case unknown
+    }
+
+    private func retryWakeProspectLocked(forEntryNamed entryName: String, at now: TimeInterval) -> RetryWakeProspect {
+        // OWNER-WIDE HOLDS FIRST, exactly as admission does (reviewer 34aae0fa item 1): under either
+        // hold `admitAttempt` throws for EVERY entry, so no boundary is due work.
+        if revocationHoldLocked || retryHoldLocked { return .notWork }
+        guard UUID(uuidString: entryName) != nil else { return .notWork } // not an entry: debris
         let entryDir = rootDirectory.appendingPathComponent(entryName, isDirectory: true)
         var isDirectory: ObjCBool = false
         guard fileManager.fileExists(atPath: entryDir.path, isDirectory: &isDirectory),
-            isDirectory.boolValue else { return .some(nil) } // purged entry: orphan debris
+            isDirectory.boolValue else { return .notWork } // purged entry: orphan debris
         let entry = Entry(root: rootDirectory, name: entryName)
-        guard isCompleteEntryLocked(at: entry) else { return .some(nil) } // not yet ready to serve
-        // Servability: an entry whose count is corrupt (or whose state cannot be read) can never be
-        // attempted again, so no boundary over it is progress.
+        guard isCompleteEntryLocked(at: entry) else { return .notWork } // not ready to serve
+        // AN ATTEMPT ALREADY IN FLIGHT OWNS THIS ENTRY: its own completion re-offers (the trigger's
+        // drainWasRefused/workPending handoff), so a wake here would race it for nothing.
+        if inFlightAttempts[entry] != nil { return .notWork }
+        // STRICT OWNER COVERAGE is the same authority the serving query and admission use: another
+        // entry's unreadable state holds attempts for the WHOLE owner. Unreadable ⇒ UNKNOWN.
+        let discovered: [Entry]
+        do {
+            discovered = try strictOwnerCoverageLocked()
+        } catch {
+            return .unknown
+        }
+        guard discovered.contains(entry) else { return .notWork }
         guard let spent = try? attemptCountLocked(for: entry) else {
-            return nil // UNKNOWN count: wait for a real signal, do not spin
+            return .unknown // UNKNOWN count: wait for a real signal, do not spin
         }
-        guard spent < attemptLimits.maxUploadAttempts else {
-            // SPEC 05ff27d0: with no attempt cap this is the CORRUPT-COUNT case only, where
-            // admission refuses terminally. A boundary over it is not progress, so no wake.
-            return .some(nil)
+        guard admitCountPermits(spent) else {
+            // The numeric saturation point: admission refuses, so a boundary is not progress.
+            return .notWork
         }
+        // The owed delay, read WITHOUT retiring it (retiring stays admission's job).
         let obligationURL = rootDirectory.appendingPathComponent(Self.obligationPrefix + entryName)
         switch readObligationKindLocked(at: obligationURL) {
         case .absent:
             break
         case .unknown:
-            return nil // UNKNOWN owed delay: not "due now"
+            return .unknown
         case .owed(let instant):
-            if instant.isNaN { return nil }
-            // The obligation is authoritative and strictly earlier than the stamp: this is when
-            // admission opens, so it is the boundary that matters.
-            return .some(.some(max(0, instant - now)))
+            if instant.isNaN { return .unknown }
+            return .dueWork(max(0, instant - now))
         }
         let url = rootDirectory.appendingPathComponent(Self.notBeforeName(for: entryName))
         switch Self.statKind(of: url) {
         case .absent:
-            return .some(nil)
+            // No delay owed: this entry is admissible NOW, which is work, and the pass that arrives
+            // here already reported it. Nothing to arm.
+            return .notWork
         case .failure:
-            return nil // UNKNOWN: cannot tell whether a delay is owed
+            return .unknown
         case .present:
             break
         }
@@ -469,9 +507,9 @@ final class VoiceSharingUploadQueue {
             let data = try? Data(contentsOf: url),
             let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
             let stamp = object["notBefore"] as? Double, stamp.isFinite else {
-            return nil // UNKNOWN owed delay: not "due now"
+            return .unknown
         }
-        return .some(.some(max(0, stamp - now)))
+        return .dueWork(max(0, stamp - now))
     }
 
     /// What the durable obligation record says about a owed delay.
@@ -514,6 +552,19 @@ final class VoiceSharingUploadQueue {
     /// an early attempt.
     func secondsUntilNextRetryBoundary() -> TimeInterval? {
         serialQueue.sync {
+            // OWNER-WIDE HOLDS FIRST (reviewer 34aae0fa item 1): under either hold `admitAttempt`
+            // refuses EVERY entry, so no boundary is due work. Checked here as well as in the per-
+            // entry prospect so a hold answers `nil` even before the listing is read — the same
+            // refusal the drain's admission applies, from the same two flags.
+            //
+            // READ FROM STORAGE, exactly as `recoverLocked` derives them (reviewer 35e67a87): the
+            // in-memory flags are only as fresh as the last reconciliation this instance performed,
+            // and a marker written by a settling pass must hold THIS instance's wake arithmetic the
+            // moment it lands on disk. A discovery FAILURE is a hold, never an absence.
+            if intentDiscovery(revocationIntentPath) != .absent { return nil }
+            if intentDiscovery(rootDirectory.appendingPathComponent(Self.retryHoldIntentName))
+                != .absent { return nil }
+            if revocationHoldLocked || retryHoldLocked { return nil }
             guard let listed = try? listDirectoryBounded(rootDirectory, [], Self.maxDirectoryEntries),
                 !listed.overflowed else { return nil }
             let now = clock().timeIntervalSince1970
@@ -529,14 +580,12 @@ final class VoiceSharingUploadQueue {
                 guard UUID(uuidString: entryName) != nil else { continue }
                 guard let size = fileSizeIfRegularLocked(at: url), size.isRegular,
                     size.bytes > 0, size.bytes <= Self.maxSettlementRecordBytes else { continue }
-                switch retryWorkProgressLocked(forEntryNamed: entryName, at: now) {
-                case nil:
-                    // UNKNOWN servability: wait for a real signal; arming now would spin.
+                switch retryWakeProspectLocked(forEntryNamed: entryName, at: now) {
+                case .unknown, .notWork:
+                    // No wake: unknown state waits for a real signal, and a fact admission refuses
+                    // on cannot be changed by waking up.
                     continue
-                case .some(nil):
-                    // Debris, an unready entry, or work that is exhausted: not due work.
-                    continue
-                case .some(.some(let delay)):
+                case .dueWork(let delay):
                     earliest = min(earliest ?? .infinity, delay)
                 }
             }
@@ -1387,10 +1436,10 @@ final class VoiceSharingUploadQueue {
             }
             do {
                 guard try isAttemptableLocked(entry) else {
-                    // RETIRED POLICY (spec 05ff27d0): with no attempt cap there is no exhaustion
-                    // path left to this branch, so in practice it is never taken. It stays as the
-                    // fail-closed guard for the arithmetic ceiling alone: should the stored count
-                    // ever reach it, the entry stops serving rather than being retried forever.
+                    // GONE WITH THE CAP (spec 05ff27d0): there is no exhaustion path left to this
+                    // branch — no count refuses an entry. It stays as the fail-closed guard for a
+                    // CORRUPT stored count, which is the only way `isAttemptableLocked` can now
+                    // return false for a complete, ready entry.
                     // The removal is best-effort here — a failure leaves the entry
                     // visible-but-unservable via the limit itself.
                     let complete = isCompleteEntryLocked(at: entry)
@@ -1690,10 +1739,14 @@ final class VoiceSharingUploadQueue {
             do {
                 // Ready/count checks run AFTER the claim so only the owner mutates shared state.
                 guard try isAttemptableLocked(entry) else {
-                    // RETIRED POLICY (spec 05ff27d0): reachable only via the numeric record
-                    // ceiling, never via a retry budget.
+                    // GONE WITH THE CAP (spec 05ff27d0, reviewer 34aae0fa item 2): with no attempt
+                    // budget `isAttemptableLocked` can no longer refuse for a large count, so this
+                    // deletion path has no reachable condition. It is kept as the fail-closed
+                    // removal for a CORRUPT count that slipped through validation, which is the
+                    // only remaining reason an entry would be complete and unservable.
                     if isCompleteEntryLocked(at: entry),
-                       try attemptCountLocked(for: entry) >= attemptLimits.maxUploadAttempts {
+                       let count = try? attemptCountLocked(for: entry),
+                       !admitCountPermits(count) {
                         let removed = (try? fileManager.removeItem(
                             at: entryDirectoryLocked(for: entry))) != nil
                         // DIAGNOSTIC (content-free): this path DELETES a complete entry.
@@ -2351,7 +2404,7 @@ final class VoiceSharingUploadQueue {
               let dict = object as? [String: Any],
               dict.count == 1,
               let value = dict["attempts"] as? Int,
-              value >= 0, value <= Self.maxUploadAttemptsCeiling
+              value >= 0, value <= Self.attemptCountSaturation
         else { throw PrepareError.accountingUnavailable }
         return value
     }
@@ -2360,14 +2413,14 @@ final class VoiceSharingUploadQueue {
     /// preparation would upload a record that does not exist yet, and would spend one of its
     /// attempts on a state the spec never permits to be exposed.
     private func isAttemptableLocked(_ entry: Entry) throws -> Bool {
-        // SPEC 05ff27d0: the count no longer gates servability. `maxUploadAttempts` is the record's
-        // numeric ceiling, so this comparison can only ever refuse a CORRUPT count — not a
-        // well-behaved entry that has simply failed many times.
         // Validate the handle FIRST: a foreign or malformed Entry is an error, not a "not ready"
         // answer, and its absence must never be reported as a benign false.
         _ = try validatedEntryDirectoryLocked(entry)
+        // SPEC 05ff27d0: the count no longer gates servability at all. An entry that has failed a
+        // thousand times is exactly as attemptable as a fresh one; retention removes unaccepted
+        // recordings, and the backoff schedule spaces the retries.
         guard isCompleteEntryLocked(at: entry) else { return false }
-        return try attemptCountLocked(for: entry) < attemptLimits.maxUploadAttempts
+        return admitCountPermits(try attemptCountLocked(for: entry))
     }
 
     /// Writes the attempt record and confirms its durability. Returns only after the record and its
@@ -2383,16 +2436,17 @@ final class VoiceSharingUploadQueue {
         defer { lock.close() }
         try lock.lockExclusive()
         let current = try attemptCountLocked(for: entry)
-        // Every increment path enforces the limit, not only `beginAttempt`.
-        // Retired budget comparison (spec 05ff27d0): this is the arithmetic ceiling check now,
-        // not a policy cap — `maxUploadAttempts` equals `maxUploadAttemptsCeiling`.
-        guard current < attemptLimits.maxUploadAttempts else {
+        // A caller-supplied budget (a control) still refuses; production has none.
+        guard admitCountPermits(current) else {
             throw PrepareError.attemptsExhausted
         }
-        let next = current + 1
-        // Guard the arithmetic: an increment that cannot be represented is a corrupt record, not a
-        // fresh start.
-        guard next > current, next <= Self.maxUploadAttemptsCeiling else {
+        // SATURATE (spec 05ff27d0, reviewer 34aae0fa item 2): the counter stops growing at the
+        // representation bound and the attempt PROCEEDS. Refusing here was the 1,001st-attempt
+        // cliff that disqualified healthy retryable work; a large count is no reason to stop
+        // retrying a recording. `&+` cannot trap, and the guard below still catches a corrupt
+        // negative/garbage record.
+        let next = min(current &+ 1, Self.attemptCountSaturation)
+        guard next > current || current >= Self.attemptCountSaturation else {
             throw PrepareError.accountingUnavailable
         }
         let url = directory.appendingPathComponent(Self.attemptRecordName)
@@ -3012,11 +3066,77 @@ final class VoiceSharingUploadQueue {
         bumpHoldGenerationForContentChange()
     }
 
+    /// LIVE EXPIRY (spec 05ff27d0, reviewer 34aae0fa item 3).
+    ///
+    /// Retention used to be VISIBILITY-ONLY in a running process: `isWithinAgeBoundLocked` hid an
+    /// entry past `maxEntryAge`, so it stopped serving and stopped uploading, but its bytes stayed
+    /// on disk until a reconstruction swept them. A long-lived process (an app that stays resident,
+    /// as the sim one does) would therefore hold expired recordings forever — retention promised
+    /// "deleted", not "invisible".
+    ///
+    /// This removes them through the SAME reconciled path every other per-entry removal uses:
+    /// durable deletion intent → disqualify (prove it can never serve again) → remove → retire the
+    /// intent with a root barrier. Nothing here is a new bespoke protocol, and a failure leaves the
+    /// standard per-entry hold so the ordinary sweeps retry it — never a silent skip.
+    ///
+    /// A FUTURE or UNREADABLE instant is NOT expired: it is an unresolved age, which retention may
+    /// not act on (deleting on unreadable state is the one irreversible mistake available here).
+    @discardableResult
+    func expireAgedOutEntries() -> Int {
+        serialQueue.sync { expireAgedOutEntriesLocked() }
+    }
+
+    private func expireAgedOutEntriesLocked() -> Int {
+        var expired = 0
+        // STORAGE POLICY FIRST: the age reader needs it, and an entry cannot be judged before the
+        // root it lives under is known to be the one we own.
+        guard (try? establishStoragePolicyLocked()) != nil else {
+            FileLog.shared.addMessage(
+                "[VoiceSharing] queue expiry deferred: storage policy unavailable")
+            FileLog.shared.forceFlush()
+            return 0
+        }
+        for entry in entriesLocked() {
+            // A malformed name is not an entry, and the age reader is the ONE age rule used by
+            // serving and by the diagnostic count — retention must not invent a second one.
+            guard UUID(uuidString: entry.name) != nil else { continue }
+            guard let age = markerAgeLocked(entry) else { continue } // unresolved age: not expired
+            guard age > Self.maxEntryAge else { continue }
+            // DO NOT ASK `isCompleteEntryLocked` HERE: it applies the SAME age bound and classifies
+            // an expired entry as `.incomplete` — the very state this sweep exists to remove. Asking
+            // it made every expired entry invisible to retention (found by the red control: age
+            // 604801s, "skip incomplete"). The structural evidence below is the honest question:
+            // is this a PUBLISHED recording (marker present, no disqualifier), or abandoned work?
+            guard Self.statKind(of: entryDirectoryLocked(for: entry)
+                .appendingPathComponent(Self.readyMarkerName)) == .present else { continue }
+            guard Self.statKind(of: entryDirectoryLocked(for: entry)
+                .appendingPathComponent(Self.failedName)) != .present else { continue }
+            guard Self.statKind(of: entryDirectoryLocked(for: entry)
+                .appendingPathComponent(Self.stageName)) != .present else { continue }
+            do {
+                try purgeRefusedEntryLocked(entry, cause: "age-exceeded")
+                expired += 1
+            } catch {
+                // The per-entry hold is set by the purge itself: the ordinary sweeps retry it.
+                FileLog.shared.addMessage(
+                    "[VoiceSharing] queue expiry deferred entry=\(entry.name) reason=purge-failed")
+                FileLog.shared.forceFlush()
+            }
+        }
+        return expired
+    }
+
     /// Durable per-entry deletion intent. Written, retired, and discovered by the EXISTING
     /// durable helpers (failureRecordWriter + synchronizer + bounded root listing): discovery
     /// lands in `refusedIntentNamesLocked` at recovery, and the serving sweep retries the
     /// scoped purge for every held entry automatically.
     static let deletionIntentPrefix = "deletion.intent."
+
+    /// Test accessor for the per-entry deletion intent path, so a control can assert the intent was
+    /// RETIRED after a live expiry rather than left dangling on disk.
+    func expiredIntentPathForTesting(name: String) -> String {
+        deletionIntentPathLocked(name).path
+    }
     private var refusedIntentNamesLocked: Set<String> = []
     private func deletionIntentPathLocked(_ name: String) -> URL {
         rootDirectory.appendingPathComponent("\(Self.deletionIntentPrefix)\(name)")
