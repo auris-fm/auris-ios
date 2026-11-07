@@ -332,9 +332,9 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         let audio = wav()
         let prep = try q.prepare(metadata: validRecord(audio: audio), audio: audio)
 
-        // 49 hours later (past the 48h bound) the preparation is finalized. Publication must be
-        // REFUSED — not accepted with a fresh lifetime.
-        clock.advance(by: 49 * 60 * 60)
+        // Past the retention bound (spec 05ff27d0: seven days from capture) the preparation is
+        // finalized. Publication must be REFUSED — not accepted with a fresh lifetime.
+        clock.advance(by: 7 * 24 * 60 * 60 + 60 * 60)
         XCTAssertThrowsError(try q.finalize(prep)) { error in
             guard case VoiceSharingUploadQueue.PrepareError.expired = error else {
                 return XCTFail("expected expired, got \(error)")
@@ -353,9 +353,9 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         try q.finalize(prep)
         XCTAssertEqual(q.readyEntries().count, 1)
 
-        clock.advance(by: 47 * 60 * 60)
+        clock.advance(by: 6 * 24 * 60 * 60)
         try q.finalize(prep) // repeated publication must NOT reset the clock
-        clock.advance(by: 2 * 60 * 60) // now 49h past creation
+        clock.advance(by: 24 * 60 * 60 + 60 * 60) // now past the seven-day bound
 
         XCTAssertTrue(q.readyEntries().isEmpty,
                       "re-finalizing must not extend the immutable entry's queue lifetime")
@@ -2917,6 +2917,75 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertTrue(q.readyEntries().isEmpty, "entries past the queue-age bound must not survive recovery")
     }
 
+    /// SPEC 05ff27d0: a recording NOT ACCEPTED within seven days of capture is deleted. The bound
+    /// is 7 days of CAPTURE age, not 48 hours, and the deletion is the ordinary recovery age rule
+    /// (one age authority for the whole type) — not a new mechanism.
+    func test_aRecordingNotAcceptedWithinSevenDaysOfCaptureIsDeleted() throws {
+        XCTAssertEqual(VoiceSharingUploadQueue.maxEntryAge, 7 * 24 * 60 * 60,
+                       "retention is seven days from capture (spec 05ff27d0)")
+        var q = makeQueue()
+        _ = try prepareAndFinalize(q, metadata: validRecord(audio: audioA), audio: audioA)
+        // JUST INSIDE the seven-day bound: it must survive, so the control cannot pass by deleting
+        // everything.
+        let insideDir = try soleEntryDirectory()
+        let justInside = Date().timeIntervalSince1970 - (7 * 24 * 60 * 60) + 60
+        try String(String(justInside)).write(
+            to: insideDir.appendingPathComponent("created.at"), atomically: true, encoding: .utf8)
+        q = makeQueue()
+        XCTAssertEqual(q.readyEntries().count, 1,
+                       "a recording captured inside the seven-day bound is retained")
+
+        // PAST the bound: deleted at recovery.
+        let oldInstant = Date().timeIntervalSince1970 - (7 * 24 * 60 * 60) - 60
+        try String(String(oldInstant)).write(
+            to: insideDir.appendingPathComponent("created.at"), atomically: true, encoding: .utf8)
+        q = makeQueue()
+        XCTAssertTrue(q.readyEntries().isEmpty,
+                      "a recording not accepted within seven days of capture is deleted")
+    }
+
+    /// SPEC 05ff27d0: there is NO fixed attempt cap. An entry that has already failed far more
+    /// times than the old five-attempt budget stays attemptable — the policy's exponential backoff
+    /// is what spaces the retries, and its ceiling is one hour. RED before the change, where the
+    /// sixth admission returned `attempts-exhausted` and the entry was disqualified/deleted.
+    func test_anEntryThatHasFailedManyTimesRemainsAttemptable() throws {
+        var q = makeQueue()
+        _ = try prepareAndFinalize(q, metadata: validRecord(audio: audioA), audio: audioA)
+        let entry = try XCTUnwrap(q.readyEntries().first)
+        // Well past the retired five-attempt budget; still below the record's own numeric ceiling
+        // so the stored count itself is valid.
+        for _ in 0..<50 {
+            let admitted = try XCTUnwrap(q.admitAttempt(entry),
+                                        "a recording must never become unservable by attempt count")
+            try q.applyAttemptResult(entry, lease: admitted.lease, outcome: .retryableFailure)
+        }
+        XCTAssertTrue(try q.isAttemptable(entry),
+                      "no fixed attempt cap: retrying is bounded by policy and retention, not a count")
+        XCTAssertNotNil(try q.admitAttempt(entry), "the fifty-first attempt is still admitted")
+        // And nothing was quarantined along the way.
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: entry.root.appendingPathComponent(entry.name)
+                .appendingPathComponent("publication.failed").path),
+            "no attempts-exhausted quarantine exists once the cap is retired")
+    }
+
+    /// SPEC 05ff27d0: the backoff ceiling is ONE HOUR — retries must still be retries (bounded,
+    /// not hot), and must reach the full hour before flattening.
+    func test_theRetryCeilingIsOneHour() {
+        XCTAssertEqual(VoiceSharingRetryPolicy.compiledMaximumDelaySeconds, 3600,
+                       "backoff ceiling is one hour (spec 05ff27d0)")
+        // Attempt 13's exponential ceiling (2 * 2^12) already exceeds an hour; full jitter must
+        // then be capped by the hour, not by the old minute.
+        let policy = VoiceSharingRetryPolicy(
+            retryBaseDelay: VoiceSharingRetryPolicy.compiledInitialDelaySeconds,
+            retryMaximumDelay: VoiceSharingRetryPolicy.compiledMaximumDelaySeconds,
+            random: { 1 })
+        XCTAssertEqual(policy.delay(afterAttempt: 13, serverRetryAfter: nil), 3600,
+                       "the jittered component flattens at one hour")
+        XCTAssertEqual(policy.delay(afterAttempt: 6, serverRetryAfter: nil), 64,
+                       "below the ceiling the growth stays exponential (2 * 2^5)")
+    }
+
     func test_recoveryStopsBeforeLoadingOversizedAudio() throws {
         // An entry whose audio exceeds the ceiling is removed by recovery WITHOUT reading it:
         // corrupt the bytes (digest mismatch alone would also remove it, so prove size path by
@@ -3611,8 +3680,11 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
         let queue = makeQueue()
         let entry = try seed(queue)
         let directory = entryRoot.appendingPathComponent(entry.name)
-        // Backdate the immutable creation instant past the lifetime bound.
-        let stale = String(Date(timeIntervalSinceNow: -72 * 3600).timeIntervalSince1970)
+        // Backdate the immutable creation instant past the lifetime bound. The bound is now seven
+        // days (spec 05ff27d0), so 72 hours is INSIDE it and would prove nothing: age it past the
+        // constant itself.
+        let stale = String(
+            Date(timeIntervalSinceNow: -VoiceSharingUploadQueue.maxEntryAge - 3600).timeIntervalSince1970)
         try Data(stale.utf8).write(to: directory.appendingPathComponent("created.at"))
 
         XCTAssertTrue(queue.readyEntries().isEmpty, "aged-out entries do not serve")
