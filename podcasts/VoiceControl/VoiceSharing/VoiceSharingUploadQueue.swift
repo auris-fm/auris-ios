@@ -1660,6 +1660,11 @@ final class VoiceSharingUploadQueue {
     func recoverAbandonedSettlements() {
         serialQueue.sync {
             recoverAbandonedSettlementsLocked()
+        // Refusal deletion intents reconcile EXPLICITLY (reviewer 4bb7841c item 1): an intent
+        // whose entry is proven absent is retired through the durable helpers here — never by
+        // the debris sweep; an intent whose entry survived stays durable and held for the
+        // serving sweeps' scoped-purge retries.
+        reconcileRefusalIntentsLocked()
             bumpHoldGenerationForContentChange()
         }
     }
@@ -2573,8 +2578,23 @@ final class VoiceSharingUploadQueue {
                 // PER-ENTRY REFUSAL HOLD (spec 1bfba50f): an entry with a durable deletion
                 // intent never serves, and the serving sweep retries its SCOPED purge
                 // automatically. Failure holds only THIS entry — the others keep serving.
-                if refusedIntentNamesLocked.contains(entry.name)
-                    || Self.statKind(of: deletionIntentPathLocked(entry.name)) == .present {
+                // REVIEWER 4bb7841c item 3: the proven-stage-absence protection applies to
+                // retries too — an intent-bearing entry with an active publication stage (or
+                // an UNKNOWN stage status) is never deleted.
+                let heldIntentKind = intentDiscovery(deletionIntentPathLocked(entry.name))
+                if refusedIntentNamesLocked.contains(entry.name) || heldIntentKind != .absent {
+                    if heldIntentKind == .failure {
+                        lastDiscoveryDiagnostic = "intent stat failed for \(entry.name)"
+                        return .unknownCoverage
+                    }
+                    let stageKind = Self.statKind(of: entryDirectoryLocked(for: entry)
+                        .appendingPathComponent(Self.stageName))
+                    guard stageKind == .absent else {
+                        if stageKind == .failure { return .unknownCoverage }
+                        // Active stage under a deletion intent: NEVER deleted; excluded.
+                        excluded.append("\(entry.name):refusal-held(active-stage)")
+                        continue
+                    }
                     do { try purgeRefusedEntryLocked(entry, cause: "held-retry") }
                     catch {
                         refusedIntentNamesLocked.insert(entry.name)
@@ -2680,8 +2700,19 @@ final class VoiceSharingUploadQueue {
             // purge failures leave the entry on disk, excluded from the served list.
             do {
                 for entry in try entriesStrictLocked() {
-                    if refusedIntentNamesLocked.contains(entry.name)
-                        || Self.statKind(of: deletionIntentPathLocked(entry.name)) == .present {
+                    // REVIEWER 4bb7841c items 2+3: intent stat failure => fail closed (serve
+                    // nothing); active/unknown stage under an intent => never deleted.
+                    let heldIntentKind = intentDiscovery(deletionIntentPathLocked(entry.name))
+                    if refusedIntentNamesLocked.contains(entry.name) || heldIntentKind != .absent {
+                        // Unconfirmable intent => the entry cannot prove it is not held: hold
+                        // ONLY it (per-entry hold, spec 1bfba50f) — never an owner-wide stop.
+                        if heldIntentKind == .failure { continue }
+                        let stageKind = Self.statKind(of: entryDirectoryLocked(for: entry)
+                            .appendingPathComponent(Self.stageName))
+                        guard stageKind == .absent else {
+                            if stageKind == .failure { throw PrepareError.accountingUnavailable }
+                            continue // active stage: never deleted; never serves
+                        }
                         try? purgeRefusedEntryLocked(entry, cause: "held-retry")
                         continue // purged or still held: either way it never serves here
                     }
@@ -2704,7 +2735,14 @@ final class VoiceSharingUploadQueue {
                     }
                 }
             } catch { return [] }
+            // REVIEWER 4bb7841c item 2: the final legacy list is rebuilt from all complete
+            // entries, so it must apply the per-entry refusal hold itself — a bindable held
+            // survivor (or one whose intent cannot be confirmed absent) never serves.
             return entriesLocked()
+                .filter {
+                    !refusedIntentNamesLocked.contains($0.name)
+                        && intentDiscovery(deletionIntentPathLocked($0.name)) == .absent
+                }
                 .filter { isCompleteEntryLocked(at: $0) }
                 // Exposure also requires CONFIRMED durability, not just a structurally valid marker:
                 // after an uncertain transition a marker may be visible without durable backing.
@@ -2818,6 +2856,37 @@ final class VoiceSharingUploadQueue {
     /// Discovers durable per-entry refusal intents into the per-entry hold. Uses the BOUNDED
     /// root listing; a listing failure or overflow cannot account the root, so it falls back to
     /// the owner-wide unknown-origin hold (fail closed, house standard for unaccountable roots).
+    /// Explicitly reconciles the discovered refusal intents: PROVEN-ABSENT entry => retire the
+    /// durable record (removal + root barrier); retirement failure keeps the hold. Surviving
+    /// entries keep their intent and are retried by the serving sweeps through the shared
+    /// scoped purge.
+    private func reconcileRefusalIntentsLocked() {
+        for name in refusedIntentNamesLocked {
+            let entry = Entry(root: rootDirectory, name: name)
+            guard Self.statKind(of: entryDirectoryLocked(for: entry)) == .absent else { continue }
+            let intentPath = deletionIntentPathLocked(name)
+            if Self.statKind(of: intentPath) == .absent {
+                // Already retired (e.g. a prior pass's barrier failed after the removal):
+                // absence is the confirmation; release the hold.
+                refusedIntentNamesLocked.remove(name)
+                continue
+            }
+            do {
+                try fileManager.removeItem(at: intentPath)
+                try synchronizer(rootDirectory, true)
+                refusedIntentNamesLocked.remove(name)
+                FileLog.shared.addMessage(
+                    "[VoiceSharing] queue removal reason=record-refused-intent-retired entry=\(name)")
+                FileLog.shared.forceFlush()
+            } catch {
+                // Retirement could not be confirmed: keep the hold; the next pass retries.
+                FileLog.shared.addMessage(
+                    "[VoiceSharing] queue removal reason=record-refused-intent-retire-failed entry=\(name)")
+                FileLog.shared.forceFlush()
+            }
+        }
+    }
+
     private func discoverRefusalIntentsLocked() {
         do {
             let (urls, overflowed) = try listDirectoryBounded(rootDirectory, [], Self.maxDirectoryEntries)
@@ -3297,6 +3366,14 @@ final class VoiceSharingUploadQueue {
                    UUID(uuidString: String(name.dropFirst(Self.obligationPrefix.count))) != nil {
                     continue
                 }
+                // Per-entry refusal deletion intents are the SAME class (reviewer 4bb7841c):
+                // the durable evidence a held survivor (or an orphaned intent's reconciliation)
+                // still needs. Sweeping one on recovery would let a SECOND fresh queue forget
+                // the hold. reconcileRefusalIntentsLocked reconciles/retires them explicitly.
+                if name.hasPrefix(Self.deletionIntentPrefix),
+                   UUID(uuidString: String(name.dropFirst(Self.deletionIntentPrefix.count))) != nil {
+                    continue
+                }
                 try? fileManager.removeItem(at: stray)
             }
         }
@@ -3304,6 +3381,11 @@ final class VoiceSharingUploadQueue {
         // ALREADY on the serial queue, so the in-place variant is used — the public entry point
         // takes the queue itself and would trap (deadlock) called from inside it.
         recoverAbandonedSettlementsLocked()
+        // Refusal deletion intents reconcile EXPLICITLY (reviewer 4bb7841c item 1): an intent
+        // whose entry is proven absent is retired through the durable helpers here — never by
+        // the debris sweep; an intent whose entry survived stays durable and held for the
+        // serving sweeps' scoped-purge retries.
+        reconcileRefusalIntentsLocked()
         bumpHoldGenerationForContentChange()
     }
 }
