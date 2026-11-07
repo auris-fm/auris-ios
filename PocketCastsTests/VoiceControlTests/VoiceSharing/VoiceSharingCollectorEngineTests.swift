@@ -1,6 +1,7 @@
 #if canImport(CryptoKit)
 import CryptoKit
 #endif
+import PocketCastsUtils
 import XCTest
 @testable import podcasts
 
@@ -21,6 +22,14 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
         events = []
         storeState = VoiceSharingEnrollmentStore.State()
         epoch = "epoch-1"
+    }
+
+    /// This class's tests are enrolled by default (this class drives the REAL engine and asserts on
+    /// the contribution that reaches the sink). Controls that need the gate CLOSED call
+    /// `openGate(enrolled: false)`.
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        openGate(enrolled: true)
     }
 
     /// SIMPLIFIED CONTRACT (spec 4afc6e43): the collector's admission decision is the shared consent
@@ -465,6 +474,47 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
 
     private func record(_ e: VoiceSharingCollector.SegmentEvent) {
         recordLock.lock(); events.append(e); recordLock.unlock()
+    }
+
+    /// SPEC 05ff27d0 / incident 2026-11-07: a REFUSED segment must name its reason. The simulator
+    /// stopped producing captures at 10:00:21Z and the log said nothing — the decision had to be
+    /// inferred from absence, which is not evidence anyone can act on. This control drives the
+    /// production refusal and requires its fixed reason line, AND requires the collector's own
+    /// counters to show the segment was SEEN but not EMITTED.
+    func test_aRefusedSegmentProducesItsReasonLineAndLeavesTheCountersMoved() async throws {
+        var permitted = true
+        let collector = VoiceSharingCollector(
+            isCollectionPermitted: { permitted },
+            membership: { VoiceSharingEnrollmentStore.State() },
+            epochProvider: { "test-epoch" },
+            sessionIdentity: { "sess-1" },
+            sink: { _ in })
+        collector.deliversSynchronouslyForTesting = true
+        XCTAssertEqual(collector.segmentsSeenCount, 0)
+        XCTAssertEqual(collector.capturesEmittedCount, 0)
+
+        // ADMITTED segment: seen AND emitted.
+        XCTAssertNotNil(collector.speechStarted(confirmationFrameSamples: 1600))
+        collector.appendSamples([0, 0.5, -0.5, 0.25], reportedTotal: 4)
+        collector.segmentationEnded(collector.currentCaptureContextForTesting)
+        collector.finalizeDeferredCompletion(context: nil)
+        XCTAssertEqual(collector.segmentsSeenCount, 1, "the admitted segment is counted as seen")
+
+        // REFUSED segment: the consent gate moves, and the refusal must name itself.
+        permitted = false
+        let before = await FileLog.shared.logFileAsString()
+        XCTAssertNil(collector.speechStarted(confirmationFrameSamples: 1600),
+                     "premise: a closed gate refuses the capture")
+        let after = await FileLog.shared.logFileAsString()
+        XCTAssertEqual(collector.segmentsSeenCount, 2,
+                       "a refused segment is still SEEN — that is the whole point of the counter")
+        XCTAssertTrue(after.count > before.count,
+                      "a refusal must write a reason line, not fail silently")
+        let added = String(after.dropFirst(before.count))
+        XCTAssertTrue(added.contains("capture refused reason=collection-not-permitted"),
+                      "the refusal names its reason; got: \(added)")
+        XCTAssertTrue(added.contains("capture decisions segments="),
+                      "the running seen-vs-emitted counters are reported alongside the decision")
     }
 }
 
@@ -2997,6 +3047,7 @@ final class VoiceSharingModelProvenanceTests: XCTestCase {
         }
         func release() {}
     }
+
 }
 
 private final class AdmissionSilentCapture: NativeAudioCapture {
