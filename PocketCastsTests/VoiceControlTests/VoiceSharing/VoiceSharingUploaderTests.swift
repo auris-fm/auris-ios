@@ -513,56 +513,38 @@ final class VoiceSharingUploaderTests: XCTestCase {
         }
     }
 
-    /// CONTRACT REJECTION (reviewer 12f353d1, incident 2026-11-06): a real 400 invalid_request
-    /// body must RETAIN the WAV/metadata through the durable quarantine — identical files on
-    /// disk, never selected again, and a fresh reconstruction still sees the bytes — while a
-    /// MATCHING DELIVERY RECEIPT still removes. Disposable production-path control.
-    func test_invalidRequest400QuarantinesWithoutDestroyingAndReceiptStillRemoves() async throws {
+    /// SPEC 1a0d3ffb: a real 400 invalid_request body DELETES the entry from the queue at
+    /// once — directory gone from disk, absent from every serving list and from a fresh
+    /// reconstruction — instead of the superseded quarantine retention. Disposable
+    /// production-path control.
+    func test_invalidRequest400DeletesTheEntryAtOnce() async throws {
         let entry = try makeReadyEntry()
-        let audioBefore = try queue.audio(of: entry)
-        let metadataBefore = try queue.metadata(of: entry)
         let uploader = makeUploader(transport: { _, _, _ in
             .response(statusCode: 400, body: Data(
                 "{\"schema_version\":1,\"code\":\"invalid_request\"}".utf8))
         })
         let outcome = await uploader.upload(entry)
-        guard case .abandoned(let reason) = outcome, reason.contains("quarantined") else {
-            return XCTFail("400 invalid_request must quarantine, got \(outcome)")
+        guard case .abandoned(let reason) = outcome, reason.contains("400") else {
+            return XCTFail("400 invalid_request must delete (abandon), got \(outcome)")
         }
-        // Bytes IDENTICAL: quarantine retains, it does not mutate.
-        XCTAssertEqual(try queue.audio(of: entry), audioBefore, "WAV must be retained byte-identical")
-        XCTAssertEqual(try queue.metadata(of: entry), metadataBefore, "metadata retained byte-identical")
-        // Durable disqualification marker present.
-        XCTAssertEqual(try FileManager.default.contentsOfDirectory(
-            at: root.appendingPathComponent(entry.name), includingPropertiesForKeys: nil)
-            .map(\.lastPathComponent).contains("publication.failed"), true,
-            "publication.failed marker must be present")
-        // NOT selected again: neither ready listing nor a fresh reconstruction offers it.
+        // DELETED AT ONCE: the entry directory leaves the disk.
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: root.appendingPathComponent(entry.name).path),
+            "spec 1a0d3ffb: the refused entry is deleted, not kept")
+        // NOT served by any listing, present or reconstructed.
         guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("coverage known")
         }
-        XCTAssertFalse(ready.contains(entry), "quarantined entry must be unservable")
+        XCTAssertFalse(ready.contains(entry), "the refused entry must not be servable")
         let reborn = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         guard case .known(let rebornReady) = reborn.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("reconstruction coverage known")
         }
         XCTAssertFalse(rebornReady.contains(entry),
-                       "reconstruction must also refuse the quarantined entry")
-        XCTAssertNoThrow(try reborn.audio(of: entry),
-                         "reconstruction must RETAIN the bytes (recoverable by inspection)")
-
-        // A MATCHING DELIVERY RECEIPT still removes: the delivered path is untouched. Uses a
-        // FRESH entry — the quarantined one must refuse admission (that is the point).
-        let fresh = try makeReadyEntry()
-        let delivered = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-        let admitted = try XCTUnwrap(try delivered.admitAttempt(fresh))
-        try delivered.applyAttemptResult(fresh, lease: admitted.lease, outcome: .delivered)
-        XCTAssertFalse(FileManager.default.fileExists(
-            atPath: root.appendingPathComponent(fresh.name).path),
-            "a delivery settlement still removes the entry")
-        // Admission of the quarantined entry is REFUSED (nil), not thrown.
-        XCTAssertNil(try delivered.admitAttempt(entry),
-                     "the quarantined entry must never be servable")
+                       "reconstruction must not resurrect the refused entry")
+        // CAPACITY FREED: a fresh recording is admitted (the queue always drains).
+        XCTAssertNoThrow(try makeReadyEntryOwned(reborn),
+                         "after deletion the queue admits new recordings")
     }
 
     /// DISPOSABLE REQUEST FIXTURE (spec 9917823a): ONE valid bound record through the REAL
@@ -646,15 +628,14 @@ final class VoiceSharingUploaderTests: XCTestCase {
                     try VoiceSharingUploadQueue.testSynchronizer(path: path, isDirectory: isDirectory)
                 })
             queue = faulted
-            let uploader = makeUploader(transport: { _, _, _ in
-                .response(statusCode: 400, body: Data(
-                    "{\"schema_version\":1,\"code\":\"invalid_request\"}".utf8))
-            })
-            let outcome = await uploader.upload(entry)
-            guard case .unavailable = outcome else {
-                XCTFail("settle uncertainty must surface as unavailable, got \(outcome)")
-                throw NSError(domain: "test-precondition", code: 2)
-            }
+            // SPEC 1a0d3ffb: the uploader no longer settles 400s as quarantine, so the pending
+            // QUARANTINE journal is constructed through the queue's own durable outcome — the
+            // same lease-validated settlement the legacy path used — with the identical
+            // entry-barrier fault landing the real pending window.
+            let lease = try XCTUnwrap(try faulted.admitAttempt(entry)).lease
+            XCTAssertThrowsError(try faulted.applyAttemptResult(
+                entry, lease: lease, outcome: .quarantined),
+                "the injected barrier fault must surface")
             // ASSERTED PRECONDITIONS, read from disk (never assumed):
             let journalURL = root.appendingPathComponent(
                 VoiceSharingUploadQueue.settlementRecordName(for: entry.name))

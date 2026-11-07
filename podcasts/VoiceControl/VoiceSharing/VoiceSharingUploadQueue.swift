@@ -1540,11 +1540,12 @@ final class VoiceSharingUploadQueue {
         case retryableFailure
         /// Permanent failure: the entry is removed (content-free terminal state).
         case abandoned
-        /// Contract-level rejection (e.g. 400 invalid_request): the request was malformed but
-        /// the RECORD is intact and must NOT be destroyed for a fixable client/server mismatch
-        /// (reviewer 12f353d1, incident 2026-11-06: 16 recordings deleted on 400s). The entry is
-        /// disqualified in place via the existing durable `publication.failed` disposal: bytes
-        /// and metadata retained, never selected for another attempt, recoverable by inspection.
+        /// LEGACY durable disqualification (spec 1a0d3ffb supersedes retention for NEW
+        /// refusals: both legs now DELETE; see the uploader's 400 branch and discovery's
+        /// record-refused purge). The outcome and its reconciliation remain because entries
+        /// already quarantined on disk must still reconcile exactly. Retained semantics
+        /// (reviewer 12f353d1, incident 2026-11-06): bytes and metadata retained,
+        /// never selected for another attempt, recoverable by inspection.
         case quarantined
     }
 
@@ -2544,9 +2545,31 @@ final class VoiceSharingUploadQueue {
                     lastDiscoveryDiagnostic = "entryStateLocked threw for \(entry.name)"
                     return .unknownCoverage
                 }
-                guard case .bound = state else {
+                switch state {
+                case .bound:
+                    break
+                case .refusedUnbindable:
+                    // SPEC 1a0d3ffb: a complete entry the record check rejects is deleted at
+                    // once. The classification above is proven (any unknown threw => .unknownCoverage).
+                    do { try purgeRefusedLocked(entry, cause: "record-check") }
+                    catch { return .unknownCoverage }
+                    excluded.append("\(entry.name):purged(record-check)")
+                case .disqualified:
+                    // A durable publication.failed intent without an active publication stage
+                    // is a PERMANENT server refusal (or a purge whose removal never completed):
+                    // spec 1a0d3ffb deletes it instead of holding the bytes. An active stage
+                    // marker must never be touched. A marker stat failure keeps the entry.
+                    let failedURL = entryDirectoryLocked(for: entry)
+                        .appendingPathComponent(Self.failedName)
+                    guard Self.statKind(of: failedURL) == .present else {
+                        excluded.append("\(entry.name):notBound(\(state))")
+                        continue
+                    }
+                    do { try purgeRefusedLocked(entry, cause: "server-refusal") }
+                    catch { return .unknownCoverage }
+                    excluded.append("\(entry.name):purged(server-refusal)")
+                case .incomplete:
                     excluded.append("\(entry.name):notBound(\(state))")
-                    continue
                 }
                 // CONFIRMED durability was verified by strictOwnerCoverageLocked (part of the
                 // shared authority); reaching here means it held.
@@ -2585,6 +2608,25 @@ final class VoiceSharingUploadQueue {
             if currentIdentityLocked != nil {
                 guard (try? strictOwnerCoverageLocked()) != nil else { return [] }
             }
+            // SPEC 1a0d3ffb: purge permanently refused entries BEFORE listing, so the served
+            // set and the usage bound never count bytes the record check has rejected or the
+            // server has refused for good. Any proven-state uncertainty must fail closed: the
+            // sweep serves nothing rather than guessing (the same discipline as coverage).
+            do {
+                for entry in try entriesStrictLocked() {
+                    switch try entryStateLocked(at: entry) {
+                    case .refusedUnbindable:
+                        try purgeRefusedLocked(entry, cause: "record-check")
+                    case .disqualified:
+                        let failedURL = entryDirectoryLocked(for: entry)
+                            .appendingPathComponent(Self.failedName)
+                        guard Self.statKind(of: failedURL) == .present else { continue }
+                        try purgeRefusedLocked(entry, cause: "server-refusal")
+                    case .bound, .incomplete:
+                        continue
+                    }
+                }
+            } catch { return [] }
             return entriesLocked()
                 .filter { isCompleteEntryLocked(at: $0) }
                 // Exposure also requires CONFIRMED durability, not just a structurally valid marker:
@@ -2660,6 +2702,22 @@ final class VoiceSharingUploadQueue {
                 // before the process can be terminated, or the diagnosis dies with it.
                 FileLog.shared.forceFlush()
         }
+    }
+
+    /// SPEC 1a0d3ffb: a recording the server refuses permanently, or that the client's own
+    /// record check rejects, is deleted from the queue AT ONCE. Lock-held purge used by both
+    /// serving paths; every deletion names its cause, so a consented recording never
+    /// disappears unexplained. Reentrancy: the discovery paths already run inside
+    /// `serialQueue`, so this must NOT re-enter `sync`.
+    private func purgeRefusedLocked(_ entry: Entry, cause: String) throws {
+        let directory = try validatedEntryDirectoryLocked(entry)
+        try fileManager.removeItem(at: directory)
+        defer { bumpHoldGenerationForContentChange() }
+        FileLog.shared.addMessage(
+            "[VoiceSharing] queue removal reason=record-refused cause=\(cause) entry=\(entry.name) removed=true")
+        // FORCE THE FLUSH (FileLog buffers 100 entries): a removal line must be on disk
+        // before the process can be terminated, or the diagnosis dies with it.
+        FileLog.shared.forceFlush()
     }
 
     // MARK: Internals (all called on serialQueue)
@@ -2858,6 +2916,10 @@ final class VoiceSharingUploadQueue {
     private enum EntryState {
         case bound(VoiceSharingRecordBinding.BoundEntry)
         case disqualified
+        /// Complete on disk (marker, created-at, age, audio/metadata all proven) but the
+        /// record check rejects the bytes: PERMANENTLY unservable, never .bound. Spec 1a0d3ffb
+        /// deletes such entries at once; discovery purges them with a named cause.
+        case refusedUnbindable
         case incomplete
 
         var flatBound: VoiceSharingRecordBinding.BoundEntry? {
@@ -2943,9 +3005,13 @@ final class VoiceSharingUploadQueue {
         }
 
         guard let audioData = try readIfPresent(audioURL),
-            let metadataData = try readIfPresent(metadataURL),
-            let bound = try? VoiceSharingRecordBinding.bind(envelope: metadataData, audio: audioData)
+            let metadataData = try readIfPresent(metadataURL)
         else { return .incomplete }
+        // SPEC 1a0d3ffb: a REJECTED record check is a permanent refusal, distinct from
+        // "incomplete" — the entry is complete on disk and will never pass. Read/stat
+        // uncertainty has already thrown above; only a proven parse/binding failure lands here.
+        guard let bound = try? VoiceSharingRecordBinding.bind(envelope: metadataData, audio: audioData)
+        else { return .refusedUnbindable }
         return .bound(bound)
     }
 
