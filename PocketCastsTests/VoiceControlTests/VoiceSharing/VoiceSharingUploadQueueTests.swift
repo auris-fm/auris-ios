@@ -3742,10 +3742,12 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
         let blocked = makeQueue(fileManager: RefusingRemover(
             blockedPath: entryRoot.appendingPathComponent(entry.name).path))
 
-        // The serving pass must fail closed, not claim success over a surviving entry.
-        guard case .unknownCoverage = blocked.readyEntriesReportingUnknownCoverage() else {
-            return XCTFail("a failed removal is unknown coverage, never .known")
+        // The serving pass must hold ONLY the refused entry (per-entry hold, spec 1bfba50f):
+        // it never serves, the hold is not owner-wide, and the intent stays durable.
+        guard case .known(let readyDuringHold) = blocked.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("a refusal hold is per-entry, never unknown coverage")
         }
+        XCTAssertTrue(readyDuringHold.isEmpty)
         XCTAssertTrue(FileManager.default.fileExists(
             atPath: entryRoot.appendingPathComponent(entry.name).path),
             "the removal did not happen; the intent is durable for reconciliation")
@@ -3793,9 +3795,10 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
         try wav(frames: 1_700).write(
             to: entryRoot.appendingPathComponent(entry.name).appendingPathComponent("audio.wav"))
 
-        guard case .unknownCoverage = faulted.readyEntriesReportingUnknownCoverage() else {
-            return XCTFail("a failed intent barrier is unknown coverage")
+        guard case .known(let heldOut) = faulted.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("a failed scoped barrier is a per-entry hold, never unknown coverage")
         }
+        XCTAssertTrue(heldOut.isEmpty, "the held entry never serves")
         XCTAssertTrue(faultFired, "the post-intent root barrier never faulted")
         XCTAssertTrue(FileManager.default.fileExists(
             atPath: entryRoot.appendingPathComponent(entry.name).path),
@@ -3839,5 +3842,148 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
             atPath: entryRoot.appendingPathComponent(
                 "deletion.intent." + entry.name).path),
             "the orphan intent is retired")
+    }
+
+    // MARK: Spec redirect 1bfba50f — scoped reconciled purge, per-entry hold
+
+    /// PURGE FAILURE: only the refused entry is held; a neighbouring valid entry still serves,
+    /// byte-for-byte. Reconstruction completes the deletion and retires the intent.
+    /// The faulted queue is constructed BEFORE seeding (instance init runs recovery, which
+    /// removes entries whose audio no longer matches their binding).
+    private final class RefusingEntryRemover: FileManager {
+        var blockedName: String?
+        override func removeItem(at URL: URL) throws {
+            if URL.lastPathComponent == blockedName { throw NSError(domain: "test-removal", code: 1) }
+            try super.removeItem(at: URL)
+        }
+    }
+
+    func test_aRefusalPurgeFailureHoldsOnlyTheRefusedEntry() throws {
+        let remover = RefusingEntryRemover()
+        let faulted = makeQueue(fileManager: remover)
+        let queue = makeQueue()
+        let refused = try seed(queue)
+        remover.blockedName = refused.name
+        try wav(frames: 1_700).write( // break the record check AFTER finalization
+            to: entryRoot.appendingPathComponent(refused.name).appendingPathComponent("audio.wav"))
+        let valid = try seed(queue, frames: 1_650)
+        let validAudio = try Data(contentsOf: entryRoot.appendingPathComponent(valid.name)
+            .appendingPathComponent("audio.wav"))
+
+        guard case .known(let ready) = faulted.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("a refusal hold is per-entry; coverage stays known")
+        }
+        XCTAssertEqual(ready.map(\.name), [valid.name],
+                       "the held refused entry never serves; the valid entry does")
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: entryRoot.appendingPathComponent(refused.name).path),
+            "the held entry is retained; contents=\((try? FileManager.default.contentsOfDirectory(atPath: entryRoot.appendingPathComponent(refused.name).path)) ?? []) diag=\(faulted.lastDiscoveryDiagnostic ?? "nil")")
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: entryRoot.appendingPathComponent(refused.name)
+                .appendingPathComponent("publication.failed").path),
+            "the purge reconciled with a durably disqualified survivor: it can never serve")
+        XCTAssertEqual(try Data(contentsOf: entryRoot.appendingPathComponent(valid.name)
+            .appendingPathComponent("audio.wav")), validAudio, "the neighbour is untouched")
+
+        // RESTART: the deletion completes through the durable intent; the valid entry survives.
+        let reborn = makeQueue()
+        guard case .known(let readyReborn) = reborn.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("reconstruction coverage known")
+        }
+        XCTAssertEqual(readyReborn.map(\.name), [valid.name])
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: entryRoot.appendingPathComponent(refused.name).path),
+            "spec: the refused entry is gone after restart")
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: entryRoot.appendingPathComponent("deletion.intent." + refused.name).path),
+            "the deletion intent is retired after reconciliation")
+    }
+
+    /// CRASH WINDOW: intent durable, removal never ran => the next pass resumes the scoped
+    /// purge and finishes it.
+    func test_aCrashAfterTheIntentBeforeRemovalResumesOnTheNextPass() throws {
+        let rootPath = entryRoot.path
+        var armed: String?
+        // Fault the scoped purge's post-intent root barrier while the entry still exists:
+        // exactly the state "intent written, removal never ran".
+        let faulted = VoiceSharingUploadQueue(
+            rootDirectory: entryRoot,
+            synchronizer: { path, isDirectory in
+                if isDirectory && path.path == rootPath, let name = armed,
+                    FileManager.default.fileExists(atPath: rootPath + "/deletion.intent." + name),
+                    FileManager.default.fileExists(atPath: rootPath + "/" + name) {
+                    throw NSError(domain: "test-barrier", code: 1)
+                }
+                try VoiceSharingUploadQueue.testSynchronizer(path: path, isDirectory: isDirectory)
+            })
+        let queue = makeQueue()
+        let entry = try seed(queue)
+        armed = entry.name
+        try wav(frames: 1_700).write(
+            to: entryRoot.appendingPathComponent(entry.name).appendingPathComponent("audio.wav"))
+
+        guard case .known(let held) = faulted.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("crash-window hold is per-entry")
+        }
+        XCTAssertTrue(held.isEmpty, "the held entry never serves")
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: entryRoot.appendingPathComponent(entry.name).path),
+            "the removal never ran: the entry is intact")
+
+        let reborn = makeQueue()
+        guard case .known(let ready) = reborn.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("reconstruction coverage known")
+        }
+        XCTAssertTrue(ready.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: entryRoot.appendingPathComponent(entry.name).path),
+            "the resumed scoped purge completes the deletion")
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: entryRoot.appendingPathComponent("deletion.intent." + entry.name).path),
+            "the intent is retired")
+    }
+
+    /// A durable deletion intent on a still-BINDABLE survivor (marker loss after a partial
+    /// removal) must NEVER let it serve: the hold applies before classification, and the
+    /// authorized deletion finishes.
+    func test_aSurvivorWithADeletionIntentNeverServesEvenIfBindable() throws {
+        let queue = makeQueue()
+        let entry = try seed(queue) // complete, bindable, no publication.failed
+        try Data([0x01]).write(to: entryRoot.appendingPathComponent(
+            "deletion.intent." + entry.name), options: .atomic)
+
+        guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("coverage known")
+        }
+        XCTAssertTrue(ready.isEmpty, "a deletion-intent survivor never serves")
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: entryRoot.appendingPathComponent(entry.name).path),
+            "the authorized deletion finishes")
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: entryRoot.appendingPathComponent("deletion.intent." + entry.name).path),
+            "the intent is retired")
+    }
+
+    /// REGRESSION GUARD: a default-path refusal purge removes ONLY the refused entry; a valid
+    /// neighbour keeps serving with its bytes intact.
+    func test_aNeighbouringValidEntryIsUntouchedByARefusalPurge() throws {
+        let queue = makeQueue()
+        let refused = try seed(queue)
+        try wav(frames: 1_700).write(
+            to: entryRoot.appendingPathComponent(refused.name).appendingPathComponent("audio.wav"))
+        let valid = try seed(queue, frames: 1_650)
+        let validAudio = try Data(contentsOf: entryRoot.appendingPathComponent(valid.name)
+            .appendingPathComponent("audio.wav"))
+
+        guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("coverage known")
+        }
+        XCTAssertEqual(ready.map(\.name), [valid.name])
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: entryRoot.appendingPathComponent(refused.name).path))
+        XCTAssertEqual(try Data(contentsOf: entryRoot.appendingPathComponent(valid.name)
+            .appendingPathComponent("audio.wav")), validAudio)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: entryRoot.appendingPathComponent("deletion.intent." + refused.name).path))
     }
 }
