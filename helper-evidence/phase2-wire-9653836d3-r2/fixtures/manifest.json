@@ -1,0 +1,43 @@
+{
+  "client_head" : "7c2e67d4b",
+  "fixtures" : [
+    {
+      "audio_byte_count" : 56,
+      "audio_sha256" : "7867a89de6ac268520df59c80a0c6a9d17aa32951bf21d9acc0cd2a2f6114347",
+      "capture_id" : "44444444-1111-2222-3333-444444444444",
+      "case" : "wake-required-command",
+      "metadata_sha256" : "d7cdeeed51702a0a14f712b4b5c153241d745fe4185010f6a1bb8b109ccd9375",
+      "record_sha256" : "c448b090f18138afebbffb4d9e1919adb36c53a9c61e82c48e4b877e638256a1",
+      "wake_required" : true
+    },
+    {
+      "audio_byte_count" : 56,
+      "audio_sha256" : "7867a89de6ac268520df59c80a0c6a9d17aa32951bf21d9acc0cd2a2f6114347",
+      "capture_id" : "55555555-1111-2222-3333-555555555555",
+      "case" : "grace-no-wake",
+      "metadata_sha256" : "4612002e831ce408c2bc741cf3331fba445bbd4aad546081748579089af4e17d",
+      "record_sha256" : "8b79fec50c79729b442bc00ebcf109c09aa0c030faeffb1b8c047db1caf2f982",
+      "wake_required" : false
+    },
+    {
+      "audio_byte_count" : 56,
+      "audio_sha256" : "7867a89de6ac268520df59c80a0c6a9d17aa32951bf21d9acc0cd2a2f6114347",
+      "capture_id" : "66666666-1111-2222-3333-666666666666",
+      "case" : "empty-result-with-language",
+      "metadata_sha256" : "b92614318d7aaa4fca147b3a51e5606fdaaa819223772ab59878dbddd1a8b8e0",
+      "record_sha256" : "71a1749507f0bc1b488af95436ad953856ebac91a984e14469fd0c3f720f02eb",
+      "wake_required" : true
+    }
+  ],
+  "provenance" : {
+    "app_version" : "9.0",
+    "build" : "1000",
+    "capture_session_id" : "phase2-parity-wire2-7c2e67d4b",
+    "conversion_version" : "v1",
+    "platform" : "ios"
+  },
+  "r1_refusal" : "execution.outcome used routing tokens and completed wake carried no decision; refused by server intake",
+  "schema_version" : 1,
+  "scope" : "encoder bytes with TEST-SUPPLIED observations; not engine output",
+  "wire_revision" : 2
+}

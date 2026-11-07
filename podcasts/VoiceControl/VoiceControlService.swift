@@ -1031,7 +1031,11 @@ class VoiceControlService: ObservableObject {
                            routingDisposition: verdict),
             context: captureContext)
         // The executor's own verdict, from the same decision the disposition derives from — the
-        // `outcome` member states what execution concluded, not what was presented.
+        // `outcome` member states what execution concluded, not what was presented. The WIRE enum
+        // is {success, failure, refused, cancelled} and the mapping lives on the encoder (applied
+        // centrally in the collector too): routing's disposition tokens (failed/executed/pending/
+        // refused) are a DIFFERENT vocabulary and must never leak into this member (reviewer
+        // 39ac0771, server fixture refusal).
         contributionCollector?.engineReported(
             stage: "execution",
             outcome: .init(state: outcome.state, reason: outcome.reason,
@@ -1039,7 +1043,7 @@ class VoiceControlService: ObservableObject {
                            translatedText: outcome.translatedText,
                            targetLanguage: outcome.targetLanguage,
                            routingDisposition: outcome.routingDisposition,
-                           outcome: verdict),
+                           outcome: VoiceSharingContributionEncoder.StageOutcome.wireExecutionOutcome(for: outcome)),
             context: captureContext)
     }
 
