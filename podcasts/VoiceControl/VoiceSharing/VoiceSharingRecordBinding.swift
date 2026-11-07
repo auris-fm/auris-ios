@@ -423,12 +423,13 @@ enum VoiceSharingRecordBinding {
                 // SERVER SCHEMA (record_schema.ts validateWake): the decision enum is
                 // {detected, rejected}, and a COMPLETED wake stage must carry one — a decision-less
                 // completed wake is filed under request/ as if no wake decision was made (GO-review
-                // fixture refusal). Enumerated HERE so a wrong token cannot self-validate locally
-                // (reviewer 39ac0771).
-                if let decision = declared["decision"] as? String {
-                    guard ["detected", "rejected"].contains(decision) else {
+                // fixture refusal). KEY PRESENCE first (reviewer 40e69257): an `as? String` cast
+                // alone lets a present null or non-string value skip the enum check entirely.
+                if declared.keys.contains("decision") {
+                    guard let decision = declared["decision"] as? String,
+                          ["detected", "rejected"].contains(decision) else {
                         throw BindingError.invalidField(
-                            "\(stagePath).decision", "not enumerated")
+                            "\(stagePath).decision", "enumerated string required")
                     }
                 }
                 if state == "completed" {
@@ -445,14 +446,17 @@ enum VoiceSharingRecordBinding {
                 // `executed`/`pending`/`failed` from settledDisposition reaching this member), so
                 // the binding must refuse any token the wire does not define. SPEC 21b5d822: every
                 // OBSERVED execution CARRIES an outcome, and an unknown one asserts none.
-                let wireOutcome = declared["outcome"] as? String
-                if let wireOutcome {
-                    guard ["success", "failure", "refused", "cancelled"].contains(wireOutcome) else {
+                // KEY PRESENCE first (reviewer 40e69257): a present null or non-string outcome must
+                // be refused too, not silently skipped by the optional cast.
+                if declared.keys.contains("outcome") {
+                    guard let wireOutcome = declared["outcome"] as? String,
+                          ["success", "failure", "refused", "cancelled"].contains(wireOutcome) else {
                         throw BindingError.invalidField(
-                            "\(stagePath).outcome", "not enumerated")
+                            "\(stagePath).outcome", "enumerated string required")
                     }
                 }
-                if ["completed", "failed", "cancelled"].contains(state), wireOutcome == nil {
+                if ["completed", "failed", "cancelled"].contains(state),
+                   !(declared["outcome"] is String) {
                     throw BindingError.missingField("\(stagePath).outcome")
                 }
                 if state == "unknown", declared.keys.contains("outcome") {

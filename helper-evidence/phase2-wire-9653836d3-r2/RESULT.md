@@ -20,3 +20,16 @@ R2 changes, all asserted by controls (encoder output + binding + real-engine dur
 - Manifest records `wire_revision: 2` and the R1 refusal reason.
 
 Old exported bytes remain immutable; this is a new set.
+
+
+## Review-fix regeneration (reviewer 40e69257, spec 8504c65a)
+- Recipe corrections applied after Reviewer's 40e69257: binding rejects present null/non-string
+  wake-decision and execution-outcome values (key-presence first); refusal aligned to spec 553ec4a6
+  (state failed, reason client_refused -> outcome refused, matching Android); durable collector
+  controls added. Regenerated fixtures above; all manifest record digests re-verified locally.
+- Provenance honesty (reviewer 40e69257 #3): manifest client_head = ebdf40ee9, the encoder that
+  emits these bytes; the review-fix commit corrects mapping/binding/controls without changing the
+  emission recipe, exact head recorded in #ios:8eb13b8b. R1 bytes remain preserved at
+  helper-evidence/phase2-wire-9653836d3/. Fixtures are TEST-SUPPLIED observations, not producer
+  evidence (manifest scope field).
+- Session: phase2-parity-wire2-7c2e67d4b, wire_revision 2.
