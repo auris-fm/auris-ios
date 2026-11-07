@@ -403,13 +403,29 @@ final class VoiceSharingUploadQueue {
                 !listed.overflowed else { return 0 }
             var earliest: TimeInterval?
             let now = clock().timeIntervalSince1970
-            for url in listed.urls where url.lastPathComponent.hasPrefix(Self.notBeforePrefix) {
-                guard UUID(uuidString: String(url.lastPathComponent.dropFirst(Self.notBeforePrefix.count))) != nil,
-                    let size = fileSizeIfRegularLocked(at: url), size.isRegular,
+            for url in listed.urls {
+                let recordName = url.lastPathComponent
+                guard recordName.hasPrefix(Self.notBeforePrefix) else { continue }
+                let entryName = String(recordName.dropFirst(Self.notBeforePrefix.count))
+                // Reviewer ea2964b3: an UNREADABLE or malformed record is debris, not live work.
+                // Returning 0 here let one orphaned stamp (the simulator has ten) suppress another
+                // live entry's future retry indefinitely. Debris is SKIPPED; only live boundaries
+                // produce a wake.
+                guard UUID(uuidString: entryName) != nil else { continue }
+                guard let size = fileSizeIfRegularLocked(at: url), size.isRegular,
                     size.bytes > 0, size.bytes <= Self.maxSettlementRecordBytes,
                     let data = try? Data(contentsOf: url),
                     let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-                    let stamp = object["notBefore"] as? Double, stamp.isFinite else { return 0 }
+                    let stamp = object["notBefore"] as? Double, stamp.isFinite else { continue }
+                // A stamp whose entry no longer exists is orphan debris in every direction —
+                // expired or not — and is skipped entirely (the simulator holds ten).
+                let entryDir = rootDirectory.appendingPathComponent(entryName, isDirectory: true)
+                var isDirectory: ObjCBool = false
+                guard fileManager.fileExists(atPath: entryDir.path, isDirectory: &isDirectory),
+                    isDirectory.boolValue else { continue }
+                // A DUE boundary over a LIVE entry is work: report 0 so the next pass attempts
+                // it. Admission re-checks fail-closed on arrival, so an early wake can never
+                // spend an early attempt.
                 earliest = min(earliest ?? .infinity, max(0, stamp - now))
             }
             return earliest

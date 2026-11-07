@@ -36,6 +36,8 @@ final class VoiceSharingCollector {
     /// silently discarded the START event, so a completed contribution could reach the uploader with no
     /// opening record and no frozen epoch.
     static let maxPendingSignals = 64
+    /// Test seam: the FIFO cap controls assert boundedness against.
+    static var pendingSignalCapForTesting: Int { maxPendingSignals }
 
     /// Refusal-set ceiling. These sets answer one question — "is this callback for a capture I already
     /// finished?" — only for captures recent enough that a late delivery is plausible. Events are delivered
@@ -806,14 +808,35 @@ return }
             if !oldest.value.emitted, !oldest.value.noContribution {
                 var evicted = oldest.value.capture
                 evicted.terminal = true
-                aggregateAudioSamples -= evicted.retained.count
                 cancelOutcomeDeadlineLocked(oldest.key)
                 terminalRing.removeValue(forKey: oldest.key)
                 let event = makeEvent(kind: .completed, from: evicted)
                 let captureID = evicted.id
-                FileLog.shared.addMessage(
-                    "[VoiceSharing] capture emitted at ring pressure capture=\(captureID.uuidString)")
-                workQueue.async { [weak self] in self?.submit(event) }
+                // Ledger transition: the ring's retained bytes (which include the confirmation
+                // frame, unlike the event audio) leave the ledger; the event's exact audio enters
+                // it below. The bytes are owned somewhere at every instant.
+                aggregateAudioSamples -= evicted.retained.count
+                // Reviewer ea2964b3: the handoff must be BOUNDED and ACCOUNTED. The audio now
+                // moves through the pending FIFO under the SAME caps as every other event — the
+                // aggregate still owns these bytes (added below, never decremented early), so a
+                // blocked worker cannot grow untracked PCM outside the ledger; once the FIFO cap
+                // or the sample budget is reached, further evictions DROP here, counted and
+                // logged. Withdrawal disposal drains this same FIFO at dequeue time.
+                let audioCount = event.audio.count
+                if pending.count >= Self.maxPendingSignals
+                    || aggregateAudioSamples + audioCount > Self.maxAggregateRetainedSamples {
+                    // The record dies here: its bytes already left the ledger above, and no
+                    // event enters it — the discard is complete, counted, and logged.
+                    overflowCount += 1
+                    FileLog.shared.addMessage(
+                        "[VoiceSharing] capture dropped at ring pressure (handoff full) capture=\(captureID.uuidString)")
+                } else {
+                    aggregateAudioSamples += audioCount
+                    pending.append(event)
+                    FileLog.shared.addMessage(
+                        "[VoiceSharing] capture emitted at ring pressure capture=\(captureID.uuidString)")
+                    workQueue.async { [weak self] in self?.drainNext() }
+                }
                 continue
             }
             aggregateAudioSamples -= oldest.value.capture.retained.count

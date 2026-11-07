@@ -135,7 +135,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         let transportCalls = TransportCallBox()
         let uploader = VoiceSharingUploader(
             queue: queue,
-            retryPolicy: VoiceSharingRetryPolicy(retryBaseDelay: 3600, retryMaximumDelay: 3600, random: { 0 }),
+            retryPolicy: VoiceSharingRetryPolicy(retryBaseDelay: 3600, retryMaximumDelay: 3600, random: { 1 }),
             isAuthorized: { true }, currentIdentity: { nil },
             endpoint: { URL(string: "https://unit.test/api/v1/voice-recordings") },
             transport: { _, _, _ in
@@ -167,6 +167,163 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
             "the retry boundary wake must run the due entry with no lifecycle event")
     }
 
+    /// REVIEWER ea2964b3 (1): an orphaned/expired not-before stamp must not suppress another
+    /// live entry's future retry. The simulator holds ten orphan stamps; on HEAD the boundary
+    /// reader answered 0 for an unreadable stamp and the trigger refused to arm any wake, so the
+    /// live boundary never fired. RED on `eb8350219`.
+    func test_anOrphanedStampCannotSuppressAnotherLiveEntryRetryWake() async throws {
+        let sink = VoiceSharingContributionSink(
+            queue: queue, isEnabled: { self.enabled },
+            encoderProvenance: { [self] in provenance }, observations: { [self] in observations })
+        lastSink = sink
+        sink.handle(event())
+        drain()
+        guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage(),
+            ready.count == 1 else {
+            return XCTFail("premise: publication produced no ready entry")
+        }
+        let entryName = ready[0].name
+        let stamp = Date().addingTimeInterval(0.5).timeIntervalSince1970
+        try JSONSerialization.data(withJSONObject: ["notBefore": stamp])
+            .write(to: root.appendingPathComponent("attempt.notbefore.\(entryName)"), options: .atomic)
+        // Debris at the root: an UNREADABLE stamp and an EXPIRED stamp over a purged entry.
+        try Data("not-json".utf8).write(
+            to: root.appendingPathComponent("attempt.notbefore.11111111-1111-1111-1111-111111111111"),
+            options: .atomic)
+        try JSONSerialization.data(withJSONObject: ["notBefore": 0])
+            .write(to: root.appendingPathComponent("attempt.notbefore.22222222-2222-2222-2222-222222222222"),
+                   options: .atomic)
+
+        let transportCalls = TransportCallBox()
+        let uploader = VoiceSharingUploader(
+            queue: queue,
+            retryPolicy: VoiceSharingRetryPolicy(retryBaseDelay: 3600, retryMaximumDelay: 3600, random: { 1 }),
+            isAuthorized: { true }, currentIdentity: { nil },
+            endpoint: { URL(string: "https://unit.test/api/v1/voice-recordings") },
+            transport: { _, _, _ in
+                await transportCalls.record()
+                return .response(statusCode: 503, body: Data())
+            })
+        let scheduler = VoiceSharingUploadScheduler(queue: queue, uploader: uploader,
+                                                    isAuthorized: { true })
+        let trigger = VoiceSharingUploadTrigger(
+            scheduler: scheduler, surfaceEnabled: { true }, isAuthorized: { true })
+        trigger.triggerDrainIfPermitted()
+        await trigger.awaitDrainCompletionForTesting()
+        let afterIdlePass = await transportCalls.count()
+        XCTAssertEqual(afterIdlePass, 0, "premise: the boundary pass sends nothing")
+
+        let deadline = ContinuousClock.now + .seconds(4)
+        var reached = await transportCalls.count()
+        while reached == 0 && ContinuousClock.now < deadline {
+            try await Task.sleep(nanoseconds: 100_000_000)
+            reached = await transportCalls.count()
+        }
+        XCTAssertGreaterThanOrEqual(reached, 1,
+            "the orphan stamps must not suppress the live entry's retry wake")
+    }
+
+    /// REVIEWER ea2964b3 (1): a still-future boundary within 50 ms must still be armed. HEAD
+    /// refused to arm any wake for delays <= 0.05, leaving the entry idle forever. RED on HEAD.
+    func test_aNearBoundaryStillArmsTheRetryWake() async throws {
+        let sink = VoiceSharingContributionSink(
+            queue: queue, isEnabled: { self.enabled },
+            encoderProvenance: { [self] in provenance }, observations: { [self] in observations })
+        lastSink = sink
+        sink.handle(event())
+        drain()
+        guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage(),
+            ready.count == 1 else {
+            return XCTFail("premise: publication produced no ready entry")
+        }
+        let entryName = ready[0].name
+        let stamp = Date().addingTimeInterval(0.03).timeIntervalSince1970
+        try JSONSerialization.data(withJSONObject: ["notBefore": stamp])
+            .write(to: root.appendingPathComponent("attempt.notbefore.\(entryName)"), options: .atomic)
+
+        let transportCalls = TransportCallBox()
+        let uploader = VoiceSharingUploader(
+            queue: queue,
+            retryPolicy: VoiceSharingRetryPolicy(retryBaseDelay: 3600, retryMaximumDelay: 3600, random: { 1 }),
+            isAuthorized: { true }, currentIdentity: { nil },
+            endpoint: { URL(string: "https://unit.test/api/v1/voice-recordings") },
+            transport: { _, _, _ in
+                await transportCalls.record()
+                return .response(statusCode: 503, body: Data())
+            })
+        let scheduler = VoiceSharingUploadScheduler(queue: queue, uploader: uploader,
+                                                    isAuthorized: { true })
+        let trigger = VoiceSharingUploadTrigger(
+            scheduler: scheduler, surfaceEnabled: { true }, isAuthorized: { true })
+        trigger.triggerDrainIfPermitted()
+        await trigger.awaitDrainCompletionForTesting()
+        let afterIdlePass = await transportCalls.count()
+        XCTAssertEqual(afterIdlePass, 0, "premise: the boundary pass sends nothing")
+
+        let deadline = ContinuousClock.now + .seconds(4)
+        var reached = await transportCalls.count()
+        while reached == 0 && ContinuousClock.now < deadline {
+            try await Task.sleep(nanoseconds: 100_000_000)
+            reached = await transportCalls.count()
+        }
+        XCTAssertGreaterThanOrEqual(reached, 1,
+            "a boundary within the schedule floor must still wake the trigger")
+    }
+
+    /// SPEC DEFECT d6580187, collector-level control (reviewer ea2964b3): the retry→capture path
+    /// must work with a capture fed through the REAL collector emission path, not just
+    /// `sink.handle`. A retry disposition, then a new collector capture: it must produce an
+    /// entry and reach the transport.
+    func test_afterARetryDispositionANewCollectorCaptureStillProducesAnEntry() async throws {
+        let transportCalls = TransportCallBox()
+        let uploader = VoiceSharingUploader(
+            queue: queue,
+            retryPolicy: VoiceSharingRetryPolicy(retryBaseDelay: 3600, retryMaximumDelay: 3600, random: { 1 }),
+            isAuthorized: { true }, currentIdentity: { nil },
+            endpoint: { URL(string: "https://unit.test/api/v1/voice-recordings") },
+            transport: { _, _, _ in
+                await transportCalls.record()
+                return .response(statusCode: 503, body: Data())
+            })
+        let scheduler = VoiceSharingUploadScheduler(queue: queue, uploader: uploader,
+                                                    isAuthorized: { true })
+        let trigger = VoiceSharingUploadTrigger(
+            scheduler: scheduler, surfaceEnabled: { true }, isAuthorized: { true })
+        let sink = VoiceSharingContributionSink(
+            queue: queue, isEnabled: { self.enabled },
+            encoderProvenance: { [self] in provenance }, observations: { [self] in observations },
+            requestUploadDrain: { [weak trigger] in trigger?.triggerDrainIfPermitted() })
+        lastSink = sink
+        let collector = VoiceSharingCollector(
+            isCollectionPermitted: { [self] in enabled },
+            membership: { VoiceSharingEnrollmentStore.State() },
+            epochProvider: { "test-epoch" },
+            sessionIdentity: { "sess-1" },
+            sink: { event in sink.handle(event) })
+        collector.deliversSynchronouslyForTesting = true
+
+        // Capture A: real collector emission -> sink -> entry -> drain -> 503 retry.
+        let contextA = collector.speechStarted(confirmationFrameSamples: 320)
+        collector.appendSamples([Float](repeating: 1, count: 3_200), reportedTotal: 3_200)
+        collector.segmentationEnded(contextA)
+        collector.finalizeDeferredCompletion(context: contextA)
+        drain()
+        await trigger.awaitDrainCompletionForTesting()
+        let afterA = await transportCalls.count()
+        XCTAssertGreaterThanOrEqual(afterA, 1, "premise: entry A was attempted and retried")
+
+        // Capture B arrives through the collector while A is behind its boundary.
+        let contextB = collector.speechStarted(confirmationFrameSamples: 320)
+        collector.appendSamples([Float](repeating: 1, count: 3_200), reportedTotal: 3_200)
+        collector.segmentationEnded(contextB)
+        collector.finalizeDeferredCompletion(context: contextB)
+        drain()
+        await trigger.awaitDrainCompletionForTesting()
+        let afterB = await transportCalls.count()
+        XCTAssertGreaterThanOrEqual(afterB, afterA + 1,
+            "the collector-emitted capture becomes an entry and is attempted despite the retry")
+    }
+
     /// SPEC DEFECT d6580187, regression coverage: a retry disposition followed by NEW captures
     /// must still produce entries and reach the transport — the stalled uploader must never
     /// gate the capture-to-entry path, and the new entry must serve while the old one is
@@ -175,7 +332,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         let transportCalls = TransportCallBox()
         let uploader = VoiceSharingUploader(
             queue: queue,
-            retryPolicy: VoiceSharingRetryPolicy(retryBaseDelay: 3600, retryMaximumDelay: 3600, random: { 0 }),
+            retryPolicy: VoiceSharingRetryPolicy(retryBaseDelay: 3600, retryMaximumDelay: 3600, random: { 1 }),
             isAuthorized: { true }, currentIdentity: { nil },
             endpoint: { URL(string: "https://unit.test/api/v1/voice-recordings") },
             transport: { _, _, _ in
@@ -203,10 +360,15 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         // entry, and the publication drain must attempt it.
         sink.handle(event())
         drain()
-        guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
-            return XCTFail("coverage known")
+        // The publication drain races this read: wait bounded for capture B's entry to appear.
+        var readyCount = 0
+        if case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() { readyCount = ready.count }
+        let readyDeadline = Date().addingTimeInterval(4)
+        while readyCount < 2 && Date() < readyDeadline {
+            Thread.sleep(forTimeInterval: 0.05)
+            if case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() { readyCount = ready.count }
         }
-        XCTAssertEqual(ready.count, 2,
+        XCTAssertEqual(readyCount, 2,
             "both entries list; the uploader's boundary admission owns who attempts")
         await trigger.awaitDrainCompletionForTesting()
         let afterB = await transportCalls.count()

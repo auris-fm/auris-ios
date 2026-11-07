@@ -180,7 +180,11 @@ final class VoiceSharingContributionSink {
                 return
             }
             // Gate check 2: the encoded bytes must not become a queue entry under a closed gate.
-            guard isEnabled(), currentGeneration() == pending.capturedGeneration else { return }
+            guard isEnabled(), currentGeneration() == pending.capturedGeneration else {
+                FileLog.shared.addMessage(
+                    "[VoiceSharing] contribution dropped reason=gate-or-generation-at-encode capture=\(pending.event.captureID)")
+                return
+            }
             let entry = try queue.prepare(metadata: encoded.metadataEnvelope, audio: encoded.wav)
             // Gate check 3 + finalize in the SAME critical section: a noteRevocation() cannot
             // land between this check and publication — it waits for the lock, and the next
