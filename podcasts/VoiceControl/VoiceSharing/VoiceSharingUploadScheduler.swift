@@ -84,6 +84,7 @@ final class VoiceSharingUploadScheduler {
     /// exact moment a callback is about to be taken, mutate the trigger (e.g. cancel it), and then
     /// release, instead of guessing with sleeps. Invoked OUTSIDE `passLock`.
     var ownerCompletionFireGateForTesting: (() -> Void)?
+    var expiryBodyForTesting: (() -> Void)?
 
     private let queue: VoiceSharingUploadQueue
 
@@ -100,8 +101,26 @@ final class VoiceSharingUploadScheduler {
         guard passLock.withLockElse({ !passInFlight }, set: { passInFlight = true }) else {
             return 0 // a pass owns the scheduler; the next one expires
         }
-        defer { passLock.withLock { passInFlight = false } }
+        defer {
+            // THE SAME COMPLETION PATH AS A DRAIN (reviewer 23901ee6 finding 3). Releasing
+            // `passInFlight` alone left every waiter a concurrent drain had registered un-fired: the
+            // drain reported `.busy`, registered for the owner's completion, and expiry released the
+            // slot without ever invoking it — so that drain never re-offered. Both owners must end
+            // the same way.
+            let waiters: [() -> Void] = passLock.withLock {
+                passInFlight = false
+                let pending = Array(ownerCompletionWaiters.values)
+                ownerCompletionWaiters.removeAll()
+                return pending
+            }
+            let gate = ownerCompletionFireGateForTesting
+            for waiter in waiters {
+                gate?()
+                waiter()
+            }
+        }
         guard isAuthorized() else { return 0 }
+        expiryBodyForTesting?()
         return queue.expireAgedOutEntries()
     }
     private let uploader: VoiceSharingUploader

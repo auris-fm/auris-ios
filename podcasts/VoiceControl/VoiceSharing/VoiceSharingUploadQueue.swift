@@ -359,6 +359,14 @@ final class VoiceSharingUploadQueue {
     /// reviewer ffca9a27). An unreadable instant is "age unknown" — never "fresh" and never
     /// "ancient" (the old `distantPast` fallback).
     private func markerAgeLocked(_ entry: Entry) -> TimeInterval? {
+        // AN UNPERSISTED RESET IS THE AUTHORITY (reviewer 23901ee6 finding 2): if a previous repair
+        // could not be written, the chosen instant is used for BOTH serving and ageing until it can
+        // be. Without this the disk value (still invalid) was re-read, so the served set excluded the
+        // entry the repair had just accepted, and its retention clock never advanced.
+        let now = clock().timeIntervalSince1970
+        if let unpersisted = resetInstantsLocked[entry.name] {
+            return max(0, now - unpersisted)
+        }
         // UNTRUSTED AGE IS REPAIRED, NOT HONOURED (spec, Android parity): a missing, unreadable or
         // future instant is reset to now and the entry reads as age 0 — fresh, so it serves and its
         // retention clock starts now. An entry that is not structurally complete never reaches this
@@ -366,10 +374,22 @@ final class VoiceSharingUploadQueue {
         // treatment of partial work unchanged.
         switch captureInstantReadingLocked(entry) {
         case .untrusted(let reason):
+            // THE GUARD LIVES HERE, NOT IN THE CALLERS (reviewer round on `42193c5fc`). The comment
+            // above claimed every caller checked completeness first; two did not — the served-set
+            // age rule and its diagnostic — so a PARTIAL entry could have its instant rewritten by a
+            // routine that is supposed to repair published work only. A repair is a WRITE, and writes
+            // on state we could not validate are how recovery's treatment of incomplete work
+            // silently changed. Incomplete entries keep their instant and stay recovery's business.
+            guard isCompleteEntryLocked(at: entry) else {
+                // Not repairable here and NOT "fresh": an age we may not act on.
+                return nil
+            }
             resetUntrustedAgeLocked(entry, observed: reason)
             return 0
         case .trusted(let age):
             return age
+        case .unaffordable:
+            return nil // refused, never repaired
         }
     }
 
@@ -3413,10 +3433,20 @@ final class VoiceSharingUploadQueue {
     /// the caller), and only to the instant. A failed write still serves the entry with now in
     /// memory and retries at the next recovery — refusing to serve because the repair could not be
     /// persisted would reintroduce the stranding.
+    /// RESET INSTANTS KEPT IN MEMORY (reviewer 23901ee6 finding 2). A failed disk write used to leave
+    /// nothing behind: `markerAgeLocked` then recomputed a FRESH ZERO from the still-invalid disk
+    /// value on every call, so serving and ageing disagreed (the served set read the invalid value
+    /// and excluded the entry) and retention never advanced. One instant per entry, chosen once and
+    /// reused, is what makes "served now, ages from now" true under a write fault.
+    private var resetInstantsLocked: [String: TimeInterval] = [:]
+
     @discardableResult
     private func resetUntrustedAgeLocked(_ entry: Entry, observed: String) -> Bool {
         let directory = entryDirectoryLocked(for: entry)
-        let now = clock().timeIntervalSince1970
+        // ONE INSTANT PER ENTRY: a repeat repair of the same entry reuses the first choice, so the
+        // age advances monotonically instead of restarting at zero on every read.
+        let now = resetInstantsLocked[entry.name] ?? clock().timeIntervalSince1970
+        resetInstantsLocked[entry.name] = now
         ageResetCount += 1
         // DIAGNOSTIC (content-free): an instant was rewritten. Without this line a poisoned capture
         // time is indistinguishable from one that was always correct.
@@ -3425,16 +3455,61 @@ final class VoiceSharingUploadQueue {
         FileLog.shared.forceFlush()
         let url = directory.appendingPathComponent(Self.createdName)
         do {
-            try String(String(now)).write(to: url, atomically: true, encoding: .utf8)
+            // THROUGH THE INJECTABLE WRITER (reviewer 23901ee6 finding 2): the persistence fault must
+            // be drivable, or the in-memory fallback below cannot be shown to work. `String.write`
+            // reached the filesystem directly and no injection point could fail it.
+            try failureRecordWriter(url, Data(String(now).utf8))
+            // PERSISTED: the memory copy is no longer needed and must not shadow the disk value.
+            resetInstantsLocked.removeValue(forKey: entry.name)
             return true
         } catch {
-            // SERVE ANYWAY with "now": the in-memory answer is the same value, and the next
-            // recovery retries the write because the on-disk instant is still untrusted.
+            // SERVE AND AGE FROM THE IN-MEMORY INSTANT. The disk value stays untrusted, so
+            // `markerAgeLocked` keeps returning THIS instant (not a fresh zero), and the next
+            // recovery retries the write.
             FileLog.shared.addMessage(
-                "[VoiceSharing] age reset persist-failed entry=\(entry.name)")
+                "[VoiceSharing] age reset persist-failed entry=\(entry.name) "
+                    + "serving-from-memory-instant")
             FileLog.shared.forceFlush()
             return false
         }
+    }
+
+    /// RECOVERY-SIDE REPAIR: fix an untrusted instant on a recording that is otherwise intact,
+    /// BEFORE recovery classifies anything by age. Structural evidence is checked without the age
+    /// rule (marker present, not disqualified, audio and metadata readable and binding), so the one
+    /// thing being repaired cannot be the thing being judged.
+    ///
+    /// A recording that is genuinely incomplete is left alone: recovery keeps its existing
+    /// treatment, and no instant is invented for work that never became a recording.
+    private func repairUntrustedAgeOnRecoveryLocked(_ entry: Entry, directory: URL) {
+        switch captureInstantReadingLocked(entry) {
+        case .trusted, .unaffordable: return
+        case .untrusted: break
+        }
+        guard Self.statKind(of: directory.appendingPathComponent(Self.readyMarkerName))
+            == .present else { return }
+        guard Self.statKind(of: directory.appendingPathComponent(Self.failedName))
+            == .absent else { return }
+        guard Self.statKind(of: directory.appendingPathComponent(Self.stageName))
+            == .absent else { return }
+        // The recording's OWN content must be present and binding: a marker over unreadable audio is
+        // not a recording to repair, it is debris.
+        guard let audioSize = fileSizeIfRegularLocked(at: directory.appendingPathComponent(Self.audioName)),
+            audioSize.isRegular, audioSize.bytes > 0,
+            audioSize.bytes <= Self.maxEntryAudioBytes,
+            let metadataSize = fileSizeIfRegularLocked(at: directory.appendingPathComponent(Self.metadataName)),
+            metadataSize.isRegular, metadataSize.bytes > 0,
+            metadataSize.bytes <= Self.maxMetadataBytes,
+            let audioData = try? Data(contentsOf: directory.appendingPathComponent(Self.audioName)),
+            let metadataData = try? Data(contentsOf: directory.appendingPathComponent(Self.metadataName)),
+            (try? VoiceSharingRecordBinding.bind(envelope: metadataData, audio: audioData)) != nil
+        else { return }
+        let reason: String
+        switch captureInstantReadingLocked(entry) {
+        case .trusted, .unaffordable: return
+        case .untrusted(let why): reason = why
+        }
+        resetUntrustedAgeLocked(entry, observed: reason)
     }
 
     /// How this entry's capture instant reads: trusted (with its age), or untrusted for a stated
@@ -3442,17 +3517,28 @@ final class VoiceSharingUploadQueue {
     private enum CaptureInstantReading {
         case trusted(TimeInterval)
         case untrusted(String) // "missing" | "unreadable" | "future"
+        /// Structurally corrupt (past the size bound): NOT repairable, never read, refused as before.
+        case unaffordable
     }
 
     /// Reads the instant and classifies it WITHOUT repairing: the caller decides, because a
     /// structurally INCOMPLETE entry must keep its existing treatment (recovery's job, not a reset).
     private func captureInstantReadingLocked(_ entry: Entry) -> CaptureInstantReading {
+        // A served-from-memory reset is TRUSTED for this instance: the instant is known, it is just
+        // not yet on disk.
+        if let unpersisted = resetInstantsLocked[entry.name] {
+            return .trusted(max(0, clock().timeIntervalSince1970 - unpersisted))
+        }
         let directory = entryDirectoryLocked(for: entry)
         let url = directory.appendingPathComponent(Self.createdName)
         guard Self.statKind(of: url) == .present else { return .untrusted("missing") }
+        // AN OVERSIZED INSTANT IS CORRUPT, NOT UNTRUSTED: a file past the bound is a foreign or
+        // damaged object, and repairing it would adopt its directory as a recording instead of
+        // letting recovery remove it. Its contents are never read (the bound is checked from
+        // attributes), and the entry stays refused.
         guard let size = fileSizeIfRegularLocked(at: url), size.isRegular, size.bytes > 0,
-            size.bytes <= Self.maxCreationInstantBytes,
-            let data = try? Data(contentsOf: url),
+            size.bytes <= Self.maxCreationInstantBytes else { return .unaffordable }
+        guard let data = try? Data(contentsOf: url),
             let text = String(data: data, encoding: .utf8),
             let seconds = TimeInterval(text), seconds.isFinite
         else { return .untrusted("unreadable") }
@@ -3563,17 +3649,21 @@ final class VoiceSharingUploadQueue {
         do { createdData = try Data(contentsOf: createdURL) } catch {
             throw PrepareError.accountingUnavailable
         }
-        guard let text = String(data: createdData, encoding: .utf8),
-            let seconds = TimeInterval(text), seconds.isFinite
-        else { return .incomplete }
-        let createdAt = Date(timeIntervalSince1970: seconds)
-        // FUTURE AND UNREADABLE INSTANTS ARE RECOVERY'S BUSINESS, NOT INCOMPLETENESS (spec,
-        // untrusted age). Classifying them here made a caller-past clock — a lease control that
-        // seeds an expired lease, a device whose clock moved back — turn a perfectly good entry
-        // into debris that recovery DELETES. The reset (see `markerAgeLocked`) repairs the instant;
-        // this classifier only applies the age BOUND, and only in the direction it can trust.
-        guard clock().timeIntervalSince(createdAt) <= Self.maxEntryAge else { return .incomplete }
-
+        // AN UNPARSEABLE INSTANT IS NOT INCOMPLETENESS (spec, untrusted age). It used to classify
+        // here, which made the AGE_RESET unreachable for exactly the case it exists to repair: the
+        // repair is guarded on completeness, and the classifier refused the entry for the very
+        // defect the repair fixes — a closed loop. "Complete" now means the RECORDING is complete
+        // (marker, audio, metadata, binding); the instant is a property that may be untrusted and
+        // repaired, not a completeness gate. Absence still classifies (nothing to repair to).
+        if let text = String(data: createdData, encoding: .utf8),
+            let seconds = TimeInterval(text), seconds.isFinite {
+            let createdAt = Date(timeIntervalSince1970: seconds)
+            // FUTURE INSTANTS ARE RECOVERY'S BUSINESS TOO: classifying them here let a caller-past
+            // clock — a lease control seeding an expired lease, a device whose clock moved back —
+            // turn a good entry into debris recovery DELETES. The reset repairs the instant; this
+            // classifier only applies the age BOUND, and only in the direction it can trust.
+            guard clock().timeIntervalSince(createdAt) <= Self.maxEntryAge else { return .incomplete }
+        }
         guard let audioSize = fileSizeIfRegularLocked(at: audioURL), audioSize.isRegular,
             audioSize.bytes > 0, audioSize.bytes <= Self.maxEntryAudioBytes,
             let metadataSize = fileSizeIfRegularLocked(at: metadataURL), metadataSize.isRegular,
@@ -3680,6 +3770,13 @@ final class VoiceSharingUploadQueue {
             // judged: a failed replacement can strand one, and leaving it would block admission
             // forever with a name that is ours, not debris.
             cleanupTemporaryMarkersLocked(in: directory)
+            // REPAIR BEFORE ANY AGE-BASED CLASSIFICATION (reviewer 23901ee6 finding 1). A complete
+            // recording whose instant is missing, unreadable or future used to be classified
+            // INCOMPLETE here and DELETED — before the repair could ever run, because the repair is
+            // guarded on completeness. A startup with a bad age was therefore destructive. The
+            // repair runs first, and only over entries whose RECORDING is otherwise intact, so the
+            // reset happens before anything judges the entry by its age.
+            repairUntrustedAgeOnRecoveryLocked(entry, directory: directory)
             guard isCompleteEntryLocked(at: entry) else {
                 // Clarification 7e9606b: a disposal/disqualification intent (`publication.failed`)
                 // is DISCOVERED STATE, not incompleteness — its cleanup deliberately could not
