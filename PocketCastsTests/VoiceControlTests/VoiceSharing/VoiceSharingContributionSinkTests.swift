@@ -1430,6 +1430,44 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         return await calls.count()
     }
 
+    /// REVIEWER 23901ee6 finding 3: a drain that found the scheduler busy and registered a
+    /// completion waiter behind a BLOCKED EXPIRY must be woken when expiry finishes. Expiry released
+    /// `passInFlight` without firing the waiters, so that drain never re-offered. RED before expiry
+    /// used the same completion path as `drainOnce`.
+    func test_aDrainWaitingBehindABlockedExpiryIsWoken() async throws {
+        let scheduler = VoiceSharingUploadScheduler(
+            queue: queue,
+            uploader: VoiceSharingUploader(
+                queue: queue,
+                retryPolicy: VoiceSharingRetryPolicy(
+                    retryBaseDelay: 3600, retryMaximumDelay: 3600, random: { 1 }),
+                isAuthorized: { true }, currentIdentity: { nil },
+                endpoint: { URL(string: "https://unit.test/api/v1/voice-recordings") },
+                transport: { _, _, _ in .response(statusCode: 503, body: Data()) }),
+            isAuthorized: { true })
+        let expiryHeld = expectation(description: "expiry owns the scheduler")
+        let woken = expectation(description: "the waiting drain is woken")
+        // BLOCK INSIDE EXPIRY with a semaphore (XCTestExpectation cannot be waited on off the main
+        // thread here): expiry holds the slot until the control signals it.
+        let release = DispatchSemaphore(value: 0)
+        scheduler.expiryBodyForTesting = {
+            expiryHeld.fulfill()
+            release.wait()
+        }
+        let expiryDone = expectation(description: "expiry returned")
+        DispatchQueue.global().async {
+            _ = scheduler.expireAgedOutRecordings()
+            expiryDone.fulfill()
+        }
+        await fulfillment(of: [expiryHeld], timeout: 5)
+        // A DRAIN ARRIVES WHILE EXPIRY OWNS THE SCHEDULER: it must WAIT, not take ownership.
+        let registration = scheduler.registerOwnerCompletion { woken.fulfill() }
+        XCTAssertFalse(registration.assumedOwnership,
+                       "premise: the drain must wait behind expiry, not assume ownership")
+        release.signal() // release expiry; its completion must fire the waiter
+        await fulfillment(of: [woken, expiryDone], timeout: 5)
+    }
+
     /// REVIEWER 34aae0fa (1) / 7c4c9cff PROGRESS RULE: a wake may only be armed for work the next
     /// pass can ATTEMPT, and the check must use the SAME admission facts the drain uses. Under an
     /// OWNER-WIDE RETRY HOLD (`attempt.pause.intent`, VoiceSharingUploadQueue.swift

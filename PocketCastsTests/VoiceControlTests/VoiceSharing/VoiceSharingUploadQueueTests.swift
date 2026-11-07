@@ -3099,6 +3099,119 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertEqual(q.readyEntries().count, 1, "the recording is SERVED after the reset")
     }
 
+    /// REVIEWER 23901ee6 finding 1: RECONSTRUCTION ITSELF must repair, not delete. Recovery used to
+    /// classify a complete recording with a bad instant as incomplete and remove the directory —
+    /// before any repair could run. Each case below reconstructs DIRECTLY over the poisoned
+    /// fixture, with no live sweep first, because a control that repairs on the old instance first
+    /// proves only that the sweep works.
+    func test_reconstructionRepairsAFutureInstantRatherThanDeletingTheRecording() throws {
+        let (entryDir, q) = try poisonAndReconstruct(reason: "future")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: entryDir.path),
+                      "recovery must not delete a recording over an untrusted instant")
+        XCTAssertEqual(q.readyEntries().count, 1, "and the recording is served afterwards")
+    }
+
+    func test_reconstructionRepairsAMissingInstantRatherThanDeletingTheRecording() throws {
+        let (entryDir, _) = try poisonAndReconstruct(reason: "missing")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: entryDir.path),
+                      "recovery must not delete a recording whose instant is missing")
+    }
+
+    func test_reconstructionRepairsAnUnreadableInstantRatherThanDeletingTheRecording() throws {
+        let (entryDir, _) = try poisonAndReconstruct(reason: "unreadable")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: entryDir.path),
+                      "recovery must not delete a recording whose instant is unreadable")
+    }
+
+    /// Publish one good recording, poison its instant, then reconstruct a FRESH queue over it — the
+    /// production startup path, with nothing run in between.
+    private func poisonAndReconstruct(reason: String) throws -> (dir: URL, queue: VoiceSharingUploadQueue) {
+        // Publish with a REAL instant first: the entry must be a genuine complete recording, so
+        // the only defect under test is the instant.
+        let seeder = makeQueue()
+        _ = try prepareAndFinalize(seeder, metadata: validRecord(audio: audioA), audio: audioA)
+        let entryDir = try soleEntryDirectory()
+        let createdURL = entryDir.appendingPathComponent("created.at")
+        switch reason {
+        case "future":
+            try String(String(Date().timeIntervalSince1970 + 30 * 24 * 60 * 60))
+                .write(to: createdURL, atomically: true, encoding: .utf8)
+        case "missing":
+            try FileManager.default.removeItem(at: createdURL)
+        default:
+            try "not-a-number".write(to: createdURL, atomically: true, encoding: .utf8)
+        }
+        // A FRESH INSTANCE performs recovery: this is the path under test.
+        let fresh = makeQueue()
+        _ = fresh.readyEntries()
+        XCTAssertEqual(fresh.ageResetCountForTesting, 1, "recovery counts the \(reason) reset")
+        return (entryDir, fresh)
+    }
+
+    /// REVIEWER 23901ee6 finding 2: a FAILED persistence keeps ONE in-memory instant, used for both
+    /// serving and ageing. Without it `markerAgeLocked` recomputed a fresh zero from the invalid disk
+    /// value on every call, so the served set excluded the entry the repair accepted and its
+    /// retention clock never advanced. RED before the fallback existed.
+    func test_aFailedPersistenceServesAndAgesFromOneInMemoryInstant() throws {
+        // Publish with a WORKING writer, then inject a write fault on a reconstructed instance: the
+        // fault must be drivable through the same seam production writes through.
+        let seeder = makeQueue()
+        _ = try prepareAndFinalize(seeder, metadata: validRecord(audio: audioA), audio: audioA)
+        let entryDir = try soleEntryDirectory()
+        let createdURL = entryDir.appendingPathComponent("created.at")
+        // A FIXED clock, and the poison is FUTURE *relative to it*: an instant relative to wall time
+        // would be ancient under this clock and would correctly age out, which is a different test.
+        let fixedNow = Date(timeIntervalSince1970: 1_800_000_000)
+        let poisoned = String(fixedNow.timeIntervalSince1970 + 3600)
+        try poisoned.write(to: createdURL, atomically: true, encoding: .utf8)
+        var seededInstant = poisoned
+        let faulting = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            clock: { fixedNow },
+            failureRecordWriter: { url, data in
+                // Fail ONLY the instant repair; everything else must keep working.
+                if url.lastPathComponent == "created.at" { throw CocoaError(.fileWriteUnknown) }
+                try data.write(to: url, options: .atomic)
+            },
+            listDirectory: { url, keys in
+                try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: keys)
+            })
+        XCTAssertEqual(faulting.readyEntries().count, 1,
+                       "a recording whose repair could not be persisted is still SERVED")
+        XCTAssertEqual(faulting.ageResetCountForTesting, 1)
+        seededInstant = try String(contentsOf: createdURL, encoding: .utf8)
+        XCTAssertEqual(seededInstant, poisoned,
+                       "the disk value is untouched, so recovery still knows to retry")
+        // AGE FROM THE SAME INSTANT: repeated reads must not restart the clock at zero.
+        XCTAssertEqual(faulting.readyEntries().count, 1)
+        XCTAssertEqual(faulting.readyEntries().count, 1)
+        XCTAssertEqual(faulting.secondsUntilNextAgeBoundary(),
+                       VoiceSharingUploadQueue.maxEntryAge,
+                       "the in-memory instant starts the retention clock exactly once")
+    }
+
+    /// THE REPAIR WRITES ONLY TO PUBLISHED WORK. An INCOMPLETE entry with an untrusted instant must
+    /// keep its instant untouched: recovery owns partial work, and a reset routine is not a licence
+    /// to write into state the caller never validated. RED when the completeness guard lived only in
+    /// the comment — the served-set age reader reached the repair without one.
+    func test_anIncompleteEntryIsNeverRepairedByTheAgeReset() throws {
+        let q = makeQueue()
+        let prep = try q.prepare(
+            metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        let dir = root.appendingPathComponent(prep.name)
+        // A PREPARING entry (no ready marker) carrying an unreadable instant.
+        try "not-a-number".write(to: dir.appendingPathComponent("created.at"),
+                                 atomically: true, encoding: .utf8)
+        _ = q.readyEntries()
+        _ = q.readyCountDiagnostics()
+        _ = q.expireAgedOutEntries()
+        let instant = try String(contentsOf: dir.appendingPathComponent("created.at"),
+                                 encoding: .utf8)
+        XCTAssertEqual(instant, "not-a-number",
+                       "a partial entry's instant is never rewritten by the repair")
+        XCTAssertEqual(q.ageResetCountForTesting, 0, "and the repair is not counted")
+    }
+
     /// The reset is PERSISTED, so it holds for a fresh instance too — not just in memory.
     func test_theAgeResetSurvivesAReconstruction() throws {
         var q = makeQueue()
