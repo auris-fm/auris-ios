@@ -199,6 +199,51 @@ final class VoiceSharingCollector {
     private var obsoleteCaptures = Set<UUID>()
     private(set) var overflowCount = 0
 
+    /// SPEC 05ff27d0 / incident 2026-11-07: SEGMENTS SEEN vs CAPTURES EMITTED, counted from the
+    /// collector's own decisions. The simulator stopped turning utterances into captures at
+    /// 10:00:21Z with no log line naming a decision, so the numbers had to be inferred from
+    /// absence — which is exactly the evidence that could not be produced afterwards. These two
+    /// counters are content-free and let a later report say "N segments seen, M captures emitted"
+    /// without reconstructing anything.
+    private(set) var segmentsSeenCount = 0
+    private(set) var capturesEmittedCount = 0
+
+    /// Emits the running counters, rate-limited so a stuck gate cannot flood the log (which itself
+    /// changes the behaviour under investigation): at most one line per interval, plus whenever the
+    /// counts change by at least `decisionReportEvery` in between.
+    private var lastDecisionReportAt: DispatchTime?
+    private static let decisionReportInterval: TimeInterval = 300
+    private static let decisionReportEvery = 10
+
+    /// `logDecisionProgressLocked` for callers that do not already hold the lock.
+    private func logDecisionProgress(force: Bool = false) {
+        lock.lock()
+        logDecisionProgressLocked(force: force)
+        lock.unlock()
+    }
+
+    /// Content-free progress line for the capture path. Logged from the collector's own decisions:
+    /// the fixed vocabulary names counters, never values from the audio or metadata.
+    private func logDecisionProgressLocked(force: Bool = false) {
+        let now = monotonicNow()
+        if !force, let last = lastDecisionReportAt {
+            let elapsed = Double(now.uptimeNanoseconds &- last.uptimeNanoseconds) / 1_000_000_000
+            // Report early when enough decisions accumulated since the last line, so a long run
+            // of refusals is visible without waiting the full interval.
+            let decisionsSince = (segmentsSeenCount + capturesEmittedCount) - decisionsAtLastReport
+            if elapsed < Self.decisionReportInterval && decisionsSince < Self.decisionReportEvery {
+                return
+            }
+        }
+        lastDecisionReportAt = now
+        decisionsAtLastReport = segmentsSeenCount + capturesEmittedCount
+        FileLog.shared.addMessage(
+            "[VoiceSharing] capture decisions segments=\(segmentsSeenCount) "
+                + "captures=\(capturesEmittedCount) overflow=\(overflowCount)")
+    }
+    /// Decision count as of the last progress line (rate-limit bookkeeping only).
+    private var decisionsAtLastReport = 0
+
     /// TEST ONLY. Delivery is asynchronous in production — that is the non-blocking property under review —
     /// so content assertions use inline delivery instead of racing a scheduler. The held-sink and
     /// thread-identity controls keep real async delivery; that is where non-blocking is actually proven.
@@ -270,11 +315,18 @@ final class VoiceSharingCollector {
     /// freeze into its utterance Task — or opens nothing (returns nil) when the gate is closed.
     @discardableResult
     func speechStarted(confirmationFrameSamples: Int, wakeRequired: Bool = true) -> CaptureContext? {
+        lock.lock()
+        segmentsSeenCount += 1
+        logDecisionProgressLocked()
+        lock.unlock()
         guard collectionPermitted() else {
             // Capture-side refusal names its own reason (spec c83a92fa): "did the collector
             // decline" and "was the utterance unbuildable" are different decisions and must not
             // look the same. Fixed vocabulary, no values.
             FileLog.shared.addMessage("[VoiceSharing] capture refused reason=collection-not-permitted")
+            // The seen-vs-emitted counters travel WITH the decision: a refusal alone says nothing
+            // about whether the pipeline was otherwise healthy.
+            logDecisionProgress(force: true)
             FileLog.shared.forceFlush()
             abandonForGateMove(context: currentCaptureContext())
             return nil
@@ -287,6 +339,7 @@ final class VoiceSharingCollector {
         // is the same "cannot build a valid record" condition as any other.
         guard let epoch = epochProvider(), !epoch.isEmpty else {
             FileLog.shared.addMessage("[VoiceSharing] capture refused reason=no-enrollment-epoch")
+            logDecisionProgress(force: true)
             abandonForGateMove(context: currentCaptureContext())
             return nil
         }
@@ -1090,7 +1143,15 @@ return }
     /// sink RETURNS, then released from the ledger. This is the ONLY place the sink is invoked.
     private func deliverUnderSinkOwnership(_ event: SegmentEvent) {
         let n = event.audio.count
-        lock.lock(); inFlightSinkAudioSamples += n; lock.unlock()
+        lock.lock()
+        // A gate-control record carries no audio and is not a captured segment; everything else
+        // that reaches the sink IS a capture emitted.
+        if !event.isGateControl {
+            capturesEmittedCount += 1
+            logDecisionProgressLocked()
+        }
+        inFlightSinkAudioSamples += n
+        lock.unlock()
         sink(event)
         // Ownership ends when the sink RETURNS — not at enqueue.
         lock.lock()
