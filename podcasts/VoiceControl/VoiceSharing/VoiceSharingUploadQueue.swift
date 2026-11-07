@@ -231,12 +231,6 @@ final class VoiceSharingUploadQueue {
     static let attemptLeaseDuration: TimeInterval = 120
     /// Absolute ceiling on a stored attempt count. Compiled bound, NOT an activation value.
     static let maxUploadAttemptsCeiling = 1_000
-    /// DURABLE per-entry deletion intent (reviewer e71b9524 item 3), written at the ROOT
-    /// (outside removable scopes) before any refused-entry removal and retired only after the
-    /// directory is proven absent. A crash anywhere in between is reconciled by the next
-    /// serving pass: intent + entry present => retry the removal; intent + entry absent =>
-    /// retire the record. Root files are never removed by entry purges.
-    static let deletionIntentPrefix = "deletion.intent."
     /// Present when publication failed and its cleanup could not complete. Such an entry is never
     /// exposed as ready, even if the ready marker survived.
     /// Present when this attempt definitively failed. Written BEFORE any removal attempt.
@@ -766,19 +760,37 @@ final class VoiceSharingUploadQueue {
     }
 
     private func purgeLocked() -> PurgeOutcome {
+        reconciledRemovalLocked(
+            targets: nil, intentPath: revocationIntentPath,
+            removalReason: "consent-revocation-purge",
+            setHold: { setRevocationHold($0, originUnknown: $1) })
+    }
+
+    /// THE shared reconciled removal machinery (spec redirect 1bfba50f): durable intent before
+    /// ANY mutation, bounded listing, mark-then-remove, survivor re-disqualification, root
+    /// barrier, and intent retirement only after full reconcile. The owner-wide consent purge
+    /// runs it unbounded (targets nil, revocation intent, owner-wide hold); a refused entry
+    /// runs it BOUNDED to its name (per-entry deletion intent, per-entry hold). The consent
+    /// path's observable behavior is unchanged by this refactor.
+    /// `setHold(false)` may only be reached when every barrier reconciled; retirement failures
+    /// re-hold BEFORE the in-memory hold clears.
+    private func reconciledRemovalLocked(
+        targets: Set<String>?, intentPath: URL, removalReason: String,
+        setHold: (_ held: Bool, _ originUnknown: Bool) -> Void
+    ) -> PurgeOutcome {
         // DURABLE INTENT BEFORE ANY MUTATION (reviewer 35e67a87). If this cannot be written and
         // synced, the purge must not start: a partial revocation with no on-disk record is exactly
         // the state a fresh queue would mistake for "nothing happened". The memory hold is set
         // regardless, so even an unwritable intent refuses serving for this process.
         do {
-            try failureRecordWriter(revocationIntentPath, Data([0x01]))
-            try synchronizer(revocationIntentPath, false)
+            try failureRecordWriter(intentPath, Data([0x01]))
+            try synchronizer(intentPath, false)
             try synchronizer(rootDirectory, true)
         } catch {
-            setRevocationHold(true) // KNOWN: we could not even record the intent
+            setHold(true, false) // KNOWN: we could not even record the intent
             return .refused
         }
-        setRevocationHold(true) // KNOWN: the intent is on disk
+        setHold(true, false) // KNOWN: the intent is on disk
         let listing: [URL]
         do {
             let (urls, overflowed) = try listDirectoryBounded(
@@ -795,6 +807,12 @@ final class VoiceSharingUploadQueue {
         for item in listing {
             let name = item.lastPathComponent
             guard UUID(uuidString: name) != nil || Self.parseSettlementName(name) != nil else {
+                continue
+            }
+            // BOUNDED TARGETS (reviewer on the consent scope): a scoped purge touches ONLY the
+            // named entries and their settlement evidence — never the neighbours.
+            if let targets, !targets.contains(name),
+                !targets.contains(Self.parseSettlementName(name) ?? "") {
                 continue
             }
             if let settlementEntry = Self.parseSettlementName(name) {
@@ -818,22 +836,22 @@ final class VoiceSharingUploadQueue {
                 }
             }
             do {
-                // DIAGNOSTIC (content-free): consent-revocation purge removes this entry. Logged
-                // per-entry — an aggregate count alone cannot attribute a named entry's removal.
+                // DIAGNOSTIC (content-free): purge removes this entry. Logged per-entry — an
+                // aggregate count alone cannot attribute a named entry's removal.
                 FileLog.shared.addMessage(
-                    "[VoiceSharing] queue removal reason=consent-revocation-purge "
+                    "[VoiceSharing] queue removal reason=\(removalReason) "
                         + "entry=\(name) starting")
                 FileLog.shared.forceFlush()
                 try fileManager.removeItem(at: item)
                 removed += 1
                 FileLog.shared.addMessage(
-                    "[VoiceSharing] queue removal reason=consent-revocation-purge "
+                    "[VoiceSharing] queue removal reason=\(removalReason) "
                         + "entry=\(name) removed=true")
                 FileLog.shared.forceFlush()
             } catch {
                 retained += 1
                 FileLog.shared.addMessage(
-                    "[VoiceSharing] queue removal reason=consent-revocation-purge "
+                    "[VoiceSharing] queue removal reason=\(removalReason) "
                         + "entry=\(name) removed=false — retained")
                 FileLog.shared.forceFlush()
                 // A RECURSIVE removal can delete children (including publication.failed) before
@@ -848,25 +866,31 @@ final class VoiceSharingUploadQueue {
         // Root barrier: the listing must reflect the removals. Failure means on-disk truth is
         // unknown, so the hold cannot be released.
         do { try synchronizer(rootDirectory, true) } catch { reconciled = false }
-        inFlightAttempts.removeAll()
-        uncertainEntriesLocked.removeAll()
+        if let targets {
+            let targetEntries = Set(inFlightAttempts.keys.filter { targets.contains($0.name) })
+            inFlightAttempts = inFlightAttempts.filter { !targetEntries.contains($0.key) }
+            uncertainEntriesLocked.subtract(targetEntries)
+        } else {
+            inFlightAttempts.removeAll()
+            uncertainEntriesLocked.removeAll()
+        }
         // The hold may be released ONLY when every barrier reconciled, and the durable intent must
         // be removed before the in-memory hold is cleared — otherwise a crash between the two
         // leaves a queue that serves while storage still records an unfinished revocation.
         if reconciled {
             do {
-                try fileManager.removeItem(at: revocationIntentPath)
+                try fileManager.removeItem(at: intentPath)
                 try synchronizer(rootDirectory, true)
                 // The origin must be re-derived at EVERY transition (reviewer e40508a1): leaving it
                 // set would mislabel a LATER, genuine failed revocation as unknown coverage.
-                setRevocationHold(false)
+                setHold(false, false)
             } catch {
                 // Intent could not be retired: stay held. A fresh instance would re-derive it.
-                setRevocationHold(true) // KNOWN: the intent is still on disk
+                setHold(true, false) // KNOWN: the intent is still on disk
                 reconciled = false
             }
         } else {
-            setRevocationHold(true) // KNOWN: barriers failed to reconcile
+            setHold(true, false) // KNOWN: barriers failed to reconcile
         }
         return reconciled ? .reconciled(removed: removed, retained: retained)
                           : .held(removed: removed, retained: retained)
@@ -2501,7 +2525,6 @@ final class VoiceSharingUploadQueue {
     private func strictOwnerCoverageLocked() throws -> [Entry] {
         try establishStoragePolicyLocked()
         let all = try entriesStrictLocked()
-        try reconcileDeletionIntentsLocked()
         for entry in all {
             let state = try entryStateLocked(at: entry)
             // Reviewer 72e9362d: an unconfirmable READY marker is UNKNOWN coverage for the whole
@@ -2546,8 +2569,21 @@ final class VoiceSharingUploadQueue {
             // is absent here. Both paths must agree about the same disk, so any disagreement is a
             // real inconsistency rather than a scheduling artifact.
             var excluded: [String] = []
-            do { try reconcileDeletionIntentsLocked() } catch { return .unknownCoverage }
             for entry in all {
+                // PER-ENTRY REFUSAL HOLD (spec 1bfba50f): an entry with a durable deletion
+                // intent never serves, and the serving sweep retries its SCOPED purge
+                // automatically. Failure holds only THIS entry — the others keep serving.
+                if refusedIntentNamesLocked.contains(entry.name)
+                    || Self.statKind(of: deletionIntentPathLocked(entry.name)) == .present {
+                    do { try purgeRefusedEntryLocked(entry, cause: "held-retry") }
+                    catch {
+                        refusedIntentNamesLocked.insert(entry.name)
+                        excluded.append("\(entry.name):refusal-held")
+                        continue
+                    }
+                    excluded.append("\(entry.name):purged(refused-retry)")
+                    continue
+                }
                 let state: EntryState
                 do { state = try entryStateLocked(at: entry) } catch {
                     lastDiscoveryDiagnostic = "entryStateLocked threw for \(entry.name)"
@@ -2559,9 +2595,13 @@ final class VoiceSharingUploadQueue {
                     break
                 case .refusedUnbindable:
                     // SPEC 1a0d3ffb: a complete entry the record check rejects is deleted at
-                    // once. The classification above is proven (any unknown threw => .unknownCoverage).
-                    do { try purgeRefusedLocked(entry, cause: "record-check") }
-                    catch { return .unknownCoverage }
+                    // once, through the scoped reconciled purge (bounded to this entry).
+                    do { try purgeRefusedEntryLocked(entry, cause: "record-check") }
+                    catch {
+                        refusedIntentNamesLocked.insert(entry.name)
+                        excluded.append("\(entry.name):refusal-held(record-check)")
+                        continue
+                    }
                     excluded.append("\(entry.name):purged(record-check)")
                     continue
                 case .disqualified:
@@ -2579,8 +2619,12 @@ final class VoiceSharingUploadQueue {
                         excluded.append("\(entry.name):notBound(\(state))")
                         continue
                     }
-                    do { try purgeRefusedLocked(entry, cause: "server-refusal") }
-                    catch { return .unknownCoverage }
+                    do { try purgeRefusedEntryLocked(entry, cause: "server-refusal") }
+                    catch {
+                        refusedIntentNamesLocked.insert(entry.name)
+                        excluded.append("\(entry.name):refusal-held(server-refusal)")
+                        continue
+                    }
                     excluded.append("\(entry.name):purged(server-refusal)")
                     continue
                 case .incomplete:
@@ -2631,11 +2675,19 @@ final class VoiceSharingUploadQueue {
             // set and the usage bound never count bytes the record check has rejected or the
             // server has refused for good. Any proven-state uncertainty must fail closed: the
             // sweep serves nothing rather than guessing (the same discipline as coverage).
+            // Per-entry refusal holds + automatic scoped retry (spec 1bfba50f). The legacy
+            // path has no per-entry hold channel, so a HELD entry simply cannot serve here:
+            // purge failures leave the entry on disk, excluded from the served list.
             do {
                 for entry in try entriesStrictLocked() {
+                    if refusedIntentNamesLocked.contains(entry.name)
+                        || Self.statKind(of: deletionIntentPathLocked(entry.name)) == .present {
+                        try? purgeRefusedEntryLocked(entry, cause: "held-retry")
+                        continue // purged or still held: either way it never serves here
+                    }
                     switch try entryStateLocked(at: entry) {
                     case .refusedUnbindable:
-                        try purgeRefusedLocked(entry, cause: "record-check")
+                        try purgeRefusedEntryLocked(entry, cause: "record-check")
                     case .disqualified:
                         // REVIEWER e71b9524 item 2: deletion requires a durable failed intent
                         // AND proven stage absence (see the strict path above).
@@ -2646,7 +2698,7 @@ final class VoiceSharingUploadQueue {
                             if stageKind == .failure { throw PrepareError.accountingUnavailable }
                             continue
                         }
-                        try purgeRefusedLocked(entry, cause: "server-refusal")
+                        try purgeRefusedEntryLocked(entry, cause: "server-refusal")
                     case .bound, .incomplete:
                         continue
                     }
@@ -2729,79 +2781,58 @@ final class VoiceSharingUploadQueue {
         }
     }
 
-    /// SPEC 1a0d3ffb, RECONCILED FORM (reviewer e71b9524 item 3): a recording the server
-    /// refuses permanently, or that the client's own record check rejects, is deleted from the
-    /// queue AT ONCE — through the same intent-before-mutation discipline as every other
-    /// durable transition:
-    ///   1. a root-level `deletion.intent.<entry>` record + ROOT BARRIER land BEFORE any
-    ///      mutation, so a crash mid-purge is reconciled exactly (retry the removal; retire
-    ///      the record once the directory is proven absent);
-    ///   2. the removal is followed by a root barrier;
-    ///   3. absence is CONFIRMED before the intent is retired; a FAILED removal disqualifies
-    ///      the entry in place (durable `publication.failed`) so it never serves again, and
-    ///      surfaces UNKNOWN — the discovery callers map that to unknownCoverage/serve-nothing.
-    /// Reentrancy: the discovery paths already run inside `serialQueue`, so this must NOT
-    /// re-enter `sync`.
-    /// Reconciles orphaned root-level deletion intents (reviewer e71b9524 item 3, crash
-    /// window): an intent whose entry directory is PROVEN ABSENT is retired; an intent whose
-    /// entry survived is left durable for the entry loop to classify and purge; a listing or
-    /// stat failure throws — callers fail closed.
-    private func reconcileDeletionIntentsLocked() throws {
-        let names = try fileManager.contentsOfDirectory(atPath: rootDirectory.path)
-        for name in names where name.hasPrefix(Self.deletionIntentPrefix) {
-            let entryName = String(name.dropFirst(Self.deletionIntentPrefix.count))
-            guard UUID(uuidString: entryName) != nil else { continue }
-            let entry = Entry(root: rootDirectory, name: entryName)
-            let directory = entryDirectoryLocked(for: entry)
-            switch Self.statKind(of: directory) {
-            case .present: continue // the entry loop owns this purge; intent stays durable
-            case .failure: throw PrepareError.accountingUnavailable
-            case .absent:
-                try? fileManager.removeItem(at: rootDirectory.appendingPathComponent(name))
-                try? synchronizer(rootDirectory, true)
-                FileLog.shared.addMessage(
-                    "[VoiceSharing] queue removal reason=record-refused-intent-retired entry=\(entryName)")
-                FileLog.shared.forceFlush()
-            }
-        }
-    }
-
-    private func purgeRefusedLocked(_ entry: Entry, cause: String) throws {
-        let intentURL = rootDirectory.appendingPathComponent("\(Self.deletionIntentPrefix)\(entry.name)")
-        let directory = try validatedEntryDirectoryLocked(entry)
-        // 1. DURABLE INTENT FIRST.
-        if Self.statKind(of: intentURL) != .present {
-            try Data([0x01]).write(to: intentURL, options: .atomic)
-            try synchronizer(rootDirectory, true)
-        }
-        // 2. REMOVE (skipped when a previous pass already removed before failing to retire).
-        if Self.statKind(of: directory) == .present {
-            do {
-                try fileManager.removeItem(at: directory)
-                try synchronizer(rootDirectory, true)
-            } catch {
-                // Deletion failed: disqualify in place so the bytes can never serve, and fail
-                // closed. The durable intent plus this marker make the next pass reconcile.
-                try? Data([0x01]).write(
-                    to: directory.appendingPathComponent(Self.failedName), options: .atomic)
-                FileLog.shared.addMessage(
-                    "[VoiceSharing] queue removal reason=record-refused cause=\(cause) entry=\(entry.name) removed=false")
-                FileLog.shared.forceFlush()
-                throw PrepareError.accountingUnavailable
-            }
-        }
-        // 3. CONFIRM, then retire the intent.
-        guard Self.statKind(of: directory) == .absent else {
+    /// SPEC 1a0d3ffb (spec redirect 1bfba50f): a recording the server refuses permanently, or
+    /// that the client's own record check rejects, is deleted from the queue AT ONCE by routing
+    /// it through the SAME reconciled removal machinery as the owner-wide consent purge
+    /// (`reconciledRemovalLocked`: durable intent before mutation, mark-then-remove, survivor
+    /// re-disqualification, root barrier, intent retired only after full reconcile) — BOUNDED
+    /// to this one entry, with a PER-ENTRY hold: a refusal never sets the owner-wide hold, and
+    /// its failure never blocks other entries from serving.
+    private func purgeRefusedEntryLocked(_ entry: Entry, cause: String) throws {
+        let name = entry.name
+        let outcome = reconciledRemovalLocked(
+            targets: [name],
+            intentPath: deletionIntentPathLocked(name),
+            removalReason: "record-refused-purge cause=\(cause)",
+            setHold: { held, _ in
+                if held { refusedIntentNamesLocked.insert(name) }
+                else { refusedIntentNamesLocked.remove(name) }
+            })
+        guard case .reconciled = outcome else {
+            refusedIntentNamesLocked.insert(name) // KNOWN: the intent is on disk
             throw PrepareError.accountingUnavailable
         }
-        try? fileManager.removeItem(at: intentURL)
-        try? synchronizer(rootDirectory, true)
         bumpHoldGenerationForContentChange()
-        FileLog.shared.addMessage(
-            "[VoiceSharing] queue removal reason=record-refused cause=\(cause) entry=\(entry.name) removed=true")
-        // FORCE THE FLUSH (FileLog buffers 100 entries): a removal line must be on disk
-        // before the process can be terminated, or the diagnosis dies with it.
-        FileLog.shared.forceFlush()
+    }
+
+    /// Durable per-entry deletion intent. Written, retired, and discovered by the EXISTING
+    /// durable helpers (failureRecordWriter + synchronizer + bounded root listing): discovery
+    /// lands in `refusedIntentNamesLocked` at recovery, and the serving sweep retries the
+    /// scoped purge for every held entry automatically.
+    static let deletionIntentPrefix = "deletion.intent."
+    private var refusedIntentNamesLocked: Set<String> = []
+    private func deletionIntentPathLocked(_ name: String) -> URL {
+        rootDirectory.appendingPathComponent("\(Self.deletionIntentPrefix)\(name)")
+    }
+
+    /// Discovers durable per-entry refusal intents into the per-entry hold. Uses the BOUNDED
+    /// root listing; a listing failure or overflow cannot account the root, so it falls back to
+    /// the owner-wide unknown-origin hold (fail closed, house standard for unaccountable roots).
+    private func discoverRefusalIntentsLocked() {
+        do {
+            let (urls, overflowed) = try listDirectoryBounded(rootDirectory, [], Self.maxDirectoryEntries)
+            guard !overflowed else { setRevocationHold(true, originUnknown: true); return }
+            for url in urls {
+                let name = url.lastPathComponent
+                guard name.hasPrefix(Self.deletionIntentPrefix) else { continue }
+                let entryName = String(name.dropFirst(Self.deletionIntentPrefix.count))
+                if UUID(uuidString: entryName) != nil {
+                    refusedIntentNamesLocked.insert(entryName) // KNOWN: the intent is on disk
+                }
+            }
+        } catch {
+            setRevocationHold(true, originUnknown: true)
+        }
     }
 
     // MARK: Internals (all called on serialQueue)
@@ -3167,6 +3198,11 @@ final class VoiceSharingUploadQueue {
         case .absent: retryHoldLocked = false
         case .failure: retryHoldLocked = true // unknown ⇒ hold
         }
+        // DURABLE PER-ENTRY REFUSAL INTENTS (spec 1bfba50f): discovered into the per-entry
+        // hold via the BOUNDED root listing; the serving sweeps retry each held entry's
+        // scoped purge automatically.
+        refusedIntentNamesLocked.removeAll()
+        discoverRefusalIntentsLocked()
         var complete: [(entry: Entry, readyDate: Date)] = []
         for entry in entriesLocked() {
             let directory = entryDirectoryLocked(for: entry)
