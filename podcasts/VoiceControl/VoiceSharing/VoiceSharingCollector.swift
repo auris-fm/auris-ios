@@ -797,6 +797,25 @@ return }
             deferredOrder: terminalSequence)
         while terminalRing.count > 32 || aggregateAudioSamples > Self.maxAggregateRetainedSamples {
             guard let oldest = terminalRing.first else { break }
+            // NO-SILENT-LOSS (spec defect d6580187): a record that is neither emitted nor
+            // marked non-contribution is REAL work — evicting it used to cancel its outcome
+            // deadline and discard its audio with no record and no log, so a capture could be
+            // lost forever purely because newer captures pressed the ring. Such a record is
+            // now SUBMITTED through the normal sink path at eviction (audio rides with the
+            // event; the deadline is cancelled so it can never emit twice).
+            if !oldest.value.emitted, !oldest.value.noContribution {
+                var evicted = oldest.value.capture
+                evicted.terminal = true
+                aggregateAudioSamples -= evicted.retained.count
+                cancelOutcomeDeadlineLocked(oldest.key)
+                terminalRing.removeValue(forKey: oldest.key)
+                let event = makeEvent(kind: .completed, from: evicted)
+                let captureID = evicted.id
+                FileLog.shared.addMessage(
+                    "[VoiceSharing] capture emitted at ring pressure capture=\(captureID.uuidString)")
+                workQueue.async { [weak self] in self?.submit(event) }
+                continue
+            }
             aggregateAudioSamples -= oldest.value.capture.retained.count
             cancelOutcomeDeadlineLocked(oldest.key)
             terminalRing.removeValue(forKey: oldest.key)
