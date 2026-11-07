@@ -4036,32 +4036,73 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
                        "the intent is retired after reconciliation")
     }
 
-    /// ITEM 1, retirement-barrier containment: a root-barrier fault AFTER the retirement
-    /// removal neither crashes discovery nor resurrects the orphan, and the next
-    /// reconstruction is clean.
+    /// ITEM 1, retirement-barrier containment (reviewer 243ef92d): a root-barrier fault AFTER
+    /// the retirement removal is contained, absence alone never releases the hold — the barrier
+    /// is RETRIED on the next pass while it stays faulted — and once the fault lifts, the
+    /// retirement is confirmed (barrier succeeds, hold released).
     func test_anOrphanIntentRetirementBarrierFailureIsContained() throws {
         try FileManager.default.createDirectory(at: entryRoot, withIntermediateDirectories: true)
         let intentName = "deletion.intent.22222222-3333-4444-5555-666666666666"
         try Data([0x01]).write(to: entryRoot.appendingPathComponent(intentName), options: .atomic)
+        let intentPath = entryRoot.appendingPathComponent(intentName).path
         let rootPath = entryRoot.path
-        let faulted = VoiceSharingUploadQueue(
-            rootDirectory: entryRoot,
-            synchronizer: { path, isDirectory in
-                if isDirectory && path.path == rootPath
-                    && !FileManager.default.fileExists(atPath: rootPath + "/" + intentName) {
-                    throw NSError(domain: "test-barrier", code: 3)
-                }
-                try VoiceSharingUploadQueue.testSynchronizer(path: path, isDirectory: isDirectory)
-            })
-        guard case .known(let ready) = faulted.readyEntriesReportingUnknownCoverage() else {
+        let counter = BarrierCounter()
+        var barrierFaulted = true
+        var faulted: VoiceSharingUploadQueue {
+            VoiceSharingUploadQueue(
+                rootDirectory: entryRoot,
+                synchronizer: { [weak counter] path, isDirectory in
+                    if isDirectory && path.path == rootPath {
+                        counter?.count += 1
+                        if barrierFaulted
+                            && !FileManager.default.fileExists(atPath: intentPath) {
+                            throw NSError(domain: "test-barrier", code: 3)
+                        }
+                    }
+                    try VoiceSharingUploadQueue.testSynchronizer(path: path, isDirectory: isDirectory)
+                })
+        }
+
+        // Both faulted passes run on the SAME instance: the serving sweep must retry the
+        // absent-entry reconciliation while the hold lives in that instance's recovery state.
+        let faultedQueue = faulted
+
+        // Pass 1: removal succeeds, the barrier fails — contained, nothing served.
+        let beforeFirst = counter.count
+        guard case .known(let ready1) = faultedQueue.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("retirement-barrier failure is contained")
         }
-        XCTAssertTrue(ready.isEmpty)
+        XCTAssertTrue(ready1.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: intentPath),
+                       "the record itself is removed before the barrier")
+        XCTAssertGreaterThan(counter.count, beforeFirst,
+                             "pass 1 attempted the root barrier confirmation")
+
+        // Pass 2: the barrier is STILL faulted. Absence alone is not durable retirement:
+        // the barrier must be retried and the hold must stay.
+        let beforeSecond = counter.count
+        guard case .known(let ready2) = faultedQueue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("the retry pass is contained too")
+        }
+        XCTAssertTrue(ready2.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: intentPath))
+        XCTAssertGreaterThan(counter.count, beforeSecond,
+                             "absence alone never releases the hold: the barrier is retried from serving")
+
+        // Pass 3: the fault lifts — the retirement is confirmed through the barrier.
+        barrierFaulted = false
         let reborn = makeQueue()
         guard case .known(let readyReborn) = reborn.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("reconstruction coverage known")
         }
         XCTAssertTrue(readyReborn.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: intentPath),
+                       "the retirement stays retired")
+    }
+
+    /// Reference box for the barrier-attempt probe (classes capture mutably in escapes).
+    final class BarrierCounter: @unchecked Sendable {
+        var count = 0
     }
 
     /// ITEM 2: a bindable survivor whose deletion intent cannot be confirmed never serves,

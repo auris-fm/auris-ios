@@ -2557,6 +2557,10 @@ final class VoiceSharingUploadQueue {
     func readyEntriesReportingUnknownCoverage() -> ReadyDiscovery {
         serialQueue.sync {
             guard (try? establishStoragePolicyLocked()) != nil else { return .unknownCoverage }
+            // Reviewer 243ef92d: an absent-entry intent whose retirement failed (e.g. the root
+            // barrier after a successful removal) is retried at EVERY serving pass, not only at
+            // recovery — the sweeps visit existing entries only, so the reconciler runs here.
+            reconcileRefusalIntentsLocked()
             // OWNER-WIDE HOLD: an unreconciled purge means the on-disk set is not provable, so
             // NOTHING may serve. Reported as unknown coverage (the same all-or-nothing channel
             // every caller already handles), never as an empty known set.
@@ -2680,6 +2684,8 @@ final class VoiceSharingUploadQueue {
     func readyEntries() -> [Entry] {
         serialQueue.sync {
             guard (try? establishStoragePolicyLocked()) != nil else { return [] }
+            // Reviewer 243ef92d: retry absent-entry intent reconciliation from serving too.
+            reconcileRefusalIntentsLocked()
             // LEGACY serving path also honors the owner-wide hold (reviewer 35e67a87): an empty
             // list, never a stale one — this path has no unknown-coverage channel. ADOPTION
             // (ce001b9a follow-through): it honors the retry hold too — a failed attempt barrier
@@ -2865,10 +2871,21 @@ final class VoiceSharingUploadQueue {
             let entry = Entry(root: rootDirectory, name: name)
             guard Self.statKind(of: entryDirectoryLocked(for: entry)) == .absent else { continue }
             let intentPath = deletionIntentPathLocked(name)
+            // Reviewer 243ef92d: absence alone is NOT durable retirement — it is exactly the
+            // state left when a prior pass removed the record but its root barrier failed.
+            // Visibility is confirmed only by the root barrier; until it succeeds the hold stays.
             if Self.statKind(of: intentPath) == .absent {
-                // Already retired (e.g. a prior pass's barrier failed after the removal):
-                // absence is the confirmation; release the hold.
-                refusedIntentNamesLocked.remove(name)
+                do {
+                    try synchronizer(rootDirectory, true)
+                    refusedIntentNamesLocked.remove(name)
+                    FileLog.shared.addMessage(
+                        "[VoiceSharing] queue removal reason=record-refused-intent-retired entry=\(name)")
+                    FileLog.shared.forceFlush()
+                } catch {
+                    FileLog.shared.addMessage(
+                        "[VoiceSharing] queue removal reason=record-refused-intent-retire-failed entry=\(name)")
+                    FileLog.shared.forceFlush()
+                }
                 continue
             }
             do {
