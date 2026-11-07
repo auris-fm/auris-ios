@@ -109,6 +109,64 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
             "the publication's drain must reach the transport with no lifecycle event")
     }
 
+    /// SPEC DEFECT d6580187, fix 1: a pass that ends with every entry behind its not-before
+    /// boundary must produce a second drain AT the boundary, with NO lifecycle event and NO new
+    /// entry — the 503-retry stall on the owner simulator (uploader idle since 10:00:21Z while
+    /// the retry was due at 10:00:26Z) is exactly this missing wake. Red on the parent: after
+    /// the first idle pass, nothing ever re-offers and the transport is never reached.
+    func test_aRetryBoundaryWakesTheTriggerWithoutAnyLifecycleEvent() async throws {
+        let sink = VoiceSharingContributionSink(
+            queue: queue, isEnabled: { self.enabled },
+            encoderProvenance: { [self] in provenance }, observations: { [self] in observations })
+        lastSink = sink
+        sink.handle(event())
+        drain()
+        // Premise: one durably ready entry exists.
+        guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage(),
+            ready.count == 1 else {
+            return XCTFail("premise: publication produced no ready entry")
+        }
+        let entryName = ready[0].name
+        // Hold it behind a retry boundary 0.5s out (the persisted not-before stamp).
+        let stamp = Date().addingTimeInterval(0.5).timeIntervalSince1970
+        try JSONSerialization.data(withJSONObject: ["notBefore": stamp])
+            .write(to: root.appendingPathComponent("attempt.notbefore.\(entryName)"), options: .atomic)
+
+        let transportCalls = TransportCallBox()
+        let uploader = VoiceSharingUploader(
+            queue: queue,
+            retryPolicy: VoiceSharingRetryPolicy(retryBaseDelay: 1, retryMaximumDelay: 60, random: { 0 }),
+            isAuthorized: { true }, currentIdentity: { nil },
+            endpoint: { URL(string: "https://unit.test/api/v1/voice-recordings") },
+            transport: { _, _, _ in
+                await transportCalls.record()
+                return .response(statusCode: 503, body: Data())
+            })
+        let scheduler = VoiceSharingUploadScheduler(queue: queue, uploader: uploader,
+                                                    isAuthorized: { true })
+        let trigger = VoiceSharingUploadTrigger(
+            scheduler: scheduler, surfaceEnabled: { true }, isAuthorized: { true })
+
+        // Pass 1: a real trigger call, no lifecycle event afterwards. The entry is behind the
+        // boundary, so this pass is idle and reaches nothing.
+        trigger.triggerDrainIfPermitted()
+        await trigger.awaitDrainCompletionForTesting()
+        let afterIdlePass = await transportCalls.count()
+        XCTAssertEqual(afterIdlePass, 0, "premise: the boundary pass sends nothing")
+
+        // THE FIX: one bounded wake armed from the boundary must re-offer and run the due entry —
+        // with no foreground event, no network change, and no new publication. Observed over a
+        // bounded window so the control also compiles (and fails) without the fix.
+        let deadline = ContinuousClock.now + .seconds(4)
+        var reached = await transportCalls.count()
+        while reached == 0 && ContinuousClock.now < deadline {
+            try await Task.sleep(nanoseconds: 100_000_000)
+            reached = await transportCalls.count()
+        }
+        XCTAssertGreaterThanOrEqual(reached, 1,
+            "the retry boundary wake must run the due entry with no lifecycle event")
+    }
+
     final class TransportCallBox {
         private let lock = NSLock()
         private var calls = 0

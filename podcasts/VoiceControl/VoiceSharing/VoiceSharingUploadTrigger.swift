@@ -40,6 +40,13 @@ final class VoiceSharingUploadTrigger {
     /// Set when the current drain was refused, so its continuation re-offers rather than counting
     /// as a completed pass.
     private var drainWasRefused = false
+    /// THE ONE BOUNDED RETRY WAKE (spec defect d6580187). A pass that ends with every entry
+    /// behind its not-before boundary used to leave the trigger idle forever — the scheduler
+    /// contract delegates "retry boundary passing" to callers and no caller implemented it, so a
+    /// 503 retry due at T never ran unless a lifecycle event happened to land later. One wake is
+    /// armed per completed pass from the queue's earliest outstanding boundary; a real trigger
+    /// (foreground, network, finalize) supersedes it.
+    private var retryWakeTaskStorage: Task<Void, Never>?
     /// CANCELLATION GENERATION (reviewer b8991889): bumped by every stop/cancel. A follow-up
     /// re-offer is admitted only if the generation that produced it is still current, checked
     /// ATOMICALLY WITH SLOT ADMISSION — so a stop landing between a completion and its re-offer
@@ -81,18 +88,30 @@ final class VoiceSharingUploadTrigger {
         pendingCompletionID = nil
         let task = drainTaskStorage
         drainTaskStorage = nil
+        let wake = retryWakeTaskStorage
+        retryWakeTaskStorage = nil
         drainInFlight = false
         activeToken = nil
         workPending = false
         stateLock.unlock()
         if let completionID { scheduler.cancelOwnerCompletion(completionID) }
         task?.cancel()
+        wake?.cancel()
     }
 
     /// Test seam: await the current drain (used by controls that must observe the FOLLOW-UP pass
     /// started automatically on completion).
     func awaitCurrentDrainForTesting() async {
         let task = drainTask
+        await task?.value
+    }
+
+    /// Test seam: await the armed retry wake (nil when none is armed), so a control observes the
+    /// boundary re-offer deterministically instead of polling.
+    func awaitRetryWakeForTesting() async {
+        stateLock.lock()
+        let task = retryWakeTaskStorage
+        stateLock.unlock()
         await task?.value
     }
 
@@ -173,9 +192,12 @@ final class VoiceSharingUploadTrigger {
         activeToken = nil
         let task = drainTaskStorage
         drainTaskStorage = nil
+        let wake = retryWakeTaskStorage
+        retryWakeTaskStorage = nil
         stateLock.unlock()
         if let completionID { scheduler.cancelOwnerCompletion(completionID) }
         task?.cancel()
+        wake?.cancel()
     }
 
     /// The guarded entry a lifecycle event reaches. Also callable directly (background task
@@ -218,7 +240,10 @@ final class VoiceSharingUploadTrigger {
         workPending = false
         let token = UUID()
         activeToken = token
+        let staleWake = retryWakeTaskStorage
+        retryWakeTaskStorage = nil
         stateLock.unlock()
+        staleWake?.cancel()
         startDrain(token: token)
     }
 
@@ -353,7 +378,44 @@ final class VoiceSharingUploadTrigger {
         stateLock.unlock()
         if pending || refused {
             triggerDrainIfPermitted(matchingGeneration: generation)
+        } else {
+            scheduleRetryWakeIfIdle(generation: generation)
         }
+    }
+
+    /// Arms the single bounded retry wake after a pass that re-offered nothing: if the queue
+    /// still holds an outstanding not-before boundary, exactly one wake fires there through the
+    /// SAME gates and generation. A boundary read that cannot be accounted reports 0 and the
+    /// wake runs immediately — the next pass re-checks admission fail-closed, so an early or
+    /// extra wake can never send anything that is not due.
+    private func scheduleRetryWakeIfIdle(generation: Int) {
+        stateLock.lock()
+        let existing = retryWakeTaskStorage
+        retryWakeTaskStorage = nil
+        stateLock.unlock()
+        existing?.cancel()
+        guard let delay = scheduler.secondsUntilNextRetryBoundary else { return }
+        stateLock.lock()
+        // Arm only between eras: a slot that is already owned by a live drain needs no wake —
+        // that drain's own completion re-arms or re-offers.
+        guard activeToken == nil else {
+            stateLock.unlock()
+            return
+        }
+        let wake = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(max(0, delay) * 1_000_000_000))
+            guard let self, !Task.isCancelled else { return }
+            self.stateLock.lock()
+            let currentGeneration = self.stopGeneration
+            self.stateLock.unlock()
+            guard currentGeneration == generation else { return }
+            FileLog.shared.addMessage("[VoiceSharing] drain re-offered: retry boundary reached")
+            self.triggerDrainIfPermitted(matchingGeneration: generation)
+        }
+        retryWakeTaskStorage = wake
+        stateLock.unlock()
+        FileLog.shared.addMessage(
+            "[VoiceSharing] retry wake armed in \(Int(delay.rounded()))s (no other wake exists)")
     }
 
     @objc private func appBecameActive() {

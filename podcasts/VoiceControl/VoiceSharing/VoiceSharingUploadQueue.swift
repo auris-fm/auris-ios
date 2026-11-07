@@ -391,6 +391,31 @@ final class VoiceSharingUploadQueue {
     /// Seconds until the NEXT entry crosses the age bound, so a timely refresh can be scheduled
     /// instead of the displayed count silently going stale on an idle screen (reviewer ffca9a27).
     /// `nil` when nothing is waiting on time.
+    /// The earliest outstanding retry boundary, for the upload trigger's ONE bounded wake
+    /// (spec defect d6580187): a pass that ends with every entry behind its not-before boundary
+    /// has no other wake — the scheduler contract explicitly delegates the "retry boundary
+    /// passing" re-invoke to callers. Nil = no outstanding boundary. An unaccountable root
+    /// (listing failure/overflow) or an unparseable stamp reports 0 — wake now; admission
+    /// re-checks everything fail-closed, so an early wake can never send anything prematurely.
+    func secondsUntilNextRetryBoundary() -> TimeInterval? {
+        serialQueue.sync {
+            guard let listed = try? listDirectoryBounded(rootDirectory, [], Self.maxDirectoryEntries),
+                !listed.overflowed else { return 0 }
+            var earliest: TimeInterval?
+            let now = clock().timeIntervalSince1970
+            for url in listed.urls where url.lastPathComponent.hasPrefix(Self.notBeforePrefix) {
+                guard UUID(uuidString: String(url.lastPathComponent.dropFirst(Self.notBeforePrefix.count))) != nil,
+                    let size = fileSizeIfRegularLocked(at: url), size.isRegular,
+                    size.bytes > 0, size.bytes <= Self.maxSettlementRecordBytes,
+                    let data = try? Data(contentsOf: url),
+                    let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                    let stamp = object["notBefore"] as? Double, stamp.isFinite else { return 0 }
+                earliest = min(earliest ?? .infinity, max(0, stamp - now))
+            }
+            return earliest
+        }
+    }
+
     func secondsUntilNextAgeBoundary() -> TimeInterval? {
         serialQueue.sync {
             let ages = entriesLocked()
