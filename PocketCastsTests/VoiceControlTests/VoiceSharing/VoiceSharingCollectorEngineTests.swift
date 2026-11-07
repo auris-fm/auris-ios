@@ -481,6 +481,46 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
     /// inferred from absence, which is not evidence anyone can act on. This control drives the
     /// production refusal and requires its fixed reason line, AND requires the collector's own
     /// counters to show the segment was SEEN but not EMITTED.
+    /// REVIEWER 43f457ab finding 3: `capturesEmittedCount` counts each CONTRIBUTION once — a
+    /// completed segment and a REJECTED one (wake or bleed) are both recorded contributions that
+    /// reach the sink, so both count; `.started` and a cancellation are not contributions and must
+    /// not move the counter. Red on a7c500657, which counted `.completed` only and silently
+    /// under-counted every rejected segment.
+    func test_theEmittedCounterCountsCompletedAndRejectedContributionsOnceEach() throws {
+        var delivered: [VoiceSharingCollector.SignalKind] = []
+        let collector = VoiceSharingCollector(
+            isCollectionPermitted: { true },
+            membership: { VoiceSharingEnrollmentStore.State() },
+            epochProvider: { "test-epoch" },
+            sessionIdentity: { "sess-1" },
+            sink: { event in delivered.append(event.kind) })
+        collector.deliversSynchronouslyForTesting = true
+
+        // A STARTED segment is not a contribution: it must not count.
+        let started = try XCTUnwrap(collector.speechStarted(confirmationFrameSamples: 1600))
+        XCTAssertEqual(collector.capturesEmittedCount, 0, "a start is not a contribution")
+        // Withdraw it so the rejected controls below start from a clean capture slot.
+        collector.speechCancelled()
+        XCTAssertEqual(collector.capturesEmittedCount, 0, "a cancellation is not a contribution")
+
+        // A WAKE REJECTION is recorded: exactly one contribution.
+        let wake = try XCTUnwrap(collector.speechStarted(confirmationFrameSamples: 1600))
+        collector.segmentRejected(kind: .rejectedWake, samples: 1600, context: wake)
+        XCTAssertEqual(collector.capturesEmittedCount, 1, "a wake rejection is one contribution")
+
+        // A BLEED REJECTION likewise.
+        let bleed = try XCTUnwrap(collector.speechStarted(confirmationFrameSamples: 1600))
+        collector.segmentRejected(kind: .rejectedBleed, samples: 1600, context: bleed)
+        XCTAssertEqual(collector.capturesEmittedCount, 2, "a bleed rejection is one contribution")
+
+        XCTAssertEqual(delivered.filter { $0 == .rejectedWake || $0 == .rejectedBleed },
+                       [.rejectedWake, .rejectedBleed],
+                       "premise: both rejections really reached the sink")
+        XCTAssertEqual(collector.segmentsSeenCount, 3,
+                       "three segments were seen; two became contributions")
+        _ = started
+    }
+
     func test_aRefusedSegmentProducesItsReasonLineAndLeavesTheCountersMoved() async throws {
         var permitted = true
         let collector = VoiceSharingCollector(
