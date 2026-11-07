@@ -1163,13 +1163,18 @@ return }
     private func deliverUnderSinkOwnership(_ event: SegmentEvent) {
         let n = event.audio.count
         lock.lock()
-        // Reviewer 34aae0fa (4): count CONTRIBUTIONS, not events. The sink ignores `.started`, so
-        // counting every non-gate-control event counted one segment twice (start then completion)
-        // before a single contribution existed. A completed segment is the thing that can become a
-        // contribution; a cancelled one is a disposal record and is not counted as emitted.
-        if event.kind == .completed {
+        // Reviewer 34aae0fa (4) + 43f457ab finding 3: count CONTRIBUTIONS, not events. The sink
+        // ignores `.started`, so counting every non-gate-control event counted one segment twice
+        // (start then completion) before a single contribution existed. A COMPLETED segment and a
+        // REJECTED one (wake or bleed) both reach the sink as a contribution record — a rejected
+        // segment is recorded, not discarded — so both count, exactly once each. `.started` and the
+        // cancellation kinds are not contributions and are not counted.
+        switch event.kind {
+        case .completed, .rejectedWake, .rejectedBleed:
             capturesEmittedCount += 1
             logDecisionProgressLocked()
+        case .started, .cancelled:
+            break
         }
         inFlightSinkAudioSamples += n
         lock.unlock()

@@ -257,7 +257,7 @@ final class VoiceSharingUploadTrigger {
     /// Called only from the permitted gate path — a closed gate already purges wholesale, and
     /// deleting on behalf of an unauthorized surface would be a removal nobody asked for.
     private func expireAgedOutRecordings() async {
-        scheduler.expireAgedOutRecordings()
+        _ = scheduler.expireAgedOutRecordings()
     }
 
     /// One drain, then a COALESCED follow-up if work arrived while it ran or if the scheduler was

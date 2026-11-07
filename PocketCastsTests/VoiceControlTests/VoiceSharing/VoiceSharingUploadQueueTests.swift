@@ -35,8 +35,9 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         root = nil
     }
 
-    private func makeQueue(fileManager: FileManager = .default) -> VoiceSharingUploadQueue {
-        VoiceSharingUploadQueue(rootDirectory: root, fileManager: fileManager)
+    private func makeQueue(fileManager: FileManager = .default,
+                           clock: @escaping () -> Date = Date.init) -> VoiceSharingUploadQueue {
+        VoiceSharingUploadQueue(rootDirectory: root, fileManager: fileManager, clock: clock)
     }
 
     private func temporaryRoot() -> URL {
@@ -3002,36 +3003,66 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                       "nothing may be deleted for having failed many times")
     }
 
-    /// REVIEWER 34aae0fa item 3: retention DELETES in the running process, not only at
-    /// reconstruction. On f3f5f70ec the age bound was visibility-only: the expired entry stopped
-    /// serving but its bytes stayed on disk until a fresh queue swept them, which a resident
-    /// process never does. This drives the live sweep on the SAME instance. RED before it existed
-    /// (file still present after the sweep).
+    /// REVIEWER 34aae0fa item 3 + 43f457ab finding 2: retention DELETES in the running process, and
+    /// the boundary is EXACT. A FIXED injected clock makes the edge observable instead of rounded
+    /// away by wall time — the previous control subtracted an extra second, so it tested seven days
+    /// plus one second and could not see whether the boundary itself expired.
     func test_theLiveSweepDeletesAnEntryAtExactlyTheSevenDayBound() throws {
-        let q = makeQueue()
+        let fixedNow = Date(timeIntervalSince1970: 1_800_000_000)
+        let q = makeQueue(clock: { fixedNow })
         _ = try prepareAndFinalize(q, metadata: validRecord(audio: audioA), audio: audioA)
         let entryDir = try soleEntryDirectory()
-        XCTAssertEqual(q.readyEntries().count, 1, "premise: one served entry")
-        // EXACTLY at the bound: `maxEntryAge` is the inclusive edge of serving, so a recording not
-        // accepted within seven days of capture is deleted.
-        let atBound = Date().timeIntervalSince1970 - VoiceSharingUploadQueue.maxEntryAge - 1
-        try String(String(atBound)).write(
-            to: entryDir.appendingPathComponent("created.at"), atomically: true, encoding: .utf8)
-        XCTAssertEqual(q.expireAgedOutEntries(), 1, "the live sweep removes the aged-out entry")
+        let createdURL = entryDir.appendingPathComponent("created.at")
+        // JUST BEFORE the bound: one second inside, it must SURVIVE — so the control cannot pass by
+        // deleting everything.
+        try String(String(fixedNow.timeIntervalSince1970 - VoiceSharingUploadQueue.maxEntryAge + 1))
+            .write(to: createdURL, atomically: true, encoding: .utf8)
+        XCTAssertEqual(q.readyEntries().count, 1, "one second inside the bound still serves")
+        XCTAssertEqual(q.expireAgedOutEntries(), 0, "one second inside the bound is not expired")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: entryDir.path))
+
+        // EXACTLY at the bound: `maxEntryAge` seconds after capture, it is deleted.
+        try String(String(fixedNow.timeIntervalSince1970 - VoiceSharingUploadQueue.maxEntryAge))
+            .write(to: createdURL, atomically: true, encoding: .utf8)
+        XCTAssertEqual(q.expireAgedOutEntries(), 1, "AT the bound the recording is deleted")
         XCTAssertFalse(FileManager.default.fileExists(atPath: entryDir.path),
                        "the expired recording's files are GONE from this instance, not just hidden")
-        // ACCOUNTING RELEASED: the entry no longer occupies a queue slot, and its deletion intent
-        // is RETIRED with a root barrier rather than left behind (absence alone is not durable
-        // retirement, reviewer 243ef92d).
         XCTAssertEqual(q.readyEntries().count, 0, "expiry releases the entry's queue slot")
         XCTAssertFalse(FileManager.default.fileExists(
             atPath: q.expiredIntentPathForTesting(name: entryDir.lastPathComponent)),
             "the deletion intent is retired with a root barrier, not left dangling")
     }
 
-    /// The live sweep must not delete on an UNRESOLVED age: a future or unreadable instant is not
-    /// evidence of expiry, and deletion is the one irreversible mistake available here.
-    func test_theLiveSweepNeverDeletesOnAnUnreadableOrFutureInstant() throws {
+    /// REVIEWER 43f457ab finding 1: destructive expiry needs PROVEN absence. An unreadable stage or
+    /// disqualifier must not be read as "not present" — that deletes a recording whose retained
+    /// state merely could not be read. The entry is left alone for a later pass, like every other
+    /// unknown state in this queue.
+    func test_expiryRefusesToDeleteWhenThePublicationStageIsUnreadable() throws {
+        let q = makeQueue()
+        _ = try prepareAndFinalize(q, metadata: validRecord(audio: audioA), audio: audioA)
+        let entryDir = try soleEntryDirectory()
+        try String(String(Date().timeIntervalSince1970 - VoiceSharingUploadQueue.maxEntryAge - 60))
+            .write(to: entryDir.appendingPathComponent("created.at"),
+                   atomically: true, encoding: .utf8)
+        // A PUBLICATION PLANE THAT CANNOT BE READ: a directory where the stage file belongs is
+        // present-but-not-decodable, so its absence is not proven.
+        let stage = entryDir.appendingPathComponent("stage.publishing")
+        try FileManager.default.createDirectory(at: stage, withIntermediateDirectories: false)
+        XCTAssertEqual(q.expireAgedOutEntries(), 0,
+                       "an unreadable publication plane is not proof of absence")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: entryDir.path),
+                      "the recording and its charge survive an unreadable stage")
+        // With the plane PROVEN absent, expiry proceeds — so the control is not passing by never
+        // expiring at all.
+        try FileManager.default.removeItem(at: stage)
+        XCTAssertEqual(q.expireAgedOutEntries(), 1, "with the plane gone, expiry proceeds")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: entryDir.path))
+    }
+
+    /// The live sweep must not delete on an UNRESOLVED age: a FUTURE instant is not evidence of
+    /// expiry. (An unreadable instant takes the AGE_RESET route instead — see the age-reset
+    /// controls below — so this control covers the future case, which retirement may not act on.)
+    func test_theLiveSweepNeverDeletesOnAFutureInstant() throws {
         let q = makeQueue()
         _ = try prepareAndFinalize(q, metadata: validRecord(audio: audioA), audio: audioA)
         let entryDir = try soleEntryDirectory()
@@ -3039,12 +3070,62 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         try String(String(future)).write(
             to: entryDir.appendingPathComponent("created.at"), atomically: true, encoding: .utf8)
         XCTAssertEqual(q.expireAgedOutEntries(), 0, "a future instant is not expiry")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: entryDir.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: entryDir.path),
+                      "a future instant must never delete a recording")
+    }
+
+    /// SPEC (Android parity, untrusted age): a MISSING, unreadable or FUTURE capture instant on an
+    /// otherwise complete recording is RESET to now and PERSISTED, counted with a reason line, and
+    /// the recording is SERVED. The previous rule ("never expired") kept a future-dated entry
+    /// forever: it never served and never aged out, so it sat in the queue permanently. RED before
+    /// the reset existed — the future-dated entry is not served and the sweep leaves it in place.
+    func test_aFutureCaptureInstantIsResetToNowPersistedAndServed() throws {
+        let q = makeQueue()
+        _ = try prepareAndFinalize(q, metadata: validRecord(audio: audioA), audio: audioA)
+        let entryDir = try soleEntryDirectory()
+        let future = Date().timeIntervalSince1970 + 30 * 24 * 60 * 60
+        try String(String(future)).write(
+            to: entryDir.appendingPathComponent("created.at"), atomically: true, encoding: .utf8)
+        XCTAssertEqual(q.ageResetCountForTesting, 0, "premise: no reset has run yet")
+
+        // The live pass applies the untrusted-age rule.
+        XCTAssertEqual(q.expireAgedOutEntries(), 0, "a reset entry is fresh, not expired")
+        XCTAssertEqual(q.ageResetCountForTesting, 1, "the untrusted instant is counted (AGE_RESET)")
+        let rewritten = try String(
+            contentsOf: entryDir.appendingPathComponent("created.at"), encoding: .utf8)
+        let now = Date().timeIntervalSince1970
+        let stored = try XCTUnwrap(TimeInterval(rewritten))
+        XCTAssertLessThan(abs(stored - now), 60, "the instant is PERSISTED as now")
+        XCTAssertEqual(q.readyEntries().count, 1, "the recording is SERVED after the reset")
+    }
+
+    /// The reset is PERSISTED, so it holds for a fresh instance too — not just in memory.
+    func test_theAgeResetSurvivesAReconstruction() throws {
+        var q = makeQueue()
+        _ = try prepareAndFinalize(q, metadata: validRecord(audio: audioA), audio: audioA)
+        let entryDir = try soleEntryDirectory()
+        try String(String(Date().timeIntervalSince1970 + 3600)).write(
+            to: entryDir.appendingPathComponent("created.at"), atomically: true, encoding: .utf8)
+        _ = q.expireAgedOutEntries()
+        XCTAssertEqual(q.ageResetCountForTesting, 1)
+        q = makeQueue() // fresh instance re-reads the persisted instant
+        XCTAssertEqual(q.readyEntries().count, 1,
+                       "the reset instant is on disk, not only in the resetting instance")
+    }
+
+    /// A MISSING or unreadable instant takes the same route (Android parity): reset to now and
+    /// serve, rather than leaving the recording permanently unservable.
+    func test_anUnreadableCaptureInstantIsAlsoResetAndServed() throws {
+        let q = makeQueue()
+        _ = try prepareAndFinalize(q, metadata: validRecord(audio: audioA), audio: audioA)
+        let entryDir = try soleEntryDirectory()
         try "not-a-number".write(
             to: entryDir.appendingPathComponent("created.at"), atomically: true, encoding: .utf8)
-        XCTAssertEqual(q.expireAgedOutEntries(), 0, "an unreadable instant is not expiry")
+        _ = q.expireAgedOutEntries()
+        XCTAssertEqual(q.ageResetCountForTesting, 1, "the unreadable instant is counted (AGE_RESET)")
+        XCTAssertEqual(q.readyEntries().count, 1, "the recording is served after the reset")
         XCTAssertTrue(FileManager.default.fileExists(atPath: entryDir.path),
-                      "an unreadable age must never delete a recording")
+                      "a recording with an untrusted age is reset, never deleted")
     }
 
     /// SPEC 05ff27d0: the backoff ceiling is ONE HOUR — retries must still be retries (bounded,

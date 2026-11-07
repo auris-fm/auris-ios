@@ -87,12 +87,22 @@ final class VoiceSharingUploadScheduler {
 
     private let queue: VoiceSharingUploadQueue
 
-    /// LIVE RETENTION (spec 05ff27d0, reviewer 34aae0fa item 3): apply the age bound by removing
-    /// expired recordings. Serialized behind one drain pass at a time so a deletion can never
-    /// interleave with a lease decision, and run OFF the caller's queue because it takes the
-    /// queue's state lock.
-    func expireAgedOutRecordings() {
-        _ = queue.expireAgedOutEntries()
+    /// LIVE RETENTION (spec 05ff27d0, reviewer 34aae0fa item 3, reviewer 43f457ab finding 1): apply
+    /// the age bound by removing expired recordings.
+    ///
+    /// IT TAKES THE PASS OWNERSHIP. The comment on this method used to claim serialization it did
+    /// not have — it called the queue directly, so an expiry could delete an entry while a pass was
+    /// mid-upload on it. Now it goes through the SAME `passInFlight` lock a drain takes: if a pass
+    /// owns the scheduler, expiry is REFUSED (reported as `.busy`) and the next pass applies it,
+    /// because the age bound is re-evaluated on every attempt.
+    @discardableResult
+    func expireAgedOutRecordings() -> Int {
+        guard passLock.withLockElse({ !passInFlight }, set: { passInFlight = true }) else {
+            return 0 // a pass owns the scheduler; the next one expires
+        }
+        defer { passLock.withLock { passInFlight = false } }
+        guard isAuthorized() else { return 0 }
+        return queue.expireAgedOutEntries()
     }
     private let uploader: VoiceSharingUploader
     private let isAuthorized: () -> Bool
