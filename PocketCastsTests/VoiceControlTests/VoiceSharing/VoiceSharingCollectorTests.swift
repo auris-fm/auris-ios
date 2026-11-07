@@ -68,6 +68,13 @@ final class VoiceSharingCollectorTests: XCTestCase {
 
     /// SIMPLIFIED CONTRACT (spec 4afc6e43): the collector's single admission decision is the consent
     /// closure the assembly passes in. These helpers open and close exactly that closure.
+    private final class LockedBox {
+        private let lock = NSLock()
+        private var value = 0
+        func add(_ n: Int) { lock.lock(); value += n; lock.unlock() }
+        var value_: Int { lock.lock(); defer { lock.unlock() }; return value }
+    }
+
     private func activateLease() { gateOpen = true }
 
     private func enrolledState(_ enrolled: Bool) {
@@ -1047,8 +1054,18 @@ final class VoiceSharingCollectorTests: XCTestCase {
             collector.speechCompleted([Float](repeating: 1, count: 3_200),
                                       context: collector.currentCaptureContextForTesting)
         }
-        XCTAssertEqual(collector.overflowCount, 13,
-                       "exactly the over-bound captures are dropped and counted; none of them blocked")
+        // ea2964b3: ring-pressure evictions of unemitted records now legitimately occupy FIFO
+        // slots (they are real work in the same bounded handoff), shifting the over-bound count
+        // by however many eviction emissions the worker had already popped when it parked in the
+        // sink (a scheduling race, bounded by the eviction count). The INVARIANTS are exact: the
+        // FIFO never exceeded its cap, and every drop was counted, never blocked.
+        XCTAssertGreaterThanOrEqual(collector.overflowCount, 13,
+            "over-bound submissions are dropped and counted")
+        XCTAssertLessThanOrEqual(collector.overflowCount, 15,
+            "the drop count stays inside the eviction-emission bound")
+        XCTAssertLessThanOrEqual(collector.pendingCountForTesting,
+                                 VoiceSharingCollector.pendingSignalCapForTesting,
+            "the handoff FIFO is bounded")
 
         hold.signal()
     }
@@ -1224,6 +1241,48 @@ final class VoiceSharingCollectorTests: XCTestCase {
     /// The CONSENT CLOSURE is load-bearing on its own: with everything else open, only the closure
     /// can veto. Without this control a closed consent is caught redundantly by identity checks and
     /// never exercised.
+    /// REVIEWER ea2964b3 (2): ring-pressure emission must move through the bounded, accounted
+    /// handoff. With the sink worker BLOCKED, evictions fill the pending FIFO to its cap and
+    /// then DROP (counted and logged); retained audio stays inside the ledger, and withdrawal
+    /// disposal purges the queued work so nothing is delivered afterwards.
+    func test_blockedWorkerKeepsEvictionHandoffBoundedAndWithdrawalDisposesIt() {
+        activateLease()
+        enrolledState(true)
+        assertPremisesOpen()
+        let gate = DispatchSemaphore(value: 0)
+        let delivered = LockedBox()
+        let collector = makeCollector(sink: { _ in
+            gate.wait()
+            delivered.add(1)
+        })
+        // makeCollector defaults to synchronous delivery; the bounded handoff under test is the
+        // pending FIFO, which only exists on the async path.
+        collector.deliversSynchronouslyForTesting = false
+        let samples = [Float](repeating: 1, count: 3_200)
+        for _ in 0..<40 {
+            collector.speechStarted(confirmationFrameSamples: 320)
+            collector.appendSamples(samples, reportedTotal: 3_200)
+            collector.segmentationEnded(collector.currentCaptureContextForTesting)
+        }
+        // Give the work queue a bounded moment to block inside the first delivery.
+        Thread.sleep(forTimeInterval: 0.5)
+        let capped = VoiceSharingCollector.pendingSignalCapForTesting
+        XCTAssertLessThanOrEqual(collector.pendingCountForTesting, capped,
+            "the handoff FIFO is bounded even while the worker is blocked")
+        XCTAssertLessThan(collector.aggregateAudioSamplesForTesting,
+                          VoiceSharingCollector.maxAggregateRetainedSamples,
+            "retained audio stays inside the ledger under eviction pressure")
+        // Withdrawal disposal: queued (never delivered) work dies here.
+        collector.gateLost()
+        XCTAssertEqual(collector.pendingCountForTesting, 0, "withdrawal purges queued work")
+        XCTAssertEqual(collector.aggregateAudioSamplesForTesting, 0, "no audio survives withdrawal")
+        gate.signal()
+        gate.signal()
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertLessThanOrEqual(delivered.value_, 2,
+            "queued eviction work is disposed, not delivered after withdrawal")
+    }
+
     /// SPEC DEFECT d6580187, fix 2 (no-silent-loss): unemitted contributionable records under
     /// ring pressure used to be discarded by the eviction loop — deadline cancelled, audio
     /// dropped, no record, no log. A capture could be lost forever purely because newer

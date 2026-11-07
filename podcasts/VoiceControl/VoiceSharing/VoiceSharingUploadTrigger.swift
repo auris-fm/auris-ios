@@ -394,10 +394,11 @@ final class VoiceSharingUploadTrigger {
         retryWakeTaskStorage = nil
         stateLock.unlock()
         existing?.cancel()
-        guard let delay = scheduler.secondsUntilNextRetryBoundary, delay > 0.05 else { return }
-        // A non-positive boundary needs no wake: the pass that just completed already attempted
-        // (or was refused at) that boundary, and arming a 0s wake would hot-loop the ladder and
-        // burn the entry's attempt budget.
+        // Reviewer ea2964b3: arm for EVERY live boundary, including one closer than the schedule
+        // floor — a due-or-near boundary is real work and must produce a second pass. The floor
+        // only coalesces sub-50ms waits; each pass still makes progress (the due entry is
+        // attempted, or the boundary advances), so no hot loop.
+        guard let delay = scheduler.secondsUntilNextRetryBoundary else { return }
         stateLock.lock()
         // Arm only between eras: a slot that is already owned by a live drain needs no wake —
         // that drain's own completion re-arms or re-offers.
