@@ -37,13 +37,13 @@ final class VoiceSharingNameSchemaControls: XCTestCase {
 
     /// A wake-positive capture: the detector ran and measured a score above its threshold.
     private let wakePositiveObservations: [String: VoiceSharingContributionEncoder.StageOutcome] = [
-        "wake": .init(state: "completed", score: 0.941, threshold: 0.75),
+        "wake": .init(state: "completed", decision: "detected", score: 0.941, threshold: 0.75),
         "bleed": .init(state: "not_run", reason: "no_playback_reference"),
         "asr": .init(state: "completed", text: "Auris play the news", sourceLanguage: "en",
                      routerInput: "play the news"),
         "translation": .init(state: "not_run", reason: "no_text"),
         "routing": .init(state: "completed", predictedIntent: "play", predictedTool: "play"),
-        "execution": .init(state: "completed", outcome: "succeeded"),
+        "execution": .init(state: "completed", outcome: "success"),
     ]
 
     /// The encoded record's `observations.wake` block, read back out of the canonical JSON. "Encoded" is
@@ -81,7 +81,7 @@ final class VoiceSharingNameSchemaControls: XCTestCase {
                          routerInput: "play the news"),
             "translation": .init(state: "not_run", reason: "no_text"),
             "routing": .init(state: "completed", predictedIntent: "play", predictedTool: "play"),
-            "execution": .init(state: "completed", outcome: "succeeded"),
+            "execution": .init(state: "completed", outcome: "success"),
         ]
         let encoded = try VoiceSharingContributionEncoder.encode(
             event: event(wakeRequired: false), provenance: provenance, observations: observations)
@@ -126,11 +126,13 @@ final class VoiceSharingNameSchemaControls: XCTestCase {
     /// verdict amendment is not a second observation.
     func test_restatingTheDecisionKeepsTheMeasuredValues() throws {
         var observations = wakePositiveObservations
-        observations["wake"] = observations["wake"]?.withDecision("accepted")
+        // SERVER SCHEMA (GO review): the decision enum is {detected, rejected}, so the amendment
+        // restates with a schema token, not an invented one.
+        observations["wake"] = observations["wake"]?.withDecision("rejected")
         let encoded = try VoiceSharingContributionEncoder.encode(
             event: event(wakeRequired: true), provenance: provenance, observations: observations)
         let wake = try persistedWake(encoded)
-        XCTAssertEqual(wake["decision"] as? String, "accepted")
+        XCTAssertEqual(wake["decision"] as? String, "rejected")
         XCTAssertEqual(wake["score"] as? Double, 0.941)
         XCTAssertEqual(wake["threshold"] as? Double, 0.75)
     }

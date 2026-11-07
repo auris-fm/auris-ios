@@ -128,7 +128,7 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
     }
 
     private let observations: [String: VoiceSharingContributionEncoder.StageOutcome] = [
-        "wake": .init(state: "completed"),
+        "wake": .init(state: "completed", decision: "detected"),
         "bleed": .init(state: "not_run", reason: "no_playback_reference"),
         "asr": .init(state: "not_run", reason: "local_only_action"),
         "translation": .init(state: "not_run", reason: "no_text"),
@@ -146,6 +146,97 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
         XCTAssertEqual(bound.audioByteCount, encoded.wav.count)
         XCTAssertEqual(bound.audioSHA256,
                        SHA256.hash(data: encoded.wav).map { String(format: "%02x", $0) }.joined())
+    }
+
+    /// SERVER SCHEMA (GO review, spec 3ea6d5c5 + reviewer 39ac0771): the wire's execution-outcome
+    /// enum is {success, failure, refused, cancelled}, and a COMPLETED wake stage must carry
+    /// `decision` {detected, rejected}. Enumerated in the LOCAL binding so a routing token such as
+    /// `succeeded`/`executed`, or a decision-less completed wake, cannot self-validate here and
+    /// only fail at server intake.
+    func test_theLocalBindingEnumeratesTheWireExecutionOutcomeAndTheWakeDecision() throws {
+        func bindObservations(
+            _ observations: [String: VoiceSharingContributionEncoder.StageOutcome]
+        ) throws {
+            let encoded = try VoiceSharingContributionEncoder.encode(
+                event: event(), provenance: provenance, observations: observations)
+            _ = try VoiceSharingRecordBinding.bind(
+                envelope: encoded.metadataEnvelope, audio: encoded.wav)
+        }
+        func expectRefusal(
+            _ label: String, _ observations: [String: VoiceSharingContributionEncoder.StageOutcome],
+            path expectedPath: String, file: StaticString = #filePath, line: UInt = #line
+        ) throws {
+            // NOTE: encode runs its own bind self-check, so the refusal fires inside encode;
+            // the whole call must be inside the do block.
+            do {
+                let encoded = try VoiceSharingContributionEncoder.encode(
+                    event: event(), provenance: provenance, observations: observations)
+                _ = try VoiceSharingRecordBinding.bind(
+                    envelope: encoded.metadataEnvelope, audio: encoded.wav)
+                XCTFail("\(label): expected a binding refusal", file: file, line: line)
+            } catch let error as VoiceSharingRecordBinding.BindingError {
+                let path: String
+                switch error {
+                case .invalidField(let found, _): path = found
+                case .missingField(let found): path = found
+                case .unknownField(let found, _): path = found
+                default:
+                    return XCTFail("\(label): expected a field error, got \(error)", file: file, line: line)
+                }
+                XCTAssertTrue(path.hasPrefix(expectedPath),
+                              "\(label): expected refusal at \(expectedPath), got \(path)",
+                              file: file, line: line)
+            }
+        }
+
+        let detectedWake: [String: VoiceSharingContributionEncoder.StageOutcome] = [
+            "wake": .init(state: "completed", decision: "detected"),
+            "bleed": .init(state: "not_run", reason: "no_playback_reference"),
+            "asr": .init(state: "not_run", reason: "local_only_action"),
+            "translation": .init(state: "not_run", reason: "no_text"),
+            "routing": .init(state: "not_run", reason: "no_candidates"),
+        ]
+        // POSITIVE: every enumerated wire outcome binds.
+        for token in ["success", "failure", "refused", "cancelled"] {
+            var observations = detectedWake
+            observations["execution"] = .init(state: "completed", outcome: token)
+            try bindObservations(observations)
+        }
+        // POSITIVE: an ABSENT execution outcome (unobserved execution) still binds.
+        var unobserved = detectedWake
+        unobserved["execution"] = .init(state: "unknown", reason: "observation_unavailable")
+        try bindObservations(unobserved)
+        // NEGATIVE: routing's disposition vocabulary is not the wire's.
+        for token in ["succeeded", "executed", "pending", "failed"] {
+            var observations = detectedWake
+            observations["execution"] = .init(state: "completed", outcome: token)
+            try expectRefusal("routing token \(token)", observations,
+                              path: "observations.execution.outcome")
+        }
+        // NEGATIVE: a completed wake stage without a decision.
+        var decisionLess = detectedWake
+        decisionLess["execution"] = .init(state: "completed", outcome: "success")
+        decisionLess["wake"] = .init(state: "completed", score: 0.931, threshold: 0.8)
+        try expectRefusal("completed wake without decision", decisionLess,
+                          path: "observations.wake.decision")
+        // NEGATIVE: a completed execution without an outcome — spec 21b5d822: every observed
+        // execution carries one.
+        var bare = detectedWake
+        bare["execution"] = .init(state: "completed")
+        try expectRefusal("completed execution without outcome", bare,
+                          path: "observations.execution.outcome")
+        // NEGATIVE: an unknown execution must not assert one.
+        var assertedUnknown = detectedWake
+        assertedUnknown["execution"] = .init(state: "unknown", reason: "observation_unavailable",
+                                             outcome: "success")
+        try expectRefusal("unknown execution with outcome", assertedUnknown,
+                          path: "observations.execution.outcome")
+        // NEGATIVE: a decision outside the schema's enum.
+        var unenumerated = detectedWake
+        unenumerated["execution"] = .init(state: "completed", outcome: "success")
+        unenumerated["wake"] = .init(state: "completed", decision: "no_wake_detected")
+        try expectRefusal("unenumerated wake decision", unenumerated,
+                          path: "observations.wake.decision")
     }
 
     /// Emits a REAL encoder fixture (envelope + WAV) for the pinned Worker intake harness, so the
@@ -209,8 +300,12 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
     }
 
 
-    /// PHASE 2 WIRE FIXTURE for cross-client parity (spec 94bf23b0). A NEW capture with NEW provenance
-    /// and the required `wake_required` root member, emitted from cleared head `7c2e67d4b`.
+    /// PHASE 2 WIRE FIXTURE for cross-client parity (spec 94bf23b0), WIRE REVISION 2. Revision 1
+    /// was REFUSED by the server: execution.outcome carried the routing token `succeeded` instead of
+    /// the wire enum's `success`, and the completed wake stage carried no `decision`, so the server
+    /// filed the case under request/ instead of wake-request/ (GO review, spec 3ea6d5c5). R2 carries
+    /// the schema's own values and a NEW capture session so the refused set cannot be mistaken for
+    /// this one.
     ///
     /// SCOPE, stated exactly: these are ENCODER fixtures whose observations are TEST-SUPPLIED (the same
     /// boundary as the f8 set). They pin the BYTES this client's encoder emits for the phase-2 record
@@ -224,7 +319,7 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
     func test_exportPhase2WireFixturesForCrossClientParity() throws {
         // NEW provenance, deliberately distinct from every earlier fixture capture.
         let phase2Provenance = VoiceSharingContributionEncoder.Provenance(
-            platform: "ios", appVersion: "9.0", build: "1000", captureSessionID: "phase2-parity-7c2e67d4b",
+            platform: "ios", appVersion: "9.0", build: "1000", captureSessionID: "phase2-parity-wire2-7c2e67d4b",
             models: VoiceSharingContributionEncoder.Models(
                 vad: .init(id: "vad-1", version: "1"), wakeword: .init(id: "wake-1", version: "1"),
                 asr: .init(id: "asr-1", version: "1"), translation: nil,
@@ -246,31 +341,31 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
             ("wake-required-command", Case(
                 id: "44444444-1111-2222-3333-444444444444", wakeRequired: true,
                 observations: [
-                    "wake": .init(state: "completed", score: 0.931, threshold: 0.8),
+                    "wake": .init(state: "completed", decision: "detected", score: 0.931, threshold: 0.8),
                     "bleed": .init(state: "not_run", reason: "no_playback_reference"),
                     "asr": .init(state: "completed", text: "play the news", sourceLanguage: "en",
                                  routerInput: "play the news"),
                     "translation": .init(state: "not_run", reason: "no_text"),
                     "routing": .init(state: "completed", predictedIntent: "play", predictedTool: "play"),
-                    "execution": .init(state: "completed", outcome: "succeeded"),
+                    "execution": .init(state: "completed", outcome: "success"),
                 ])),
             // Grace active: heard WITHOUT a wake word. Same shape, wake_required false.
             ("grace-no-wake", Case(
                 id: "55555555-1111-2222-3333-555555555555", wakeRequired: false,
                 observations: [
-                    "wake": .init(state: "completed", score: 0.402, threshold: 0.8),
+                    "wake": .init(state: "completed", decision: "rejected", score: 0.402, threshold: 0.8),
                     "bleed": .init(state: "not_run", reason: "no_playback_reference"),
                     "asr": .init(state: "completed", text: "pause", sourceLanguage: "en",
                                  routerInput: "pause"),
                     "translation": .init(state: "not_run", reason: "no_text"),
                     "routing": .init(state: "completed", predictedIntent: "pause", predictedTool: "pause"),
-                    "execution": .init(state: "completed", outcome: "succeeded"),
+                    "execution": .init(state: "completed", outcome: "success"),
                 ])),
             // A genuinely empty recognition that STILL reports the recogniser's language.
             ("empty-result-with-language", Case(
                 id: "66666666-1111-2222-3333-666666666666", wakeRequired: true,
                 observations: [
-                    "wake": .init(state: "completed", score: 0.888, threshold: 0.8),
+                    "wake": .init(state: "completed", decision: "detected", score: 0.888, threshold: 0.8),
                     "bleed": .init(state: "not_run", reason: "no_playback_reference"),
                     "asr": .init(state: "completed", reason: "empty_result", sourceLanguage: "ja"),
                     "translation": .init(state: "not_run", reason: "no_text"),
@@ -315,11 +410,13 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
         }
         let manifestObject: [String: Any] = [
             "client_head": "7c2e67d4b",
+            "wire_revision": 2,
+            "r1_refusal": "execution.outcome used routing tokens and completed wake carried no decision; refused by server intake",
             "schema_version": 1,
             "scope": "encoder bytes with TEST-SUPPLIED observations; not engine output",
             "provenance": [
                 "platform": "ios", "app_version": "9.0", "build": "1000",
-                "capture_session_id": "phase2-parity-7c2e67d4b", "conversion_version": "v1",
+                "capture_session_id": "phase2-parity-wire2-7c2e67d4b", "conversion_version": "v1",
             ],
             "fixtures": manifest,
         ]
@@ -348,16 +445,16 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
             // the exact bytes that show the gap.
             "f8-routing-executed": (
                 "22222222-2222-3333-4444-555555555555",
-                ["wake": .init(state: "completed"),
+                ["wake": .init(state: "completed", decision: "detected"),
                  "bleed": .init(state: "not_run", reason: "no_playback_reference"),
                  "asr": .init(state: "completed", text: "pause"),
                  "translation": .init(state: "not_run", reason: "source_language_target_language"),
                  "routing": .init(state: "completed", routingDisposition: "executed"),
-                 "execution": .init(state: "completed")]),
+                 "execution": .init(state: "completed", outcome: "success")]),
             // A genuinely empty recognition: asr COMPLETED with the sole sanctioned reason.
             "f8-empty-result": (
                 "33333333-2222-3333-4444-555555555555",
-                ["wake": .init(state: "completed"),
+                ["wake": .init(state: "completed", decision: "detected"),
                  "bleed": .init(state: "not_run", reason: "no_playback_reference"),
                  "asr": .init(state: "completed", reason: "empty_result"),
                  "translation": .init(state: "not_run", reason: "no_text"),
@@ -367,7 +464,7 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
             // while asr still carries its own text facts (spec 4d10275f).
             "f8-translation-backend-handles": (
                 "44444444-2222-3333-4444-555555555555",
-                ["wake": .init(state: "completed"),
+                ["wake": .init(state: "completed", decision: "detected"),
                  "bleed": .init(state: "not_run", reason: "no_playback_reference"),
                  "asr": .init(state: "completed", text: "spielt den nächsten Titel"),
                  "translation": .init(state: "not_run", reason: "backend_handles_translation"),
@@ -377,7 +474,7 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
             // be established, and a translator existed but was unavailable.
             "f8-translation-source-unavailable": (
                 "55555555-2222-3333-4444-555555555555",
-                ["wake": .init(state: "completed"),
+                ["wake": .init(state: "completed", decision: "detected"),
                  "bleed": .init(state: "not_run", reason: "no_playback_reference"),
                  "asr": .init(state: "completed", text: "unintelligible tail"),
                  "translation": .init(state: "not_run", reason: "source_language_unavailable"),
@@ -385,12 +482,12 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
                  "execution": .init(state: "not_run", reason: "precondition_failed")]),
             "f8-translation-translator-unavailable": (
                 "66666666-2222-3333-4444-555555555555",
-                ["wake": .init(state: "completed"),
+                ["wake": .init(state: "completed", decision: "detected"),
                  "bleed": .init(state: "not_run", reason: "no_playback_reference"),
                  "asr": .init(state: "completed", text: "öffne die App"),
                  "translation": .init(state: "not_run", reason: "translator_unavailable"),
                  "routing": .init(state: "completed", routingDisposition: "executed"),
-                 "execution": .init(state: "completed")]),
+                 "execution": .init(state: "completed", outcome: "success")]),
         ]
         // Emitted-byte NEGATIVE (f8): a completed stage carrying a reason. The production binding
         // MUST refuse it, and the pinned intake must refuse the bytes too.
@@ -431,7 +528,9 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
             // the f8 rule is. Exported WITHOUT a bind self-check: refusing it is the point.
             let encoded = try VoiceSharingContributionEncoder.encode(
                 event: capture(captureID), provenance: provenance, observations: [
-                    "wake": .init(state: "completed"),
+                    // A VALID base record: the negative is created by mutation below, so the base
+                    // must pass the self-check binding (completed wake carries its decision).
+                    "wake": .init(state: "completed", decision: "detected"),
                     "bleed": .init(state: "not_run", reason: "no_playback_reference"),
                     "asr": .init(state: "not_run", reason: "local_only_action"),
                     "translation": .init(state: "not_run", reason: "no_text"),

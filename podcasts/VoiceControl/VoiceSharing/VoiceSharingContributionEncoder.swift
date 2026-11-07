@@ -107,6 +107,30 @@ enum VoiceSharingContributionEncoder {
                          routingDisposition: routingDisposition,
                          score: score, threshold: threshold)
         }
+
+        /// Re-states the wire execution outcome without losing the other members (see
+        /// `withDecision`). Used by the collector's execution-stage mapping.
+        func withWireOutcome(_ wireOutcome: String?) -> StageOutcome {
+            StageOutcome(state: state, reason: reason, text: text, decision: decision,
+                         translatedText: translatedText, targetLanguage: targetLanguage,
+                         routingDisposition: routingDisposition,
+                         outcome: wireOutcome, score: score, threshold: threshold)
+        }
+
+        /// SERVER SCHEMA (spec 21b5d822, GO review): the execution stage's wire outcome is the
+        /// schema's OWN enum — {success, failure, refused, cancelled} — reached by a mapping
+        /// DISTINCT from settledDisposition's routing tokens (reviewer 39ac0771: the routing
+        /// tokens `executed`/`pending` leaked into this member at 9653836d3). Per spec 21b5d822
+        /// every OBSERVED execution carries an outcome; `unknown` observed nothing and omits it.
+        static func wireExecutionOutcome(for outcome: StageOutcome) -> String? {
+            switch (outcome.state, outcome.reason) {
+            case ("completed", _): return "success"
+            case ("failed", _): return "failure"
+            case ("cancelled", _): return "cancelled"
+            case ("not_run", "client_refused"): return "refused"
+            default: return nil
+            }
+        }
     }
 
     struct Encoded {

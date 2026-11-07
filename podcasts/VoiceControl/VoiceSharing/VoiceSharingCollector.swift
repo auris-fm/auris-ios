@@ -435,6 +435,15 @@ final class VoiceSharingCollector {
     ) {
         var outcome = outcome
         if let decision { outcome = outcome.withDecision(decision) }
+        // SERVER SCHEMA (spec 21b5d822, reviewer 39ac0771): every OBSERVED execution carries the
+        // wire's outcome, in the schema's own enum — not routing's disposition tokens. The mapping
+        // is applied HERE so every execution producer gets it by construction; a producer that
+        // already stated an outcome keeps its stated value, and an unobserved execution (unknown,
+        // or not_run for a reason that is not a refusal) maps to nil and states nothing.
+        if stage == "execution", outcome.outcome == nil {
+            outcome = outcome.withWireOutcome(
+                VoiceSharingContributionEncoder.StageOutcome.wireExecutionOutcome(for: outcome))
+        }
         lock.lock()
         defer { lock.unlock() }
         guard let context else { return }

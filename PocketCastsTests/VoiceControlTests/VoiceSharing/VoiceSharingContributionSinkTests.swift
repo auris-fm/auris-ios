@@ -53,7 +53,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
 
     private var observations: [String: VoiceSharingContributionEncoder.StageOutcome] {
         [
-            "wake": .init(state: "completed"),
+            "wake": .init(state: "completed", decision: "detected"),
             "bleed": .init(state: "not_run", reason: "no_playback_reference"),
             "asr": .init(state: "not_run", reason: "local_only_action"),
             "translation": .init(state: "not_run", reason: "no_text"),
@@ -784,7 +784,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         XCTAssertEqual(scheduler.scheduled.first?.0.uptimeNanoseconds, 1_025_000_000)
         drain()
         XCTAssertEqual(queue.readyEntries().count, 0)
-        collector.engineReported(stage: "wake", outcome: .init(state: "completed"), context: context)
+        collector.engineReported(stage: "wake", outcome: .init(state: "completed", decision: "detected"), context: context)
         scheduler.fire()
         let frozen = try readyMetadata()
         let envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: frozen) as? [String: Any])

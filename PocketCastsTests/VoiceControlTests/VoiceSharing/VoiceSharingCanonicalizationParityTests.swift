@@ -86,6 +86,10 @@ final class VoiceSharingCanonicalizationParityTests: XCTestCase {
     /// record shape. The shape is pinned by `VoiceSharingNameSchemaControls` (which binds through the
     /// production validator). The Worker requires the field from core `0b44ae17`; re-capturing a digest for
     /// the wake_required shape is a server-side step, not something this client suite can mint.
+    ///
+    /// WIRE-REVISION-2 DEVIATION, same principle: clients now must also carry wake `decision` and
+    /// execution `outcome`, so the captured record is further from the sendable shape. The captured
+    /// digest STILL pins the canonicalizer only; re-capture remains a server-side step.
     func test_theCapturedDigestStillPinsTheCanonicalizerToTheWorker() throws {
         let audio = Self.clientWav(frames: 1600)
         let record = Self.workerAcceptedRecord(audio: audio)
@@ -177,6 +181,10 @@ final class VoiceSharingCanonicalizationParityTests: XCTestCase {
             // phase-2 member the client must send rather than inheriting the captured Worker record.
             record["wake_required"] = false
             var observations = try XCTUnwrap(record["observations"] as? [String: Any])
+            // WIRE REVISION 2: the current shape carries the wake decision and the execution
+            // outcome (GO review); the routing rules under test need a record that first binds.
+            observations["wake"] = ["state": "completed", "decision": "detected"]
+            observations["execution"] = ["state": "not_run", "reason": "precondition_failed"]
             var routing = try XCTUnwrap(observations["routing"] as? [String: Any])
             routing["state"] = "completed"
             routing["predicted_intent"] = intent

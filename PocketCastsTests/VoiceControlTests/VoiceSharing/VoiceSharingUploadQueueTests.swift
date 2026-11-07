@@ -289,7 +289,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                 "router": ["id": "lfm2", "version": "1"],
             ],
             "observations": [
-                "wake": ["state": "completed", "decision": "accepted"],
+                "wake": ["state": "completed", "decision": "detected"],
                 "bleed": ["state": "not_run", "reason": "no_playback_reference"],
                 "asr": ["state": "completed", "text": "play the next episode"],
                 "translation": ["state": "not_run", "reason": "no_text"],

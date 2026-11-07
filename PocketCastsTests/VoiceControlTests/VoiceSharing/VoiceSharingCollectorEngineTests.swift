@@ -791,7 +791,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     /// queue at the end of the real pipeline.
     private var claims: [String: VoiceSharingContributionEncoder.StageOutcome] {
         [
-            "wake": .init(state: "completed"),
+            "wake": .init(state: "completed", decision: "detected"),
             "bleed": .init(state: "not_run", reason: "no_playback_reference"),
             "asr": .init(state: "unknown", reason: "observation_unavailable"),
             "translation": .init(state: "not_run", reason: "no_text"),
@@ -1144,7 +1144,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
             let unknownClaims: [String: VoiceSharingContributionEncoder.StageOutcome] = [
-                "wake": .init(state: "completed"),
+                "wake": .init(state: "completed", decision: "detected"),
                 "bleed": .init(state: "unknown", reason: "observation_unavailable"),
                 "asr": .init(state: "completed", text: "play the latest episode"),
                 "translation": .init(state: "unknown", reason: "observation_unavailable"),
@@ -1512,7 +1512,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     /// canonicalizer, so the refusal cannot be a stale-digest artifact.
     func test_aPersistedEnvelopeCarryingANullEmptyResultFieldIsRefusedForThatReason() throws {
         let observations: [String: VoiceSharingContributionEncoder.StageOutcome] = [
-            "wake": .init(state: "completed"),
+            "wake": .init(state: "completed", decision: "detected"),
             "bleed": .init(state: "unknown", reason: "observation_unavailable"),
             "asr": .init(state: "completed", reason: "empty_result"),
             "translation": .init(state: "unknown", reason: "observation_unavailable"),
@@ -1552,7 +1552,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     /// A real encoder fixture whose ASR stage is completed/empty_result — the one legal completed reason.
     private func encodeEmptyResultRecord() throws -> VoiceSharingContributionEncoder.Encoded {
         let observations: [String: VoiceSharingContributionEncoder.StageOutcome] = [
-            "wake": .init(state: "completed"),
+            "wake": .init(state: "completed", decision: "detected"),
             "bleed": .init(state: "unknown", reason: "observation_unavailable"),
             "asr": .init(state: "completed", reason: "empty_result"),
             "translation": .init(state: "unknown", reason: "observation_unavailable"),
@@ -1663,6 +1663,31 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         let unknown = Outcome(state: "unknown", reason: "observation_unavailable")
         XCTAssertEqual(VoiceControlService.settledDispositionForTesting(unknown), "pending",
                        "an unobserved turn cannot claim a terminal disposition")
+    }
+
+    /// SERVER SCHEMA (GO review, reviewer 39ac0771): the execution stage's wire outcome is the
+    /// schema's OWN enum — {success, failure, refused, cancelled} — reached by a mapping DISTINCT
+    /// from settledDisposition's routing tokens. An unobserved execution (unknown/not_run) states
+    /// NO outcome at all rather than asserting a conclusion nothing observed.
+    func test_theWireExecutionOutcomeIsADistinctVocabularyFromTheRoutingDisposition() {
+        typealias Outcome = VoiceSharingContributionEncoder.StageOutcome
+        func wire(_ state: String, reason: String? = nil) -> String? {
+            VoiceSharingContributionEncoder.StageOutcome.wireExecutionOutcome(
+                for: Outcome(state: state, reason: reason))
+        }
+        XCTAssertEqual(wire("completed"), "success")
+        XCTAssertEqual(wire("failed"), "failure")
+        XCTAssertEqual(wire("cancelled"), "cancelled")
+        // SPEC 21b5d822: a stated refusal IS an observed outcome — the wire's `refused`.
+        XCTAssertEqual(wire("not_run", reason: "client_refused"), "refused")
+        XCTAssertNil(wire("unknown"), "unobserved execution must not assert an outcome")
+        XCTAssertNil(wire("not_run"), "a non-refusal not_run observed no execution")
+        // The routing disposition keeps its own vocabulary — the two mappings must not merge.
+        let completed = Outcome(state: "completed", reason: nil)
+        XCTAssertEqual(VoiceControlService.settledDispositionForTesting(completed), "executed")
+        XCTAssertNotEqual(VoiceControlService.settledDispositionForTesting(completed),
+                          VoiceSharingContributionEncoder.StageOutcome.wireExecutionOutcome(for: completed),
+                          "routing disposition and wire outcome are different vocabularies")
     }
 
     /// REVIEW 59841fbc #1: an explicit `reason: null` on a completed stage is still a carded reason. The
@@ -2491,6 +2516,10 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         XCTAssertEqual(record["wake_required"] as? Bool, true,
                        "wake-word mode without grace: the speech needed a wake word")
         let wake = try XCTUnwrap((record["observations"] as? [String: Any])?["wake"] as? [String: Any])
+        // SERVER SCHEMA (GO review): the REAL producer states its wake decision on every completed
+        // wake stage — not only the hand-built fixtures. A detected wake says "detected".
+        XCTAssertEqual(wake["decision"] as? String, "detected",
+                       "the engine's own completed wake stage must carry its decision")
         // The stub detector reports 0.95 confidence; the engine compares it to its own configured threshold.
         XCTAssertEqual(try XCTUnwrap(wake["score"] as? Double), 0.95, accuracy: 0.0001,
                        "the durable record carries the detector's MEASURED score")
@@ -2516,8 +2545,11 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         let record = try XCTUnwrap(try durableRecordsSince(watermark).first)
         XCTAssertEqual(record["wake_required"] as? Bool, false,
                        "grace is active: the speech did not need a wake word")
-        XCTAssertNotNil((record["observations"] as? [String: Any])?["wake"] as? [String: Any],
+        let graceWake = try XCTUnwrap((record["observations"] as? [String: Any])?["wake"] as? [String: Any],
                         "the detector still ran, so its measurement is still recorded")
+        // The forwarded NEGATIVE wake is still a decision: the schema's "rejected".
+        XCTAssertEqual(graceWake["decision"] as? String, "rejected",
+                       "a forwarded negative wake is a rejected decision, stated by the real producer")
     }
 
     /// THE COMBINED UTTERANCE, ON DISK: "Auris, <command>" in one breath. The wake word is part of the

@@ -752,11 +752,12 @@ class VoiceAsrEngine {
                 outcome: .init(
                     state: "completed", reason: nil,
                     // SERVER SCHEMA (record_schema.ts validateWake): the decision enum is
-                    // {detected, rejected} — "no_wake_detected" here made every observed
-                    // negative wake a 400 invalid_request at observations.wake.decision
-                    // (incident 2026-11-05, all 16 removed records). A completed stage carries
-                    // no reason, so the verdict lives in decision under the schema's own value.
-                    decision: detected ? nil : "rejected",
+                    // {detected, rejected} and a COMPLETED wake stage must carry one — the
+                    // server files a decision-less completed wake under request/ as if no
+                    // wake decision was made (spec GO review, fixture refusal nov07). A
+                    // completed stage carries no reason (spec 94073918), so the verdict
+                    // lives in decision under the schema's own values, detected included.
+                    decision: detected ? "detected" : "rejected",
                     score: measuredWake?.score, threshold: measuredWake?.threshold),
                 context: utteranceContext)
             if detected {
