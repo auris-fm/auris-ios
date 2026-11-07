@@ -231,6 +231,12 @@ final class VoiceSharingUploadQueue {
     static let attemptLeaseDuration: TimeInterval = 120
     /// Absolute ceiling on a stored attempt count. Compiled bound, NOT an activation value.
     static let maxUploadAttemptsCeiling = 1_000
+    /// DURABLE per-entry deletion intent (reviewer e71b9524 item 3), written at the ROOT
+    /// (outside removable scopes) before any refused-entry removal and retired only after the
+    /// directory is proven absent. A crash anywhere in between is reconciled by the next
+    /// serving pass: intent + entry present => retry the removal; intent + entry absent =>
+    /// retire the record. Root files are never removed by entry purges.
+    static let deletionIntentPrefix = "deletion.intent."
     /// Present when publication failed and its cleanup could not complete. Such an entry is never
     /// exposed as ready, even if the ready marker survived.
     /// Present when this attempt definitively failed. Written BEFORE any removal attempt.
@@ -2495,6 +2501,7 @@ final class VoiceSharingUploadQueue {
     private func strictOwnerCoverageLocked() throws -> [Entry] {
         try establishStoragePolicyLocked()
         let all = try entriesStrictLocked()
+        try reconcileDeletionIntentsLocked()
         for entry in all {
             let state = try entryStateLocked(at: entry)
             // Reviewer 72e9362d: an unconfirmable READY marker is UNKNOWN coverage for the whole
@@ -2539,6 +2546,7 @@ final class VoiceSharingUploadQueue {
             // is absent here. Both paths must agree about the same disk, so any disagreement is a
             // real inconsistency rather than a scheduling artifact.
             var excluded: [String] = []
+            do { try reconcileDeletionIntentsLocked() } catch { return .unknownCoverage }
             for entry in all {
                 let state: EntryState
                 do { state = try entryStateLocked(at: entry) } catch {
@@ -2547,6 +2555,7 @@ final class VoiceSharingUploadQueue {
                 }
                 switch state {
                 case .bound:
+                    // THE ONLY case that may fall through to the age check and ready.append.
                     break
                 case .refusedUnbindable:
                     // SPEC 1a0d3ffb: a complete entry the record check rejects is deleted at
@@ -2554,22 +2563,32 @@ final class VoiceSharingUploadQueue {
                     do { try purgeRefusedLocked(entry, cause: "record-check") }
                     catch { return .unknownCoverage }
                     excluded.append("\(entry.name):purged(record-check)")
+                    continue
                 case .disqualified:
-                    // A durable publication.failed intent without an active publication stage
+                    // A durable publication.failed intent WITHOUT an active publication stage
                     // is a PERMANENT server refusal (or a purge whose removal never completed):
-                    // spec 1a0d3ffb deletes it instead of holding the bytes. An active stage
-                    // marker must never be touched. A marker stat failure keeps the entry.
-                    let failedURL = entryDirectoryLocked(for: entry)
-                        .appendingPathComponent(Self.failedName)
-                    guard Self.statKind(of: failedURL) == .present else {
+                    // spec 1a0d3ffb deletes it. REVIEWER e71b9524 item 2: entryStateLocked
+                    // returns .disqualified on the failed marker BEFORE checking the stage, so
+                    // the stage absence must be PROVEN here — an entry carrying both markers
+                    // (failed intent + still-active stage) is NEVER deleted, and a stage stat
+                    // failure is UNKNOWN coverage, not a deletion.
+                    let stageKind = Self.statKind(of: entryDirectoryLocked(for: entry)
+                        .appendingPathComponent(Self.stageName))
+                    guard stageKind == .absent else {
+                        if stageKind == .failure { return .unknownCoverage }
                         excluded.append("\(entry.name):notBound(\(state))")
                         continue
                     }
                     do { try purgeRefusedLocked(entry, cause: "server-refusal") }
                     catch { return .unknownCoverage }
                     excluded.append("\(entry.name):purged(server-refusal)")
+                    continue
                 case .incomplete:
+                    // REVIEWER e71b9524 item 1: incomplete entries must NEVER reach the serving
+                    // gate — a prepared-but-unfinalized entry with a fresh created.at is not
+                    // ready. Retained, never served, never deleted here.
                     excluded.append("\(entry.name):notBound(\(state))")
+                    continue
                 }
                 // CONFIRMED durability was verified by strictOwnerCoverageLocked (part of the
                 // shared authority); reaching here means it held.
@@ -2618,9 +2637,15 @@ final class VoiceSharingUploadQueue {
                     case .refusedUnbindable:
                         try purgeRefusedLocked(entry, cause: "record-check")
                     case .disqualified:
-                        let failedURL = entryDirectoryLocked(for: entry)
-                            .appendingPathComponent(Self.failedName)
-                        guard Self.statKind(of: failedURL) == .present else { continue }
+                        // REVIEWER e71b9524 item 2: deletion requires a durable failed intent
+                        // AND proven stage absence (see the strict path above).
+                        let directory = entryDirectoryLocked(for: entry)
+                        let stageKind = Self.statKind(
+                            of: directory.appendingPathComponent(Self.stageName))
+                        guard stageKind == .absent else {
+                            if stageKind == .failure { throw PrepareError.accountingUnavailable }
+                            continue
+                        }
                         try purgeRefusedLocked(entry, cause: "server-refusal")
                     case .bound, .incomplete:
                         continue
@@ -2704,15 +2729,74 @@ final class VoiceSharingUploadQueue {
         }
     }
 
-    /// SPEC 1a0d3ffb: a recording the server refuses permanently, or that the client's own
-    /// record check rejects, is deleted from the queue AT ONCE. Lock-held purge used by both
-    /// serving paths; every deletion names its cause, so a consented recording never
-    /// disappears unexplained. Reentrancy: the discovery paths already run inside
-    /// `serialQueue`, so this must NOT re-enter `sync`.
+    /// SPEC 1a0d3ffb, RECONCILED FORM (reviewer e71b9524 item 3): a recording the server
+    /// refuses permanently, or that the client's own record check rejects, is deleted from the
+    /// queue AT ONCE — through the same intent-before-mutation discipline as every other
+    /// durable transition:
+    ///   1. a root-level `deletion.intent.<entry>` record + ROOT BARRIER land BEFORE any
+    ///      mutation, so a crash mid-purge is reconciled exactly (retry the removal; retire
+    ///      the record once the directory is proven absent);
+    ///   2. the removal is followed by a root barrier;
+    ///   3. absence is CONFIRMED before the intent is retired; a FAILED removal disqualifies
+    ///      the entry in place (durable `publication.failed`) so it never serves again, and
+    ///      surfaces UNKNOWN — the discovery callers map that to unknownCoverage/serve-nothing.
+    /// Reentrancy: the discovery paths already run inside `serialQueue`, so this must NOT
+    /// re-enter `sync`.
+    /// Reconciles orphaned root-level deletion intents (reviewer e71b9524 item 3, crash
+    /// window): an intent whose entry directory is PROVEN ABSENT is retired; an intent whose
+    /// entry survived is left durable for the entry loop to classify and purge; a listing or
+    /// stat failure throws — callers fail closed.
+    private func reconcileDeletionIntentsLocked() throws {
+        let names = try fileManager.contentsOfDirectory(atPath: rootDirectory.path)
+        for name in names where name.hasPrefix(Self.deletionIntentPrefix) {
+            let entryName = String(name.dropFirst(Self.deletionIntentPrefix.count))
+            guard UUID(uuidString: entryName) != nil else { continue }
+            let entry = Entry(root: rootDirectory, name: entryName)
+            let directory = entryDirectoryLocked(for: entry)
+            switch Self.statKind(of: directory) {
+            case .present: continue // the entry loop owns this purge; intent stays durable
+            case .failure: throw PrepareError.accountingUnavailable
+            case .absent:
+                try? fileManager.removeItem(at: rootDirectory.appendingPathComponent(name))
+                try? synchronizer(rootDirectory, true)
+                FileLog.shared.addMessage(
+                    "[VoiceSharing] queue removal reason=record-refused-intent-retired entry=\(entryName)")
+                FileLog.shared.forceFlush()
+            }
+        }
+    }
+
     private func purgeRefusedLocked(_ entry: Entry, cause: String) throws {
+        let intentURL = rootDirectory.appendingPathComponent("\(Self.deletionIntentPrefix)\(entry.name)")
         let directory = try validatedEntryDirectoryLocked(entry)
-        try fileManager.removeItem(at: directory)
-        defer { bumpHoldGenerationForContentChange() }
+        // 1. DURABLE INTENT FIRST.
+        if Self.statKind(of: intentURL) != .present {
+            try Data([0x01]).write(to: intentURL, options: .atomic)
+            try synchronizer(rootDirectory, true)
+        }
+        // 2. REMOVE (skipped when a previous pass already removed before failing to retire).
+        if Self.statKind(of: directory) == .present {
+            do {
+                try fileManager.removeItem(at: directory)
+                try synchronizer(rootDirectory, true)
+            } catch {
+                // Deletion failed: disqualify in place so the bytes can never serve, and fail
+                // closed. The durable intent plus this marker make the next pass reconcile.
+                try? Data([0x01]).write(
+                    to: directory.appendingPathComponent(Self.failedName), options: .atomic)
+                FileLog.shared.addMessage(
+                    "[VoiceSharing] queue removal reason=record-refused cause=\(cause) entry=\(entry.name) removed=false")
+                FileLog.shared.forceFlush()
+                throw PrepareError.accountingUnavailable
+            }
+        }
+        // 3. CONFIRM, then retire the intent.
+        guard Self.statKind(of: directory) == .absent else {
+            throw PrepareError.accountingUnavailable
+        }
+        try? fileManager.removeItem(at: intentURL)
+        try? synchronizer(rootDirectory, true)
+        bumpHoldGenerationForContentChange()
         FileLog.shared.addMessage(
             "[VoiceSharing] queue removal reason=record-refused cause=\(cause) entry=\(entry.name) removed=true")
         // FORCE THE FLUSH (FileLog buffers 100 entries): a removal line must be on disk
