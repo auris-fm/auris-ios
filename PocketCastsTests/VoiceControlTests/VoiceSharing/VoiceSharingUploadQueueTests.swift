@@ -3475,6 +3475,10 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
         VoiceSharingUploadQueue(rootDirectory: entryRoot, clock: clock)
     }
 
+    private func makeQueue(fileManager: FileManager) -> VoiceSharingUploadQueue {
+        VoiceSharingUploadQueue(rootDirectory: entryRoot, fileManager: fileManager)
+    }
+
     private func wav(frames: Int) -> Data {
         var data = Data()
         let dataBytes = frames * 2
@@ -3662,5 +3666,178 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
         XCTAssertTrue(ready.isEmpty)
         XCTAssertFalse(FileManager.default.fileExists(
             atPath: entryRoot.appendingPathComponent(name).path))
+    }
+
+    // MARK: Reviewer e71b9524 — bound-only gate, proven stage absence, reconciled purge
+
+    /// ITEM 1, strict path: a prepared-but-unfinalized entry never serves and is retained.
+    func test_anUnfinalizedEntryNeverServesOnTheStrictPath() throws {
+        let queue = makeQueue()
+        let samples: [Float] = Array(repeating: 0.25, count: 4)
+        let event = VoiceSharingCollector.SegmentEvent(
+            kind: .completed, captureID: UUID(),
+            enrollmentEpoch: "epoch-1", authorizationSession: "sess-1",
+            retainedSamples: samples.count, truncated: false, droppedSpans: [],
+            originalSampleCount: nil, audio: samples, isGateControl: false)
+        let provenance = VoiceSharingContributionEncoder.Provenance(
+            platform: "ios", appVersion: "9.0", build: "1000", captureSessionID: "sess-1",
+            models: .init(vad: nil, wakeword: nil, asr: nil, translation: nil, router: nil),
+            conversionVersion: "v1")
+        let encoded = try VoiceSharingContributionEncoder.encode(
+            event: event, provenance: provenance, observations: [:])
+        let prep = try queue.prepare(metadata: encoded.metadataEnvelope, audio: encoded.wav)
+        // Deliberately NOT finalized, with a fresh created.at — the case that previously
+        // slipped past the bound-only gate.
+        guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("coverage stays known")
+        }
+        XCTAssertTrue(ready.isEmpty, "an unfinalized entry must never serve")
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: entryRoot.appendingPathComponent(prep.name).path),
+            "an unfinalized entry is retained, not deleted")
+    }
+
+    /// ITEM 2: failed intent + ACTIVE stage => never deleted on either path; files intact.
+    func test_anEntryWithAnActiveStageIsNeverDeletedEvenWithARefusalIntent() throws {
+        let queue = makeQueue()
+        let entry = try seed(queue)
+        let directory = entryRoot.appendingPathComponent(entry.name)
+        try Data([0x01]).write(to: directory.appendingPathComponent("publication.failed"))
+        try Data([0x01]).write(to: directory.appendingPathComponent("stage.publishing"))
+
+        XCTAssertTrue(queue.readyEntries().isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: directory.appendingPathComponent("deletion-marker-probe").path),
+            "precondition sanity")
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: directory.appendingPathComponent("audio.wav").path),
+            "an active stage must never be deleted despite the refusal intent")
+        guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("coverage known")
+        }
+        XCTAssertTrue(ready.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: directory.appendingPathComponent("audio.wav").path),
+            "strict path must also leave the staged entry intact")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: entryRoot.path)
+            .filter { $0 == entry.name }.count, 1, "the entry directory survives")
+    }
+
+    /// ITEM 3, removal failure: the purge fails CLOSED (unknown coverage), the entry's bytes
+    /// are never served again, and a fresh reconstruction COMPLETES the reconciled deletion.
+    private final class RefusingRemover: FileManager {
+        let blockedPath: String
+        init(blockedPath: String) { self.blockedPath = blockedPath; super.init() }
+        override func removeItem(at URL: URL) throws {
+            if URL.path == blockedPath { throw NSError(domain: "test-removal", code: 1) }
+            try super.removeItem(at: URL)
+        }
+    }
+
+    func test_aFailedRemovalFailsClosedAndReconcilesOnReconstruction() throws {
+        let queue = makeQueue()
+        let entry = try seed(queue)
+        try wav(frames: 1_700).write(
+            to: entryRoot.appendingPathComponent(entry.name).appendingPathComponent("audio.wav"))
+        let blocked = makeQueue(fileManager: RefusingRemover(
+            blockedPath: entryRoot.appendingPathComponent(entry.name).path))
+
+        // The serving pass must fail closed, not claim success over a surviving entry.
+        guard case .unknownCoverage = blocked.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("a failed removal is unknown coverage, never .known")
+        }
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: entryRoot.appendingPathComponent(entry.name).path),
+            "the removal did not happen; the intent is durable for reconciliation")
+
+        // Reconstruction without the fault COMPLETES the deletion through the durable intent.
+        let reborn = makeQueue()
+        guard case .known(let ready) = reborn.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("reconstruction coverage known")
+        }
+        XCTAssertTrue(ready.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: entryRoot.appendingPathComponent(entry.name).path))
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: entryRoot.appendingPathComponent(
+                "deletion.intent." + entry.name).path),
+            "the deletion intent is retired after reconciliation")
+    }
+
+    /// ITEM 3, barrier failure BEFORE any mutation: nothing is deleted, coverage holds closed,
+    /// and reconstruction (clean barriers) completes the purge.
+    /// The faulted queue is constructed BEFORE seeding: instance init runs recovery, and
+    /// recovery deletes an entry whose audio no longer matches its bound digest — constructing
+    /// it after seeding would destroy the fixture before discovery ever ran.
+    func test_aBarrierFailureBeforeThePurgeMutationFailsClosed() throws {
+        let rootPath = entryRoot.path
+        var faultedEntryName: String?
+        var faultFired = false
+        // Fault the FIRST root sync that happens while a deletion intent is already durable:
+        // in the purge that is exactly the post-intent barrier; nothing earlier carries one.
+        let faulted = VoiceSharingUploadQueue(
+            rootDirectory: entryRoot,
+            synchronizer: { path, isDirectory in
+                if isDirectory && path.path == rootPath,
+                   let name = faultedEntryName,
+                   FileManager.default.fileExists(
+                       atPath: rootPath + "/deletion.intent." + name) {
+                    faultFired = true
+                    throw NSError(domain: "test-barrier", code: 1)
+                }
+                try VoiceSharingUploadQueue.testSynchronizer(path: path, isDirectory: isDirectory)
+            })
+        let queue = makeQueue()
+        let entry = try seed(queue)
+        faultedEntryName = entry.name
+        try wav(frames: 1_700).write(
+            to: entryRoot.appendingPathComponent(entry.name).appendingPathComponent("audio.wav"))
+
+        guard case .unknownCoverage = faulted.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("a failed intent barrier is unknown coverage")
+        }
+        XCTAssertTrue(faultFired, "the post-intent root barrier never faulted")
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: entryRoot.appendingPathComponent(entry.name).path),
+            "the entry is untouched: the failure landed before any mutation")
+
+        let reborn = makeQueue()
+        guard case .known(let ready) = reborn.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("reconstruction coverage known")
+        }
+        XCTAssertTrue(ready.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: entryRoot.appendingPathComponent(entry.name).path),
+            "reconstruction completes the purge")
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: entryRoot.appendingPathComponent("deletion.intent." + entry.name).path),
+            "the deletion intent is retired after reconciliation")
+    }
+
+    /// ITEM 3, crash window: intent durable, directory already gone => the next pass retires
+    /// the record and resurrects nothing.
+    func test_anOrphanDeletionIntentRetiresWithoutResurrectingAnything() throws {
+        let queue = makeQueue()
+        let entry = try seed(queue)
+        try wav(frames: 1_700).write(
+            to: entryRoot.appendingPathComponent(entry.name).appendingPathComponent("audio.wav"))
+        XCTAssertTrue(queue.readyEntries().isEmpty, "the first pass deletes the refused entry")
+
+        // Simulate a crash AFTER the removal, BEFORE the intent retirement.
+        try Data([0x01]).write(to: entryRoot.appendingPathComponent(
+            "deletion.intent." + entry.name), options: .atomic)
+
+        let reborn = makeQueue()
+        guard case .known(let ready) = reborn.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("reconstruction coverage known")
+        }
+        XCTAssertTrue(ready.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: entryRoot.appendingPathComponent(entry.name).path),
+            "the orphan intent must not resurrect anything")
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: entryRoot.appendingPathComponent(
+                "deletion.intent." + entry.name).path),
+            "the orphan intent is retired")
     }
 }
