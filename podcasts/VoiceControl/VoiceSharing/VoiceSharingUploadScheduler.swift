@@ -37,6 +37,13 @@ final class VoiceSharingUploadScheduler {
         passLock.withLock { lastIdleDecisionByDiagnosticStorage }
     }
 
+    /// The queue's earliest outstanding retry boundary in seconds, or nil when none. The
+    /// trigger arms its single bounded wake from this — the scheduler stays wake-free per its
+    /// contract, and the boundary lives on the queue where admission enforces it.
+    var secondsUntilNextRetryBoundary: TimeInterval? {
+        queue.secondsUntilNextRetryBoundary()
+    }
+
     /// OWNER-COMPLETION SIGNAL (reviewer 280f4c52). A refused caller used to have no way to learn
     /// when the owner finished, so recovering from `.busy` meant polling. This is the atomic
     /// handshake: `registerOwnerCompletion` answers whether this caller already OWNS the scheduler,
