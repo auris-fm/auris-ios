@@ -626,10 +626,20 @@ extension VoiceSharingUploadTransportTests {
                       "no transfer remains held after cleanup")
     }
 
-    /// SAME-account/same-epoch fencing across the real path: after the entry was admitted under
-    /// (acct-A, epoch-1), a move of EITHER component stops the send at the real transport's
-    /// credential boundary.
-    func test_realTransportFencesSameAccountEpochIdentityMoves() async throws {
+    /// SAME-account fencing across the real path, per the pinned ACCOUNT-BINDING contract
+    /// (spec 4afc6e43): after the entry was admitted under (acct-A, epoch-1), an ACCOUNT move
+    /// stops the send at the real transport's credential boundary — but an EPOCH-ONLY move for
+    /// the SAME owner MUST still ship, because a re-enrollment does not invalidate audio the
+    /// account already captured. (This test previously asserted whole-snapshot fencing, which
+    /// contradicted the contract and failed on the epoch leg; corrected to pin the contract.)
+    func test_realTransportFencesAccountMovesAndShipsSameOwnerEpochMoves() async throws {
+        final class UploadCounter: @unchecked Sendable {
+            private let lock = NSLock()
+            private var value = 0
+            func increment() { lock.lock(); value += 1; lock.unlock() }
+            var count: Int { lock.lock(); defer { lock.unlock() }; return value }
+        }
+        let uploadCounter = UploadCounter()
         UploadRecordingURLProtocol.handler = { request in
             let path = request.url?.path ?? ""
             if path == "/api/v1/auth/token" {
@@ -637,7 +647,7 @@ extension VoiceSharingUploadTransportTests {
                                         httpVersion: nil, headerFields: nil)!,
                         Data(#"{"access_token":"tok-1","token_type":"Bearer","expires_in":900,"refresh_token":"r-1","refresh_expires_in":2592000,"issuer":"https://unit.test","subject":"acct-A"}"#.utf8))
             }
-            XCTFail("no upload request may reach the wire after an identity move")
+            uploadCounter.increment()
             return (HTTPURLResponse(url: request.url!, statusCode: 500,
                                     httpVersion: nil, headerFields: nil)!, Data())
         }
@@ -651,7 +661,7 @@ extension VoiceSharingUploadTransportTests {
             accountScope: "acct-A", enrollmentEpoch: "epoch-1"))
         let admitted = box.current
 
-        // The account scope moves while the attempt is pending send.
+        // The account scope moves while the attempt is pending send: the send must fence.
         box.current = VoiceSharingUploadIdentity(
             accountScope: "acct-B", enrollmentEpoch: "epoch-1")
         let result = await transport.send(
@@ -660,15 +670,20 @@ extension VoiceSharingUploadTransportTests {
         guard case .transportFailure = result else {
             return XCTFail("an account move must fence the send, got \(result)")
         }
-        // The epoch moves identically.
+        XCTAssertEqual(uploadCounter.count, 0,
+                       "an account move must not put a single upload byte on the wire")
+
+        // The EPOCH moves identically for the SAME owner: the send must still ship. A 500 here
+        // is the point — the request left, because the owner did not change (spec 4afc6e43).
         box.current = VoiceSharingUploadIdentity(
             accountScope: "acct-A", enrollmentEpoch: "epoch-2")
         let result2 = await transport.send(
             request: self.makeRequest(), admittedIdentity: admitted,
             identityFence: { box.current })
-        guard case .transportFailure = result2 else {
-            return XCTFail("an epoch move must fence the send, got \(result2)")
-        }
+        XCTAssertEqual(result2, .response(statusCode: 500, body: Data()),
+                       "a same-owner epoch move must NOT fence: re-enrollment does not invalidate captured audio")
+        XCTAssertEqual(uploadCounter.count, 1,
+                       "exactly the epoch-leg upload reached the wire")
     }
 }
 
@@ -983,25 +998,34 @@ extension VoiceSharingUploadTransportTests {
         XCTAssertEqual(UploadRecordingURLProtocol.requestCount, 1)
     }
 
-    func test_identityMoveWhileActualTransferChildIsHeldSendsNothing() async throws {
+    /// ACCOUNT-BINDING contract (spec 4afc6e43) at the held-transfer boundary: an ACCOUNT move
+    /// (or a cleared identity) while the actual transfer child is held must fence — zero requests.
+    /// An EPOCH-ONLY move for the SAME owner must NOT fence: the transfer ships. (This test
+    /// previously expected all three legs to fence, contradicting the contract on the epoch leg.)
+    func test_identityMoveWhileActualTransferChildIsHeldFollowsTheAccountBinding() async throws {
         let admitted = try XCTUnwrap(VoiceSharingUploadIdentity(accountScope: "account-A", enrollmentEpoch: "epoch-A"))
-        let replacements: [VoiceSharingUploadIdentity?] = [
-            VoiceSharingUploadIdentity(accountScope: "account-B", enrollmentEpoch: "epoch-A"),
-            VoiceSharingUploadIdentity(accountScope: "account-A", enrollmentEpoch: "epoch-B"),
-            nil
+        // (replacement, ships?) — ships == the request leaves and the 503 answer returns.
+        let legs: [(label: String, replacement: VoiceSharingUploadIdentity?, ships: Bool)] = [
+            ("an account move", VoiceSharingUploadIdentity(accountScope: "account-B", enrollmentEpoch: "epoch-A"), false),
+            ("a same-owner epoch move", VoiceSharingUploadIdentity(accountScope: "account-A", enrollmentEpoch: "epoch-B"), true),
+            ("a cleared identity", nil, false),
         ]
-        for replacement in replacements {
-            await assertHeldTransferIdentity(admitted: admitted, replacement: replacement, expectedRequests: 0)
+        for (label, replacement, ships) in legs {
+            await assertHeldTransferIdentity(
+                admitted: admitted, replacement: replacement, ships: ships, label: label)
         }
     }
 
     func test_unchangedIdentityWhileActualTransferChildIsHeldStillLaunches() async throws {
         let admitted = try XCTUnwrap(VoiceSharingUploadIdentity(accountScope: "account-A", enrollmentEpoch: "epoch-A"))
-        await assertHeldTransferIdentity(admitted: admitted, replacement: admitted, expectedRequests: 1)
+        await assertHeldTransferIdentity(
+            admitted: admitted, replacement: admitted, ships: true, label: "an unchanged identity")
     }
 
     private func assertHeldTransferIdentity(admitted: VoiceSharingUploadIdentity,
-                                           replacement: VoiceSharingUploadIdentity?, expectedRequests: Int) async {
+                                           replacement: VoiceSharingUploadIdentity?, ships: Bool,
+                                           label: String) async {
+        let expectedRequests = ships ? 1 : 0
         UploadRecordingURLProtocol.reset()
         UploadRecordingURLProtocol.handler = { request in
             (HTTPURLResponse(url: request.url!, statusCode: 503, httpVersion: nil, headerFields: nil)!, Data())
@@ -1023,8 +1047,13 @@ extension VoiceSharingUploadTransportTests {
         // No task cancellation, network transition or attempt-registry action may hide the identity guard.
         await release.open()
         let result = await task.value
-        XCTAssertEqual(result, expectedRequests == 0 ? .transportFailure : .response(statusCode: 503, body: Data()))
-        XCTAssertEqual(UploadRecordingURLProtocol.requestCount, expectedRequests)
+        let expected = ships
+            ? VoiceSharingUploader.TransportResult.response(statusCode: 503, body: Data())
+            : VoiceSharingUploader.TransportResult.transportFailure
+        XCTAssertEqual(result, expected,
+                       "\(label): the held-transfer outcome must follow the account-binding contract")
+        XCTAssertEqual(UploadRecordingURLProtocol.requestCount, expectedRequests,
+                       "\(label): request count must follow the account-binding contract")
     }
 
     func test_networkLossAtTransferPublicationSendsNothing() async throws {

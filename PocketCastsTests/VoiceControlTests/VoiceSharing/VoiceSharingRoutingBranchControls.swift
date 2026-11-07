@@ -215,7 +215,16 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         XCTAssertNotNil(weakModel)
         XCTAssertNotNil(weakTrigger)
         XCTAssertNotNil(weakLifetime)
+        // The surface flag follows the BUILD CONDITION (spec 7dcb3a53, reviewer 02d45284) — a
+        // STAGING build compiles it ON. Asserting one fixed value here contradicted the staging
+        // configuration this suite runs under; the lifecycle claims below do not depend on the
+        // surface either way, so the premise only pins the compilation condition.
+        #if STAGING
+        XCTAssertTrue(VoiceSharingSettingsModel.surfaceEnabled,
+                      "premise: this suite runs under a STAGING build")
+        #else
         XCTAssertFalse(VoiceSharingSettingsModel.surfaceEnabled)
+        #endif
         store.setLocalOptIn(true)
         XCTAssertEqual(published.count, 1)
         XCTAssertEqual(published.last?.localOptIn, true)
