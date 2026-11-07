@@ -1370,6 +1370,71 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         XCTAssertEqual(after.count, 0, "a digest-mismatched entry must never be ready upload work")
     }
 
+    /// REVIEWER 7c4c9cff PROGRESS RULE: a wake may only be armed for work the next pass can
+    /// actually ATTEMPT. A caused boundary over an entry that admission will refuse — here an
+    /// entry whose attempt budget is spent — must NOT arm, because the next pass makes no
+    /// progress and re-arms at the same instant: that is a zero-sleep self-reoffer loop. With
+    /// the policy cap still in place this entry is unservable, so the boundary is not "due work"
+    /// and no transport call may ever happen, however long the window. RED on `f6365e628`, where
+    /// `secondsUntilNextRetryBoundary` answered 0 for a due boundary over a live entry directory
+    /// without asking whether the entry could be served.
+    func test_aDueBoundaryOverAnUnservableEntryArmsNoWake() async throws {
+        lastSink = VoiceSharingContributionSink(
+            queue: queue, isEnabled: { self.enabled },
+            encoderProvenance: { [self] in provenance }, observations: { [self] in observations })
+        lastSink?.handle(event())
+        drain()
+        guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage(),
+            ready.count == 1 else {
+            return XCTFail("premise: publication produced no ready entry")
+        }
+        let entry = ready[0]
+        // Spend the entry's whole attempt budget, so admission answers `attempts-exhausted` — a
+        // refusal that a retry wake cannot resolve.
+        let limits = VoiceSharingUploadQueue.AttemptLimits.default
+        for _ in 1...limits.maxUploadAttempts {
+            let maybeAdmitted = try queue.admitAttempt(entry)
+            guard let admitted = maybeAdmitted else {
+                return XCTFail("premise: the budget must be spendable before it is spent")
+            }
+            try queue.applyAttemptResult(entry, lease: admitted.lease, outcome: .retryableFailure)
+        }
+        XCTAssertFalse(try queue.isAttemptable(entry),
+                       "premise: the entry is unservable once its budget is spent")
+        // A DUE boundary over it: stamp in the past.
+        let entryName = entry.name
+        let stamp = Date().addingTimeInterval(-1).timeIntervalSince1970
+        try JSONSerialization.data(withJSONObject: ["notBefore": stamp])
+            .write(to: root.appendingPathComponent("attempt.notbefore.\(entryName)"), options: .atomic)
+        // THE RULE: no due attemptable work remains, so no wake is armed at all.
+        XCTAssertNil(queue.secondsUntilNextRetryBoundary(),
+                     "an unservable due boundary is not due work: arming it spins without progress")
+
+        let transportCalls = TransportCallBox()
+        let uploader = VoiceSharingUploader(
+            queue: queue,
+            retryPolicy: VoiceSharingRetryPolicy(retryBaseDelay: 3600, retryMaximumDelay: 3600, random: { 1 }),
+            isAuthorized: { true }, currentIdentity: { nil },
+            endpoint: { URL(string: "https://unit.test/api/v1/voice-recordings") },
+            transport: { _, _, _ in
+                await transportCalls.record()
+                return .response(statusCode: 503, body: Data())
+            })
+        let trigger = VoiceSharingUploadTrigger(
+            scheduler: VoiceSharingUploadScheduler(queue: queue, uploader: uploader,
+                                                   isAuthorized: { true }),
+            surfaceEnabled: { true }, isAuthorized: { true })
+        trigger.triggerDrainIfPermitted()
+        await trigger.awaitDrainCompletionForTesting()
+        // A bounded observation window: a self-reoffer loop would fire repeatedly here.
+        let deadline = ContinuousClock.now + .seconds(2)
+        while ContinuousClock.now < deadline {
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        let reached = await transportCalls.count()
+        XCTAssertEqual(reached, 0, "an unservable entry must not be retried by a wake")
+    }
+
     func test_malformedStageClaimFailsAtTheSinkWithoutSideEffects() throws {
         // A claim bind() will refuse (non-enumerated reason): the sink drops the event, logs,
         // and the queue stays EMPTY — no partial entry survives a failed encode.
