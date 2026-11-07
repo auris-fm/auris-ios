@@ -135,7 +135,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         let transportCalls = TransportCallBox()
         let uploader = VoiceSharingUploader(
             queue: queue,
-            retryPolicy: VoiceSharingRetryPolicy(retryBaseDelay: 1, retryMaximumDelay: 60, random: { 0 }),
+            retryPolicy: VoiceSharingRetryPolicy(retryBaseDelay: 3600, retryMaximumDelay: 3600, random: { 0 }),
             isAuthorized: { true }, currentIdentity: { nil },
             endpoint: { URL(string: "https://unit.test/api/v1/voice-recordings") },
             transport: { _, _, _ in
@@ -165,6 +165,53 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         }
         XCTAssertGreaterThanOrEqual(reached, 1,
             "the retry boundary wake must run the due entry with no lifecycle event")
+    }
+
+    /// SPEC DEFECT d6580187, regression coverage: a retry disposition followed by NEW captures
+    /// must still produce entries and reach the transport — the stalled uploader must never
+    /// gate the capture-to-entry path, and the new entry must serve while the old one is
+    /// behind its retry boundary.
+    func test_aRetryDispositionDoesNotStopNewCapturesFromProducingEntries() async throws {
+        let transportCalls = TransportCallBox()
+        let uploader = VoiceSharingUploader(
+            queue: queue,
+            retryPolicy: VoiceSharingRetryPolicy(retryBaseDelay: 3600, retryMaximumDelay: 3600, random: { 0 }),
+            isAuthorized: { true }, currentIdentity: { nil },
+            endpoint: { URL(string: "https://unit.test/api/v1/voice-recordings") },
+            transport: { _, _, _ in
+                await transportCalls.record()
+                return .response(statusCode: 503, body: Data())
+            })
+        let scheduler = VoiceSharingUploadScheduler(queue: queue, uploader: uploader,
+                                                    isAuthorized: { true })
+        let trigger = VoiceSharingUploadTrigger(
+            scheduler: scheduler, surfaceEnabled: { true }, isAuthorized: { true })
+
+        // Capture A publishes and drains: 503, retry disposition, boundary published.
+        let sink = VoiceSharingContributionSink(
+            queue: queue, isEnabled: { self.enabled },
+            encoderProvenance: { [self] in provenance }, observations: { [self] in observations },
+            requestUploadDrain: { [weak trigger] in trigger?.triggerDrainIfPermitted() })
+        lastSink = sink
+        sink.handle(event())
+        drain()
+        await trigger.awaitDrainCompletionForTesting()
+        let afterA = await transportCalls.count()
+        XCTAssertGreaterThanOrEqual(afterA, 1, "premise: entry A was attempted and retried")
+
+        // Capture B arrives while A is behind its retry boundary: it must still become an
+        // entry, and the publication drain must attempt it.
+        sink.handle(event())
+        drain()
+        guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("coverage known")
+        }
+        XCTAssertEqual(ready.count, 2,
+            "both entries list; the uploader's boundary admission owns who attempts")
+        await trigger.awaitDrainCompletionForTesting()
+        let afterB = await transportCalls.count()
+        XCTAssertGreaterThanOrEqual(afterB, afterA + 1,
+            "the new capture's entry is attempted despite the pending retry")
     }
 
     final class TransportCallBox {
@@ -920,14 +967,24 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         XCTAssertFalse(evicted.isEmpty, "bounded ring eviction must retire a timer")
         for (_, work) in evicted { work.perform() }
         drain()
-        XCTAssertEqual(queue.readyEntries().count, 0)
+        // NO-SILENT-LOSS (spec defect d6580187): the record pressed out of the ring is EMITTED
+        // at eviction — exactly one durably ready entry — and the evicted (cancelled) timer can
+        // never publish a second copy of it. The emission hops the collector's work queue, so
+        // observe over a bounded window instead of racing it.
+        let emissionDeadline = Date().addingTimeInterval(4)
+        while queue.readyEntries().isEmpty && Date() < emissionDeadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        XCTAssertEqual(queue.readyEntries().count, 1,
+            "the evicted unemitted record is contributed, never silently discarded")
         weak var released = collector
         collector = nil
         XCTAssertNil(released, "scheduled work must not own the collector or its PCM")
         XCTAssertTrue(scheduler.scheduled.allSatisfy { $0.1.isCancelled })
         scheduler.fire()
         drain()
-        XCTAssertEqual(queue.readyEntries().count, 0)
+        XCTAssertEqual(queue.readyEntries().count, 1,
+            "no stale timer resurrects or duplicates a published record")
     }
 
     /// `OutcomeWaitLimit` still refuses a nonsense value (spec 4afc6e43 keeps the timeout a fixed

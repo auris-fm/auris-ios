@@ -154,7 +154,11 @@ final class VoiceSharingContributionSink {
         publicationLock.lock()
         defer { publicationLock.unlock() }
         // Gate check 1: authorization still current (live switch AND captured generation).
-        guard isEnabled(), currentGeneration() == pending.capturedGeneration else { return }
+        guard isEnabled(), currentGeneration() == pending.capturedGeneration else {
+            FileLog.shared.addMessage(
+                "[VoiceSharing] contribution dropped reason=gate-or-generation capture=\(pending.event.captureID)")
+            return
+        }
         var provenance = encoderProvenance()
         if let session = pending.event.authorizationSession {
             provenance.captureSessionID = session
@@ -170,7 +174,11 @@ final class VoiceSharingContributionSink {
             }
             let encoded = try VoiceSharingContributionEncoder.encode(
                 event: pending.event, provenance: provenance, observations: claims)
-            guard encoded.metadataEnvelope.count <= pending.event.metadataByteCeiling else { return }
+            guard encoded.metadataEnvelope.count <= pending.event.metadataByteCeiling else {
+                FileLog.shared.addMessage(
+                    "[VoiceSharing] contribution dropped reason=metadata-ceiling capture=\(pending.event.captureID)")
+                return
+            }
             // Gate check 2: the encoded bytes must not become a queue entry under a closed gate.
             guard isEnabled(), currentGeneration() == pending.capturedGeneration else { return }
             let entry = try queue.prepare(metadata: encoded.metadataEnvelope, audio: encoded.wav)
@@ -178,6 +186,8 @@ final class VoiceSharingContributionSink {
             // land between this check and publication — it waits for the lock, and the next
             // reader (purge in the assembly) removes what this transaction published.
             guard isEnabled(), currentGeneration() == pending.capturedGeneration else {
+                FileLog.shared.addMessage(
+                    "[VoiceSharing] contribution dropped reason=gate-or-generation-at-finalize capture=\(pending.event.captureID)")
                 do { try queue.discardUnready(entry) } catch {
                     FileLog.shared.addMessage(
                         "[VoiceSharing] revocation discard failed (entry retained, charged) capture=\(pending.event.captureID)")

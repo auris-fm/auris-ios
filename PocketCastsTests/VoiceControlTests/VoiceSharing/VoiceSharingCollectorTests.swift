@@ -1224,6 +1224,38 @@ final class VoiceSharingCollectorTests: XCTestCase {
     /// The CONSENT CLOSURE is load-bearing on its own: with everything else open, only the closure
     /// can veto. Without this control a closed consent is caught redundantly by identity checks and
     /// never exercised.
+    /// SPEC DEFECT d6580187, fix 2 (no-silent-loss): unemitted contributionable records under
+    /// ring pressure used to be discarded by the eviction loop — deadline cancelled, audio
+    /// dropped, no record, no log. A capture could be lost forever purely because newer
+    /// captures pressed the ring. The fix EMITS such records through the normal sink path at
+    /// eviction. Red on the parent: the overflow records never reach the sink at all.
+    func test_ringPressureEmitsUnemittedRecordsInsteadOfDiscardingThem() {
+        activateLease()
+        enrolledState(true)
+        assertPremisesOpen()
+        let collector = makeCollector()
+        let samples = [Float](repeating: 1, count: 3_200)
+        // 36 deferred captures: over the 32-record ring, each unemitted with a long deadline.
+        for _ in 0..<36 {
+            collector.speechStarted(confirmationFrameSamples: 320)
+            collector.appendSamples(samples, reportedTotal: 3_200)
+            collector.segmentationEnded(collector.currentCaptureContextForTesting)
+        }
+        // Eviction emissions are handed off on the collector's work queue: observe over a
+        // bounded window instead of racing the delivery.
+        let deadline = Date().addingTimeInterval(4)
+        var overflow = snapshot().filter { $0.kind == .completed }
+        while overflow.count < 4 && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+            overflow = snapshot().filter { $0.kind == .completed }
+        }
+        XCTAssertGreaterThanOrEqual(
+            overflow.count, 4,
+            "the records pressed out of the ring must be emitted, not silently discarded")
+        XCTAssertTrue(overflow.allSatisfy { !$0.audio.isEmpty },
+            "an eviction-emitted record carries its audio")
+    }
+
     func test_consentClosureIsLoadBearing_evenWhenEverythingElseIsOpen() {
         var gateOpen = false
         let collector = VoiceSharingCollector(
