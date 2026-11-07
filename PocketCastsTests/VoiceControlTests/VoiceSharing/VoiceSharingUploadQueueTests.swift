@@ -4089,8 +4089,27 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
         XCTAssertGreaterThan(counter.count, beforeSecond,
                              "absence alone never releases the hold: the barrier is retried from serving")
 
-        // Pass 3: the fault lifts — the retirement is confirmed through the barrier.
+        // Pass 3: the fault lifts — retirement is CONFIRMED on the same instance that held
+        // it: the barrier succeeds and the hold is released there.
         barrierFaulted = false
+        let beforeRelease = counter.count
+        guard case .known(let ready3) = faultedQueue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("the confirmed retirement pass is contained")
+        }
+        XCTAssertTrue(ready3.isEmpty)
+        XCTAssertGreaterThan(counter.count, beforeRelease,
+                             "the retiring barrier attempt runs on the holding instance")
+
+        // Pass 4: a retired hold is not retried — no further barrier attempt for it.
+        let beforeIdle = counter.count
+        guard case .known(let ready4) = faultedQueue.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("the idle pass is contained")
+        }
+        XCTAssertTrue(ready4.isEmpty)
+        XCTAssertEqual(counter.count, beforeIdle,
+                       "a retired hold is gone: no further reconciliation attempts")
+
+        // Reconstruction stays clean as an additional check.
         let reborn = makeQueue()
         guard case .known(let readyReborn) = reborn.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("reconstruction coverage known")
