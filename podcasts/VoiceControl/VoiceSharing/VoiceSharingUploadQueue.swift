@@ -41,9 +41,13 @@ final class VoiceSharingUploadQueue {
     /// ceiling; this is the ceiling, NOT an activation value).
     static let maxMetadataBytes = 64 * 1024
 
-    /// Queue-age bound for ready entries. Entries older than this are removed at recovery and
-    /// refuse publication — a compiled ceiling, NOT an activation value.
-    static let maxEntryAge: TimeInterval = 48 * 60 * 60
+    /// Queue-age bound for ready entries, measured from CAPTURE. Entries older than this are
+    /// removed at recovery and refuse publication — a compiled ceiling, NOT an activation value.
+    ///
+    /// SPEC 05ff27d0: a recording not ACCEPTED within seven days of capture is deleted. Retention
+    /// — not a fixed attempt cap — is what bounds how long an unaccepted recording can persist:
+    /// the queue retries for as long as the backoff schedule is due, but never past this instant.
+    static let maxEntryAge: TimeInterval = 7 * 24 * 60 * 60
 
     /// QUEUE-WIDE budgets. Per-entry bounds cannot bound the queue: N individually-legal entries
     /// still multiply. These are compiled defaults; like every other numeric limit here they are
@@ -92,9 +96,18 @@ final class VoiceSharingUploadQueue {
 
     /// Attempt bounds. Compiled implementation defaults, NOT owner-approved activation values.
     struct AttemptLimits {
+        /// NO FIXED ATTEMPT CAP (spec 05ff27d0). Retrying is bounded by the backoff schedule and
+        /// by retention (`maxEntryAge`), not by a count: a recording that has failed a hundred
+        /// times is still retried, because the failures that matter here are TRANSIENT (the
+        /// server answering 503 for hours) and a count turns a temporary outage into permanent
+        /// data loss. The stored counter remains a diagnostic and keeps the record's numeric
+        /// ceiling; it no longer refuses anything.
         let maxUploadAttempts: Int
 
-        static let `default` = AttemptLimits(maxUploadAttempts: 5)
+        /// Unbounded: the ceiling of the stored representation, which is a record bound, not a
+        /// policy budget.
+        static let `default` = AttemptLimits(
+            maxUploadAttempts: VoiceSharingUploadQueue.maxUploadAttemptsCeiling)
     }
 
     /// Upper bound on bytes this queue itself writes for one entry, excluding the caller's audio and
@@ -139,7 +152,10 @@ final class VoiceSharingUploadQueue {
         case accountingUnavailable
         /// Required queue-root backup policy could not be established and read back.
         case storagePolicyUnavailable
-        /// An increment path was asked to spend an attempt the entry does not have.
+        /// RETIRED POLICY (spec 05ff27d0): the case remains because the surviving arithmetic guard
+        /// in `recordAttemptLocked` still uses it, but no attempt BUDGET exists any more — an
+        /// entry is never refused for counting too many tries. Retention deletes unaccepted
+        /// recordings; the count no longer terminates anything.
         case attemptsExhausted
         /// Another owner holds the attempt lease.
         case leaseHeld
@@ -417,13 +433,14 @@ final class VoiceSharingUploadQueue {
             isDirectory.boolValue else { return .some(nil) } // purged entry: orphan debris
         let entry = Entry(root: rootDirectory, name: entryName)
         guard isCompleteEntryLocked(at: entry) else { return .some(nil) } // not yet ready to serve
-        // Servability: an entry whose budget is spent (or whose state cannot be read) can never be
+        // Servability: an entry whose count is corrupt (or whose state cannot be read) can never be
         // attempted again, so no boundary over it is progress.
         guard let spent = try? attemptCountLocked(for: entry) else {
             return nil // UNKNOWN count: wait for a real signal, do not spin
         }
         guard spent < attemptLimits.maxUploadAttempts else {
-            // Budget spent: admission disqualifies it, so no retry wake can make progress.
+            // SPEC 05ff27d0: with no attempt cap this is the CORRUPT-COUNT case only, where
+            // admission refuses terminally. A boundary over it is not progress, so no wake.
             return .some(nil)
         }
         let obligationURL = rootDirectory.appendingPathComponent(Self.obligationPrefix + entryName)
@@ -1370,9 +1387,12 @@ final class VoiceSharingUploadQueue {
             }
             do {
                 guard try isAttemptableLocked(entry) else {
-                    // Exhausted is a terminal disposition for this record: it stops serving so it
-                    // is not retried forever. The removal is best-effort here — a failure leaves
-                    // the entry visible-but-unservable via the attempt limit itself.
+                    // RETIRED POLICY (spec 05ff27d0): with no attempt cap there is no exhaustion
+                    // path left to this branch, so in practice it is never taken. It stays as the
+                    // fail-closed guard for the arithmetic ceiling alone: should the stored count
+                    // ever reach it, the entry stops serving rather than being retried forever.
+                    // The removal is best-effort here — a failure leaves the entry
+                    // visible-but-unservable via the limit itself.
                     let complete = isCompleteEntryLocked(at: entry)
                     if complete {
                         let marked = (try? validatedEntryDirectoryLocked(entry))
@@ -1670,6 +1690,8 @@ final class VoiceSharingUploadQueue {
             do {
                 // Ready/count checks run AFTER the claim so only the owner mutates shared state.
                 guard try isAttemptableLocked(entry) else {
+                    // RETIRED POLICY (spec 05ff27d0): reachable only via the numeric record
+                    // ceiling, never via a retry budget.
                     if isCompleteEntryLocked(at: entry),
                        try attemptCountLocked(for: entry) >= attemptLimits.maxUploadAttempts {
                         let removed = (try? fileManager.removeItem(
@@ -2338,6 +2360,9 @@ final class VoiceSharingUploadQueue {
     /// preparation would upload a record that does not exist yet, and would spend one of its
     /// attempts on a state the spec never permits to be exposed.
     private func isAttemptableLocked(_ entry: Entry) throws -> Bool {
+        // SPEC 05ff27d0: the count no longer gates servability. `maxUploadAttempts` is the record's
+        // numeric ceiling, so this comparison can only ever refuse a CORRUPT count — not a
+        // well-behaved entry that has simply failed many times.
         // Validate the handle FIRST: a foreign or malformed Entry is an error, not a "not ready"
         // answer, and its absence must never be reported as a benign false.
         _ = try validatedEntryDirectoryLocked(entry)
@@ -2359,6 +2384,8 @@ final class VoiceSharingUploadQueue {
         try lock.lockExclusive()
         let current = try attemptCountLocked(for: entry)
         // Every increment path enforces the limit, not only `beginAttempt`.
+        // Retired budget comparison (spec 05ff27d0): this is the arithmetic ceiling check now,
+        // not a policy cap — `maxUploadAttempts` equals `maxUploadAttemptsCeiling`.
         guard current < attemptLimits.maxUploadAttempts else {
             throw PrepareError.attemptsExhausted
         }

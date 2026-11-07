@@ -164,8 +164,9 @@ final class VoiceSharingSettingsModel {
     }
 
     var compiledBoundsDescription: String {
-        "Audio up to \(VoiceSharingUploadQueue.maxEntryAudioBytes / 1024) KB per contribution, "
-            + "retained for at most \(Int(VoiceSharingUploadQueue.maxEntryAge / 3600)) hours."
+        let days = Int(VoiceSharingUploadQueue.maxEntryAge / (24 * 60 * 60))
+        return "Audio up to \(VoiceSharingUploadQueue.maxEntryAudioBytes / 1024) KB per contribution, "
+            + "retained for at most \(days) \(days == 1 ? "day" : "days")."
     }
     // MARK: - Recovery / stopped state (spec 62d39f8f, reviewer 8ae2b980)
 

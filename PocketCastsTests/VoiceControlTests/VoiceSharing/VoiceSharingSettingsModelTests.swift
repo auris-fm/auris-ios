@@ -154,7 +154,8 @@ final class VoiceSharingSettingsModelTests: XCTestCase {
     func test_compiledBoundsDescriptionMatchesTheQueueConstants() {
         let text = model().compiledBoundsDescription
         XCTAssertTrue(text.contains("\(VoiceSharingUploadQueue.maxEntryAudioBytes / 1024) KB"))
-        XCTAssertTrue(text.contains("\(Int(VoiceSharingUploadQueue.maxEntryAge / 3600)) hours"))
+        // SPEC 05ff27d0: the bound is stated in DAYS, and the copy must match the constant.
+        XCTAssertTrue(text.contains("\(Int(VoiceSharingUploadQueue.maxEntryAge / (24 * 60 * 60))) days"))
     }
 }
 
