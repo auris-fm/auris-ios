@@ -54,6 +54,7 @@ class VoiceAsrEngine {
         }
     }
 
+    var contributionCollector: VoiceSharingCollector?
     private(set) var echoFilterRoute: EchoFilterRoute = .external
     /// How long the reference survives a route change so the handover is still filtered.
     ///
@@ -184,7 +185,11 @@ class VoiceAsrEngine {
     /// This is deliberately the same single operation that enqueues. A separate "can you accept?"
     /// precheck would be a DIFFERENT operation from the one that takes ownership, so a stop landing
     /// between them could reject the enqueue with no owner left to release.
-    var onRoutingInput: ((IntentRoutingInput) -> Bool)?
+    var onRoutingInputWithContext: ((IntentRoutingInput, VoiceSharingCollector.CaptureContext?) -> Bool)?
+    var onRoutingInput: ((IntentRoutingInput) -> Bool)? {
+        get { onRoutingInputWithContext.map { consumer in { consumer($0, nil) } } }
+        set { onRoutingInputWithContext = newValue.map { consumer in { input, _ in consumer(input) } } }
+    }
 
     /// Invoked when a turn that was admitted leaves the engine WITHOUT reaching routing — a
     /// backend/recognition/translation drop or a cancellation. The routing path does not call it;
@@ -417,6 +422,8 @@ class VoiceAsrEngine {
                 FileLog.shared.addMessage("[VoicePipeline] dropped utterance from stale session=\(session) current=\(self.currentSession())")
                 return
             }
+            let frozen = self.contributionCollector?.currentCaptureContext()
+            self.contributionCollector?.segmentationEnded(frozen)
             Task { [weak self] in
                 guard let self else { return }
                 // Re-check when the task actually runs: a stop() can land between enqueue and
@@ -425,13 +432,28 @@ class VoiceAsrEngine {
                     FileLog.shared.addMessage("[VoicePipeline] dropped utterance queued before a session change session=\(session) current=\(self.currentSession())")
                     return
                 }
-                await self.processUtterance(utterance, capturedAt: capturedAt)
+                self.utteranceBodyGateForTesting?()
+                await self.processUtterance(utterance, capturedAt: capturedAt, frozenContext: frozen)
             }
         }
+        segmenter.onSpeechStarted = { [weak self] count in
+            // PHASE 2 (name schema v1): freeze the REAL grace state at segment start — this closure
+            // runs on the segmenter's start delivery, before any mode change, so the value is the
+            // state the speech actually began under. Wake-word mode without grace requires the wake
+            // word; anything else (grace window active, continuous mode) does not.
+            guard let self else { return }
+            let wakeRequired = listeningMode == .wakeWord && !gracePeriodSignal.isActive
+            contributionCollector?.speechStarted(confirmationFrameSamples: count, wakeRequired: wakeRequired)
+        }
+        segmenter.onSpeechAccumulated = { [weak self] samples, total in
+            self?.contributionCollector?.appendSamples(samples, reportedTotal: total)
+        }
+        segmenter.onSpeechCancelled = { [weak self] in self?.contributionCollector?.speechCancelled() }
         // Segmentation faults are forwarded so the interruption is observable outside this
         // component. A private flag would leave the user with unexplained silence.
         segmenter.onStuckActiveFault = { [weak self] fault in
             guard let self else { return }
+            self.contributionCollector?.speechCancelled()
             // Attribute the fault to the session whose samples raised it, not to whatever session
             // happens to be current when the delivery runs.
             let session = self.segmenter.currentSession ?? self.currentSession()
@@ -493,6 +515,7 @@ class VoiceAsrEngine {
     /// start as listening, and must release any acquired input route.
     @discardableResult
     func start() -> Bool {
+        contributionCollector?.pipelineStarting()
         FileLog.shared.addMessage("[VoicePipeline] engine starting backend=\(backend.requiredModel.id)")
         // The new session must exist BEFORE callbacks are installed: installing them replays
         // current state (a missing classifier) through the delivery fence, and a replay tagged
@@ -552,10 +575,64 @@ class VoiceAsrEngine {
         // is not a fault, so the block above does not cover it; leaving it in place would
         // concatenate old-session PCM with the new session's and dispatch them as one command.
         segmenter.resetForNewSession()
+        contributionCollector?.pipelineStopped()
+    }
+
+    /// Test seam: the capture→segmenter closure installed by `start()`. Reading it proves the production
+    /// wiring exists without needing a live audio session; production callers use `start()` itself.
+    var captureCallbackForTesting: (([Float]) -> Void)? {
+        capture.onCapturedSamples.map { callback in { [weak self] samples in
+            guard let self else { return }
+            callback(samples, nil, self.currentSession())
+        } }
+    }
+
+    /// Test seam: the route condition the bleed branch reads. Production derives it from the audio route;
+    /// forcing it here lets the branch be exercised without a simulator-wide route change.
+    var isExposedSpeakerRouteForTesting: Bool {
+        get { echoFilterRoute.appliesCorrelationWindow }
+        set { echoFilterRoute = newValue ? .builtInSpeaker : .external }
     }
 
     /// Exposed for focused translate-drop tests (`@testable`).
-    func processUtterance(_ utterance: [Float], capturedAt: MonotonicTime? = nil) async {
+    /// Entry point for one segmented utterance. The capture identity is frozen SYNCHRONOUSLY here — before
+    /// the Task exists — so a queued-but-not-yet-running utterance A keeps A's identity even if B starts and
+    /// opens its own capture before A's body ever runs. Reading "what is current" inside the async body would
+    /// hand A's audio to B.
+    /// `taskBodyGate`, when provided (tests only), runs as the Task body's first statement — AFTER the
+    /// freeze, so tests can hold the body back and mutate collector state in between deterministically.
+    /// Test-only body gate used by the PRODUCTION closure path too, so the start()-installed
+    /// `onUtterance` closure can be held mid-flight deterministically (nil in production).
+    var utteranceBodyGateForTesting: (() -> Void)?
+
+    func beginUtteranceProcessing(_ utterance: [Float], taskBodyGate: (() -> Void)? = nil) -> Task<Void, Never> {
+        let frozenContext = contributionCollector?.currentCaptureContext()
+        return beginUtteranceProcessing(utterance, preFrozenContext: frozenContext, taskBodyGate: taskBodyGate)
+    }
+
+    /// Outcome launch for a context ALREADY frozen synchronously (production onUtterance path).
+    func beginUtteranceProcessing(_ utterance: [Float], preFrozenContext: VoiceSharingCollector.CaptureContext?, taskBodyGate: (() -> Void)? = nil) -> Task<Void, Never> {
+        let bodyGate = taskBodyGate ?? utteranceBodyGateForTesting
+        return Task {
+            bodyGate?()
+            await self.processUtterance(utterance, frozenContext: preFrozenContext)
+        }
+    }
+
+    /// `frozenContext` is captured by the synchronous `onUtterance` closure BEFORE this Task was created.
+    /// `processUtterance` itself must not read "current" state: by the time an async body runs, a successor
+    /// may have started.
+    /// The context frozen for the most recent utterance — what the service's routing/execution decision
+    /// sites attribute their observations to. Test-visible so a control can report against the same capture.
+    private(set) var lastUtteranceContextForTesting: VoiceSharingCollector.CaptureContext?
+
+    func processUtterance(_ utterance: [Float], capturedAt: MonotonicTime? = nil, frozenContext: VoiceSharingCollector.CaptureContext? = nil) async {
+        let utteranceContext = frozenContext
+        var captureHandedToRouting = false
+        defer {
+            if !captureHandedToRouting { contributionCollector?.finalizeDeferredCompletion(context: utteranceContext) }
+        }
+        lastUtteranceContextForTesting = utteranceContext
         stageTimer.mark() // VAD segment ready
         // ONE IDENTITY FROM ADMISSION (spec delta3b1def9): the utterance is admitted HERE, so its
         // identity is minted here — not rebuilt later. Retries/duplicates that re-emit the SAME
@@ -583,16 +660,45 @@ class VoiceAsrEngine {
                 mic: utterance,
                 reference: observation?.samples ?? [],
                 segmentEndOffset: segmentEndOffset) {
+                // THE DETECTOR RAN AND RETURNED A VERDICT (reviewer 7f83f874): the bleed stage is
+                // `completed` with `decision: overlap` and NO reason, because that is what actually
+                // happened. An earlier version of this fix used `unknown`/`no_playback_reference`,
+                // which passes the deployed schema's membership check but asserts the OPPOSITE of
+                // the observed fact — "there was no reference" when the detector had just consulted
+                // one. A well-formed record that misstates an observation is worse than a rejected
+                // one, because it enters the dataset looking clean (@cloud 1cb92ee6). The original
+                // "playback_bleed" was in neither enumeration nor the deployed schema
+                // (`record_schema.ts:93`), so every bleed rejection failed validation and vanished.
+                // Why recognition did not run is carried separately, on the ASR stage, as
+                // `not_run`/`rejected_by_bleed`.
+                contributionCollector?.engineReported(stage: "bleed", outcome: .init(state: "completed", reason: nil), context: utteranceContext, decision: "overlap")
+                contributionCollector?.segmentRejected(kind: .rejectedBleed, samples: utterance.count, context: utteranceContext)
                 FileLog.shared.addMessage("[VoicePipeline] → drop (bleed filter)")
                 return
             }
         }
 
+        // ENGINE-PRODUCED OBSERVATION (spec 2dcf8c5b): reaching here means the bleed filter produced a
+        // verdict for this capture. When the reference is not exposed the filter is not consulted at all,
+        // which is NOT a verdict — that case stays `unknown`/`no_playback_reference` from the caller.
+        if echoFilterRoute.appliesCorrelationWindow {
+            contributionCollector?.engineReported(
+                stage: "bleed",
+                outcome: .init(state: "completed", reason: nil),
+                context: utteranceContext, decision: "no_overlap")
+        }
+
         // The detector observes every segment in both listening modes.
-        let result = wakeWordDetector.detect(samples: utterance, sampleRate: 16000)
+        let result = wakeWordDetector.detect(samples: utterance, sampleRate: 16000) { [weak contributionCollector] identity in
+            contributionCollector?.engineUsedModel(slot: "wakeword", reference: identity, context: utteranceContext)
+        }
         stageTimer.mark() // wake result
 
         let score = wakeScore(of: result)
+        // PHASE 2 (name schema v1): whenever the detector ran it MEASURED a score against a threshold,
+        // and the record must carry both values rather than `na`. A detector error measured nothing,
+        // so the pair stays nil there.
+        let measuredWake: (score: Double, threshold: Double)? = score.map { (Double($0), Double(wakeThreshold)) }
         let wakeCmp: String = {
             guard let score else { return "error" }
             let op = score >= wakeThreshold ? ">=" : "<"
@@ -609,11 +715,51 @@ class VoiceAsrEngine {
         switch WakeGate.decide(result: result, listeningMode: listeningMode, graceActive: gracePeriodSignal.isActive) {
         case .discardProcessing(let errorCode):
             FileLog.shared.addMessage("[VoicePipeline] wake error \(errorCode) → drop")
+            // ENGINE-PRODUCED OBSERVATION (review bc692f91): the DETECTOR failed for this capture — a real
+            // observed error, reported from the site that made the decision.
+            contributionCollector?.engineReported(
+                stage: "wake",
+                outcome: .init(state: "failed", reason: "detector_error"),
+                context: utteranceContext)
+            contributionCollector?.segmentRejected(kind: .rejectedWake, samples: utterance.count, context: utteranceContext)
             return
         case .dropUtterance:
             FileLog.shared.addMessage("[VoicePipeline] wake \(wakeCmp) → drop (no grace)")
+            // Wake-negative: collectable audio. Notifying here adds NO ASR/router/action work — the very
+            // next statement returns, and nothing downstream runs for this segment either way.
+            // ENGINE-PRODUCED OBSERVATION (review bc692f91): the detector RAN and reported no wake for
+            // this segment — reported from the decision site, never inferred from receiving frames.
+            // An OBSERVED NEGATIVE is still `completed`: the detector ran and gave a verdict. The
+            // verdict lives in the DECISION field, because a completed stage carries no reason
+            // (spec 94073918) — emitting the reason here would be refused by the binding and the
+            // capture would vanish instead of being recorded as a real no-wake observation.
+            contributionCollector?.engineReported(
+                stage: "wake",
+                outcome: .init(state: "completed", reason: nil, decision: "rejected",
+                               score: measuredWake?.score, threshold: measuredWake?.threshold),
+                context: utteranceContext)
+            contributionCollector?.segmentRejected(kind: .rejectedWake, samples: utterance.count, context: utteranceContext)
             return
         case .forward(let detected):
+            // ENGINE-PRODUCED OBSERVATION (review bc692f91): the wake decision below is made HERE, by
+            // the detector, so this is the only place entitled to report the wake stage.
+            // The detector RAN and returned a verdict either way. A forwarded NEGATIVE segment in
+            // grace/continuous mode observed `no_wake_detected` exactly as a dropped one did, so the
+            // same outcome must be reported here — dropping it would lose a real observation
+            // (reviewer 7c6e628e).
+            contributionCollector?.engineReported(
+                stage: "wake",
+                outcome: .init(
+                    state: "completed", reason: nil,
+                    // SERVER SCHEMA (record_schema.ts validateWake): the decision enum is
+                    // {detected, rejected} and a COMPLETED wake stage must carry one — the
+                    // server files a decision-less completed wake under request/ as if no
+                    // wake decision was made (spec GO review, fixture refusal nov07). A
+                    // completed stage carries no reason (spec 94073918), so the verdict
+                    // lives in decision under the schema's own values, detected included.
+                    decision: detected ? "detected" : "rejected",
+                    score: measuredWake?.score, threshold: measuredWake?.threshold),
+                context: utteranceContext)
             if detected {
                 onWakeWordDetected?()
                 detectedConfidence = confidence(of: result)
@@ -661,11 +807,23 @@ class VoiceAsrEngine {
         }
         if case .failure(let error) = ready {
             FileLog.shared.addMessage("[VoicePipeline] → drop (backend not ready: \(error))")
+            // ENGINE-PRODUCED OBSERVATION (spec 2dcf8c5b): the recogniser could not be started, so this
+            // capture's ASR genuinely failed — a real observed failure, not an unobserved stage.
+            contributionCollector?.engineReported(
+                stage: "asr",
+                outcome: .init(state: "failed", reason: "provider_error"),
+                context: utteranceContext)
+            contributionCollector?.finalizeDeferredCompletion(context: utteranceContext)
             return
         }
         stageTimer.mark() // ASR start
         let asrStartedAt = Date()
-        let asrResult = await backend.transcribe(samples: utterance, sampleRateHz: 16000)
+        let asrResult = await backend.transcribe(samples: utterance, sampleRateHz: 16000) { [weak contributionCollector] identity, translates in
+            contributionCollector?.engineUsedModel(slot: "asr", reference: identity, context: utteranceContext)
+            if translates {
+                contributionCollector?.engineUsedModel(slot: "translation", reference: identity, context: utteranceContext)
+            }
+        }
         let asrMs = Int(Date().timeIntervalSince(asrStartedAt) * 1000)
         stageTimer.mark() // ASR result
         emitStageTiming(detectedConfidence: detectedConfidence)
@@ -683,6 +841,48 @@ class VoiceAsrEngine {
             return "trim[ut=\(utteranceId)] '\(asrResult.text)' → '\(trimmedText)'"
         }()
 
+        // ENGINE-PRODUCED OBSERVATION (spec 406c247e): the ASR stage states the RECOGNISER'S OWN RESULT,
+        // and nothing else. A wake-only capture is a SUCCESSFUL recognition whose text happens to be just
+        // the wake phrase — removing that phrase is the COMMAND INPUT's job, downstream, not an ASR
+        // failure and not a wake rejection. So the raw transcript is published as completed.
+        let rawText = asrResult.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !rawText.isEmpty {
+            // The language is the RECOGNISER'S OWN observation and router_input is the exact text
+            // handed onward as the command input (spec 78480a17: existing schema fields, stated by
+            // the site that produced them). `empty_result` never carries either member.
+            // NON-CONTENT (reviewer 9be75bf0, found through the durable-output control): a transcript
+            // with no letter or number is discarded below, before translation, the router, or any cloud
+            // work — so NO command input was ever produced. Reporting `router_input` here claimed a
+            // command that never proceeded; a reader of the record would see "?!" as the input to a
+            // router that was never called. `text` still carries what the recogniser heard, which is the
+            // ASR stage's own result; the command input is absent because there was none.
+            let commandInput: String? = Self.isNonContent(trimmedText)
+                ? nil
+                : (trimmedText.isEmpty ? rawText : trimmedText)
+            contributionCollector?.engineReported(
+                stage: "asr",
+                outcome: .init(state: "completed", reason: nil, text: rawText,
+                               sourceLanguage: asrResult.detectedLanguage,
+                               routerInput: commandInput),
+                context: utteranceContext)
+        } else {
+            // A GENUINELY EMPTY recogniser result is a SUCCESSFUL recognition with nothing usable in it
+            // (spec delta c6f3bdf7): `completed` carrying `empty_result`, with no text and no router
+            // input. It is not `not_run` — the recogniser did run — and not `provider_error` — nothing
+            // failed. The binding enforces exactly this pairing on every path.
+            //
+            // The LANGUAGE survives an empty transcript (reviewer 67ecb11e). An empty result means "it
+            // heard speech and recognised nothing", which is a different fact from "it could not tell
+            // what language was spoken" — and cleanly distinguishes silence-shaped output in a language
+            // that transcribes confidently empty from one whose recogniser never engaged. Dropping it
+            // here would make an empty transcript indistinguishable from an unknown language.
+            contributionCollector?.engineReported(
+                stage: "asr",
+                outcome: .init(state: "completed", reason: VoiceSharingRecordBinding.emptyResultReasonForEngine,
+                               sourceLanguage: asrResult.detectedLanguage),
+                context: utteranceContext)
+        }
+
         if trimmedText.isEmpty {
             let reason = isWakePositive ? "wake-only" : "empty"
             FileLog.shared.addMessage(
@@ -691,6 +891,7 @@ class VoiceAsrEngine {
             if isWakePositive {
                 onWakeOnly?()
             }
+            contributionCollector?.finalizeDeferredCompletion(context: utteranceContext)
             return
         }
 
@@ -712,7 +913,8 @@ class VoiceAsrEngine {
         // detected language is not English (the SenseVoice CJK path). Trim first so we
         // only translate the command remainder (matches Android).
         let trimmedResult = AsrResult(text: trimmedText, detectedLanguage: asrResult.detectedLanguage)
-        let (finalized, translateNote) = await maybeTranslate(trimmedResult, backend: backend)
+        let (finalized, translateNote) = await maybeTranslate(
+            trimmedResult, backend: backend, context: utteranceContext)
         // Source-first: lang + first quote are ASR; translate note carries the English result.
         FileLog.shared.addMessage(
             "[VoicePipeline] asr \(backend.requiredModel.id) \(asrMs)ms ut=\(utteranceId) lang=\(trimmedResult.detectedLanguage ?? "?") '\(trimmedResult.text)'\(trimNote.map { " \($0)" } ?? "")\(translateNote.map { " \($0)" } ?? "")"
@@ -721,6 +923,7 @@ class VoiceAsrEngine {
             // Don't feed untranslated CJK into the English-only intent model.
             FileLog.shared.addMessage("[VoicePipeline] → drop (\(translateNote ?? "translate"))")
             onUnroutable?()
+            contributionCollector?.finalizeDeferredCompletion(context: utteranceContext)
             return
         }
         // OWNERSHIP TRANSFER, CONDITIONAL ON ACCEPTANCE: only a router that actually took the
@@ -734,8 +937,9 @@ class VoiceAsrEngine {
             selection: selection,
             utteranceId: utteranceId
         )
-        if onRoutingInput?(routingInput) ?? false {
+        if onRoutingInputWithContext?(routingInput, utteranceContext) ?? false {
             admissionHandedToRouting = true
+            captureHandedToRouting = true
         }
     }
 
@@ -831,36 +1035,51 @@ class VoiceAsrEngine {
 
     /// Translates a non-English, non-self-translating ASR result to English before
     /// intent routing. Fail / blank / no-op notes are dropped by the caller (ERROR earcon).
-    private func maybeTranslate(_ result: AsrResult, backend: AsrBackend) async -> (AsrResult, String?) {
+    private func maybeTranslate(_ result: AsrResult, backend: AsrBackend, context: VoiceSharingCollector.CaptureContext?) async -> (AsrResult, String?) {
+        func report(_ outcome: VoiceSharingContributionEncoder.StageOutcome) {
+            contributionCollector?.engineReported(stage: "translation", outcome: outcome, context: context)
+        }
         // BACKEND PROVENANCE FIRST: a backend that translates to English has already produced the
         // English router text — including when it reported no language. Asking for a language id
         // before the backend capability mislabeled that translated-only output as original text.
         if backend.capabilities.canTranslateToEnglish {
+            report(.init(state: "not_run", reason: "backend_handles_translation"))
             return (result, "translate=skip(backend)")
         }
         guard let detected = result.detectedLanguage?.lowercased() else {
+            report(.init(state: "not_run", reason: "source_language_unavailable"))
             return (result, "translate=skip(no lang)")
         }
         if detected == "en" {
+            // Nothing to translate: the source already is the target. This is the only true skip.
+            report(.init(state: "not_run", reason: "source_language_target_language"))
             return (result, nil)
         }
         guard let translationStage else {
             // Missing platform translation is a hard failure for non-English SenseVoice text —
             // never relabel native text as english_v1.
+            report(.init(state: "not_run", reason: "translator_unavailable"))
             return (result, "translate=skip(no stage)")
         }
 
         if case .failure = await translationStage.ensureReady(sourceLanguage: detected) {
+            report(.init(state: "failed", reason: "provider_error"))
             return (result, "translate=fail(\(detected))")
         }
         let translated = await translationStage.translate(text: result.text, sourceLanguage: detected)
         guard !translated.isEmpty else {
+            report(.init(state: "failed", reason: "provider_error"))
             return (result, "translate=blank(\(detected))")
         }
         // Reject no-op "translations" that would mislabel CJK as English.
         if translated == result.text {
+            report(.init(state: "failed", reason: "provider_error"))
             return (result, "translate=noop(\(detected))")
         }
+        // The owning schema already carries `translated_text` and `target_language`, so a successful
+        // translation now states what it actually produced instead of only that it ran (spec d09c320c).
+        report(.init(state: "completed", reason: nil,
+                     translatedText: translated, targetLanguage: "en"))
         return (
             AsrResult(text: translated, detectedLanguage: "en"),
             "translate=\(detected)→en '\(translated)'"

@@ -12,6 +12,7 @@ class SettingsViewController: PCViewController, UITableViewDataSource, UITableVi
         case about, pocketCastsPlus, privacy
         case upNextHistory, foldersHistory
         case headphoneControls
+        case voiceControl
         case developer, beta
 
         /// Whether the section should be displayed or not
@@ -22,6 +23,11 @@ class SettingsViewController: PCViewController, UITableViewDataSource, UITableVi
 
             case .pocketCastsPlus:
                 return !SubscriptionHelper.hasActiveSubscription()
+
+            case .voiceControl:
+                // Same compile-time surface gate the sharing screen uses: no entry rather than a
+                // dead row when the feature is not built in.
+                return VoiceSharingSettingsModel.surfaceEnabled
 
             default:
                 return true
@@ -38,6 +44,8 @@ class SettingsViewController: PCViewController, UITableViewDataSource, UITableVi
                 return (L10n.settingsAppearance, UIImage(named: "settings_appearance"))
             case .storageAndDataUse:
                 return (L10n.settingsStorage, UIImage(named: "settings_storage"))
+            case .voiceControl:
+                return (L10n.voiceSharingAccountTitle, UIImage(systemName: "waveform"))
             case .autoArchive:
                 return (L10n.settingsAutoArchive, UIImage(named: "settings_archive"))
             case .autoAddToUpNext:
@@ -87,7 +95,7 @@ class SettingsViewController: PCViewController, UITableViewDataSource, UITableVi
         return [
             developerSection,
             [.pocketCastsPlus],
-            [.general, .notifications, .appearance],
+            [.general, .voiceControl, .notifications, .appearance],
             [.autoArchive, .autoDownload, .autoAddToUpNext],
             [.storageAndDataUse, .siriShortcuts, .headphoneControls, .watch, .customFiles],
             [.importSteps, .opml],
@@ -168,6 +176,18 @@ class SettingsViewController: PCViewController, UITableViewDataSource, UITableVi
             navigationController?.pushViewController(AppearanceViewController(), animated: true)
         case .storageAndDataUse:
             navigationController?.pushViewController(StorageAndDataUseViewController(), animated: true)
+        case .voiceControl:
+            // ONE destination for Voice Control: the FULL screen (enable, models, status, sharing),
+            // not the sharing-only account controller (reviewer on 4b2f60468). Ordinary Voice
+            // Control settings must open while signed out — only sharing participation inside the
+            // screen requires an account, and that section is optional in the view.
+            guard let service = VoiceControlService.shared else {
+                FileLog.shared.addMessage("[VoiceControl] Settings entry visible but service unavailable")
+                return
+            }
+            let host = UIHostingController(rootView: VoiceControlSettingsView(service: service))
+            host.title = L10n.voiceSharingAccountTitle
+            navigationController?.pushViewController(host, animated: true)
         case .autoAddToUpNext:
             navigationController?.pushViewController(AutoAddToUpNextViewController(), animated: true)
         case .autoArchive:

@@ -725,7 +725,7 @@ class PlaybackManager: ServerPlaybackDelegate {
         if let episode, isCurrentEpisode(uuid: episode.uuid) {
             autoplayIfNeeded()
             if queue.upNextCount() > 0 {
-                playNextEpisode(autoPlay: isPlaying)
+                playNextEpisodeCollectingOutcome(autoPlay: isPlaying)
             } else {
                 endPlayback(saveCurrentEpisode: saveCurrentEpisode)
             }
@@ -751,16 +751,32 @@ class PlaybackManager: ServerPlaybackDelegate {
     }
 
     func skipToNextUpNextEpisode() -> String? {
-        let nextTitle = queue.episodeAt(index: 0)?.displayableTitle()
-        if queue.upNextCount() > 0 {
-            playNextEpisode(autoPlay: isPlaying)
-        }
-        return nextTitle
+        skipToNextUpNextEpisodeWithFact().presentationTitle
     }
 
-    private func playNextEpisode(autoPlay: Bool) {
+    /// The skip's actual decision, returned at the branches where it is made —
+    /// not a pre-read of the queue. `played` names the episode the action
+    /// really started (shuffle may pick any index, so the presented candidate
+    /// and the played episode can differ); `declined` is the action's own
+    /// guard branch (nothing queued, or the chosen slot resolved to nothing).
+    enum NextEpisodeSkipOutcome {
+        case played(title: String)
+        case declined
+    }
+
+    func skipToNextUpNextEpisodeWithFact() -> (presentationTitle: String?, outcome: NextEpisodeSkipOutcome) {
+        // Presentation keeps the historical pre-read title: the response
+        // template has always spoken the top-of-queue candidate and must not
+        // change behavior. The OUTCOME is the action's own result.
+        let presentationTitle = queue.episodeAt(index: 0)?.displayableTitle()
+        let outcome = playNextEpisodeCollectingOutcome(autoPlay: isPlaying)
+        return (presentationTitle, outcome)
+    }
+
+    @discardableResult
+    private func playNextEpisodeCollectingOutcome(autoPlay: Bool) -> NextEpisodeSkipOutcome {
         let queueCount = queue.upNextCount()
-        if queueCount == 0 { return }
+        if queueCount == 0 { return .declined }
 
         var index = 0
         if queueCount > 1, Settings.upNextShuffleEnabled() {
@@ -768,7 +784,7 @@ class PlaybackManager: ServerPlaybackDelegate {
             FileLog.shared.addMessage("Play Next Episode with Shuffle enabled: playing episode \(index) out of \(queueCount)")
         }
 
-        guard let nextEpisode = queue.episodeAt(index: index) else { return }
+        guard let nextEpisode = queue.episodeAt(index: index) else { return .declined }
 
         FileLog.shared.addMessage("Play Next Episode \(nextEpisode.displayableTitle())")
 
@@ -795,6 +811,7 @@ class PlaybackManager: ServerPlaybackDelegate {
 
         numberOfEpisodesToSleepAfter -= 1
         NotificationCenter.postOnMainThread(notification: Constants.Notifications.playbackTrackChanged)
+        return .played(title: nextEpisode.displayableTitle())
     }
 
     func play(playlist: EpisodeFilter) {
@@ -1479,7 +1496,7 @@ class PlaybackManager: ServerPlaybackDelegate {
             clearNowPlayingInfo()
             cancelSleepTimer()
         } else {
-            playNextEpisode(autoPlay: numberOfEpisodesToSleepAfter != 1)
+            playNextEpisodeCollectingOutcome(autoPlay: numberOfEpisodesToSleepAfter != 1)
         }
     }
 

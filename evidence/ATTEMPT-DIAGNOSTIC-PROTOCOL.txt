@@ -1,0 +1,72 @@
+FIRST ATTEMPT — DIAGNOSTIC PROTOCOL (agreed before the attempt, not after)
+Decision: option 1 — build stays frozen at bb72d3c4c; the 6-line allowance-logging fix is
+deferred until after the first attempt. Basis (cloud, bcd03ab7): the request id only has to
+exist on ONE half. Server instrumentation timestamps+ids every account-route line, so
+correlation = server (timestamp, outcome) x client (provisioner outcome, time-to-the-second).
+An id in the client log would help on attempts 2..N, not on the first.
+
+WHAT WILL BE RECORDED, in this format, verbatim
+  1. Every [VoiceSharing] line with wall-clock time TO THE SECOND, unsummarised.
+  2. For each line: the emitter, and whether it can ONLY come from the app process.
+     The debug_log is shared with the test host, so an unqualified line is not evidence.
+  3. Screen state at the attempt and at any failure, word for word.
+  4. Whether a provision was attempted at all.
+
+THE ONE DISTINCTION I CAN MAKE WITHOUT THE SERVER
+  `provision skipped: <reason>`  -> no request was sent (client-side fact)
+  an outcome line (`installed:`, `REFUSED:`, `unavailable`) -> a request WAS sent
+  This separates "never left the device" from "left and was refused" without any id.
+
+EXPECTED ORDERING, to be named not assumed
+  cloud projects: token acquisition (/api/v1/auth/token) -> allowance -> capture.
+  If the first account-route request is an ALLOWANCE request rather than a TOKEN request,
+  that is either an already-usable token or a skipped step. Different findings; report which.
+
+KNOWN LIMIT, stated in advance
+  If the failure is BEFORE the route (wrong host, TLS, no token), nothing arrives, no id
+  exists on either side, and client evidence is the whole of it. An id would not have helped.
+  This is the bucket where the 6-line fix buys least, which is why it is deferred.
+
+CORRECTION (spec a91a907e) — A TIMESTAMP/OUTCOME MATCH IS A CANDIDATE, NOT AN EXACT MATCH
+  I wrote above that two clocks matching "is the correlation, and it survives having no id."
+  That overstates it, and spec is right to bound it. Without a shared identifier, a
+  (server time, server outcome) pair agreeing with a (client time, client outcome) pair
+  establishes a CANDIDATE pairing, not identity of request. It is weakest exactly where it
+  is needed:
+    - clock skew between the device and the edge is unmeasured;
+    - two attempts within the same second are indistinguishable;
+    - a server outcome that maps many-to-one onto a client outcome (any refusal that
+      surfaces as the same client line) cannot separate which refusal it was.
+  So the honest phrasing of a match is "candidate correlation, consistent with a single
+  request crossing the wire and matching outcomes" - and the only way to convert a
+  candidate into an identification is to inspect origin logs against the client's
+  attempt, which spec has offered and which needs no build change from me.
+  Everything else in this protocol stands; this bounds what the evidence will support.
+
+SCOPE RULE FOR SEAMED RECEIPTS (cloud d7615dbf, adopting reviewer a459dbd5)
+  When a control replaces a production collaborator with a closure or stub, the receipt
+  covers ONLY what the closure still exercises. The stub does not merely stand in for a
+  dependency - it removes a whole downstream domain from the claim. Every receipt written
+  over a seam must say which domain it stopped at.
+
+  Applied to the three receipts this protocol governs:
+    ad14b43e4 (unresolved ticks) - domain stops at LOCAL settlement. The seam
+      `initiateIdentityRecoveryRefresh` is substituted, so transport calls are OUTSIDE
+      the claim. It must never be cited as evidence about request volume.
+    bb5b5ff38 (signed-update persistence) - domain stops at the simulator Keychain with
+      a synthetic credential. Production-credential durability is outside the claim.
+    e7730a5fd (installed build state) - domain stops at static artifact inspection plus
+      one read-only launch. No request was observed; nothing here speaks to the network.
+
+  THE GAP NOBODY CAN CLOSE ALONE (cloud): between a client-side local count and a
+  server-side arrival count there is a domain - "left the device, never arrived" - that
+  neither side can observe. It is closed only by a scope statement plus, where it matters,
+  origin logs; never by either side extrapolating.
+
+STALE-BINARY TRAP (android c48561c1, checked here)
+  Android had a build-system up-to-date skip reported as success. The equivalent hazard on
+  this lane is a red-verification that replays a cached binary instead of rebuilding, which
+  would make a "red" receipt prove nothing. Checked: both unresolved-tick red receipts show
+  ~4829 compile lines and an actual test start, and the gate log starts 9 real test suites.
+  Rule going forward: a red receipt must show compilation of the changed file, or it is not
+  evidence that the defect was present when the test ran.

@@ -1,6 +1,7 @@
 import AVFoundation
 import Combine
 import PocketCastsDataModel
+import PocketCastsServer
 import PocketCastsUtils
 
 class VoiceControlAssembly {
@@ -102,8 +103,8 @@ class VoiceControlAssembly {
         // "Threshold"). A missing manifest or hash mismatch disables voice control.
         let wakewordDir = bundleURL("melspectrogram.ort").deletingLastPathComponent()
         let manifestURL = wakewordDir.appendingPathComponent("auris_eval.json")
-        let thresholdResult = WakeWordThresholdLoader.load(manifestURL: manifestURL, modelDirectory: wakewordDir)
-        guard case .success(let threshold) = thresholdResult else {
+        let thresholdResult = WakeWordThresholdLoader.loadDeployment(manifestURL: manifestURL, modelDirectory: wakewordDir)
+        guard case .success(let deployment) = thresholdResult else {
             if case .failure(let error) = thresholdResult {
                 FileLog.shared.addMessage("[VoicePipeline] Wake-word threshold load failed: \(error). Voice control disabled (fail closed).")
             }
@@ -114,7 +115,8 @@ class VoiceControlAssembly {
             melModel: bundleURL("melspectrogram.ort"),
             embedModel: bundleURL("embedding_model.ort"),
             classifierModel: bundleURL("auris.ort"),
-            threshold: threshold
+            threshold: deployment.threshold,
+            verifiedModelIdentity: deployment.identity
         )
 
         let cloudAudioPlayer = CloudAudioPlayer()
@@ -144,9 +146,177 @@ class VoiceControlAssembly {
             wakeWordDetector: wakeWordDetector,
             gracePeriodSignal: gracePeriodSignal,
             clock: SystemMonotonicClock(),
-            wakeThreshold: threshold,
+            wakeThreshold: deployment.threshold,
             translationStage: AppleTranslationTranslator()
         )
+        // Voice-sharing composition (production). The collector observes the engine with production
+        // defaults for membership/epoch/session; consent loss on the coordinator's gate — membership
+        // withdrawal, sign-out, refresh observing the switch off, and the SCHEDULED LEASE-EXPIRY
+        // TRIGGER — routes straight into the collector's purge. The feature itself stays disabled
+        // until the owner approves activation; wiring exists so consent loss acts on real audio the
+        // moment anything upstream produces it.
+        // The queue-backed contribution sink (round 62/63): collector event → encoder → durable
+        // queue entry. The gate reads the live policy on EVERY event and the remote switch
+        // defaults to disabled, so no upload work is minted until owner-approved activation.
+        // Encode/queue failures are logged (opaque IDs only) and dropped — never into the
+        // recognition pipeline.
+        let queueRoot = VoiceSharingUploadQueue.defaultRootDirectory()
+        try? FileManager.default.createDirectory(at: queueRoot, withIntermediateDirectories: true)
+        // PER-ENTRY IDENTITY BINDING (reviewer fd6b8036 / spec fe99ec96): the queue compares each
+        // entry's own durable enrollment epoch against this LIVE read at admission, so a surviving
+        // entry from a previous epoch cannot ride a newer process into an upload — and a new entry
+        // is admitted without waiting for a rebuild. The reader is evaluated per admission, never
+        // captured at construction.
+        let contributionQueue = VoiceSharingUploadQueue(
+            rootDirectory: queueRoot,
+            // BOTH halves, structurally (reviewer 2b121320): an epoch value is opaque and can
+            // collide across accounts, so the live identity pairs it with the account scope.
+            currentIdentity: {
+                VoiceSharingUploadIdentity(
+                    accountScope: ServerSettings.userId,
+                    // PROVENANCE, NOT PERMISSION (spec 1bb73eac): the epoch is stamped on the
+                    // record so the server can attribute it. Using `activeEnrollmentEpoch` here
+                    // required a projection round trip in THIS process, which cold start never
+                    // has — so a restarted app with consent already given refused every upload
+                    // forever. Permission is the authenticated account (the queue's ownership
+                    // fence) plus the user's own choice, re-checked server-side.
+                    enrollmentEpoch: VoiceSharingEnrollmentStore.shared
+                        .persistedEnrollmentEpochForProvenance)
+            })
+        // PRODUCTION WIRE (spec 18:38Z): the real transport (bearer credential + the configured
+        // endpoint, fail-closed on either) feeding the uploader feeding the serialized scheduler.
+        // The whole chain sits behind the live authorization gate, so nothing here can mint a
+        // request without eligibility AND a credential — and the surface itself is still compiled
+        // OFF (VoiceSharingSettingsModel.surfaceEnabled == false): no caller invokes drains yet.
+        // IDENTITY PIN (spec 724577f3 / reviewer d9e99a5e): `permitsCollection` answers "may this
+        // account collect NOW", which is not the question a queued entry asks. An entry queued
+        // under one enrollment epoch must not be uploaded after the account's epoch moves, even
+        // when the new epoch also permits collection. The pin is sampled from the SAME store the
+        // policy folds on, so account switch and re-enrollment both invalidate it.
+        // The PER-ENTRY binding above owns the "may this entry go out" decision. A construction-time
+        // pin must not also veto it: that froze identity at assembly time, blocking every new entry
+        // after a re-enrollment and admitting stale entries after a rebuild (reviewer fd6b8036).
+        // SIMPLIFIED CONTRACT (spec 4afc6e43): one authorization gate — the ordinary
+        // authenticated session plus the user's sharing choice. The policy snapshot/lease no
+        // longer gates uploads; the server re-checks enrollment/enablement at accept.
+        // THE ONE CONSENT DECISION (spec 4afc6e43, reviewer ee48cdfe): shared by capture, sink
+        // and upload. Ordinary session + affirmative sharing choice + no explicit consent loss.
+        // The server re-checks enrollment at accept; no policy/readiness check.
+        let uploadAuthorized: () -> Bool = {
+            ServerSettings.userId != nil
+                && VoiceSharingEnrollmentStore.shared.consentAllowsCollection
+        }
+        // ONE identity reader for the whole upload path: queue, uploader and transport all
+        // consult it, so the fence spans admission, credential acquisition and settlement.
+        let uploadIdentity: () -> VoiceSharingUploadIdentity? = {
+            VoiceSharingUploadIdentity(
+                accountScope: ServerSettings.userId,
+                // PROVENANCE, NOT PERMISSION (spec 1bb73eac). See the queue's identity reader
+                // above: `activeEnrollmentEpoch` needs a projection round trip in THIS process,
+                // which cold start never has, so admission refused every entry forever.
+                // Explicit opt-out and explicit withdrawal still answer nil here — those are the
+                // user's own instructions and stop the path without waiting for a round trip.
+                enrollmentEpoch: VoiceSharingEnrollmentStore.shared
+                    .persistedEnrollmentEpochForProvenance)
+        }
+        // SPEC RULING 2026-11-03: Voice Sharing selects the Auris provider on EVERY build where
+        // sharing is enabled, ignoring the assistant's routing flag and the gateway-cutover gate. With no
+        // configured origin there is no credential to present, so sharing is unavailable rather than
+        // falling back to a static identity the account route must refuse.
+        // Sharing endpoints use the CONFIGURED origin (not the cutover-gated one) so authentication and
+        // the requests it authorizes agree, per reviewer on b658801c6. Resolved LIVE per request, not
+        // captured once: a captured origin lets auth mint for the new origin while upload still targets
+        // the old one after an origin change (reviewer on f37893cd0).
+        let voiceSharingTokenProvider = CloudTokenProviderRouter.voiceSharingProvider()
+        if voiceSharingTokenProvider == nil {
+            FileLog.shared.addMessage("[VoiceSharing] sharing unavailable: no Auris origin configured")
+        }
+        let uploadTrigger = voiceSharingTokenProvider.map { provider in
+            makeVoiceSharingUploadTrigger(
+                queue: contributionQueue, isAuthorized: uploadAuthorized, currentIdentity: uploadIdentity,
+                baseURLProvider: { CloudConfig.shared.configuredOrigin },
+                tokenProvider: provider)
+        }
+        // The settings MODEL is wired here, in production, with the real live reads (reviewer
+        // 8ae2b980): the policy's effective permit, the enrollment store's effective enrollment,
+        // and the store's local opt-in. Each returns `nil` when it cannot answer, which the model
+        // renders as `unknown` rather than inventing an opt-out.
+        let settingsModel = VoiceSharingSettingsModel(
+            queue: contributionQueue,
+            isCollectionPermitted: { uploadAuthorized() },
+            // TRI-STATE: no authoritative projection yet ⇒ unknown, not "not enrolled".
+            isAccountEnrolled: { VoiceSharingEnrollmentStore.shared.currentEnrollmentAnswer },
+            isLocallyOptedIn: { VoiceSharingEnrollmentStore.shared.currentState.localOptIn },
+            // Coherence stamps: the account the reads belong to and the enrollment generation that
+            // moves when intent/membership changes. A read taken across a move is detected and the
+            // whole snapshot degrades to `unknown` rather than mixing two moments.
+            coherenceAccount: { ServerSettings.userId },
+            coherenceGeneration: { VoiceSharingEnrollmentStore.shared.currentEnrollmentGeneration },
+            coherenceVersion: { VoiceSharingEnrollmentStore.shared.activeEnrollmentEpoch },
+            queueHoldGeneration: { contributionQueue.currentHoldGeneration })
+        // Time-driven freshness: the queue's next age boundary and the policy's lease deadline.
+        settingsModel.nextAgeBoundarySeconds = { [weak contributionQueue] in
+            contributionQueue?.secondsUntilNextAgeBoundary()
+        }
+        settingsModel.scheduleTimeDrivenRefresh = { delay, body in
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: body)
+        }
+        let contributionSink = VoiceSharingContributionSink(
+            queue: contributionQueue,
+            isEnabled: { uploadAuthorized() },
+            encoderProvenance: {
+                VoiceSharingContributionEncoder.Provenance(
+                    platform: "ios",
+                    appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
+                    build: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
+                    captureSessionID: UUID().uuidString,
+                    models: .init(vad: nil, wakeword: nil, asr: nil, translation: nil, router: nil),
+                    conversionVersion: "v1") // spec ruling 2026-10-22: bounded string, not Int
+            },
+            // A durably published recording is uploadable work: request a drain through the
+            // EXISTING trigger (spec 5ffbfdd5), so an already-foreground app does not wait for a
+            // leave-and-return lifecycle event. The trigger keeps its gates, single-flight and
+            // workPending coalescing — no new mechanism.
+            requestUploadDrain: { [weak uploadTrigger] in uploadTrigger?.triggerDrainIfPermitted() })
+        // No capture allowance (spec c74d7e30, "Actual upload usage"): daily quota is metered
+        // from ACTUAL accepted bytes at the server, so capture no longer acquires, reserves or
+        // checks any prepaid allocation. The ledger, provisioner and capability objects are not
+        // constructed at all — removing only the collector's guard would have left a provisioner
+        // still requesting allowances on every policy exchange.
+        let contributionCollector = VoiceSharingCollector(
+            // Capture gate = the same consent truth as upload (session + sharing choice).
+            isCollectionPermitted: uploadAuthorized,
+            // CONNECTED CAPTURE ENTRY, second half (2026-11-03): admission ALSO requires the
+            // completion wait limit — a nil limit closes the gate before the allowance is ever
+            // consulted (collector: `guard outcomeWaitLimit != nil`). Without this the provisioned
+            // allowance is real but unreachable: consent live, allowance issued, zero captures.
+            outcomeWaitLimit: VoiceSharingCollector.OutcomeWaitLimit(
+                milliseconds: 15_000, ceilingMilliseconds: 15_000),
+            sink: { event in
+                contributionSink.handle(event)
+            }
+        )
+        asrEngine.contributionCollector = contributionCollector
+        // The COLLECTOR owns its registration: a held sink or queued drain can keep the collector
+        // alive after the engine is gone, and that collector must still be purged at consent loss.
+        // Consent loss purges BOTH holders of retained contribution state: the collector's
+        // in-memory capture/FIFO, and the durable queue (any entry prepared before the gate
+        // closed, ready or not). Cleanup failures inside purge leave entries retained + charged.
+        // AUTHORIZATION INVALIDATION goes through the REAL production path (reviewer 70e5fc58):
+        // this handler is the coordinator's single gate-lost signal — withdrawal, sign-out, the
+        // refresh observing the switch off, and the scheduled lease-expiry trigger. It must reach
+        // the SINK's revocation generation, not just purge storage, or a queued event from the
+        // superseded epoch could publish after the switch reads true again.
+        // Re-login recovery (review 15a18d5d): identityBecameReadable must INITIATE the normal
+        // refresh, not merely permit a later one. Wired here where Firebase is configured; the
+        // coordinator's default is a no-op so tests can drive the sequence without Firebase.
+        if let uploadTrigger {
+            installVoiceSharingGateLoss(
+                collector: contributionCollector, sink: contributionSink, uploadTrigger: uploadTrigger,
+                queue: contributionQueue, coordinator: .shared)
+        }
+
+
         // One emitted-PCM reference for the whole session: the cloud-answer renderer
         // feeds it, and the engine correlates against it. Without a producer the
         // reference stays empty and the filter cannot fire.
@@ -279,7 +449,7 @@ class VoiceControlAssembly {
         let language = Locale.current.language.languageCode?.identifier ?? "en"
         ttsEngine.warmUp(language: language)
 
-        return VoiceControlService(
+        let service = VoiceControlService(
             conditionMonitor: conditionMonitor,
             routeMonitor: routeMonitor,
             interruptionHandler: interruptionHandler,
@@ -292,6 +462,7 @@ class VoiceControlAssembly {
             gracePeriodSignal: gracePeriodSignal,
             liveOriginManager: conversationManager,
             analytics: voiceAnalytics,
+            contributionCollector: contributionCollector,
             isPlaybackActive: isPlaybackActive,
             onInputRoutingFinished: onInputRoutingFinished,
             testInputBarrier: testInputBarrier,
@@ -300,6 +471,113 @@ class VoiceControlAssembly {
             parsedIntentObserverFactory: parsedIntentObserverFactory,
             preparedObserverFactory: preparedObserverFactory
         )
+        // An absent sharing origin disables SHARING ONLY. Returning nil here took out the whole Voice
+        // Control service — a working feature broken because an unrelated one is unconfigured, which is
+        // failing wide rather than closed. The service is always constructed; with no upload trigger it
+        // simply has no voice-sharing lifetime attached.
+        if let uploadTrigger {
+            return installVoiceSharingLifetime(
+                on: service, settingsModel: settingsModel, uploadTrigger: uploadTrigger,
+                enrollmentStore: .shared,
+                queue: contributionQueue)
+        }
+        service.voiceSharingLifetime = nil
+        return service
+    }
+
+    /// The production upload chain. Injection changes sources, not the wiring under test.
+    func makeVoiceSharingUploadTrigger(
+        queue: VoiceSharingUploadQueue,
+        isAuthorized: @escaping () -> Bool,
+        currentIdentity: @escaping () -> VoiceSharingUploadIdentity?,
+        baseURLProvider: @escaping () -> String = { CloudConfig.shared.baseUrl },
+        tokenProvider: CloudTokenProviding, // caller supplies the voice-sharing provider (spec 2026-11-03)
+        session: URLSession = .shared,
+        clock: @escaping () -> Date = Date.init,
+        retryPolicy: VoiceSharingRetryPolicy = VoiceSharingRetryPolicy(
+            retryBaseDelay: VoiceSharingRetryPolicy.compiledInitialDelaySeconds,
+            retryMaximumDelay: VoiceSharingRetryPolicy.compiledMaximumDelaySeconds,
+            random: { Double.random(in: 0...1) }),
+        surfaceEnabled: @escaping () -> Bool = { VoiceSharingSettingsModel.surfaceEnabled },
+        networkGate: VoiceSharingUploadNetworkGate = VoiceSharingUploadNetworkGate(),
+        beforeNetworkRetryForTesting: (() async -> Void)? = nil
+    ) -> VoiceSharingUploadTrigger {
+        let transport = VoiceSharingUploadTransport(
+            baseURLProvider: baseURLProvider, tokenProvider: tokenProvider, session: session)
+        let uploader = VoiceSharingUploader(
+            queue: queue, networkGate: networkGate, retryPolicy: retryPolicy, isAuthorized: isAuthorized,
+            currentIdentity: currentIdentity, endpoint: { transport.endpoint }, clock: clock,
+            networkFenceTransport: { [transport] request, admitted, fence, networkFence in
+                return await transport.send(request: request, admittedIdentity: admitted, identityFence: fence,
+                                            networkFence: networkFence, networkAllowance: networkGate.allowance)
+            })
+        uploader.beforeNetworkRetryForTesting = beforeNetworkRetryForTesting
+        let scheduler = VoiceSharingUploadScheduler(queue: queue, uploader: uploader, isAuthorized: isAuthorized)
+        return VoiceSharingUploadTrigger(
+            scheduler: scheduler, surfaceEnabled: surfaceEnabled, isAuthorized: isAuthorized, networkGate: networkGate)
+    }
+
+    /// Keep revocation subscribed for as long as the collector can retain contribution audio.
+    func installVoiceSharingGateLoss(
+        collector: VoiceSharingCollector,
+        sink: VoiceSharingContributionSink,
+        uploadTrigger: VoiceSharingUploadTrigger,
+        queue: VoiceSharingUploadQueue,
+        coordinator: VoiceSharingCoordinator,
+        // Injectable so the focused control can drive the PRODUCTION handler (reviewer 7318214c);
+        // production resolves the real consent truth.
+        sessionAlive: @escaping () -> Bool = { ServerSettings.userId != nil },
+        consentGone: @escaping () -> Bool = { VoiceSharingEnrollmentStore.shared.consentGoneForPurge },
+        // Injectable diagnostic sink (incident 2026-11-05): production logs to FileLog; controls
+        // assert the exact purge decision line without touching the log store.
+        log: @escaping (String) -> Void = { FileLog.shared.addMessage($0) }
+    ) {
+        collector.gateLostSubscription = coordinator.registerGateLostHandler {
+            [weak collector, weak sink, weak uploadTrigger] in
+            // THE SUSPECTED CAUSE OF THE SILENT QUEUE WIPES, AND NOT A CONFIRMED ONE. On 2026-11-05
+            // staging lost ~32 durable entries with zero accepted records, and this handler purged
+            // on EVERY gate closure — including the old policy snapshot flapping "no installed
+            // snapshot". That is a mechanism that WOULD explain the loss, but the incident's cause
+            // remains UNRESOLVED (the retention behaviour observed afterwards does not identify
+            // which path removed those entries). Do not cite this as the established root cause.
+            // Under
+            // the simplified contract (spec 4afc6e43) gate closure is not consent withdrawal; the
+            // only purge is the user's explicit opt-out (settings) — see SettingsModel.
+            sink?.noteRevocation()
+            collector?.gateLost()
+            uploadTrigger?.stop()
+            // SPEC e1529db9: explicit WITHDRAWAL (local opt-out, server withdrawal, sign-out)
+            // still clears pending recordings; TEMPORARY loss (policy flap, network, listening)
+            // must retain them. Consent truth, not the gate event, decides the purge.
+            // INCIDENT 2026-11-05 (staging): 32 durable entries were removed at 19:58 with ZERO
+            // log lines. Silence is its own defect: every purge decision — keep OR clear — is
+            // now logged with its cause and the reconciled counts. No audio, no credentials.
+            if !sessionAlive() {
+                let outcome = queue.purgeAll()
+                log("[VoiceSharing] durable queue PURGE cause=session-gone outcome=\(outcome)")
+            } else if consentGone() {
+                let outcome = queue.purgeAll()
+                log("[VoiceSharing] durable queue PURGE cause=consent-gone outcome=\(outcome)")
+            } else {
+                log("[VoiceSharing] gate lost (temporary) — durable queue RETAINED")
+            }
+        }
+    }
+
+    /// The service outlives this builder; subscriptions and their dependencies must do so too.
+    @discardableResult
+    func installVoiceSharingLifetime(
+        on service: VoiceControlService,
+        settingsModel: VoiceSharingSettingsModel,
+        uploadTrigger: VoiceSharingUploadTrigger,
+        enrollmentStore: VoiceSharingEnrollmentStore,
+        queue: VoiceSharingUploadQueue
+    ) -> VoiceControlService {
+        service.voiceSharingLifetime = nil
+        service.voiceSharingLifetime = VoiceSharingLifetime(
+            settingsModel: settingsModel, uploadTrigger: uploadTrigger,
+            enrollmentStore: enrollmentStore, queue: queue)
+        return service
     }
 
     /// Product ASR selection for assembly/tests. Nil = unsupported locale (fail closed).
@@ -368,5 +646,36 @@ private class DefaultAnalyticsService: AnalyticsService {
             return String(describing: value)
         }
         Analytics.track(analyticsEvent, properties: sendableProperties)
+    }
+}
+
+/// Keeps the existing sharing objects and their source registrations alive with the service.
+final class VoiceSharingLifetime {
+    let settingsModel: VoiceSharingSettingsModel
+    let uploadTrigger: VoiceSharingUploadTrigger
+    private let enrollmentStore: VoiceSharingEnrollmentStore
+    private let queue: VoiceSharingUploadQueue
+    private let enrollmentObserver: UUID
+    private let queueObserver: UUID
+
+    init(settingsModel: VoiceSharingSettingsModel,
+         uploadTrigger: VoiceSharingUploadTrigger,
+         enrollmentStore: VoiceSharingEnrollmentStore,
+         queue: VoiceSharingUploadQueue) {
+        self.settingsModel = settingsModel
+        self.uploadTrigger = uploadTrigger
+        self.enrollmentStore = enrollmentStore
+        self.queue = queue
+        enrollmentObserver = enrollmentStore.addObserver { [weak settingsModel] _ in
+            settingsModel?.refreshLiveState()
+        }
+        queueObserver = queue.addContentObserver { [weak settingsModel] in
+            settingsModel?.refreshLiveState()
+        }
+    }
+
+    deinit {
+        enrollmentStore.removeObserver(enrollmentObserver)
+        queue.removeContentObserver(queueObserver)
     }
 }

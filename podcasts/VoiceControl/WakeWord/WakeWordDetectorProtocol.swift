@@ -14,5 +14,15 @@ protocol WakeWordDetectorProtocol: AnyObject {
     /// result. The complete original segment is always forwarded to ASR on a
     /// positive result; the detector never cuts audio.
     func detect(samples: [Float], sampleRate: Int) -> WakeWordResult
+    func detect(samples: [Float], sampleRate: Int,
+                modelUsed: (VoiceSharingContributionEncoder.ModelRef?) -> Void) -> WakeWordResult
     func release()
+}
+
+extension WakeWordDetectorProtocol {
+    func detect(samples: [Float], sampleRate: Int,
+                modelUsed: (VoiceSharingContributionEncoder.ModelRef?) -> Void) -> WakeWordResult {
+        modelUsed(nil)
+        return detect(samples: samples, sampleRate: sampleRate)
+    }
 }

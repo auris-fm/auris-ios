@@ -1,0 +1,39 @@
+OWNER SIMULATOR — READ-ONLY STATE REPORT (no uninstall, no seeding, no login)
+Date: 2026-11-03 19:06:38Z
+Destination: 13EB57ED-99BB-4C6F-B855-D31E96028D57 (owner's). Nothing was installed, removed, seeded or signed in.
+
+SIGNING / CONFIGURATION OF THE CURRENTLY INSTALLED APP
+  CFBundleIdentifier : fm.auris
+  CFBundleVersion    : 8.21.0.0  (CFBundleShortVersionString 8.21)
+  Signature          : adhoc
+  TeamIdentifier     : not set
+  Data container     : E102D48E-7DE9-455C-97B3-7CFE420024CA (unchanged across the read-only launch)
+  -> The installed build is an AD-HOC simulator build, not a team-signed one. This is the same
+     signing mode as the pieces I build, so an in-place update is compatible in that respect.
+     It remains true (and @cloud named it) that device/team-signing equivalence is unverified.
+
+AURIS CONFIGURATION
+  auris_cloud_user_id present in fm.auris.plist: user_b237ca93-... (matches the account we have
+  been treating as the owner's).
+  No custom gateway base URL key set: the app uses its built-in default.
+  No VoiceSharing origin override is set in the container.
+
+SESSION STATE — READ-ONLY, MEASURED AT LAUNCH
+  A read-only launch (simctl launch, then relaunch of the existing install) emitted:
+    03:06:27  [VoiceSharing] capture allowance provision skipped: no account identity
+  while `SJSyncingEmail` is EMPTY and no refresh token is present in that container.
+  -> The installed app currently holds NO readable owner credential, so it cannot issue an
+     allowance request. This is a signed-out state.
+
+HONEST LIMIT ON THE ABOVE
+  The same debug_log also contains lines from my test-host runs on this simulator
+  (`identity settled from owner readiness`), because the test host and the app share the
+  container. Those lines are NOT evidence about the app's session and must not be read as
+  "the app has a settled identity". The line I rely on is the app-launch-only
+  `no account identity`, which fits the empty email field and the absent token.
+
+CONSEQUENCE FOR HANDOFF
+  The in-place update itself is compatible and data-preserving (measured separately on a
+  disposable simulator in SIGNED-UPDATE-PERSISTENCE.txt). What is NOT ready is the session:
+  the upload test needs a real sign-in on this simulator, and per spec that is @spec's to
+  coordinate. Until then no capture/allowance/upload step can run here.

@@ -1,0 +1,31 @@
+{
+  "pr": 59,
+  "draft": true,
+  "base_branch": "main",
+  "base_head": "83d553d05699e34850794c9790830130c389ef36",
+  "review_head": "ead8f973c4716b82270a25769e69c4808844b907",
+  "merge_base": "f04d7f85faf269ac86ab87827dd674fde370776c",
+  "outgoing_commit_count": 197,
+  "changed_file_count": 69,
+  "short_stat": "69 files changed, 30512 insertions(+), 143 deletions(-)",
+  "merge_preview_tree": "dd5d5fe352289a8a1914c1a06cf54f1a68b9a6b0",
+  "patch_sha256": "a8d013472fc05229dea0473d481d7d4fb0515a82f10912ac3bcfe5ddda59804c",
+  "excluded_stack_heads": {
+    "PR56-auth": {
+      "head": "f9cd61f468ec06fd8ec7520731438b9378be61b5",
+      "ancestor": false
+    },
+    "PR57-audio": {
+      "head": "0567fcc5de21ce3231483f7f57b0b420a288670f",
+      "ancestor": false
+    },
+    "PR58-tail": {
+      "head": "c5077bdc74a39a6e40cbda43f359f90883cca5e5",
+      "ancestor": false
+    },
+    "PR50-current": {
+      "head": "42b0f6a9f3731ae8f657442d2b46928d7d15d092",
+      "ancestor": false
+    }
+  }
+}

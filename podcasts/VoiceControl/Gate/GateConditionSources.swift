@@ -129,11 +129,20 @@ struct PlaybackContextConditionSource {
 }
 
 class LiveConditionMonitor: ObservableObject {
-    @Published var setup: GateSetup = .init(
-        enabledByUser: .allowed,
-        deviceSupported: .allowed,
-        modelsReady: .allowed
-    )
+    /// The user's Voice Control enable choice survives relaunch (reviewer on 4b2f60468: a settings
+    /// switch must not silently re-enable after restart). Default is ENABLED only for a user who
+    /// has never expressed a preference; an explicit off is persisted and restored.
+    static let userEnabledDefaultsKey = "VoiceControl.UserEnabled"
+
+    @Published var setup: GateSetup = {
+        let persisted = UserDefaults.standard.object(forKey: LiveConditionMonitor.userEnabledDefaultsKey)
+        let enabled = (persisted as? Bool) ?? true
+        return .init(
+            enabledByUser: enabled ? .allowed : .blocked(reason: "user_disabled"),
+            deviceSupported: .allowed,
+            modelsReady: .allowed
+        )
+    }()
     @Published var conflicts: GateConflicts = .init(
         notOnCall: .allowed,
         notCasting: .allowed,
@@ -270,6 +279,7 @@ class LiveConditionMonitor: ObservableObject {
 
     func updateUserEnabled(_ enabled: Bool) {
         FileLog.shared.addMessage("[VoicePipeline] UserEnabled: \(enabled)")
+        UserDefaults.standard.set(enabled, forKey: Self.userEnabledDefaultsKey)
         setup = GateSetup(
             enabledByUser: enabled ? .allowed : .blocked(reason: "user_disabled"),
             deviceSupported: setup.deviceSupported,
