@@ -1678,16 +1678,69 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         XCTAssertEqual(wire("completed"), "success")
         XCTAssertEqual(wire("failed"), "failure")
         XCTAssertEqual(wire("cancelled"), "cancelled")
-        // SPEC 21b5d822: a stated refusal IS an observed outcome — the wire's `refused`.
-        XCTAssertEqual(wire("not_run", reason: "client_refused"), "refused")
+        // SPEC ALIGNMENT 553ec4a6 (same rule Android gets): a REFUSAL is state `failed` with
+        // `client_refused` — the wire's `refused` — not a not_run.
+        XCTAssertEqual(wire("failed", reason: "client_refused"), "refused")
         XCTAssertNil(wire("unknown"), "unobserved execution must not assert an outcome")
-        XCTAssertNil(wire("not_run"), "a non-refusal not_run observed no execution")
+        XCTAssertNil(wire("not_run"), "a not_run stage observed no execution")
         // The routing disposition keeps its own vocabulary — the two mappings must not merge.
         let completed = Outcome(state: "completed", reason: nil)
         XCTAssertEqual(VoiceControlService.settledDispositionForTesting(completed), "executed")
         XCTAssertNotEqual(VoiceControlService.settledDispositionForTesting(completed),
                           VoiceSharingContributionEncoder.StageOutcome.wireExecutionOutcome(for: completed),
                           "routing disposition and wire outcome are different vocabularies")
+    }
+
+    /// REVIEWER 40e69257 #2: the collector's AUTOMATIC execution-outcome mapping, measured on
+    /// DURABLE BYTES through the production collector/sink/queue. The producer supplies NO outcome
+    /// member at all — so deleting the collector's mapping makes this control fail. Covers the
+    /// fixed mapping (spec 21b5d822 + alignment 553ec4a6): completed/success, failed/failure,
+    /// failed+client_refused/refused, cancelled/cancelled, and unknown with NO outcome member.
+    func test_theCollectorMapsExecutionOutcomeOntoDurableBytesForEveryObservedState() async throws {
+        let cases: [(label: String, state: String, reason: String?, expected: String?)] = [
+            ("completed", "completed", nil, "success"),
+            ("failed action", "failed", "action_failed", "failure"),
+            ("refusal (spec 553ec4a6)", "failed", "client_refused", "refused"),
+            ("cancelled", "cancelled", "cancelled_by_user", "cancelled"),
+            ("unobserved", "unknown", "observation_unavailable", nil),
+        ]
+        for (label, state, reason, expected) in cases {
+            openGate(enrolled: true)
+            let chain = makeChain(wake: DetectedWake(), claims: { [:] })
+            chain.engine.listeningMode = .wakeWord
+            var released = false
+            chain.engine.onRoutingInputWithContext = { _, context in
+                // THE PRODUCER STATES NO OUTCOME: the mapping must come from the collector.
+                chain.engine.contributionCollector?.engineReported(
+                    stage: "execution",
+                    outcome: .init(state: state, reason: reason),
+                    context: context)
+                chain.engine.contributionCollector?.finalizeDeferredCompletion(context: context)
+                released = true
+                return true
+            }
+            let watermark = recordWatermark()
+            await chain.backend.emitSpeechThenSilence(
+                level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
+            let deadline = Date().addingTimeInterval(5)
+            while !released, Date() < deadline {
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+            XCTAssertTrue(released, "\(label): the consumer must be handed the capture")
+            _ = waitForReadyEntries(1)
+            let record = try XCTUnwrap(try durableRecordsSince(watermark).first, label)
+            let exec = try XCTUnwrap(
+                (record["observations"] as? [String: Any])?["execution"] as? [String: Any], label)
+            if let expected {
+                XCTAssertEqual(exec["outcome"] as? String, expected,
+                               "\(label): the durable record must carry the mapped outcome; got \(String(describing: exec["outcome"]))")
+                XCTAssertEqual(exec["reason"] as? String, reason,
+                               "\(label): the observed reason is retained alongside the outcome")
+            } else {
+                XCTAssertFalse(exec.keys.contains("outcome"),
+                               "\(label): an unobserved execution must state NO outcome member")
+            }
+        }
     }
 
     /// REVIEW 59841fbc #1: an explicit `reason: null` on a completed stage is still a carded reason. The

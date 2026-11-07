@@ -237,6 +237,67 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
         unenumerated["wake"] = .init(state: "completed", decision: "no_wake_detected")
         try expectRefusal("unenumerated wake decision", unenumerated,
                           path: "observations.wake.decision")
+
+        // RAW-RECORD negatives (reviewer 40e69257): a present null or NON-STRING value must be
+        // refused too — the optional-cast form would skip the enum check for exactly these. Built
+        // by mutation against the production canonicalizer, so the DIGEST is not what refuses.
+        func rawBindingRefusal(
+            _ label: String, path expectedPath: String,
+            mutate: (inout [String: Any]) -> Void,
+            file: StaticString = #filePath, line: UInt = #line
+        ) throws {
+            let encoded = try VoiceSharingContributionEncoder.encode(
+                event: event(), provenance: provenance, observations: observations)
+            var object = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: encoded.metadataEnvelope) as? [String: Any])
+            mutate(&object)
+            var digest = ""
+            #if canImport(CryptoKit)
+            digest = SHA256.hash(data: try VoiceSharingRecordBinding.canonicalizeForTesting(object))
+                .map { String(format: "%02x", $0) }.joined()
+            #endif
+            let sealed = try JSONSerialization.data(withJSONObject:
+                ["record": object["record"] as Any, "record_sha256": digest])
+            do {
+                _ = try VoiceSharingRecordBinding.bind(envelope: sealed, audio: encoded.wav)
+                XCTFail("\(label): expected a binding refusal", file: file, line: line)
+            } catch let error as VoiceSharingRecordBinding.BindingError {
+                guard case .invalidField(let path, _) = error else {
+                    return XCTFail("\(label): expected invalidField, got \(error)", file: file, line: line)
+                }
+                XCTAssertTrue(path.hasPrefix(expectedPath),
+                              "\(label): expected refusal at \(expectedPath), got \(path)",
+                              file: file, line: line)
+            }
+        }
+        try rawBindingRefusal("null wake decision on a failed wake", path: "observations.wake.decision") { body in
+            var record = body["record"] as! [String: Any]
+            var obs = record["observations"] as! [String: Any]
+            obs["wake"] = ["state": "failed", "reason": "detector_error", "decision": NSNull()]
+            record["observations"] = obs
+            body["record"] = record
+        }
+        try rawBindingRefusal("numeric wake decision", path: "observations.wake.decision") { body in
+            var record = body["record"] as! [String: Any]
+            var obs = record["observations"] as! [String: Any]
+            obs["wake"] = ["state": "failed", "reason": "detector_error", "decision": 1]
+            record["observations"] = obs
+            body["record"] = record
+        }
+        try rawBindingRefusal("numeric execution outcome on a not_run stage", path: "observations.execution.outcome") { body in
+            var record = body["record"] as! [String: Any]
+            var obs = record["observations"] as! [String: Any]
+            obs["execution"] = ["state": "not_run", "reason": "precondition_failed", "outcome": 123]
+            record["observations"] = obs
+            body["record"] = record
+        }
+        try rawBindingRefusal("null execution outcome on a completed stage", path: "observations.execution.outcome") { body in
+            var record = body["record"] as! [String: Any]
+            var obs = record["observations"] as! [String: Any]
+            obs["execution"] = ["state": "completed", "outcome": NSNull()]
+            record["observations"] = obs
+            body["record"] = record
+        }
     }
 
     /// Emits a REAL encoder fixture (envelope + WAV) for the pinned Worker intake harness, so the
@@ -409,8 +470,13 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
             ])
         }
         let manifestObject: [String: Any] = [
-            "client_head": "7c2e67d4b",
+            // REVIEWER 40e69257 #3: name the recipe honestly. The ENCODER emitting these bytes is
+            // the one at ebdf40ee9 (the wire-v2 fix); the review-fix commit corrects mapping/binding
+            // and controls without changing emission, so the bytes are ebdf40ee9's and the recipe's
+            // review-fix head is recorded separately. R1's bytes remain preserved beside these.
+            "client_head": "ebdf40ee9",
             "wire_revision": 2,
+            "recipe_note": "bytes emitted by the ebdf40ee9 encoder; review-fix head posted in #ios:8eb13b8b; test-supplied observations, not producer evidence",
             "r1_refusal": "execution.outcome used routing tokens and completed wake carried no decision; refused by server intake",
             "schema_version": 1,
             "scope": "encoder bytes with TEST-SUPPLIED observations; not engine output",

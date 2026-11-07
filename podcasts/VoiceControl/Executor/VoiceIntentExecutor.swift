@@ -150,7 +150,9 @@ extension VoiceIntentExecuting {
         case .earcon(.error):
             return (response, ExecutionVerdict(state: "failed", reason: "action_failed", outcome: "failed"))
         case .earcon(.confirmRequired):
-            return (response, ExecutionVerdict(state: "not_run", reason: "client_refused", outcome: "refused"))
+            // SPEC ALIGNMENT 553ec4a6 (matches Android): a refusal is state `failed`, outcome
+            // `refused`, reason `client_refused` — not a not_run, which states no outcome.
+            return (response, ExecutionVerdict(state: "failed", reason: "client_refused", outcome: "refused"))
         default:
             return (response, ExecutionVerdict(state: "unknown", reason: "observation_unavailable"))
         }
@@ -409,7 +411,7 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
         case .earcon(.error):
             return ExecutionVerdict(state: "failed", reason: "action_failed", outcome: "failed")
         case .earcon(.confirmRequired):
-            return ExecutionVerdict(state: "not_run", reason: "client_refused", outcome: "refused")
+            return ExecutionVerdict(state: "failed", reason: "client_refused", outcome: "refused")
         default:
             return ExecutionVerdict(state: "unknown", reason: "observation_unavailable")
         }

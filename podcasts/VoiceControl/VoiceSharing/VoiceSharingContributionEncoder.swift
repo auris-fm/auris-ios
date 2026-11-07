@@ -117,17 +117,19 @@ enum VoiceSharingContributionEncoder {
                          outcome: wireOutcome, score: score, threshold: threshold)
         }
 
-        /// SERVER SCHEMA (spec 21b5d822, GO review): the execution stage's wire outcome is the
-        /// schema's OWN enum — {success, failure, refused, cancelled} — reached by a mapping
-        /// DISTINCT from settledDisposition's routing tokens (reviewer 39ac0771: the routing
-        /// tokens `executed`/`pending` leaked into this member at 9653836d3). Per spec 21b5d822
-        /// every OBSERVED execution carries an outcome; `unknown` observed nothing and omits it.
+        /// SERVER SCHEMA (spec 21b5d822 + alignment 553ec4a6, GO review): the execution stage's
+        /// wire outcome is the schema's OWN enum — {success, failure, refused, cancelled} — reached
+        /// by a mapping DISTINCT from settledDisposition's routing tokens (reviewer 39ac0771: the
+        /// routing tokens `executed`/`pending` leaked into this member at 9653836d3). Every
+        /// OBSERVED execution carries an outcome. A REFUSAL is state `failed` with
+        /// `client_refused` — matching Android — not a not_run. `unknown` observed nothing and
+        /// omits the member.
         static func wireExecutionOutcome(for outcome: StageOutcome) -> String? {
             switch (outcome.state, outcome.reason) {
             case ("completed", _): return "success"
+            case ("failed", "client_refused"): return "refused"
             case ("failed", _): return "failure"
             case ("cancelled", _): return "cancelled"
-            case ("not_run", "client_refused"): return "refused"
             default: return nil
             }
         }

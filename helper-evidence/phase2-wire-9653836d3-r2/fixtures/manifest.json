@@ -1,5 +1,5 @@
 {
-  "client_head" : "7c2e67d4b",
+  "client_head" : "ebdf40ee9",
   "fixtures" : [
     {
       "audio_byte_count" : 56,
@@ -37,6 +37,7 @@
     "platform" : "ios"
   },
   "r1_refusal" : "execution.outcome used routing tokens and completed wake carried no decision; refused by server intake",
+  "recipe_note" : "bytes emitted by the ebdf40ee9 encoder; review-fix head posted in #ios:8eb13b8b; test-supplied observations, not producer evidence",
   "schema_version" : 1,
   "scope" : "encoder bytes with TEST-SUPPLIED observations; not engine output",
   "wire_revision" : 2
