@@ -86,6 +86,14 @@ final class VoiceSharingUploadScheduler {
     var ownerCompletionFireGateForTesting: (() -> Void)?
 
     private let queue: VoiceSharingUploadQueue
+
+    /// LIVE RETENTION (spec 05ff27d0, reviewer 34aae0fa item 3): apply the age bound by removing
+    /// expired recordings. Serialized behind one drain pass at a time so a deletion can never
+    /// interleave with a lease decision, and run OFF the caller's queue because it takes the
+    /// queue's state lock.
+    func expireAgedOutRecordings() {
+        _ = queue.expireAgedOutEntries()
+    }
     private let uploader: VoiceSharingUploader
     private let isAuthorized: () -> Bool
     /// Max entries attempted per pass: a bounded pass cannot pin the caller forever.

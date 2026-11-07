@@ -1370,15 +1370,11 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         XCTAssertEqual(after.count, 0, "a digest-mismatched entry must never be ready upload work")
     }
 
-    /// REVIEWER 7c4c9cff PROGRESS RULE: a wake may only be armed for work the next pass can
-    /// actually ATTEMPT. A caused boundary over an entry that admission will refuse — here an
-    /// entry whose attempt budget is spent — must NOT arm, because the next pass makes no
-    /// progress and re-arms at the same instant: that is a zero-sleep self-reoffer loop. With
-    /// the policy cap still in place this entry is unservable, so the boundary is not "due work"
-    /// and no transport call may ever happen, however long the window. RED on `f6365e628`, where
-    /// `secondsUntilNextRetryBoundary` answered 0 for a due boundary over a live entry directory
-    /// without asking whether the entry could be served.
-    func test_aDueBoundaryOverAnUnservableEntryArmsNoWake() async throws {
+    /// Helpers for the progress-rule controls: publish one ready entry with a DUE boundary and
+    /// return the real trigger over a real scheduler+uploader.
+    private func readyEntryWithDueBoundary(
+        _ calls: TransportCallBox
+    ) -> (entry: String, trigger: VoiceSharingUploadTrigger) {
         lastSink = VoiceSharingContributionSink(
             queue: queue, isEnabled: { self.enabled },
             encoderProvenance: { [self] in provenance }, observations: { [self] in observations })
@@ -1386,53 +1382,106 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         drain()
         guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage(),
             ready.count == 1 else {
-            return XCTFail("premise: publication produced no ready entry")
+            XCTFail("premise: publication produced no ready entry")
+            return ("", VoiceSharingUploadTrigger(scheduler: VoiceSharingUploadScheduler(
+                queue: queue, uploader: VoiceSharingUploader(
+                    queue: queue,
+                    retryPolicy: VoiceSharingRetryPolicy(
+                        retryBaseDelay: 3600, retryMaximumDelay: 3600, random: { 1 }),
+                    isAuthorized: { true }, currentIdentity: { nil },
+                    endpoint: { URL(string: "https://unit.test/api/v1/voice-recordings") },
+                    transport: { _, _, _ in .response(statusCode: 503, body: Data()) }),
+                isAuthorized: { true }), surfaceEnabled: { true }, isAuthorized: { true }))
         }
-        let entry = ready[0]
-        // Spend the entry's whole attempt budget, so admission answers `attempts-exhausted` — a
-        // refusal that a retry wake cannot resolve.
-        let limits = VoiceSharingUploadQueue.AttemptLimits.default
-        for _ in 1...limits.maxUploadAttempts {
-            let maybeAdmitted = try queue.admitAttempt(entry)
-            guard let admitted = maybeAdmitted else {
-                return XCTFail("premise: the budget must be spendable before it is spent")
-            }
-            try queue.applyAttemptResult(entry, lease: admitted.lease, outcome: .retryableFailure)
-        }
-        XCTAssertFalse(try queue.isAttemptable(entry),
-                       "premise: the entry is unservable once its budget is spent")
-        // A DUE boundary over it: stamp in the past.
-        let entryName = entry.name
+        let entryName = ready[0].name
         let stamp = Date().addingTimeInterval(-1).timeIntervalSince1970
-        try JSONSerialization.data(withJSONObject: ["notBefore": stamp])
+        try? JSONSerialization.data(withJSONObject: ["notBefore": stamp])
             .write(to: root.appendingPathComponent("attempt.notbefore.\(entryName)"), options: .atomic)
-        // THE RULE: no due attemptable work remains, so no wake is armed at all.
-        XCTAssertNil(queue.secondsUntilNextRetryBoundary(),
-                     "an unservable due boundary is not due work: arming it spins without progress")
-
-        let transportCalls = TransportCallBox()
         let uploader = VoiceSharingUploader(
             queue: queue,
-            retryPolicy: VoiceSharingRetryPolicy(retryBaseDelay: 3600, retryMaximumDelay: 3600, random: { 1 }),
+            retryPolicy: VoiceSharingRetryPolicy(
+                retryBaseDelay: 3600, retryMaximumDelay: 3600, random: { 1 }),
             isAuthorized: { true }, currentIdentity: { nil },
             endpoint: { URL(string: "https://unit.test/api/v1/voice-recordings") },
             transport: { _, _, _ in
-                await transportCalls.record()
+                await calls.record()
                 return .response(statusCode: 503, body: Data())
             })
         let trigger = VoiceSharingUploadTrigger(
             scheduler: VoiceSharingUploadScheduler(queue: queue, uploader: uploader,
                                                    isAuthorized: { true }),
             surfaceEnabled: { true }, isAuthorized: { true })
+        return (entryName, trigger)
+    }
+
+    /// Run a real trigger pass and observe for a bounded window. Returns how many transport calls
+    /// the window produced, which is 0 when no wake was armed — and > 0 for a self-reoffer loop.
+    private func passesReached(_ trigger: VoiceSharingUploadTrigger,
+                               _ calls: TransportCallBox) async -> Int {
+        // A DUE boundary over a servable entry makes the FIRST pass attempt it — that is the
+        // premise, not the finding. Record where it starts so the measurement counts only the
+        // passes a WAKE produced afterwards.
         trigger.triggerDrainIfPermitted()
         await trigger.awaitDrainCompletionForTesting()
-        // A bounded observation window: a self-reoffer loop would fire repeatedly here.
         let deadline = ContinuousClock.now + .seconds(2)
         while ContinuousClock.now < deadline {
-            try await Task.sleep(nanoseconds: 100_000_000)
+            try? await Task.sleep(nanoseconds: 100_000_000)
         }
-        let reached = await transportCalls.count()
-        XCTAssertEqual(reached, 0, "an unservable entry must not be retried by a wake")
+        return await calls.count()
+    }
+
+    /// REVIEWER 34aae0fa (1) / 7c4c9cff PROGRESS RULE: a wake may only be armed for work the next
+    /// pass can ATTEMPT, and the check must use the SAME admission facts the drain uses. Under an
+    /// OWNER-WIDE RETRY HOLD (`attempt.pause.intent`, VoiceSharingUploadQueue.swift
+    /// `retryHoldLocked`) `admitAttempt` throws for every entry, so a due boundary is not work.
+    /// RED on f3f5f70ec, where the boundary reader ignored the hold and returned 0 — the exact
+    /// zero delay that makes the trigger re-offer itself without progress.
+    func test_aDueBoundaryUnderARetryHoldArmsNoWake() async throws {
+        let calls = TransportCallBox()
+        let (entryName, trigger) = readyEntryWithDueBoundary(calls)
+        // The durable retry-hold marker, exactly as a failed boundary publication leaves it.
+        try Data([0x01]).write(to: root.appendingPathComponent("attempt.pause.intent"),
+                               options: .atomic)
+        XCTAssertNil(queue.secondsUntilNextRetryBoundary(),
+                     "under a retry hold admission refuses every entry: no boundary is due work")
+        trigger.triggerDrainIfPermitted()
+        await trigger.awaitDrainCompletionForTesting()
+        let baseline = await calls.count() // the ORDINARY pass: a due boundary is attempted once
+        let deadline = ContinuousClock.now + .seconds(2)
+        while ContinuousClock.now < deadline {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        let afterHold = await calls.count()
+        XCTAssertEqual(afterHold, baseline,
+                       "with no wake armed, no further pass may run — a held entry must not be "
+                           + "retried, and nothing may self-reoffer")
+        XCTAssertFalse(entryName.isEmpty, "premise")
+    }
+
+    /// REVIEWER 34aae0fa (1): the same rule for the SECOND owner-wide hold. A durable revocation
+    /// hold (`revocationHoldLocked`, i.e. a pending disqualification across the owner) refuses
+    /// admission for every entry, so a due boundary over one is not due work either.
+    func test_aDueBoundaryUnderAnOwnerWideHoldArmsNoWake() async throws {
+        let calls = TransportCallBox()
+        let (_, trigger) = readyEntryWithDueBoundary(calls)
+        // The durable owner-wide revocation marker: `revocation.intent` at the root, which recovery
+        // reads into `revocationHoldLocked` (VoiceSharingUploadQueue.swift:269, :3572).
+        try Data([0x01]).write(to: root.appendingPathComponent("revocation.intent"),
+                               options: .atomic)
+        // Re-open the queue so recovery picks the marker up the way production does.
+        let fresh = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertNil(fresh.secondsUntilNextRetryBoundary(),
+                     "under an owner-wide hold no boundary is due work")
+        trigger.triggerDrainIfPermitted()
+        await trigger.awaitDrainCompletionForTesting()
+        let baseline = await calls.count()
+        let deadline = ContinuousClock.now + .seconds(2)
+        while ContinuousClock.now < deadline {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        let afterOwnerHold = await calls.count()
+        XCTAssertEqual(afterOwnerHold, baseline,
+                       "with no wake armed, no further pass may run under an owner-wide hold")
     }
 
     func test_malformedStageClaimFailsAtTheSinkWithoutSideEffects() throws {

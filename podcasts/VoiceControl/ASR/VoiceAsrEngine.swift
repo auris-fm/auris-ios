@@ -55,6 +55,21 @@ class VoiceAsrEngine {
     }
 
     var contributionCollector: VoiceSharingCollector?
+    /// Segments that completed with NO collector attached (spec 13f80de6). Zero in a healthy
+    /// process; a non-zero value names the exact failure shape the incident forensics could not
+    /// obtain, and the first occurrence is logged immediately.
+    private(set) var segmentsWithoutCollectorCount = 0
+
+    /// Records one segment delivered to a nil collector: counted every time, LOGGED once so a
+    /// standing nil cannot flood the log, then flushed (a diagnosis must survive termination).
+    private func noteSegmentWithoutCollector() {
+        segmentsWithoutCollectorCount += 1
+        guard segmentsWithoutCollectorCount == 1 else { return }
+        FileLog.shared.addMessage(
+            "[VoicePipeline] segment completed with NO contribution collector: "
+                + "collection skipped (init-order or a cleared reference)")
+        FileLog.shared.forceFlush()
+    }
     private(set) var echoFilterRoute: EchoFilterRoute = .external
     /// How long the reference survives a route change so the handover is still filtered.
     ///
@@ -442,8 +457,19 @@ class VoiceAsrEngine {
             // state the speech actually began under. Wake-word mode without grace requires the wake
             // word; anything else (grace window active, continuous mode) does not.
             guard let self else { return }
+            // NO-COLLECTOR OBSERVABILITY (spec 13f80de6): every capture call site is
+            // `contributionCollector?.…`, so a nil reference skips collection with NO log line —
+            // indistinguishable from a detector that never ran. The reference is a plain optional
+            // assigned once inside `buildVoiceControlService` (VoiceControlAssembly.swift), so nil
+            // is unreachable in a live process; if that reading is ever wrong, this is the line
+            // that says so. Counted separately from segments seen, because a segment that
+            // completes with no collector was never seen by one.
+            guard let collector = contributionCollector else {
+                self.noteSegmentWithoutCollector()
+                return
+            }
             let wakeRequired = listeningMode == .wakeWord && !gracePeriodSignal.isActive
-            contributionCollector?.speechStarted(confirmationFrameSamples: count, wakeRequired: wakeRequired)
+            collector.speechStarted(confirmationFrameSamples: count, wakeRequired: wakeRequired)
         }
         segmenter.onSpeechAccumulated = { [weak self] samples, total in
             self?.contributionCollector?.appendSamples(samples, reportedTotal: total)

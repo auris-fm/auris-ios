@@ -180,6 +180,65 @@ final class VoiceSharingProductionPathControls: XCTestCase {
         XCTAssertFalse(start.wakeRequired, "grace is active, so no wake word was required at segment start")
     }
 
+    /// REVIEWER 0628d185 / 13f80de6 FORWARD CONTROL: a wake REJECTION with grace FALSE must reach the
+    /// collector through the REAL engine path and produce a capture.
+    ///
+    /// This closes the question the incident forensics left open. The stuck build's `drop (no grace)`
+    /// branch calls `engineReported` and `segmentRejected(.rejectedWake)` before returning
+    /// (`VoiceAsrEngine.swift`, the `.dropUtterance` case), and this control proves that claim by driving
+    /// it: wake-word mode, NO grace, a detector that runs and answers not-detected. A capture must be
+    /// RECORDED — started, then a terminal `rejectedWake` — not silently skipped. If "no grace" bypassed
+    /// collection, the segment list below would be empty or carry no terminal kind.
+    func test_aWakeRejectionWithGraceFalseStillProducesACapture() async {
+        let collector = makeCollector()
+        let backend = EngineStubBackend()
+        backend.stubTranscript = "play the news"
+        let grace = GracePeriodSignal()
+        XCTAssertFalse(grace.isActive, "premise: no grace window is open")
+        let engine = makeEngine(collector: collector, wake: ProductionPathNotDetectedWake(),
+                                backend: backend, grace: grace, mode: .wakeWord)
+        defer { engine.stop() }
+
+        let recorded = await emitAndWait(backend, engine: engine)
+        XCTAssertTrue(recorded, "a wake-rejected segment must still be RECORDED, not silently dropped")
+        let kinds = snapshot().map { $0.kind }
+        XCTAssertTrue(kinds.contains(.started),
+                      "the segment was seen by the collector before the wake gate decided")
+        guard let terminal = snapshot().first(where: { $0.kind == .rejectedWake }) else {
+            return XCTFail("the wake rejection itself must be recorded as a capture")
+        }
+        XCTAssertGreaterThan(terminal.originalSampleCount ?? 0, 0,
+                             "the rejected capture carries its audio size")
+        XCTAssertEqual(terminal.reportedStages["wake"]?.decision, "rejected",
+                       "the wake decision is recorded from the decision site")
+        XCTAssertEqual(engine.segmentsWithoutCollectorCount, 0,
+                       "with a collector attached, no segment completes unattributed")
+    }
+
+    /// SPEC 13f80de6: the nil-collector counter. Every capture call site is `contributionCollector?.…`,
+    /// so a missing collector would skip collection with NO log line. The engine counts such segments
+    /// separately from segments seen — the signal that would have named the incident's failure shape.
+    func test_aSegmentDeliveredWithNoCollectorIsCountedAndLogged() async {
+        let backend = EngineStubBackend()
+        backend.stubTranscript = "play the news"
+        // No collector attached at all: the pre-assignment window, made visible.
+        let engine = makeEngine(collector: makeCollector(), wake: ProductionPathNotDetectedWake(),
+                                backend: backend)
+        engine.contributionCollector = nil
+        defer { engine.stop() }
+
+        XCTAssertTrue(engine.start(), "premise: engine started with stubbed capture")
+        backend.emitSpeech(level: 0.6, totalSamples: 6 * 160)
+        backend.emitSilence(totalSamples: 24 * 160)
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline, engine.segmentsWithoutCollectorCount == 0 {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(engine.segmentsWithoutCollectorCount, 1,
+                       "a segment delivered to a nil collector is COUNTED")
+        XCTAssertTrue(snapshot().isEmpty, "premise: with no collector nothing is recorded")
+    }
+
     /// A detector that RAN and measured must put its score and threshold on the observation the collector
     /// recorded. `DetectedWake` reports a fixed score; the threshold is the engine's own configured value, so
     /// both numbers come from the producer.

@@ -247,6 +247,19 @@ final class VoiceSharingUploadTrigger {
         startDrain(token: token)
     }
 
+    /// LIVE RETENTION SWEEP (spec 05ff27d0, reviewer 34aae0fa item 3): every permitted pass applies
+    /// the age bound by REMOVING expired recordings, so a resident process cannot hold them
+    /// forever. Runs on the trigger rather than inside the scheduler because deletion holds the
+    /// queue's state lock and must never be interleaved with a lease decision mid-pass; here it is
+    /// ordered strictly BEFORE the drain, so a pass never attempts work it is about to delete, and a
+    /// never-drained idle queue still expires (this entry point is the periodic pass).
+    ///
+    /// Called only from the permitted gate path — a closed gate already purges wholesale, and
+    /// deleting on behalf of an unauthorized surface would be a removal nobody asked for.
+    private func expireAgedOutRecordings() async {
+        scheduler.expireAgedOutRecordings()
+    }
+
     /// One drain, then a COALESCED follow-up if work arrived while it ran or if the scheduler was
     /// owned by someone else.
     ///
@@ -273,6 +286,8 @@ final class VoiceSharingUploadTrigger {
             // executes must prevent the drain from starting at all — the post-await check alone
             // was too late and could still send. stop() has already cleared the slot, so an
             // early return here leaves no bookkeeping behind.
+            if Task.isCancelled { return }
+            await self?.expireAgedOutRecordings()
             if Task.isCancelled { return }
             let outcome = await scheduler.drainOnce()
             guard let self else { return }
