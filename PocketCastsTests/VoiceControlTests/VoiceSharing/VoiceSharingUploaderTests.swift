@@ -881,14 +881,24 @@ final class VoiceSharingUploaderTests: XCTestCase {
         XCTAssertThrowsError(try failing.applyAttemptResult(
             entry, lease: admitted.lease, outcome: .retryableFailure,
             retryNotBefore: Date().addingTimeInterval(60)))
-        // In-memory hold engaged in THIS instance...
-        XCTAssertThrowsError(try failing.admitAttempt(entry))
+        // AMENDED BY SPEC d720ab6c / reviewer 066e2a70 item 2. The stamp write failed, so the
+        // DELAY is honoured from the durable obligation instead of from a stamp that never landed —
+        // and the refusal is `.notYetDue` with the right instant, not `.accountingUnavailable`.
+        // That distinction is the whole point: the recording is paused for its 60 seconds, so the
+        // server's minimum still applies, and no unknown fact about the retry bookkeeping is being
+        // used to withhold the recording beyond what the server asked for. In-memory hold in THIS
+        // instance first...
+        XCTAssertThrowsError(try failing.admitAttempt(entry)) { error in
+            guard case .notYetDue = (error as? VoiceSharingUploadQueue.PrepareError) else {
+                return XCTFail("expected .notYetDue, got \(error)")
+            }
+        }
         // ...and re-derived from disk by a FRESH instance.
         let fresh = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         XCTAssertThrowsError(try fresh.admitAttempt(entry)) { error in
-            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError,
-                           .accountingUnavailable,
-                           "the durable pause intent must hold a fresh owner")
+            guard case .notYetDue = (error as? VoiceSharingUploadQueue.PrepareError) else {
+                return XCTFail("the durable pause must hold a fresh owner, got \(error)")
+            }
         }
     }
 
@@ -1043,6 +1053,67 @@ final class VoiceSharingUploaderTests: XCTestCase {
         }
     }
 
+    /// REVIEWER 066e2a70 item 3: a capture whose audio is a READABLE pair but not the documented
+    /// representation must still reach the transport. RED before the fix: `isServedEntryLocked`
+    /// excluded `.invalidAudio`/`.audioSizeMismatch`/`.audioSampleCountMismatch`, so a malformed WAV
+    /// sat in the queue forever, held on a local verdict the ruling forbids. The corrupted-JSON
+    /// control above exercises a different binding failure and could never catch this.
+    func test_captureWithMalformedAudioIsSentAndTheServersRefusalDeletesIt() async throws {
+        let entry = try makeReadyEntry()
+        // Break the WAV body so binding reports `.invalidAudio`, leaving metadata.json intact: the
+        // record still parses, so this is exactly the "readable pair, invalid audio" case.
+        let directory = root.appendingPathComponent(entry.name, isDirectory: true)
+        try Data("RIFF".utf8).write(to: directory.appendingPathComponent("audio.wav"))
+        queue = VoiceSharingUploadQueue(rootDirectory: root) // re-derive state from disk
+        // PRE: the metadata still parses, so this really is the "readable pair, invalid audio"
+        // shape and not the unreadable-record case covered by the control above.
+        let parsedMetadata = try? queue.metadata(of: entry)
+        XCTAssertNotNil(parsedMetadata, "PRE: metadata must still parse")
+        XCTAssertTrue(queue.readyEntries().contains { $0.name == entry.name },
+                      "the server owns the audio-representation verdict, not the client")
+
+        var sawRequest = false
+        let uploader = makeUploader(transport: { _, _, _ in
+            sawRequest = true
+            // 415 owns `unsupported_audio`: the truthful code for audio the server cannot decode.
+            return .response(statusCode: 415, body: Data(
+                #"{"schema_version":1,"code":"unsupported_audio"}"#.utf8))
+        })
+        let outcome = await uploader.upload(entry)
+        XCTAssertTrue(sawRequest, "malformed audio must reach the server, which is the authority")
+        guard case .abandoned = outcome else {
+            return XCTFail("the server's final refusal settles it; got \(outcome)")
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path),
+                       "the final refusal deletes the capture")
+    }
+
+    /// REVIEWER 066e2a70 item 2: a malformed `attempts.json` made `isAttemptableLocked` THROW, so
+    /// the upload died before admission — the count-write fallback never got a chance to run. The
+    /// count spaces retries; it is not a gate.
+    func test_malformedAttemptRecordStillUploads() async throws {
+        let entry = try makeReadyEntry()
+        try Data("not-json".utf8).write(
+            to: root.appendingPathComponent(entry.name, isDirectory: true)
+                .appendingPathComponent(VoiceSharingUploadQueue.attemptRecordName))
+        queue = VoiceSharingUploadQueue(rootDirectory: root)
+
+        var sawRequest = false
+        let bound = try XCTUnwrap(queue.boundIdentity(of: entry))
+        let uploader = makeUploader(transport: { _, _, _ in
+            sawRequest = true
+            // 200 pairs with `duplicate` (a 201 pairs with `accepted`); anything else is a
+            // protocol violation and would be retained as unknown.
+            return .response(statusCode: 200, body: self.receiptBody(
+                captureID: bound.captureID, recordSHA: bound.recordSHA256, status: "duplicate"))
+        })
+        let outcome = await uploader.upload(entry)
+        XCTAssertTrue(sawRequest, "an unreadable attempt count must not hold the recording")
+        guard case .delivered = outcome else {
+            return XCTFail("expected a delivered receipt; got \(outcome)")
+        }
+    }
+
     func test_aLocallyUnbindableCaptureIsSentAndTheServersRefusalDeletesIt() async throws {
         // A BOUND queue: the fence must still attribute the attempt to the owning account even
         // though the record itself no longer parses.
@@ -1179,11 +1250,18 @@ final class VoiceSharingUploaderTests: XCTestCase {
         XCTAssertTrue(rootListing.contains { $0.hasPrefix(VoiceSharingUploadQueue.obligationPrefix) },
                       "obligation file must exist; got \(rootListing)")
         let fresh1 = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        // AMENDED BY SPEC d720ab6c: the stamp write failed, so what refuses is the DURABLE
+        // OBLIGATION, not an owner-wide accounting hold. The obligation is the per-entry record of
+        // the server's minimum, and it survives the restart — which is the property this control
+        // exists to prove. (The old `.accountingUnavailable` was the owner-wide hold, and it was
+        // itself a gate on an attempt derived from an unknown fact.)
         XCTAssertThrowsError(try fresh1.admitAttempt(entry)) { error in
-            // The owner-wide hold refuses first (accountingUnavailable); the per-entry obligation
-            // boundary is what keeps refusing AFTER the hold lifts (asserted below).
-            XCTAssertEqual(
-                error as? VoiceSharingUploadQueue.PrepareError, .accountingUnavailable)
+            guard case .notYetDue(let retryAt) =
+                (error as? VoiceSharingUploadQueue.PrepareError) else {
+                return XCTFail("the durable obligation must refuse after a stamp failure, got \(error)")
+            }
+            XCTAssertGreaterThan(retryAt.timeIntervalSinceNow, 500,
+                                 "the ORIGINAL minimum survives the restart")
         }
         _ = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init) // second restart
         // Reconciliation may lift the owner-wide marker (state is provable)...

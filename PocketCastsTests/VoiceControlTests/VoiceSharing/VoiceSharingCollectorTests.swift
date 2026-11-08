@@ -388,8 +388,12 @@ final class VoiceSharingCollectorTests: XCTestCase {
         XCTAssertEqual(agg.openCaptures, 0, "every segment closed")
         XCTAssertLessThanOrEqual(agg.terminalHistory, VoiceSharingCollector.maxTerminalHistoryIDs + 8,
                                  "refusal history is pruned to its floor, not grown for the session lifetime")
-        XCTAssertLessThanOrEqual(agg.queuedEvents, VoiceSharingCollector.maxPendingSignals,
-                                 "the FIFO holds its bound")
+        // AMENDED BY SPEC 2741a0ca: queued work is no longer dropped at the cap. The identity
+        // state this control is really about (open captures, refusal history) stays bounded; the
+        // FIFO does not, and its pressure is counted rather than silently discarded.
+        XCTAssertEqual(agg.openCaptures, 0, "the FIFO-drain property is unchanged")
+        XCTAssertGreaterThan(collector.overflowCount, 0,
+                             "queueing past the old cap is counted pressure")
         // And the collector still works after all that pruning:
         collector.speechStarted(confirmationFrameSamples: 320)
         let ctx = collector.currentCaptureContextForTesting
@@ -668,23 +672,31 @@ final class VoiceSharingCollectorTests: XCTestCase {
             collector.speechStarted(confirmationFrameSamples: 320)
             collector.appendSamples(segment, reportedTotal: segment.count)
             collector.speechCompleted(segment, context: collector.currentCaptureContextForTesting)
+            // AMENDED BY SPEC 2741a0ca: the budget is GENUINELY retired as a dropping gate. A
+            // recording may stop being collected only when sharing is off, so neither this budget
+            // nor the FIFO cap may discard; both are counted pressure. Retained audio can now
+            // EXCEED the constant — that is the ruled behaviour, and it is why the ledger is
+            // surfaced. What still holds is that every byte is accounted for and released at drain.
             if i % 20 == 0 {
-                XCTAssertLessThanOrEqual(collector.aggregateAudioSamplesForTesting,
-                                         VoiceSharingCollector.maxAggregateRetainedSamples,
-                                         "the aggregate byte budget holds under saturation")
+                XCTAssertGreaterThan(collector.aggregateAudioSamplesForTesting, 0,
+                                     "the ledger accounts for saturation")
             }
         }
-        XCTAssertLessThanOrEqual(collector.aggregateAudioSamplesForTesting,
-                                 VoiceSharingCollector.maxAggregateRetainedSamples,
-                                 "saturating 200 segments never exceeds the aggregate budget")
-        XCTAssertGreaterThan(collector.overflowCount, 0, "the budget drops newest work when full (counted)")
+        // AT LEAST the budget: it was reached, not enforced as a discard threshold. The exact
+        // overshoot is not the point; that nothing was dropped to stay under it is.
+        XCTAssertGreaterThanOrEqual(collector.aggregateAudioSamplesForTesting,
+                                    VoiceSharingCollector.maxAggregateRetainedSamples,
+                                    "saturating reaches the budget and retains work there")
+        XCTAssertGreaterThan(collector.overflowCount, 0, "the pressure is counted, never silent")
 
         stateLock.lock(); open = true; stateLock.unlock()
         hold.signal()
         XCTAssertTrue(collector.waitForDrain())
-        XCTAssertLessThanOrEqual(collector.aggregateAudioSamplesForTesting,
-                                 VoiceSharingCollector.maxAggregateRetainedSamples,
-                                 "drain releases owned audio")
+        // DRAIN still releases ownership: the bounded-memory property that remains is that nothing
+        // is retained once the work has been delivered.
+        XCTAssertLessThan(collector.aggregateAudioSamplesForTesting,
+                          VoiceSharingCollector.maxAggregateRetainedSamples,
+                          "drain releases owned audio")
     }
 
     /// Ownership actually leaves at drain: after one completed segment is fully delivered, the only
@@ -1063,9 +1075,17 @@ final class VoiceSharingCollectorTests: XCTestCase {
             "over-bound submissions are dropped and counted")
         XCTAssertLessThanOrEqual(collector.overflowCount, 15,
             "the drop count stays inside the eviction-emission bound")
-        XCTAssertLessThanOrEqual(collector.pendingCountForTesting,
-                                 VoiceSharingCollector.pendingSignalCapForTesting,
-            "the handoff FIFO is bounded")
+        // AMENDED BY SPEC 2741a0ca. The handoff FIFO no longer DROPS at its cap: pressure is
+        // counted and logged, and the capture is still queued, because the only allowed admission
+        // gate is the durable queue's record limit. The FIFO can therefore exceed the cap — this
+        // asserts the RULED behaviour, and the bound is replaced by a counted, observable pressure
+        // signal. TRADE-OFF: retained in-memory work is no longer capped by this constant, so the
+        // ledger (aggregateAudioSamples) is what an operator can see and act on.
+        XCTAssertGreaterThan(collector.pendingCountForTesting,
+                             VoiceSharingCollector.pendingSignalCapForTesting,
+            "pressure no longer discards: the FIFO is allowed to exceed its old cap")
+        XCTAssertGreaterThan(collector.overflowCount, 0,
+            "and the pressure that used to drop is COUNTED, never silent")
 
         hold.signal()
     }
@@ -1266,12 +1286,16 @@ final class VoiceSharingCollectorTests: XCTestCase {
         }
         // Give the work queue a bounded moment to block inside the first delivery.
         Thread.sleep(forTimeInterval: 0.5)
-        let capped = VoiceSharingCollector.pendingSignalCapForTesting
-        XCTAssertLessThanOrEqual(collector.pendingCountForTesting, capped,
-            "the handoff FIFO is bounded even while the worker is blocked")
-        XCTAssertLessThan(collector.aggregateAudioSamplesForTesting,
-                          VoiceSharingCollector.maxAggregateRetainedSamples,
-            "retained audio stays inside the ledger under eviction pressure")
+        // AMENDED BY SPEC 2741a0ca: a blocked worker no longer makes the FIFO DROP work. This
+        // fixture stays UNDER both caps (40 events x 3200 samples), so no pressure is counted —
+        // the point is that all 40 are queued and retained rather than discarded, and that
+        // WITHDRAWAL still disposes of them. Retained work is not bounded here; the ledger is what
+        // an operator can see. (The pressure path itself is asserted by
+        // `test_aggregateIdentityState_isBoundedAcrossManySegments`.)
+        XCTAssertGreaterThan(collector.pendingCountForTesting, 0,
+            "queued work is retained for delivery, not discarded")
+        XCTAssertGreaterThan(collector.aggregateAudioSamplesForTesting, 0,
+            "the retained-audio ledger accounts for what is queued")
         // Withdrawal disposal: queued (never delivered) work dies here.
         collector.gateLost()
         XCTAssertEqual(collector.pendingCountForTesting, 0, "withdrawal purges queued work")
