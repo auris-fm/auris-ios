@@ -144,9 +144,12 @@ final class VoiceSharingUploadQueue {
     /// permits to exist.
     static let maxDirectoryEntries = 64
 
-    /// Names the ROOT may hold: one directory per record, up to 2 retry sidecars per record, plus
-    /// the queue's own intent files and room for debris that must not wedge enumeration.
-    static let maxRootEntries = maxQueueEntries * 4 + 64
+    /// DEPRECATED BOUND — retained ONLY for the destructive sweep, never for discovery, counting or
+    /// serving (spec 2741a0ca ruling 1, spec a4b417fc ruling 1). Any bound derived from the cap is
+    /// wrong: an inherited over-cap queue (Android's Pixel held 104) exceeds it, and the queue
+    /// cannot drain down to the cap without first being discovered. So the name is honest about its
+    /// one remaining job.
+    static let maxSweptEntries = maxQueueEntries * 4 + 64
 
     /// The closed set of file names an entry directory may contain. Accounting and cleanup are
     /// defined over exactly these.
@@ -616,7 +619,7 @@ final class VoiceSharingUploadQueue {
     /// attempts it — admission re-checks fail-closed on arrival, so an early wake can never spend
     /// an early attempt.
     func secondsUntilNextRetryBoundary() -> TimeInterval? {
-        serialQueue.sync {
+        serialQueue.sync { () -> TimeInterval? in
             // OWNER-WIDE HOLDS FIRST (reviewer 34aae0fa item 1): under either hold `admitAttempt`
             // refuses EVERY entry, so no boundary is due work. Checked here as well as in the per-
             // entry prospect so a hold answers `nil` even before the listing is read — the same
@@ -630,11 +633,14 @@ final class VoiceSharingUploadQueue {
             if intentDiscovery(rootDirectory.appendingPathComponent(Self.retryHoldIntentName))
                 != .absent { return nil }
             if revocationHoldLocked || retryHoldLocked { return nil }
-            guard let listed = try? listDirectoryBounded(rootDirectory, [], Self.maxRootEntries),
-                !listed.overflowed else { return nil }
+            // UNBOUNDED (spec a4b417fc ruling 1): this decides the next wake, i.e. it is discovery.
+            // A bound here let an over-cap root look unreadable and stop the wake arithmetic, which
+            // in turn stopped the drain that would have brought the queue back under the cap.
+            let listed: [URL]
+            do { listed = try listDirectory(rootDirectory, []) } catch { return nil }
             let now = clock().timeIntervalSince1970
             var earliest: TimeInterval?
-            for url in listed.urls {
+            for url in listed {
                 let recordName = url.lastPathComponent
                 guard recordName.hasPrefix(Self.notBeforePrefix) else { continue }
                 let entryName = String(recordName.dropFirst(Self.notBeforePrefix.count))
@@ -740,7 +746,7 @@ final class VoiceSharingUploadQueue {
     /// `contentsOfDirectory(at:includingPropertiesForKeys:)` is defined in an extension and cannot
     /// be overridden by a subclass.
     private let listDirectory: (URL, [URLResourceKey]) throws -> [URL]
-    /// Bounded listing. Returns at most `maxRootEntries (for the root) or maxDirectoryEntries (inside an entry)` names along with whether more existed,
+    /// Bounded listing. Returns at most `maxSweptEntries (for the root) or maxDirectoryEntries (inside an entry)` names along with whether more existed.
     /// so callers refuse on overflow instead of allocating an unbounded array first.
     private let listDirectoryBounded: (URL, [URLResourceKey], Int) throws -> (urls: [URL], overflowed: Bool)
     /// Intent-discovery seam (reviewer 2d7cb2c9): defaults to the REAL required-stat. Injectable
@@ -967,13 +973,26 @@ final class VoiceSharingUploadQueue {
         // STRICT, not lenient: `entriesLocked()` turns an unreadable root into `[]` so the count
         // would silently read as ZERO — an unreadable queue reported as empty, the one misreading
         // this change must not reintroduce.
-        var count = try entriesStrictLocked().count
-        // AUDIO RESIDUE COUNTS (spec 746aa9c2). A failed delete can leave a capture's audio behind
-        // with its directory name gone; that audio is still "a capture ID holding audio", so it still
-        // occupies a slot. Counting only directories would let removal failures grow the queue past
-        // its limit — and residue is exactly what a full disk produces.
-        count += audioResidueCountLocked()
-        return count
+        var ids = Set<String>()
+        for entry in try entriesStrictLocked() {
+            // A DIRECTORY IS NOT A CAPTURE (reviewer 07a7bb51). The rule is "capture IDs still
+            // holding audio" (746aa9c2), so an empty or metadata-only directory occupies no slot —
+            // counting directories let 32 debris directories refuse a real recording, which is a
+            // wedge built out of nothing at all.
+            if entryHoldsAudioLocked(entry) { ids.insert(entry.name.uppercased()) }
+        }
+        // AUDIO RESIDUE COUNTS too: a failed delete can leave a capture's audio behind with its
+        // directory gone. Same identity space — canonical, so one capture is one slot.
+        ids.formUnion(try audioResidueIDsLocked())
+        return ids.count
+    }
+
+    /// Does this entry directory contain a real audio file? Size is not judged: a corrupt or
+    /// empty audio file is still audio the server may want to refuse — the count is about
+    /// occupancy, and the server owns the verdict on the bytes.
+    private func entryHoldsAudioLocked(_ entry: Entry) -> Bool {
+        Self.statKind(of: entryDirectoryLocked(for: entry).appendingPathComponent(Self.audioName))
+            == .present
     }
 
     /// Audio left behind by a failed delete, counted by SUFFIX, not by directory: a trailing entry
@@ -981,22 +1000,18 @@ final class VoiceSharingUploadQueue {
     /// directory). Sidecar-only leftovers (retry stamps, obligations, locks) are NOT captures — they
     /// hold no audio — and never count (spec 746aa9c2). This is why the rule is "capture IDs still
     /// holding audio" rather than "names in the root".
-    private func audioResidueCountLocked() -> Int {
-        guard let listed = try? listDirectoryBounded(rootDirectory, [], Self.maxRootEntries),
-              !listed.overflowed else { return 0 }
+    private func audioResidueIDsLocked() throws -> Set<String> {
         var ids = Set<String>()
-        for url in listed.urls {
+        for url in try listDirectory(rootDirectory, []) {
             let name = url.lastPathComponent
             guard name.hasSuffix(Self.audioResidueSuffix),
                   let id = UUID(uuidString: String(name.dropLast(Self.audioResidueSuffix.count)))
             else { continue }
-            // A residue file whose capture still has a directory is already counted above.
-            if fileManager.fileExists(atPath: rootDirectory.appendingPathComponent(id.uuidString).path) {
-                continue
-            }
-            ids.insert(id.uuidString)
+            // Canonical, so a residue file is the SAME slot as its capture's directory rather than
+            // a second one (`UUID` parses case-insensitively; duplicates collapse in the set).
+            ids.insert(id.uuidString.uppercased())
         }
-        return ids.count
+        return ids
     }
 
     /// ONE line per distinct cause, so an uncountable root stays attributable without flooding the
@@ -1135,11 +1150,10 @@ final class VoiceSharingUploadQueue {
         setHold(true, false) // KNOWN: the intent is on disk
         let listing: [URL]
         do {
-            let (urls, overflowed) = try listDirectoryBounded(
-                rootDirectory, [.isDirectoryKey], Self.maxRootEntries)
-            // Overflow means we cannot SEE the whole root, so we cannot prove revocation.
-            if overflowed { return .refused }
-            listing = urls
+            // UNBOUNDED (spec a4b417fc ruling 1): proving revocation means seeing every entry.
+            // A bound turned "the queue is large" into "revocation cannot be proven", refusing the
+            // very wake that would drain it.
+            listing = try listDirectory(rootDirectory, [.isDirectoryKey])
         } catch {
             return .refused
         }
@@ -1589,7 +1603,15 @@ final class VoiceSharingUploadQueue {
             if let readIdentity = currentIdentityLocked {
                 // A BOUND queue refuses when an account cannot be established at all.
                 guard let live = readIdentity() else { return refuse("live-identity-unavailable") }
-                let bound = try boundIdentityLocked(of: entry)
+                // A LOCAL BINDING IS NOT AN ADMISSION GATE (spec 2741a0ca rulings 2 + reviewer
+                // 307d0bde item 1). A capture whose metadata is unreadable, malformed or
+                // digest-mismatched still holds audio the server has never seen; refusing it here
+                // is the hold the ruling forbids. The binding supplies only the record's OWN
+                // provenance (its enrollment epoch) and a diagnostic capture id, so when it is
+                // unavailable the attempt proceeds with the account scope alone and the server owns
+                // the verdict. Only a MISSING capture (no audio) is refused.
+                guard entryHoldsAudioLocked(entry) else { return refuse("capture-audio-absent") }
+                let bound = try? boundIdentityLocked(of: entry)
                 // ABSENT owner means this entry predates sign-in and belongs to no account yet:
                 // it cannot be attributed, so it is refused (never inherited by the current account).
                 guard case .present(let capturedScope) = try ownerScopeLocked(for: entry) else {
@@ -1598,8 +1620,17 @@ final class VoiceSharingUploadQueue {
                 guard capturedScope == live.accountScope else {
                     return refuse("account-mismatch")
                 }
+                // THE EPOCH IS PROVENANCE, AND THE RECORD CANNOT SUPPLY IT HERE. The account is
+                // what binds an attempt (spec 4afc6e43); the epoch only travels with the record.
+                // For an entry the client cannot bind there is no recorded epoch to read, and the
+                // deployed schema refuses an empty one — so the attempt carries the LIVE epoch,
+                // which is truthful provenance: this send happened under this enrollment. Without
+                // a live epoch the identity cannot be formed and the server could not accept the
+                // record anyway, so the refusal is honest rather than a fabricated value.
+                let epoch = bound?.enrollmentEpoch ?? live.enrollmentEpoch
+                guard !epoch.isEmpty else { return refuse("enrollment-epoch-unavailable") }
                 admittedIdentity = VoiceSharingUploadIdentity(
-                    accountScope: capturedScope, enrollmentEpoch: bound.enrollmentEpoch)
+                    accountScope: capturedScope, enrollmentEpoch: epoch)
             }
             guard let lease = try acquireLeaseLocked(for: entry) else {
                 return refuse("lease-held-or-unavailable")
@@ -1643,8 +1674,15 @@ final class VoiceSharingUploadQueue {
             do {
                 try recordAttemptLocked(entry)
             } catch {
-                releaseLeaseLocked(for: entry, owner: lease)
-                throw error
+                // A DIAGNOSTIC COUNT-WRITE FAILURE MUST NOT STOP THE UPLOAD (spec 2741a0ca ruling,
+                // reviewer 307d0bde item 2). The count exists to space retries and to report; a
+                // disk that cannot be written is exactly when an upload matters most. Keep the
+                // count in memory, log it, and let the attempt proceed — the lease stays held.
+                attemptCountMemoryOverride[entry] = (attemptCountMemoryOverride[entry] ?? 0) + 1
+                FileLog.shared.addMessage(
+                    "[VoiceSharing] attempt count write failed entry=\(entry.name) "
+                        + "reason=\(type(of: error)) disposition=memory-only attempt-proceeds")
+                FileLog.shared.forceFlush()
             }
             // INVARIANT: any throwing admission step AFTER the lease is acquired must release it
             // before rethrowing. This count read is such a step — it runs outside the cleanup
@@ -1737,7 +1775,7 @@ final class VoiceSharingUploadQueue {
     /// keeps the hold and reports it; nothing here trusts memory.
     @discardableResult
     func reconcileRetryHold() -> Bool {
-        serialQueue.sync {
+        serialQueue.sync { () -> Bool in
             // EXPLICIT THREE-WAY (reviewer c9416bf7): unknown intent state RETAINS the hold —
             // only proven absence can lift it, never an unreadable root.
             switch intentDiscovery(rootDirectory.appendingPathComponent(Self.retryHoldIntentName)) {
@@ -1752,15 +1790,17 @@ final class VoiceSharingUploadQueue {
             }
             // Every surviving stamp must be bounded-parseable and well-named, otherwise the
             // boundary state is unprovable and the hold stands.
-            guard let listed = try? listDirectoryBounded(
-                rootDirectory, [], Self.maxRootEntries), !listed.overflowed else {
+            // UNBOUNDED (spec a4b417fc ruling 1). An over-cap root is exactly when the retry
+            // boundary matters most, so it must not be the thing that makes it unprovable.
+            let listed: [URL]
+            do { listed = try listDirectory(rootDirectory, []) } catch {
                 retryHoldLocked = true
                 return false
             }
             // Obligations are proved too (reviewer a29e62a2): a scanned-stamp walk cannot prove
             // a failed stamp never existed, so reconciliation checks the pending-obligation
             // records — an unparseable one keeps the hold.
-            for url in listed.urls
+            for url in listed
             where url.lastPathComponent.hasPrefix(Self.obligationPrefix) {
                 guard let size = fileSizeIfRegularLocked(at: url), size.isRegular,
                     size.bytes > 0, size.bytes <= Self.maxSettlementRecordBytes,
@@ -1774,7 +1814,7 @@ final class VoiceSharingUploadQueue {
                     return false
                 }
             }
-            for url in listed.urls where url.lastPathComponent.hasPrefix(Self.notBeforePrefix) {
+            for url in listed where url.lastPathComponent.hasPrefix(Self.notBeforePrefix) {
                 let name = url.lastPathComponent
                 guard UUID(uuidString: String(name.dropFirst(Self.notBeforePrefix.count))) != nil,
                     let size = fileSizeIfRegularLocked(at: url), size.isRegular,
@@ -1883,10 +1923,17 @@ final class VoiceSharingUploadQueue {
     @discardableResult
     func beginAttempt(_ entry: Entry) throws -> Bool {
         try serialQueue.sync {
-            // OWNER-WIDE HOLD blocks attempt admission for the same reason serving is blocked:
-            // the on-disk entry set is not provable, so no attempt may be spent on it.
+            // A REVOCATION HOLD IS A GATE ("sharing off"); A RETRY HOLD IS NOT (spec d720ab6c).
+            // The ruling is explicit: "an unknown fact about the whole root or owner may refuse only
+            // NEW ADMISSIONS, never an attempt." `retryHoldLocked` is an unknown bookkeeping fact
+            // about retry state, so it may not spend a due recording's turn. It no longer throws
+            // here; it is logged and the attempt proceeds.
             guard !revocationHoldLocked else { throw PrepareError.accountingUnavailable }
-            guard !retryHoldLocked else { throw PrepareError.accountingUnavailable }
+            if retryHoldLocked {
+                FileLog.shared.addMessage(
+                    "[VoiceSharing] attempt entry=\(entry.name) reason=retry-state-unknown disposition=due-now")
+                FileLog.shared.forceFlush()
+            }
             // The enforced retry boundary applies at EVERY entry point (reviewer ce001b9a).
             try refuseIfNotYetDueLocked(entry)
             guard inFlightAttempts[entry] == nil else { return false }
@@ -1900,8 +1947,17 @@ final class VoiceSharingUploadQueue {
                 UUID(uuidString: entry.name) != nil,
                 !entry.name.contains("/")
             else { throw CocoaError(.fileNoSuchFile) }
-            let discovered = try strictOwnerCoverageLocked()
-            guard discovered.contains(entry) else { return false }
+            // PER-ENTRY COVERAGE, NOT OWNER-WIDE (spec d720ab6c, reviewer 307d0bde item 3). This
+            // used `strictOwnerCoverageLocked()`, so one unreadable sibling entry stopped EVERY
+            // attempt: a due recording lost its turn to a fact about a different recording. Only
+            // this entry's own state may hold its attempt, and unreadable state means DUE NOW
+            // rather than an invented delay.
+            _ = try? strictOwnerCoverageLocked()
+            guard entry.root == rootDirectory,
+                UUID(uuidString: entry.name) != nil,
+                !entry.name.contains("/"),
+                Self.statKind(of: entryDirectoryLocked(for: entry)) == .present
+            else { return false }
             // EVERY non-dispatch path settles explicitly: a lease acquired here must never survive
             // a later refusal or throw, or the entry would be blocked by its own failed attempt.
             let lease = try acquireLeaseLocked(for: entry)
@@ -2052,9 +2108,20 @@ final class VoiceSharingUploadQueue {
 
     /// The body, for callers ALREADY on the serial queue.
     private func recoverAbandonedSettlementsLocked() {
+        // A BOUND MAY GUARD ONLY THE DESTRUCTIVE SWEEP (spec a4b417fc ruling 1). This pass REMOVES
+        // things, so it is the one place a bound is allowed — and a deferred sweep is LOGGED
+        // rather than silently skipped, so an over-cap root shows up as work waiting instead of
+        // disappearing.
         guard let listed = try? listDirectoryBounded(
-            rootDirectory, [.isDirectoryKey], Self.maxRootEntries), !listed.overflowed else {
+            rootDirectory, [.isDirectoryKey], Self.maxSweptEntries) else {
+            FileLog.shared.addMessage("[VoiceSharing] sweep deferred reason=listing-failed")
+            FileLog.shared.forceFlush()
             return
+        }
+        if listed.overflowed {
+            FileLog.shared.addMessage(
+                "[VoiceSharing] sweep deferred reason=over-bound entries=\(listed.urls.count) bound=\(Self.maxSweptEntries)")
+            FileLog.shared.forceFlush()
         }
         for url in listed.urls {
             let entryName = Self.parseSettlementName(url.lastPathComponent)
@@ -2552,9 +2619,16 @@ final class VoiceSharingUploadQueue {
         return .present(text)
     }
 
+    /// Attempt counts whose DURABLE write failed, held in memory so the count is not lost and not
+    /// silently reset to zero (spec 2741a0ca: a count-write failure must not stop the upload).
+    private var attemptCountMemoryOverride: [Entry: Int] = [:]
+
     private func attemptCountLocked(for entry: Entry) throws -> Int {
         let directory = try validatedEntryDirectoryLocked(entry)
         let url = directory.appendingPathComponent(Self.attemptRecordName)
+        // An in-memory count supersedes the disk one ONLY when the last write failed: the disk value
+        // is then stale, and reading it would under-report attempts and re-crowd the server.
+        if let inMemory = attemptCountMemoryOverride[entry] { return inMemory }
         // `fileExists` returns false for MANY failures, not just absence. Only ENOENT means "no
         // attempts yet"; any other error is unreadable storage and must refuse, otherwise a
         // permission fault would reset the retry budget.
@@ -2589,7 +2663,18 @@ final class VoiceSharingUploadQueue {
         // SPEC 05ff27d0: the count no longer gates servability at all. An entry that has failed a
         // thousand times is exactly as attemptable as a fresh one; retention removes unaccepted
         // recordings, and the backoff schedule spaces the retries.
-        guard isCompleteEntryLocked(at: entry) else { return false }
+        // ATTEMPTABILITY IS "CONTAINS A CAPTURE", NOT "BINDS LOCALLY" (spec 2741a0ca ruling 2,
+        // reviewer 307d0bde item 1). Requiring a successful binding here was the second local gate:
+        // the first was admission's identity read, and together they meant a capture the client
+        // could not parse was never offered to the server. An entry holding audio is attemptable.
+        // A DECIDED REJECTION still blocks the attempt. That is not a local verdict: the marker is
+        // written from the server's own final refusal (`publication.failed`), and it is what keeps a
+        // quarantined entry out of the wire. What must NOT block is a local inability to bind.
+        if case .disqualified = try entryStateLocked(at: entry) { return false }
+        // A CAPTURE STILL BEING WRITTEN IS NOT ATTEMPTABLE. This is not a local verdict on a
+        // recording: an `.incomplete` entry has no audio and no marker yet, so there is nothing to
+        // send. Only `.unready` (audio present, record unusable) is the case the ruling frees.
+        guard isServedEntryLocked(at: entry) else { return false }
         return admitCountPermits(try attemptCountLocked(for: entry))
     }
 
@@ -2922,20 +3007,38 @@ final class VoiceSharingUploadQueue {
         try establishStoragePolicyLocked()
         let all = try entriesStrictLocked()
         for entry in all {
-            let state = try entryStateLocked(at: entry)
+            // UNREADABLE METADATA IS PER-ENTRY, NEVER OWNER-WIDE (spec 2741a0ca ruling 2, reviewer
+            // 307d0bde item 3). Previously any entry that failed to parse threw out of here and
+            // took the WHOLE owner's serving and admission with it — one corrupted record held
+            // every other capture hostage. A local inability to read a record is not evidence about
+            // any other record, so it is skipped, not propagated.
+            guard let state = try? entryStateLocked(at: entry) else { continue }
             // Reviewer 72e9362d: an unconfirmable READY marker is UNKNOWN coverage for the whole
             // owner — the attempt gate must hold exactly where the serving query holds. Entries
             // still being prepared (incomplete, no marker) are known-incomplete; durability
             // confirmation does not apply to them.
             if case .bound = state {
-                try confirmDurableLocked(directory: entryDirectoryLocked(for: entry))
+                guard (try? confirmDurableLocked(directory: entryDirectoryLocked(for: entry))) != nil
+                else {
+                    // Same rule: an unconfirmable marker disqualifies THIS entry. It is not proof
+                    // that a sibling entry is unconfirmable.
+                    FileLog.shared.addMessage(
+                        "[VoiceSharing] coverage entry=\(entry.name) reason=marker-unconfirmable disposition=skip-entry")
+                    FileLog.shared.forceFlush()
+                    continue
+                }
                 // OWNERSHIP IS PART OF THE SHARED AUTHORITY (reviewer e8dd9c35): an owner file that
                 // exists but cannot be read is UNKNOWN coverage for the WHOLE owner, exactly like an
                 // unconfirmable marker — not a quiet per-entry skip. `ownerScopeLocked` throws for
                 // unreadable storage and returns `.absent` only for a genuinely missing file, so a
                 // fault can never be mistaken for "not attributed yet".
                 if currentIdentityLocked != nil {
-                    _ = try ownerScopeLocked(for: entry)
+                    guard (try? ownerScopeLocked(for: entry)) != nil else {
+                        FileLog.shared.addMessage(
+                            "[VoiceSharing] coverage entry=\(entry.name) reason=owner-unreadable disposition=skip-entry")
+                        FileLog.shared.forceFlush()
+                        continue
+                    }
                 }
             }
         }
@@ -3048,20 +3151,29 @@ final class VoiceSharingUploadQueue {
                 }
                 let state: EntryState
                 do { state = try entryStateLocked(at: entry) } catch {
-                    lastDiscoveryDiagnostic = "entryStateLocked threw for \(entry.name)"
-                    return .unknownCoverage
+                    // PER-ENTRY, NOT OWNER-WIDE (reviewer 307d0bde item 3, spec 2741a0ca ruling 2).
+                    // One unreadable entry returning `.unknownCoverage` here stopped serving for
+                    // EVERY entry — a single corrupt directory became a queue-wide hold, which is
+                    // the wedge in another costume. The entry is excluded and logged; its siblings
+                    // keep serving.
+                    FileLog.shared.addMessage(
+                        "[VoiceSharing] serving entry=\(entry.name) reason=state-unreadable disposition=skip-entry")
+                    FileLog.shared.forceFlush()
+                    excluded.append("\(entry.name):state-unreadable")
+                    continue
                 }
                 switch state {
                 case .bound:
                     // THE ONLY case that may fall through to the age check and ready.append.
                     break
                 case .unready:
-                    // SPEC 2741a0ca ruling 2: a capture holding audio is never deleted or held
-                    // for a local verdict. It occupies a record slot and is excluded from SERVING
-                    // (there is no binding to serve), but it stays on disk for the uploader and for
-                    // the 7-day expiry. Excluded, not purged.
-                    excluded.append("\(entry.name):send-unbound")
-                    continue
+                    // SPEC 2741a0ca ruling 2, corrected by reviewer 307d0bde item 1: a capture the
+                    // client cannot bind is STILL SERVED. "Retained but never sent" is a hold with
+                    // extra steps — the first version of this branch excluded it here and only
+                    // logged `send-unbound`, which established no upload path at all. The server
+                    // owns the verdict on the bytes, so the entry falls through to `ready` exactly
+                    // like a bound one; only its identity/provenance read is skipped downstream.
+                    break
                 case .disqualified:
                     // ONLY A DECIDED REJECTION MAY DELETE (spec, old-cap resume). The marker now
                     // records WHY; the marker used to say only "revoked", so this branch deleted a
@@ -3110,8 +3222,26 @@ final class VoiceSharingUploadQueue {
                     excluded.append("\(entry.name):notBound(\(state))")
                     continue
                 }
-                // CONFIRMED durability was verified by strictOwnerCoverageLocked (part of the
-                // shared authority); reaching here means it held.
+                // CONFIRMED DURABILITY, PER ENTRY (spec d720ab6c, reviewer 307d0bde item 3). This
+                // used to be assumed: `strictOwnerCoverageLocked` verified every entry and threw if
+                // any failed, so reaching here "meant it held". That authority is now per-entry and
+                // no longer throws, so the check must happen HERE, for this entry only — otherwise
+                // an unconfirmable entry is silently served.
+                guard (try? confirmDurableLocked(directory: entryDirectoryLocked(for: entry))) != nil
+                else {
+                    excluded.append("\(entry.name):unconfirmed-durability")
+                    continue
+                }
+                // ATTRIBUTABILITY, PER ENTRY: an owner file that exists but cannot be READ means
+                // this entry's account is unknown, so it cannot be attributed to anyone and must
+                // not be served. Only THIS entry — a sibling with a readable owner keeps serving.
+                if currentIdentityLocked != nil, (try? ownerScopeLocked(for: entry)) == nil {
+                    // `ownerScopeLocked` throws for unreadable/non-regular storage and returns
+                    // `.absent` only for a genuinely missing file, so a fault can never be
+                    // mistaken for "not attributed yet".
+                    excluded.append("\(entry.name):owner-unreadable")
+                    continue
+                }
                 // ONE age rule shared with the count signature and the change version
                 // (reviewer ffca9a27): a future (skewed) date is NOT fresh, and an unreadable
                 // date cannot claim freshness.
@@ -3176,8 +3306,11 @@ final class VoiceSharingUploadQueue {
                     }
                     switch try entryStateLocked(at: entry) {
                     case .unready:
-                        // Ruling 2: no local verdict deletes. Left in place.
-                        continue
+                        // Ruling 2: no local verdict deletes OR holds. It is left in place and it
+                        // is still served — the server judges the bytes, not this process. (The
+                        // strict path made the same correction; both must agree or the two serving
+                        // queries disagree about the same entry.)
+                        break
                     case .disqualified:
                         // ONLY A DECIDED REJECTION MAY DELETE (spec, old-cap resume) — the same
                         // authority as the strict path above. A cap quarantine is excluded and
@@ -3214,7 +3347,16 @@ final class VoiceSharingUploadQueue {
                     !refusedIntentNamesLocked.contains($0.name)
                         && intentDiscovery(deletionIntentPathLocked($0.name)) == .absent
                 }
-                .filter { isCompleteEntryLocked(at: $0) }
+                // A SERVED ENTRY CONTAINS A CAPTURE, NOT NECESSARILY A BINDING (spec 2741a0ca
+                // ruling 2). Bind-only filtering silently dropped exactly the unbound captures the
+                // strict path had just decided to serve; both queries must agree on servability.
+                .filter { isServedEntryLocked(at: $0) }
+                // ATTRIBUTABILITY, PER ENTRY — the same rule the strict path applies. Without
+                // this the two serving queries disagree about the same disk (the strict one
+                // excludes an entry whose owner cannot be read; this one served it).
+                .filter {
+                    currentIdentityLocked == nil || (try? self.ownerScopeLocked(for: $0)) != nil
+                }
                 // Exposure also requires CONFIRMED durability, not just a structurally valid marker:
                 // after an uncertain transition a marker may be visible without durable backing.
                 .filter { (try? self.confirmDurableLocked(directory: self.entryDirectoryLocked(for: $0))) != nil }
@@ -3448,8 +3590,10 @@ final class VoiceSharingUploadQueue {
 
     private func discoverRefusalIntentsLocked() {
         do {
-            let (urls, overflowed) = try listDirectoryBounded(rootDirectory, [], Self.maxRootEntries)
-            guard !overflowed else { setRevocationHold(true, originUnknown: true); return }
+            // UNBOUNDED (spec a4b417fc ruling 1): this is discovery. Overflow used to set a
+            // REVOCATION HOLD for the whole queue on a large root — the most damaging form of the
+            // Android bug, since it stops serving and draining at once.
+            let urls = try listDirectory(rootDirectory, [])
             for url in urls {
                 let name = url.lastPathComponent
                 guard name.hasPrefix(Self.deletionIntentPrefix) else { continue }
@@ -3528,11 +3672,14 @@ final class VoiceSharingUploadQueue {
     private func entriesStrictLocked() throws -> [Entry] {
         let contents: [URL]
         do {
-            // Bounded discovery: a root with more names than the cap cannot be accounted, so it is a
-            // refusal. Checking a cap after an eager listing would not bound allocation.
-            let listed = try listDirectoryBounded(rootDirectory, [], Self.maxRootEntries)
-            guard !listed.overflowed else { throw PrepareError.accountingUnavailable }
-            contents = listed.urls
+            // DISCOVERY IS UNBOUNDED (spec 2741a0ca ruling 1). A bound here was the Android bug in
+            // iOS clothes: an inherited over-cap queue — the Pixel had 104 records — listed MORE
+            // names than the bound, so discovery refused, and a queue that cannot be discovered
+            // cannot count, serve or drain. It could never get back under the cap, because getting
+            // under the cap requires draining. Discovery, counting and serving therefore read the
+            // whole listing; only the destructive sweep is bounded (`sweptEntriesLocked`), and a
+            // deferred sweep is logged rather than silently skipped.
+            contents = try listDirectory(rootDirectory, [])
         } catch {
             throw PrepareError.accountingUnavailable
         }
@@ -3890,6 +4037,46 @@ final class VoiceSharingUploadQueue {
         boundEntryLocked(at: entry) != nil
     }
 
+    /// MAY THIS ENTRY BE OFFERED TO THE SERVER? (spec 2741a0ca ruling 2, reviewer 307d0bde item 1)
+    ///
+    /// A bound entry is served, as always. So is an entry whose record exists but no longer agrees
+    /// with itself — a digest mismatch or an unparseable record: those are exactly the cases the
+    /// ruling says must be SENT, because only the server may issue the final refusal that deletes
+    /// them. `isCompleteEntryLocked` alone dropped them, which made "retained for the uploader" a
+    /// promise the serving path never kept.
+    ///
+    /// It is deliberately NOT "any directory with audio". The binding also enforces the audio
+    /// representation (float/stereo/rate/truncation) the server's own `wav_validate.ts` mirrors;
+    /// a recording that cannot be represented is not one this build may claim to convert, and
+    /// serving it would ship bytes no client ever produced. Those keep their existing verdicts.
+    private func isServedEntryLocked(at entry: Entry) -> Bool {
+        guard entryHoldsAudioLocked(entry) else { return false }
+        if isCompleteEntryLocked(at: entry) { return true }
+        // Unbound but audio present: served only when the failure is about the RECORD's integrity
+        // rather than the audio's representability.
+        switch boundFailureLocked(at: entry) {
+        case .digestMismatch, .audioDigestMismatch, .malformedJSON, .duplicateKey,
+             .nonFiniteNumber, .missingField, .unknownField, .invalidField:
+            return true
+        case .audioSizeMismatch, .audioSampleCountMismatch, .invalidAudio, .none:
+            return false
+        }
+    }
+
+    /// The binding failure for an entry, for the servability split above and for diagnostics.
+    private func boundFailureLocked(at entry: Entry) -> VoiceSharingRecordBinding.BindingError? {
+        do {
+            _ = try boundIdentityLocked(of: entry)
+            return nil
+        } catch let error as VoiceSharingRecordBinding.BindingError {
+            return error
+        } catch {
+            // A READ failure is not a verdict about the record: treat it as not-served rather than
+            // guessing which side of the split it belongs to.
+            return nil
+        }
+    }
+
     /// Result of an error-reporting, no-follow stat. Distinguishes "not there" from "could not
     /// tell", which `fileExists` cannot: it collapses every failure into `false`.
     enum StatKind { case present, absent, failure }
@@ -4009,27 +4196,30 @@ final class VoiceSharingUploadQueue {
             let createdAt = creationInstantLocked(in: directory) ?? .distantPast
             complete.append((entry, createdAt))
         }
+        // NO OVER-CAP PURGE ON RECOVERY (spec 2741a0ca + 4afc6e43, ruling a4b417fc ruling 1).
+        // This pass DELETED the oldest recordings until the queue fit the 32-record cap. That maps
+        // to no allowed gate: the limit governs NEW ADMISSIONS, and nothing authorises deleting
+        // audio the server has never seen. It also made the cap unreachable in the other direction —
+        // an inherited over-cap queue (Android's Pixel: 104) was silently truncated at launch
+        // instead of drained. An over-cap queue is legal and must be served and drained. The limit
+        // reasserts itself naturally because admission refuses new captures while it is exceeded.
         if complete.count > Self.maxQueueEntries {
-            for stale in complete.sorted(by: { $0.readyDate < $1.readyDate }).prefix(complete.count - Self.maxQueueEntries) {
-                let removed = (try? fileManager.removeItem(
-                    at: entryDirectoryLocked(for: stale.entry))) != nil
-                // DIAGNOSTIC (content-free): the capacity ceiling removes OLDEST-READY entries.
-                // A count drop that matches this must be attributable, not inferred from silence.
-                FileLog.shared.addMessage(
-                    "[VoiceSharing] queue removal reason=over-capacity "
-                        + "entry=\(stale.entry.name) ceiling=\(Self.maxQueueEntries) "
-                        + "removed=\(removed)")
-                    // FORCE THE FLUSH (FileLog buffers 100 entries): a removal line must be on disk
-                    // before the process can be terminated, or the diagnosis dies with it.
-                    FileLog.shared.forceFlush()
-            }
+            FileLog.shared.addMessage(
+                "[VoiceSharing] queue over cap records=\(complete.count) ceiling=\(Self.maxQueueEntries) "
+                    + "disposition=drain-not-delete")
+            FileLog.shared.forceFlush()
         }
         // Stray regular files directly under the root are not entries; remove them so the root
         // stays queue-owned. Discovery here is BOUNDED too: construction must not eagerly
         // materialise an oversized root just because recovery tolerates failures. On overflow we
         // skip cleanup (fail-closed) rather than enumerate past the bound.
         if let listed = try? listDirectoryBounded(
-            rootDirectory, [.isDirectoryKey], Self.maxRootEntries), !listed.overflowed {
+            rootDirectory, [.isDirectoryKey], Self.maxSweptEntries) {
+            if listed.overflowed {
+                FileLog.shared.addMessage(
+                    "[VoiceSharing] sweep deferred reason=over-bound pass=stray-orphans entries=\(listed.urls.count)")
+                FileLog.shared.forceFlush()
+            }
             // WHICH ENTRIES STILL EXIST, established once: an attempt sidecar is only meaningful
             // while its recording does. Orphans are what is left after an entry was removed, and
             // they were previously kept forever — the owner's queue showed nine of them with no

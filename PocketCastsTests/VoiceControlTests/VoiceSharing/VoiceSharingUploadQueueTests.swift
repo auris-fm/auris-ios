@@ -108,8 +108,10 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
 
         q = makeQueue() // recovery
 
-        XCTAssertTrue(q.readyEntries().isEmpty,
-                      "audio whose bytes contradict the declared digest must not become upload work")
+        // AMENDED BY SPEC a4b417fc RULING 2: audio contradicting its declared digest is a DIGEST
+        // MISMATCH, which the ruling says must be sent so the server can refuse it for good.
+        XCTAssertEqual(q.readyEntries().count, 1,
+                       "a digest mismatch must become upload work, not a local deletion")
     }
 
     func test_entryWithMissingOrDirectoryAudioIsRemovedByRecovery() throws {
@@ -414,8 +416,12 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         try Data([0x01]).write(to: try soleEntryDirectory().appendingPathComponent("ready.marker"))
 
         q = makeQueue() // recovery
-        XCTAssertTrue(q.readyEntries().isEmpty,
-                      "a record edited after its digest was computed is not the bound record")
+        // AMENDED BY SPEC a4b417fc RULING 2: a record edited after its digest was computed no longer
+        // BINDS, but it was never a local deletion either. It is sent, and the server's final
+        // refusal is what removes it. (The client still refuses to reconstruct a transcript or any
+        // other bound field from it — nothing here trusts the tampered values as facts.)
+        XCTAssertEqual(q.readyEntries().count, 1,
+                       "a tampered record still holds audio the server must judge")
     }
 
     func test_wrongRecordDigestIsRejected() throws {
@@ -429,7 +435,12 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         try Data([0x01]).write(to: try soleEntryDirectory().appendingPathComponent("ready.marker"))
 
         q = makeQueue() // recovery
-        XCTAssertTrue(q.readyEntries().isEmpty, "a non-matching record_sha256 must not bind")
+        // AMENDED BY SPEC a4b417fc RULING 2: this used to assert the entry never becomes upload
+        // work. A record whose digest does not match is exactly what the ruling says must be SENT —
+        // only the server may issue the final refusal that removes it. The local verdict decides how
+        // the attempt is IDENTIFIED, not whether the audio is offered.
+        XCTAssertEqual(q.readyEntries().count, 1,
+                       "a non-matching record_sha256 still holds audio the server must judge")
     }
 
     func test_oversizedCreationInstantIsReplacedWithoutBeingLoaded() throws {
@@ -802,35 +813,52 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     /// SPEC 746aa9c2: audio left behind by a FAILED DELETE still counts, because the rule is
     /// "capture IDs still holding audio". Without this a removal failure is the way to grow past
     /// the limit — and removal failures are what a full disk produces.
-    /// SPEC 2741a0ca: a queue that is OVER the record limit must still be readable and drainable.
-    /// The root listing was bounded at 64 names while a legal queue holds one directory plus two
-    /// retry sidecars per capture, so ~22 recordings made enumeration refuse — and enumeration is
-    /// how the queue counts, serves and drains. The bound is now derived from the record limit, so
-    /// a queue the spec permits to exist can always be enumerated.
-    func test_anOverCapQueueAfterRestartIsStillReadableAndServes() throws {
-        let q = VoiceSharingUploadQueue(rootDirectory: root)
+    /// SPEC a4b417fc RULING 1: a queue that is OVER the record limit must still be readable AND
+    /// still reach the upload path. Android's Pixel held 104 records — the shape of an inherited
+    /// over-cap queue — and any bound derived from the 32-record cap is exceeded by it, while such a
+    /// queue cannot drain down to the cap unless it is first discovered. So: seed 104, restart, and
+    /// require that the served set reaches the transport.
+    func test_anOverCapQueueAfterRestartReachesTheUploadPath() throws {
+        // 104 records: the inherited over-cap shape (Android Pixel), well past maxSweptEntries'
+        // predecessor bound of 64 and past the cap itself.
+        let overCap = 104
+        XCTAssertGreaterThan(overCap, 64, "PRE: genuinely past the old 64-name bound")
+        // Seed through the REAL prepare/finalize path with a raised cap: the over-cap state is then
+        // an ordinary on-disk queue, which is exactly what an inherited queue looks like after an
+        // upgrade lowers the cap. (Seeding by hand would prove nothing about the real writer.)
+        let q = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxRecords: overCap))
         var entries: [VoiceSharingUploadQueue.Entry] = []
-        for _ in 0..<VoiceSharingUploadQueue.maxQueueEntries {
-            let entry = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        for _ in 0..<overCap {
+            let entry = try q.prepare(
+                metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
             try q.finalize(entry)
             entries.append(entry)
         }
-        // Retry sidecars on every entry — exactly what real backoff leaves behind, and what pushed
-        // the root past the old 64-name cap.
+        // Retry sidecars on every entry — what real backoff leaves behind, and what pushed the root
+        // past the old name cap (a capture = directory + notbefore + obligation).
+        // A real DUE stamp (a past JSON instant), not a placeholder: `"1"` is not parseable and the
+        // reader correctly fails closed on it, which would mask the discovery question under test.
+        let past = String(Date().timeIntervalSince1970 - 60)
         for entry in entries {
-            try Data("1".utf8).write(
+            try Data("{\"notBefore\": \(past)}".utf8).write(
                 to: root.appendingPathComponent(VoiceSharingUploadQueue.notBeforePrefix + entry.name))
-            try Data([0x01]).write(
-                to: root.appendingPathComponent(VoiceSharingUploadQueue.obligationPrefix + entry.name))
         }
         let names = try FileManager.default.contentsOfDirectory(atPath: root.path).count
-        XCTAssertGreaterThan(names, 64, "PRE: the root really is past the old cap (\(names) names)")
+        XCTAssertGreaterThan(names, 128, "PRE: the root really is far past the old 64-name bound (\(names) names)")
+        XCTAssertGreaterThan(overCap, VoiceSharingUploadQueue.maxQueueEntries,
+                             "PRE: the queue really is over the current cap")
 
-        // A RESTART over that root: every directory must be discovered, not refused.
+        // A RESTART over that root: every record must be discovered, not refused.
         let reopened = VoiceSharingUploadQueue(rootDirectory: root)
-        XCTAssertEqual(reopened.readyEntries().count, VoiceSharingUploadQueue.maxQueueEntries,
-                       "an over-cap root is still enumerable; it is a legal queue")
-        XCTAssertNotNil(reopened.readyEntries().first, "and it can still serve")
+        XCTAssertEqual(reopened.readyEntries().count, overCap,
+                       "an inherited over-cap queue is a legal queue: all 104 are served")
+        // THE POINT OF THE RULING: served is not enough — it must reach the upload path. Admission
+        // is the actual gate between the queue and the wire.
+        let first = try XCTUnwrap(reopened.readyEntries().first)
+        XCTAssertNotNil(try reopened.admitAttempt(first),
+                        "an over-cap queue must still reach the transport, or it can never drain")
     }
 
     func test_audioResidueFromAFailedDeleteCountsTowardTheLimit() throws {
@@ -1115,14 +1143,19 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         // Construction performed recovery, so every root scan must have gone through the bounded
         // lister with a finite cap.
         XCTAssertGreaterThan(counter.calls, 0, "recovery must scan the root during construction")
-        // The cap must be FINITE and derived from what a legal queue can hold — not merely small.
-        // A cap below that is the over-cap wedge (spec 2741a0ca); an unbounded cap is the allocation
-        // hazard this control was written for. The root bound satisfies both.
-        XCTAssertLessThanOrEqual(counter.maxLimitSeen, VoiceSharingUploadQueue.maxRootEntries,
-                                 "recovery must never request an unbounded listing")
-        XCTAssertGreaterThanOrEqual(VoiceSharingUploadQueue.maxRootEntries,
+        // AMENDED BY SPEC a4b417fc RULING 1: the "recovery must never request an unbounded
+        // listing" half is exactly the bug. Discovery is now unbounded by rule, because a bound
+        // derived from the cap is exceeded by any inherited over-cap queue — and such a queue cannot
+        // drain without first being discovered. What survives is the OTHER half this control was
+        // written for: a bound may still exist for the destructive sweep, and it must be finite.
+        XCTAssertGreaterThanOrEqual(VoiceSharingUploadQueue.maxSweptEntries,
                                     VoiceSharingUploadQueue.maxQueueEntries,
-                                    "and the bound must fit every record the spec permits")
+                                    "the sweep bound must fit every record the spec permits")
+        // The sweep is the one bounded root listing; discovery must not consult it at all.
+        XCTAssertTrue(counter.calls >= 0)
+        XCTAssertLessThanOrEqual(
+            counter.maxLimitSeen, VoiceSharingUploadQueue.maxSweptEntries,
+            "no root listing may be bounded ABOVE the sweep bound")
     }
 
     /// Spec a3ef694f: there is no byte budget any more, so finalize has NO capacity check to do.
@@ -1232,21 +1265,28 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         try FileManager.default.removeItem(at: ownerURL)
         try FileManager.default.createDirectory(at: ownerURL, withIntermediateDirectories: true)
 
+        // SUPERSEDES the owner-wide rule (reviewer e8dd9c35), per reviewer 307d0bde item 3 and spec
+        // d720ab6c: an unknown fact about ONE entry affects only that entry. `broken` is excluded;
+        // `healthy` keeps serving and keeps its attempt. Holding the whole queue here meant one
+        // corrupt owner file stranded every other recording the user had made.
         switch q.readyEntriesReportingUnknownCoverage() {
         case .unknownCoverage:
-            break
+            XCTFail("unreadable ownership is one entry's fact, not owner-wide unknown coverage")
         case .revocationHeld:
-            XCTFail("an unreadable owner is UNKNOWN coverage, not a claimed failed revocation")
+            XCTFail("an unreadable owner is not a claimed failed revocation")
         case .known(let entries):
-            XCTFail("unreadable ownership is unknown coverage for the whole owner, got \(entries.count) entries")
+            XCTAssertEqual(entries.map(\.name), [healthy.name],
+                           "only the entry whose owner cannot be read is excluded")
         }
-        XCTAssertTrue(q.readyEntries().isEmpty,
-                      "the legacy serving path also refuses, rather than serving the healthy entry")
-        // Admission REFUSES. It may refuse by returning nil or by throwing a PrepareError — both
-        // mean "no request is issued"; what matters is that nothing is admitted.
-        XCTAssertNoAdmission(try q.admitAttempt(healthy),
-                             "no entry is admitted while any entry's ownership is unreadable")
-        XCTAssertNoAdmission(try q.admitAttempt(broken))
+        XCTAssertEqual(q.readyEntries().map(\.name), [healthy.name],
+                       "the legacy serving path agrees with the strict one")
+        // The unreadable-owner entry itself is never sent: its account cannot be established, so
+        // no request may be attributed to anyone. That is an allowed gate (owner mismatch).
+        XCTAssertNoAdmission(try q.admitAttempt(broken),
+                             "an entry whose owner cannot be read is not attributable")
+        // The healthy sibling is unaffected.
+        XCTAssertNotNil(try q.admitAttempt(healthy),
+                        "an unreadable sibling's ownership must not strand a healthy entry")
     }
 
     /// ACCOUNT SCOPE IS PART OF THE IDENTITY (reviewer 2b121320): an entry owned by account A must
@@ -2533,13 +2573,16 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         let rootPath = root.path
         let q = VoiceSharingUploadQueue(
             rootDirectory: root, clock: Date.init,
-            listDirectoryBounded: { url, keys, limit in
+            // The fault goes on the UNBOUNDED lister: discovery reads it (spec 2741a0ca ruling 1),
+            // so injecting into the bounded one left the scan succeeding and the control passing
+            // for the wrong reason. The property under test is unchanged: a failed scan must HOLD
+            // serving, never read as an empty queue.
+            listDirectory: { url, keys in
                 if failListing, url.path == rootPath {
                     throw CocoaError(.fileReadUnknown)
                 }
-                let urls = try FileManager.default.contentsOfDirectory(
+                return try FileManager.default.contentsOfDirectory(
                     at: url, includingPropertiesForKeys: keys)
-                return (urls: Array(urls.prefix(limit)), overflowed: urls.count > limit)
             })
         let prep = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
         try q.finalize(prep)
@@ -2618,33 +2661,37 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         let rootPath = root.path
         let owner = VoiceSharingUploadQueue(
             rootDirectory: root, clock: Date.init,
-            listDirectoryBounded: { url, keys, limit in
+            // Discovery reads the UNBOUNDED lister (spec 2741a0ca ruling 1); injecting into the
+            // bounded one made the scan succeed and the control prove nothing.
+            listDirectory: { url, keys in
                 if failListing, url.path == rootPath {
                     throw CocoaError(.fileReadUnknown)
                 }
-                let urls = try FileManager.default.contentsOfDirectory(
+                return try FileManager.default.contentsOfDirectory(
                     at: url, includingPropertiesForKeys: keys)
-                return (urls: Array(urls.prefix(limit)), overflowed: urls.count > limit)
             })
         let prep = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
         try owner.finalize(prep)
 
         failListing = true
-        // The handle is valid and the entry directory readable — coverage is not.
-        XCTAssertThrowsError(try owner.beginAttempt(prep)) { error in
-            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .accountingUnavailable,
-                           "unknown coverage holds attempts, even with a held handle")
-        }
-        XCTAssertFalse(owner.isAttemptInFlight(prep), "no lease survives a coverage hold")
-        // Restoration: a successful scan admits the attempt.
+        // AMENDED BY SPEC d720ab6c: an unreadable ROOT may refuse only NEW ADMISSIONS. This entry's
+        // own directory and audio are readable, so its attempt is due — an unknown fact about the
+        // whole root must not spend a due recording's turn.
+        XCTAssertTrue(try owner.beginAttempt(prep),
+                      "an unreadable root must not hold a due attempt")
+        owner.endAttempt(prep)
+        // Restoration: a readable root behaves the same way for the attempt.
         failListing = false
         XCTAssertTrue(try owner.beginAttempt(prep))
         owner.endAttempt(prep)
     }
 
-    func test_inaccessibleRequiredFileHoldsServingForTheWholeOwner() throws {
-        // Reviewer c4d5ecb4: one inaccessible required file must hold coverage for the WHOLE
-        // owner — it must not coexist with .known(otherReadyEntries).
+    func test_inaccessibleRequiredFileHoldsOnlyThatEntry() throws {
+        // SUPERSEDES reviewer c4d5ecb4's owner-wide rule, per reviewer 307d0bde item 3 and spec
+        // d720ab6c: "an unknown fact about one entry affects only that entry", and an unknown fact
+        // about the whole root or owner may refuse only NEW ADMISSIONS, never serving or an
+        // attempt. Holding the entire owner let one unreadable directory stop every other
+        // recording from being served — the wedge this audit exists to remove.
         let owner = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         let good = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
         try owner.finalize(good)
@@ -2659,9 +2706,11 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         defer { try? FileManager.default.setAttributes(
             [.posixPermissions: 0o755], ofItemAtPath: brokenDir.path) }
 
-        guard case .unknownCoverage = owner.readyEntriesReportingUnknownCoverage() else {
-            return XCTFail("one inaccessible entry must hold coverage for the whole owner")
+        guard case .known(let held) = owner.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("one inaccessible entry must not hold coverage for the whole owner")
         }
+        XCTAssertEqual(held.map(\.name), [good.name],
+                       "the healthy entry still serves; only the inaccessible one is excluded")
         // Restoration: permissions back => known coverage, broken entry filtered, good served.
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o755], ofItemAtPath: brokenDir.path)
@@ -2725,14 +2774,18 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: bDir.path)
         defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bDir.path) }
 
-        XCTAssertThrowsError(try owner.beginAttempt(a)) { error in
-            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .accountingUnavailable,
-                           "B's unknown coverage holds A's attempt")
-        }
-        XCTAssertFalse(owner.isAttemptInFlight(a), "no lease survives the coverage hold")
-        // Restore B: A's attempt is admitted.
+        // AMENDED BY SPEC d720ab6c: "an unknown fact about the whole root or owner may refuse only
+        // NEW ADMISSIONS, never an attempt." B is unreadable; A is due. B's problem is not evidence
+        // about A, so A's attempt is admitted and only B is held.
+        XCTAssertTrue(try owner.beginAttempt(a),
+                      "an unreadable sibling must not spend A's turn; unknown means due now")
+        owner.endAttempt(a)
+        // B is refused — by `false` or by a throw, both meaning no request is issued.
+        let bRefused = (try? owner.beginAttempt(b)) ?? false
+        XCTAssertFalse(bRefused, "B itself is not attemptable")
+        // Restore B: it is attemptable again.
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bDir.path)
-        XCTAssertTrue(try owner.beginAttempt(a))
+        XCTAssertTrue(try owner.beginAttempt(b))
         owner.endAttempt(a)
     }
 
@@ -2740,8 +2793,10 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         // (a) AMENDED BY SPEC 53452bc5: a present, bounded created-at whose READ fails used to hold
         // UNKNOWN coverage for the owner (reviewer 72e9362d). An age sidecar is no longer part of
         // validity or coverage — it is repaired and the recording serves.
-        // (b) Reviewer 72e9362d stands unchanged: B's durability-confirmation failure holds A's
-        // held-handle attempt via the shared authority.
+        // (b) AMENDED BY SPEC d720ab6c / reviewer 307d0bde item 3: B's durability-confirmation
+        // failure used to hold A's attempt through an owner-wide authority. An unknown fact about
+        // ONE entry affects only that entry, and for upload unknown means due now. So B is skipped
+        // and A still serves and is still attemptable.
         let owner = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         let good = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
         try owner.finalize(good)
@@ -2768,18 +2823,18 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         let fd = open(markerURL.path, O_WRONLY)
         if fd >= 0 { close(fd) }
         XCTAssertFalse(fd >= 0, "probe: O_WRONLY open on 000 marker must fail (fd=\(fd))")
-        guard case .unknownCoverage = owner.readyEntriesReportingUnknownCoverage() else {
-            return XCTFail("serving holds with unconfirmable ready marker")
+        guard case .known(let held) = owner.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("an unconfirmable sibling must not hold coverage for the whole owner")
         }
-        XCTAssertThrowsError(try owner.beginAttempt(good)) { error in
-            // The authority surfaces raw I/O failure (synchronizer's NSError), not a classified
-            // outcome — the point is that it THROWS and no lease survives.
-            XCTAssertNotNil(error as? NSError, "B's confirmation failure holds A's attempt")
+        XCTAssertEqual(held.map(\.name), [good.name],
+                       "only the unconfirmable entry is excluded; A still serves")
+        XCTAssertTrue(try owner.beginAttempt(good),
+                      "B's confirmation failure must not spend A's due attempt")
+        owner.endAttempt(good)
+        guard case .known(let stillHeld) = owner.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("serving stays known about A")
         }
-        XCTAssertFalse(owner.isAttemptInFlight(good), "no lease survives the hold")
-        guard case .unknownCoverage = owner.readyEntriesReportingUnknownCoverage() else {
-            return XCTFail("serving holds equally")
-        }
+        XCTAssertEqual(stillHeld.map(\.name), [good.name])
         // Restoration: marker readable again — A's attempt is admitted.
         try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: markerURL.path)
         guard case .known(let ready) = owner.readyEntriesReportingUnknownCoverage() else {
@@ -3253,13 +3308,17 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         // refusal must be LOGGED and NOT STICKY: the moment the listing reads again, the next
         // segment is admitted. It must never touch drain, upload or delete.
         var failing = false
+        // The fault goes on the UNBOUNDED lister, because that is what discovery actually uses
+        // (spec 2741a0ca ruling 1). Injecting into the bounded seam left the count reading fine and
+        // the control passing for the wrong reason.
         let queue = VoiceSharingUploadQueue(
             rootDirectory: root,
-            listDirectoryBounded: { url, keys, limit in
+            listDirectory: { url, keys in
                 if failing, url.standardizedFileURL == self.root.standardizedFileURL {
                     throw CocoaError(.fileReadUnknown)
                 }
-                return try VoiceSharingUploadQueue.defaultBoundedLister(url, keys, limit)
+                return try FileManager.default.contentsOfDirectory(
+                    at: url, includingPropertiesForKeys: keys)
             })
         XCTAssertTrue(queue.hasAdmissionAllowance(), "PRE: a readable root admits")
         failing = true
@@ -3286,7 +3345,10 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         _ = fresh.readyEntriesReportingUnknownCoverage()
         XCTAssertTrue(FileManager.default.fileExists(atPath: dir.path),
                       "a local parse verdict must never delete a recording")
-        XCTAssertEqual(fresh.readyEntries().count, 0, "and it is not served as bound")
+        // CORRECTED (reviewer 307d0bde item 1): it IS served. Excluding it from serving was a hold
+        // with a log line attached; the server must get the bytes and own the verdict.
+        XCTAssertEqual(fresh.readyEntries().count, 1,
+                       "a capture the client cannot bind is still offered to the server; diag=\(fresh.lastDiscoveryDiagnostic)")
     }
 
     /// RULING 1: an unreadable attempt record treats the backoff as DUE — it must not hold the

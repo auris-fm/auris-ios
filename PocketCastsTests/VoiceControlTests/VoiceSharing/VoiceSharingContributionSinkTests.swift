@@ -740,9 +740,12 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         let refusingListQueue = VoiceSharingUploadQueue(
             rootDirectory: root,
             clock: Date.init,
-            listDirectoryBounded: { url, keys, limit in
+            // Discovery reads the UNBOUNDED lister (spec a4b417fc ruling 1); injecting into the
+            // bounded one made the listing succeed and the control prove nothing.
+            listDirectory: { url, keys in
                 if failListing { throw CocoaError(.fileReadNoPermission) }
-                return try VoiceSharingUploadQueue.testBoundedListing(url, keys, limit)
+                return try FileManager.default.contentsOfDirectory(
+                    at: url, includingPropertiesForKeys: keys)
             })
         guard case .refused = refusingListQueue.purgeAll() else {
             return XCTFail("an unlistable root must refuse, never report success")
@@ -1125,8 +1128,17 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
             collector?.appendSamples(samples)
             collector?.segmentationEnded(context)
         }
+        // AMENDED BY SPEC 2741a0ca: the in-process FIFO cap that used to press a record out of the
+        // ring is GONE, because discarding a capture before any durable record exists maps to no
+        // allowed gate. Pressure is counted and logged; the capture is still queued. So the eviction
+        // this control was written around no longer happens — which is the point, not a regression.
+        // What still matters is the property it protected: nothing is silently lost.
+        // The terminal ring still evicts past 32, but an unemitted record is SUBMITTED through the
+        // normal sink path at eviction and only then has its deadline cancelled — so eviction is
+        // never silent loss (spec defect d6580187). What the FIFO-cap removal changed is the
+        // HANDOFF: pressure no longer discards a capture before any durable record exists.
         let evicted = scheduler.scheduled.filter { $0.1.isCancelled }
-        XCTAssertFalse(evicted.isEmpty, "bounded ring eviction must retire a timer")
+        XCTAssertFalse(evicted.isEmpty, "ring eviction retires the deadline of the record it submits")
         for (_, work) in evicted { work.perform() }
         drain()
         // NO-SILENT-LOSS (spec defect d6580187): the record pressed out of the ring is EMITTED
@@ -1362,12 +1374,15 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         var data = try Data(contentsOf: audioURL)
         data[VoiceSharingRecordBinding.wavHeaderBytes + 2] ^= 0xFF
         try data.write(to: audioURL)
-        // The queue's own authority refuses: the entry disappears from readiness (fresh query,
-        // same production recovery path a relaunch would take).
+        // AMENDED BY SPEC a4b417fc RULING 2: tampered audio is a DIGEST MISMATCH, and the ruling is
+        // explicit that such a record must be SENT rather than held — only the server's final
+        // refusal may delete it. So the assertion inverts: it stays ready upload work. What must
+        // still be true is that the client never treats it as the record it claims to be.
         guard case .known(let after) = queue.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("coverage known after tamper")
         }
-        XCTAssertEqual(after.count, 0, "a digest-mismatched entry must never be ready upload work")
+        XCTAssertEqual(after.count, 1,
+                       "tampered audio still holds a capture the server must judge and refuse")
     }
 
     /// Helpers for the progress-rule controls: publish one ready entry with a DUE boundary and
