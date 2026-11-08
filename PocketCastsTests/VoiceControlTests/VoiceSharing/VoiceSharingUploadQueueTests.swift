@@ -2687,7 +2687,14 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         try owner.finalize(livePrep)
         let failedPrep = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioB), audio: audioB)
         try owner.finalize(failedPrep)
-        try Data([0x01]).write(to: root.appendingPathComponent(failedPrep.name).appendingPathComponent("publication.failed"))
+        // THE MARKER MUST SAY WHY (spec, old-cap resume). A legacy bare `0x01` no longer authorises
+        // deletion — it is indistinguishable from an old cap quarantine, and deleting on it is
+        // exactly how entry 8E946B60 was lost. This control pins the DELETION rule, so it records
+        // the cause that rule applies to.
+        try "decidedRejection".write(
+            to: root.appendingPathComponent(failedPrep.name)
+                .appendingPathComponent("publication.failed"),
+            atomically: true, encoding: .utf8)
 
         // A fresh instance's serving pass DELETES the refused entry...
         let recovered = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
@@ -3302,6 +3309,65 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: entryDir.path),
                       "an unreadable age must never delete recording content")
         XCTAssertEqual(fresh.expireAgedOutEntries(), 0, "and retention cannot act on an unknown age")
+    }
+
+    /// A PURGE NEEDS A DECIDED, RECORDING-SPECIFIC REJECTION RECORDED IN ITS MARKER (spec afc64eb2).
+    /// Markers used to carry a bare byte with no cause, so a quarantine became deletable by
+    /// accident. Now the cause is the marker's content and only a decided rejection authorises
+    /// deletion. Its counterpart is `test_aLegacyMarkerNeverAuthorisesDeletion` below.
+    func test_aDecidedRejectionIsStillPurged() throws {
+        let seeder = makeQueue()
+        _ = try prepareAndFinalize(seeder, metadata: validRecord(audio: audioA), audio: audioA)
+        let entryDir = try soleEntryDirectory()
+        try "decidedRejection".write(
+            to: entryDir.appendingPathComponent("publication.failed"),
+            atomically: true, encoding: .utf8)
+
+        let fresh = makeQueue()
+        XCTAssertEqual(fresh.readyEntries().count, 0, "a decided rejection never serves")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: entryDir.path),
+                       "and it is deleted, exactly as before")
+    }
+
+    /// THE LEGACY MARKER: a bare `0x01` records no cause, so it can never authorise deletion. This is
+    /// the exact shape that deleted entry 8E946B60. RED before this change — such an entry was
+    /// purged on the next serving pass and is retained here.
+    func test_aLegacyMarkerNeverAuthorisesDeletion() throws {
+        let seeder = makeQueue()
+        _ = try prepareAndFinalize(seeder, metadata: validRecord(audio: audioA), audio: audioA)
+        let entryDir = try soleEntryDirectory()
+        try Data([0x01]).write(to: entryDir.appendingPathComponent("publication.failed"))
+
+        let fresh = makeQueue()
+        XCTAssertEqual(fresh.readyEntries().count, 0, "a disqualified entry never serves")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: entryDir.path),
+                      "but an unknown cause must NOT authorise deleting the recording")
+    }
+
+    /// SPEC (orphaned sidecars): retry stamps whose recording no longer exists are removed, counted
+    /// and named — while a LIVE entry keeps its own. A silent sweep of retry state would be
+    /// indistinguishable from losing it.
+    func test_orphanedAttemptSidecarsAreSweptAndLiveOnesKept() throws {
+        let seeded = makeQueue()
+        _ = try prepareAndFinalize(seeded, metadata: validRecord(audio: audioA), audio: audioA)
+        let liveName = try soleEntryDirectory().lastPathComponent
+        let liveStamp = root.appendingPathComponent("attempt.notbefore.\(liveName)")
+        try "{\"notBefore\":1}".write(to: liveStamp, atomically: true, encoding: .utf8)
+        // An orphan: a well-formed stamp with no entry directory behind it.
+        let orphanName = UUID().uuidString
+        let orphanStamp = root.appendingPathComponent("attempt.notbefore.\(orphanName)")
+        try "{\"notBefore\":1}".write(to: orphanStamp, atomically: true, encoding: .utf8)
+        let orphanObligation = root.appendingPathComponent("attempt.obligation.\(orphanName)")
+        try "1800".write(to: orphanObligation, atomically: true, encoding: .utf8)
+
+        let fresh = makeQueue()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: liveStamp.path),
+                      "a live recording KEEPS its retry stamp")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: orphanStamp.path),
+                       "an orphaned stamp is swept")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: orphanObligation.path),
+                       "an orphaned obligation is swept too")
+        XCTAssertEqual(fresh.removedOrphanSidecars, 2, "and the sweep is counted")
     }
 
     /// THE REPAIR WRITES ONLY TO PUBLISHED WORK. An INCOMPLETE entry with an untrusted instant must
@@ -4085,10 +4151,10 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
     func test_aDurableServerRefusalIsDeletedButAnActiveStageNeverIs() throws {
         let queue = makeQueue()
         let refused = try seed(queue)
-        // The durable refusal intent exactly as the (legacy) quarantine settlement leaves it:
-        // publication.failed present, no active stage, bytes retained.
-        try Data([0x01]).write(to: entryRoot.appendingPathComponent(refused.name)
-            .appendingPathComponent("publication.failed"))
+        // The durable refusal intent: publication.failed present WITH ITS CAUSE (a bare legacy
+        // byte no longer authorises deletion), no active stage, bytes retained.
+        try "decidedRejection".write(to: entryRoot.appendingPathComponent(refused.name)
+            .appendingPathComponent("publication.failed"), atomically: true, encoding: .utf8)
         XCTAssertTrue(FileManager.default.fileExists(
             atPath: entryRoot.appendingPathComponent(refused.name).path),
             "precondition: the quarantined intent is durable")
