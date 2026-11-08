@@ -1140,19 +1140,62 @@ final class VoiceSharingUploadQueue {
         disqualifyLocked(entry)
     }
 
+    /// WHY an entry is disqualified, recorded IN the marker (spec, old-cap resume).
+    ///
+    /// The marker used to carry a single `0x01` — "revoked", with no cause. That made every
+    /// disqualification equal at purge time, so an entry quarantined by the OLD attempt cap was
+    /// deleted on update exactly like one the server had permanently rejected. The distinction is
+    /// not cosmetic: a cap quarantine is a CLIENT bookkeeping accident and the recording is still
+    /// good, while a decided rejection is the server refusing that specific recording forever.
+    enum DisqualificationCause: String {
+        /// The server decided this RECORDING is unacceptable (contract/record rejection). Terminal.
+        case decidedRejection
+        /// Removal/disposal intents (opt-out, refusal purge, owner scope) — deliberately deleted.
+        case removal
+        /// A marker whose content says nothing (the legacy bare `0x01`, or an unparseable
+        /// payload). It records no decision by anyone, so it never authorises deleting a
+        /// recording. Deliberate intents write a real cause and are never legacy.
+        case legacyUnknown
+
+        /// Only a decided rejection or a DELIBERATE removal intent authorises deletion. An
+        /// unknown cause must be resurrected.
+        var authorisesDeletion: Bool { self == .decidedRejection || self == .removal }
+    }
+
     /// Durably disqualifies one entry: marker bytes synced as a FILE, then the entry directory.
     /// Returns FALSE if any step fails — the caller must then make no disqualification claim and
     /// must not delete the entry.
-    private func disqualifyLocked(_ item: URL) -> Bool {
+    private func disqualifyLocked(_ item: URL,
+                                  cause: DisqualificationCause = .removal) -> Bool {
         let intent = item.appendingPathComponent(Self.failedName)
         do {
-            try failureRecordWriter(intent, Data([0x01]))
+            // THE CAUSE IS THE MARKER'S CONTENT. Legacy markers are a single `0x01`; they are read
+            // as `.legacyUnknown` (the conservative reading — an unknown cause never authorises
+            // deletion of a recording someone might still want), see `disqualificationCauseLocked`.
+            try failureRecordWriter(intent, Data(cause.rawValue.utf8))
             try synchronizer(intent, false)
             try synchronizer(item, true)
             return true
         } catch {
             return false
         }
+    }
+
+    /// Reads the recorded disqualification cause. A LEGACY marker (`0x01`, or anything unparseable
+    /// as a cause name) reads as `.legacyUnknown`: the old build never recorded a reason, so an
+    /// unknown cause must never authorise deleting a recording. This is DISTINCT from `.removal`:
+    /// a deliberate removal intent writes its cause and DOES authorise deletion; a marker that
+    /// says nothing does not. `nil` means NO marker at all.
+    private func disqualificationCauseLocked(at directory: URL) -> DisqualificationCause? {
+        let intent = directory.appendingPathComponent(Self.failedName)
+        guard Self.statKind(of: intent) == .present else { return nil }
+        guard let data = try? Data(contentsOf: intent) else { return .legacyUnknown }
+        // A legacy single byte, or any unrecognised payload, is not evidence of a decision.
+        if data == Data([0x01]) { return .legacyUnknown }
+        guard let text = String(data: data, encoding: .utf8),
+            let parsed = DisqualificationCause(rawValue: text)
+        else { return .legacyUnknown }
+        return parsed
     }
 
     /// Atomically marks a prepared entry ready AFTER its bytes are durable: audio and metadata are
@@ -1480,7 +1523,7 @@ final class VoiceSharingUploadQueue {
                     let complete = isCompleteEntryLocked(at: entry)
                     if complete {
                         let marked = (try? validatedEntryDirectoryLocked(entry))
-                            .map { disqualifyLocked($0) } ?? false
+                            .map { disqualifyLocked($0, cause: .decidedRejection) } ?? false
                         // DIAGNOSTIC (content-free): this is the ONLY admission path that
                         // quarantines. Without it an entry can stop serving with no trace of why.
                         FileLog.shared.addMessage(
@@ -2261,7 +2304,7 @@ final class VoiceSharingUploadQueue {
                     "[VoiceSharing] queue quarantine reason=contract-rejected "
                         + "entry=\(entry.name) starting")
                 FileLog.shared.forceFlush()
-                guard disqualifyLocked(directory) else {
+                guard disqualifyLocked(directory, cause: .decidedRejection) else {
                     // A false here can mean the marker write failed AFTER landing (sync failure),
                     // so the state is UNKNOWN — log confirmation-failed, never "absent".
                     FileLog.shared.addMessage(
@@ -2810,6 +2853,12 @@ final class VoiceSharingUploadQueue {
     /// The last discovery's per-entry account, for controls and diagnostics.
     private(set) var lastDiscoveryDiagnostic = ""
 
+    /// ORPHANED ATTEMPT SIDECARS removed by the last recovery (spec, orphaned sidecars): retry
+    /// stamps and obligations whose recording no longer exists. Counted and named so the removal
+    /// is attributable — the owner's queue held nine with no recording behind them.
+    private(set) var removedOrphanSidecars = 0
+    private(set) var orphanSidecarNames: [String] = []
+
     func readyEntriesReportingUnknownCoverage() -> ReadyDiscovery {
         serialQueue.sync {
             guard (try? establishStoragePolicyLocked()) != nil else { return .unknownCoverage }
@@ -2885,6 +2934,17 @@ final class VoiceSharingUploadQueue {
                     excluded.append("\(entry.name):purged(record-check)")
                     continue
                 case .disqualified:
+                    // ONLY A DECIDED REJECTION MAY DELETE (spec, old-cap resume). The marker now
+                    // records WHY; the marker used to say only "revoked", so this branch deleted a
+                    // cap-quarantined recording on update exactly as it deletes a server-refused
+                    // one (entry 8E946B60). A cause that does not authorise deletion is never
+                    // purged here: it is excluded and left intact.
+                    let cause = disqualificationCauseLocked(
+                        at: entryDirectoryLocked(for: entry)) ?? .legacyUnknown
+                    guard cause.authorisesDeletion else {
+                        excluded.append("\(entry.name):notDeletable(\(cause.rawValue))")
+                        continue
+                    }
                     // A durable publication.failed intent WITHOUT an active publication stage
                     // is a PERMANENT server refusal (or a purge whose removal never completed):
                     // spec 1a0d3ffb deletes it. REVIEWER e71b9524 item 2: entryStateLocked
@@ -2982,9 +3042,14 @@ final class VoiceSharingUploadQueue {
                     case .refusedUnbindable:
                         try purgeRefusedEntryLocked(entry, cause: "record-check")
                     case .disqualified:
+                        // ONLY A DECIDED REJECTION MAY DELETE (spec, old-cap resume) — the same
+                        // authority as the strict path above. A cap quarantine is excluded and
+                        // left intact for the recovery resume to serve.
+                        let directory = entryDirectoryLocked(for: entry)
+                        let cause = disqualificationCauseLocked(at: directory) ?? .removal
+                        guard cause.authorisesDeletion else { continue }
                         // REVIEWER e71b9524 item 2: deletion requires a durable failed intent
                         // AND proven stage absence (see the strict path above).
-                        let directory = entryDirectoryLocked(for: entry)
                         let stageKind = Self.statKind(
                             of: directory.appendingPathComponent(Self.stageName))
                         guard stageKind == .absent else {
@@ -3814,6 +3879,8 @@ final class VoiceSharingUploadQueue {
         // scoped purge automatically.
         refusedIntentNamesLocked.removeAll()
         discoverRefusalIntentsLocked()
+        removedOrphanSidecars = 0
+        orphanSidecarNames.removeAll()
         var complete: [(entry: Entry, readyDate: Date)] = []
         for entry in entriesLocked() {
             let directory = entryDirectoryLocked(for: entry)
@@ -3874,6 +3941,18 @@ final class VoiceSharingUploadQueue {
         // skip cleanup (fail-closed) rather than enumerate past the bound.
         if let listed = try? listDirectoryBounded(
             rootDirectory, [.isDirectoryKey], Self.maxDirectoryEntries), !listed.overflowed {
+            // WHICH ENTRIES STILL EXIST, established once: an attempt sidecar is only meaningful
+            // while its recording does. Orphans are what is left after an entry was removed, and
+            // they were previously kept forever — the owner's queue showed nine of them with no
+            // recordings behind them (spec, orphaned sidecars).
+            var liveEntries = Set<String>()
+            for item in listed.urls {
+                let name = item.lastPathComponent
+                if UUID(uuidString: name) != nil,
+                   (try? item.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
+                    liveEntries.insert(name)
+                }
+            }
             for stray in listed.urls
             where !((try? stray.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false) {
                 // Lease locks are OWNED root files, not debris: removing one would invalidate the
@@ -3905,14 +3984,28 @@ final class VoiceSharingUploadQueue {
                 // debris sweep used to) silently turned every enforced delay back into an advisory
                 // one on the next launch — exactly what the reviewer rejected.
                 if name.hasPrefix(Self.notBeforePrefix),
-                   UUID(uuidString: String(name.dropFirst(Self.notBeforePrefix.count))) != nil {
+                   let owner = UUID(uuidString: String(name.dropFirst(Self.notBeforePrefix.count))) {
+                    // AN ORPHAN is swept: the delay belongs to a recording that is gone, so it can
+                    // neither be honoured nor erase anything retryable. Counted and named, because
+                    // a silent removal of retry state is indistinguishable from losing it.
+                    if liveEntries.contains(owner.uuidString) { continue }
+                    removedOrphanSidecars += 1
+                    orphanSidecarNames.append(name)
+                    _ = try? fileManager.removeItem(at: stray)
                     continue
                 }
                 // Retry obligations are the SAME class (reviewer a29e62a2): the write-ahead proof
                 // that a delay was owed. Sweeping one on restart erases the only record of the
                 // original server minimum.
                 if name.hasPrefix(Self.obligationPrefix),
-                   UUID(uuidString: String(name.dropFirst(Self.obligationPrefix.count))) != nil {
+                   let owner = UUID(uuidString: String(name.dropFirst(Self.obligationPrefix.count))) {
+                    // ORPHANS are swept for the same reason as not-before stamps: an obligation
+                    // proves what a RECORDING is owed, and owes it nothing once the recording is
+                    // gone. Live entries keep theirs — that is the guarantee above.
+                    if liveEntries.contains(owner.uuidString) { continue }
+                    removedOrphanSidecars += 1
+                    orphanSidecarNames.append(name)
+                    _ = try? fileManager.removeItem(at: stray)
                     continue
                 }
                 // Per-entry refusal deletion intents are the SAME class (reviewer 4bb7841c):
@@ -3924,6 +4017,14 @@ final class VoiceSharingUploadQueue {
                     continue
                 }
                 try? fileManager.removeItem(at: stray)
+            }
+            if removedOrphanSidecars > 0 {
+                // ONE REASON LINE PER SWEEP, naming what went: an orphan sweep that removed retry
+                // state silently would be indistinguishable from losing that state to a bug.
+                FileLog.shared.addMessage(
+                    "[VoiceSharing] queue sidecar sweep reason=orphaned-entry removed=\(removedOrphanSidecars) "
+                        + "names=\(orphanSidecarNames.prefix(8).joined(separator: ","))")
+                FileLog.shared.forceFlush()
             }
         }
         // Settlement records are recovery state, not debris: reconcile-retire them here. Runs
