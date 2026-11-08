@@ -412,21 +412,30 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertTrue(q.readyEntries().isEmpty, "a non-matching record_sha256 must not bind")
     }
 
-    func test_oversizedCreationInstantIsRefusedWithoutBeingLoaded() throws {
-        // The instant is a short decimal string. An oversized file is a corrupt or foreign object;
-        // the bound must be checked from attributes so a huge file is never read to find out.
+    func test_oversizedCreationInstantIsReplacedWithoutBeingLoaded() throws {
+        // AMENDED BY SPEC 53452bc5. This control used to require the ENTRY to be refused because
+        // its instant could not be bounded. An age sidecar is no longer part of validity: the
+        // oversized file is still never READ (the bound is checked from attributes), but it is now
+        // REPLACED with a fresh instant and the recording serves. The bound still protects the
+        // reader — what changed is who pays for the corruption, and it is no longer the recording.
         var q = makeQueue()
         let prep = try q.prepare(metadata: validRecord(audio: audioA), audio: audioA)
         try wav().write(to: try soleEntryDirectory().appendingPathComponent("audio.wav"))
-        // Replace the immutable instant with content far past the bound.
         let instant = try soleEntryDirectory().appendingPathComponent("created.at")
         try Data(String(repeating: "1", count: 4096).utf8).write(to: instant)
         try Data([0x01]).write(to: try soleEntryDirectory().appendingPathComponent("ready.marker"))
         _ = prep
 
         q = makeQueue() // recovery
-        XCTAssertTrue(q.readyEntries().isEmpty,
-                      "an entry whose admission instant cannot be bounded is not ready")
+        XCTAssertEqual(q.readyEntries().count, 1,
+                       "an unbounded age sidecar is replaced, and the recording serves")
+        XCTAssertEqual(q.ageResetCountForTesting, 1, "the replacement is counted (AGE_RESET)")
+        let replaced = try Data(contentsOf: instant)
+        let text = try XCTUnwrap(String(data: replaced, encoding: .utf8))
+        XCTAssertLessThanOrEqual(replaced.count, VoiceSharingUploadQueue.maxCreationInstantBytes,
+                                 "the sidecar is back inside the bound")
+        XCTAssertLessThan(abs(try XCTUnwrap(TimeInterval(text)) - Date().timeIntervalSince1970), 300,
+                          "and holds a fresh instant")
     }
 
     func test_wavStructurallyInconsistentHeadersAreRejected() throws {
@@ -2764,23 +2773,44 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertEqual(ready.count, 2, "restored: both entries are valid and served")
     }
 
-    func test_oversizedCreatedAtHoldsCoverageInsteadOfLoading() throws {
-        // Reviewer f2d68c23 (1): the created-at read keeps the bounded-reader discipline — an
-        // oversized/nonregular file is UNKNOWN coverage, refused before allocation.
-        let owner = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-        let prep = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
-        try owner.finalize(prep)
-        let createdURL = root.appendingPathComponent(prep.name).appendingPathComponent("created.at")
-        try Data(repeating: 0x41, count: VoiceSharingUploadQueue.maxCreationInstantBytes + 1)
-            .write(to: createdURL)
-        guard case .unknownCoverage = owner.readyEntriesReportingUnknownCoverage() else {
-            return XCTFail("oversized created-at must hold coverage for the whole owner")
-        }
-        // Nonregular created-at is equally unknown.
-        try FileManager.default.removeItem(at: createdURL)
-        try FileManager.default.createDirectory(at: createdURL, withIntermediateDirectories: true)
-        guard case .unknownCoverage = owner.readyEntriesReportingUnknownCoverage() else {
-            return XCTFail("nonregular created-at must hold coverage")
+    /// AMENDED BY SPEC 53452bc5 (f2d68c23 retained for everything EXCEPT the age sidecar). An
+    /// oversized or non-regular `created.at` used to hold coverage for the whole owner. It no longer
+    /// does: an age sidecar is not part of a recording's validity or of owner coverage, it is never
+    /// read, and it is REPLACED with a fresh instant — the recording serves and the owner is not
+    /// held. RED on the previous behaviour, where both shapes produced `unknownCoverage`.
+    func test_oversizedOrNonRegularCreatedAtIsReplacedAndTheEntryServes() throws {
+        for shape in ["oversized", "nonregular"] {
+            if let existing = root, FileManager.default.fileExists(atPath: existing.path) {
+                try FileManager.default.removeItem(at: existing)
+            }
+            root = temporaryRoot()
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            let owner = makeQueue()
+            let prep = try owner.prepare(
+                metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+            try owner.finalize(prep)
+            let createdURL = root.appendingPathComponent(prep.name)
+                .appendingPathComponent("created.at")
+            if shape == "oversized" {
+                try Data(repeating: 0x41, count: VoiceSharingUploadQueue.maxCreationInstantBytes + 1)
+                    .write(to: createdURL)
+            } else {
+                try FileManager.default.removeItem(at: createdURL)
+                try FileManager.default.createDirectory(at: createdURL,
+                                                        withIntermediateDirectories: true)
+            }
+            // COVERAGE IS KNOWN: the owner is never held for an age sidecar.
+            guard case .known(let ready) = owner.readyEntriesReportingUnknownCoverage() else {
+                return XCTFail("\(shape): an age sidecar must not hold coverage for the owner")
+            }
+            XCTAssertEqual(ready.count, 1, "\(shape): the recording is served")
+            // The bad sidecar was REPLACED with a fresh instant, not honoured and not left behind.
+            let replaced = try Data(contentsOf: createdURL)
+            let text = try XCTUnwrap(String(data: replaced, encoding: .utf8))
+            let instant = try XCTUnwrap(TimeInterval(text))
+            XCTAssertLessThan(abs(instant - Date().timeIntervalSince1970), 300,
+                              "\(shape): the sidecar now holds a fresh instant")
+            XCTAssertEqual(owner.ageResetCountForTesting, 1, "\(shape): counted as AGE_RESET")
         }
     }
 
@@ -2808,23 +2838,26 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         owner.endAttempt(a)
     }
 
-    func test_createdAtReadFailureHoldsCoverageAndReadyGateConfirmsHoldAttempts() throws {
-        // Reviewer 72e9362d: (a) a present, bounded created-at whose READ fails is UNKNOWN
-        // coverage, never .incomplete; (b) B's durability-confirmation failure holds A's held-
-        // handle attempt via the shared authority.
+    func test_createdAtReadFailureIsRepairedAndReadyGateConfirmsHoldAttempts() throws {
+        // (a) AMENDED BY SPEC 53452bc5: a present, bounded created-at whose READ fails used to hold
+        // UNKNOWN coverage for the owner (reviewer 72e9362d). An age sidecar is no longer part of
+        // validity or coverage — it is repaired and the recording serves.
+        // (b) Reviewer 72e9362d stands unchanged: B's durability-confirmation failure holds A's
+        // held-handle attempt via the shared authority.
         let owner = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         let good = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
         try owner.finalize(good)
         let broken = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioB), audio: audioB)
         try owner.finalize(broken)
 
-        // (a) Replace created.at via an unreplicable-in-content path: make the file unreadable
-        // while stat-visible — chmod 000 on the FILE itself (stat ok, read fails).
+        // (a) An unreadable created.at is REPAIRED (spec 53452bc5), not held: the recording still
+        // serves and the owner's coverage stays known. Both entries are valid recordings.
         let createdURL = root.appendingPathComponent(broken.name).appendingPathComponent("created.at")
         try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: createdURL.path)
-        guard case .unknownCoverage = owner.readyEntriesReportingUnknownCoverage() else {
-            return XCTFail("a bounded created-at whose read fails must hold coverage")
+        guard case .known(let served) = owner.readyEntriesReportingUnknownCoverage() else {
+            return XCTFail("an unreadable age sidecar must not hold coverage for the owner")
         }
+        XCTAssertEqual(served.count, 2, "both recordings serve")
         try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: createdURL.path)
 
         // (b) B's ready marker present but its durability witness unconfirmable: chmod 000 on the
@@ -3088,7 +3121,8 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
             to: entryDir.appendingPathComponent("created.at"), atomically: true, encoding: .utf8)
         XCTAssertEqual(q.ageResetCountForTesting, 0, "premise: no reset has run yet")
 
-        // The live pass applies the untrusted-age rule.
+        // The live pass applies the untrusted-age rule. AGE_RESET counts a REPAIR, not a read: the
+        // instant is replaced once, and further reads see a trusted value.
         XCTAssertEqual(q.expireAgedOutEntries(), 0, "a reset entry is fresh, not expired")
         XCTAssertEqual(q.ageResetCountForTesting, 1, "the untrusted instant is counted (AGE_RESET)")
         let rewritten = try String(
@@ -3190,6 +3224,86 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                        "the in-memory instant starts the retention clock exactly once")
     }
 
+    /// REVIEWER (second round on 444cde13f): the fallback must cover EVERY untrusted age, not just
+    /// a future one, and must survive a FAULTED writer — classification used to require the disk
+    /// instant, so a failed repair still deleted or refused the recording. For each of missing,
+    /// empty and unreadable: with the writer faulted the recording is SERVED, ageing from one chosen
+    /// instant as the clock advances; then the fault is LIFTED and the same instance persists it on
+    /// recovery WITHOUT choosing a new instant.
+    func test_everyUntrustedAgeIsServedFromMemoryWhileTheWriterIsFaultedThenPersisted() throws {
+        for defect in ["missing", "empty", "unreadable"] {
+            // Each case gets its own root: the test root is per-test, not per-iteration.
+            if let existing = root, FileManager.default.fileExists(atPath: existing.path) {
+                try FileManager.default.removeItem(at: existing)
+            }
+            root = temporaryRoot()
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            let fixedNow = Date(timeIntervalSince1970: 1_800_000_000)
+            let seeder = makeQueue(clock: { fixedNow })
+            _ = try prepareAndFinalize(seeder, metadata: validRecord(audio: audioA), audio: audioA)
+            let entryDir = try soleEntryDirectory()
+            let createdURL = entryDir.appendingPathComponent("created.at")
+            switch defect {
+            case "missing": try FileManager.default.removeItem(at: createdURL)
+            case "empty": try Data().write(to: createdURL)
+            default: try "not-a-number".write(to: createdURL, atomically: true, encoding: .utf8)
+            }
+
+            var faulted = true
+            var now = fixedNow
+            let q = VoiceSharingUploadQueue(
+                rootDirectory: root,
+                clock: { now },
+                failureRecordWriter: { url, data in
+                    if faulted, url.lastPathComponent == "created.at" {
+                        throw CocoaError(.fileWriteUnknown)
+                    }
+                    try data.write(to: url, options: .atomic)
+                },
+                listDirectory: { url, keys in
+                    try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: keys)
+                })
+            XCTAssertEqual(q.readyEntries().count, 1,
+                           "\(defect): a recording is SERVED even though its age could not be persisted "
+                           + "diag=\(q.lastDiscoveryDiagnostic)")
+            XCTAssertEqual(q.ageResetCountForTesting, 1, "\(defect): counted once (AGE_RESET)")
+            // AGES FROM THAT INSTANT: a later clock read must show elapsed time, not a fresh zero.
+            now = fixedNow.addingTimeInterval(3_600)
+            XCTAssertEqual(q.secondsUntilNextAgeBoundary(),
+                           VoiceSharingUploadQueue.maxEntryAge - 3_600,
+                           "\(defect): retention counts from the chosen instant, not from now")
+            // LIFT THE FAULT: recovery on the SAME instance persists it.
+            faulted = false
+            _ = q.readyEntries()
+            guard let persisted = try? String(contentsOf: createdURL, encoding: .utf8) else {
+                return XCTFail("\(defect): the retry left no sidecar at all; diag="
+                               + q.lastDiscoveryDiagnostic)
+            }
+            XCTAssertEqual(try XCTUnwrap(TimeInterval(persisted)), fixedNow.timeIntervalSince1970,
+                           "\(defect): the ORIGINAL chosen instant is written, not a new one")
+            XCTAssertEqual(q.secondsUntilNextAgeBoundary(),
+                           VoiceSharingUploadQueue.maxEntryAge - 3_600,
+                           "\(defect): persistence does not reset the retention clock")
+        }
+    }
+
+    /// REVIEWER (second round on 444cde13f): an OversizedOrCorrupt instant is not repairable, but it
+    /// must not cost the RECORDING either. Structural validation is independent of the sidecar, so
+    /// the entry still counts as a valid recording while the age rule refuses to serve it.
+    func test_aCorruptAgeSidecarNeverCostsTheRecording() throws {
+        let q = makeQueue()
+        _ = try prepareAndFinalize(q, metadata: validRecord(audio: audioA), audio: audioA)
+        let entryDir = try soleEntryDirectory()
+        try Data(String(repeating: "9", count: 4096).utf8)
+            .write(to: entryDir.appendingPathComponent("created.at"))
+        // RECONSTRUCTION over it must not delete the recording.
+        let fresh = makeQueue()
+        _ = fresh.readyEntries()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: entryDir.path),
+                      "an unreadable age must never delete recording content")
+        XCTAssertEqual(fresh.expireAgedOutEntries(), 0, "and retention cannot act on an unknown age")
+    }
+
     /// THE REPAIR WRITES ONLY TO PUBLISHED WORK. An INCOMPLETE entry with an untrusted instant must
     /// keep its instant untouched: recovery owns partial work, and a reset routine is not a licence
     /// to write into state the caller never validated. RED when the completeness guard lived only in
@@ -3236,6 +3350,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
             to: entryDir.appendingPathComponent("created.at"), atomically: true, encoding: .utf8)
         _ = q.expireAgedOutEntries()
         XCTAssertEqual(q.ageResetCountForTesting, 1, "the unreadable instant is counted (AGE_RESET)")
+        XCTAssertEqual(q.readyEntries().count, 1, "premise: repairable, so it serves")
         XCTAssertEqual(q.readyEntries().count, 1, "the recording is served after the reset")
         XCTAssertTrue(FileManager.default.fileExists(atPath: entryDir.path),
                       "a recording with an untrusted age is reset, never deleted")
