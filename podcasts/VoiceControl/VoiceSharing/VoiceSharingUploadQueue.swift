@@ -151,6 +151,12 @@ final class VoiceSharingUploadQueue {
     /// one remaining job.
     static let maxSweptEntries = maxQueueEntries * 4 + 64
 
+    /// The smallest wake a retry-held queue will arm when work is ALREADY due. Positive by
+    /// construction: an armed 0 fires the trigger immediately, which re-arms and spins (reviewer
+    /// 34aae0fa). That is the one hazard a retry hold MUST still prevent, while still never
+    /// freezing progress.
+    static let retryHoldWakeFloorSeconds: TimeInterval = 15
+
     /// The closed set of file names an entry directory may contain. Accounting and cleanup are
     /// defined over exactly these.
     /// The closed set of fixed file names an entry directory may contain.
@@ -505,9 +511,11 @@ final class VoiceSharingUploadQueue {
     }
 
     private func retryWakeProspectLocked(forEntryNamed entryName: String, at now: TimeInterval) -> RetryWakeProspect {
-        // OWNER-WIDE HOLDS FIRST, exactly as admission does (reviewer 34aae0fa item 1): under either
-        // hold `admitAttempt` throws for EVERY entry, so no boundary is due work.
-        if revocationHoldLocked || retryHoldLocked { return .notWork }
+        // ONLY A SHARING-OFF HOLD STOPS WORK (spec d720ab6c, reviewer 4f98b831). A retry hold used
+        // to answer `.notWork` too, which meant an unreadable retry record permanently suppressed
+        // every entry's retry wake — the queue would never schedule the very retry that would have
+        // cleared the hold. Unknown retry state is due now, so it never blocks the wake either.
+        if revocationHoldLocked { return .notWork }
         guard UUID(uuidString: entryName) != nil else { return .notWork } // not an entry: debris
         let entryDir = rootDirectory.appendingPathComponent(entryName, isDirectory: true)
         var isDirectory: ObjCBool = false
@@ -630,9 +638,15 @@ final class VoiceSharingUploadQueue {
             // and a marker written by a settling pass must hold THIS instance's wake arithmetic the
             // moment it lands on disk. A discovery FAILURE is a hold, never an absence.
             if intentDiscovery(revocationIntentPath) != .absent { return nil }
-            if intentDiscovery(rootDirectory.appendingPathComponent(Self.retryHoldIntentName))
-                != .absent { return nil }
-            if revocationHoldLocked || retryHoldLocked { return nil }
+            // A RETRY HOLD MAY NOT SUPPRESS THE WAKE FOR WORK STILL IN THE FUTURE (spec d720ab6c):
+            // returning `nil` for every held entry stopped the wake that would have drained the
+            // queue, so an unreadable retry record froze progress indefinitely.
+            //
+            // BUT A ZERO DELAY STILL SELF-REOFFERS. If the earliest boundary is ALREADY due, an
+            // armed wake of 0 fires the trigger immediately and re-arms forever without progress —
+            // the exact loop the original control was written against. Under a retry hold the wake
+            // is therefore CLAMPED to a positive floor: the queue keeps waking, but cannot spin.
+            if revocationHoldLocked { return nil }
             // UNBOUNDED (spec a4b417fc ruling 1): this decides the next wake, i.e. it is discovery.
             // A bound here let an over-cap root look unreadable and stop the wake arithmetic, which
             // in turn stopped the drain that would have brought the queue back under the cap.
@@ -659,6 +673,16 @@ final class VoiceSharingUploadQueue {
                 case .dueWork(let delay):
                     earliest = min(earliest ?? .infinity, delay)
                 }
+            }
+            // READ FROM STORAGE, exactly as `recoverLocked` derives it (reviewer 35e67a87): the
+            // in-memory flag is only as fresh as the last reconciliation THIS instance performed,
+            // and a marker that lands after construction must still govern the wake arithmetic.
+            let retryHeld = retryHoldLocked
+                || intentDiscovery(rootDirectory.appendingPathComponent(Self.retryHoldIntentName))
+                    != .absent
+            if let earliest, retryHeld, earliest <= 0 {
+                // Due already, and the retry schedule is unsettled: arm the floor instead of 0.
+                return Self.retryHoldWakeFloorSeconds
             }
             return earliest
         }
@@ -938,10 +962,14 @@ final class VoiceSharingUploadQueue {
             guard (try? establishStoragePolicyLocked()) != nil else { return false }
             // WHICH INTENT IT IS DECIDES (spec 84f7065a item 2). A sharing-off / withdrawal intent
             // whose state is UNKNOWN refuses admission, because the COLLECT gate is "sharing is
-            // proven on" and an unreadable withdrawal marker proves nothing. A retry or attempt
-            // intent says nothing about whether there is room, so it must never refuse here — and
-            // `retryHoldLocked` is deliberately NOT consulted below.
-            guard !revocationHoldLocked else { return false }
+            // proven on" and an unreadable withdrawal marker proves nothing.
+            //
+            // A RETRY HOLD ALSO REFUSES ADMISSION, and no more than that (spec d720ab6c): an
+            // attempt barrier that could not be published left the retry schedule unprovable, and
+            // admitting MORE captures into a queue whose retry state is unsettled is the one thing
+            // the hold is for. It stops there — serving and attempts are never gated on it, which
+            // is why the same flag is absent from `readyEntries` and from the attempt path.
+            guard !revocationHoldLocked, !retryHoldLocked else { return false }
             // AN UNCOUNTABLE ROOT REFUSES ADMISSION (spec 2741a0ca ruling). The gate is "fewer than
             // 32 audio records ON DISK", and a count that could not be taken cannot satisfy it. So
             // this refuses — but ONLY this: the refusal is logged with `count_unknown`, it is never
@@ -1897,14 +1925,25 @@ final class VoiceSharingUploadQueue {
         try synchronizer(rootDirectory, true)
     }
 
-    /// Refuses an attempt that is not yet due. Unreadable/unparseable state refuses (fail closed):
-    /// a not-before we cannot read is not permission to proceed.
+    /// Refuses an attempt that is not yet due.
+    ///
+    /// AN UNREADABLE DELAY IS NOT A DELAY (spec d720ab6c, reviewer 4f98b831). This used to throw
+    /// `leaseHeld` for an unreadable obligation, an unstattable stamp or an unparseable one — a
+    /// queue-wide retry hold on the path the UPLOADER actually calls, which is the last surviving
+    /// form of the gate 066e2a70 item 2 removed elsewhere. Unknown retry state means DUE NOW.
+    /// A READABLE FUTURE DEADLINE still refuses, and that is the distinction that matters: the
+    /// server's minimum keeps applying, while the client's inability to read its own bookkeeping
+    /// stops withholding a recording.
     private func refuseIfNotYetDueLocked(_ entry: Entry) throws {
         // THE OBLIGATION IS AUTHORITATIVE (reviewer a29e62a2): a missing stamp does not mean no
         // delay is owed — the obligation record proves it even when stamp publication failed.
         if let owed = readObligationLocked(entry) {
-            if owed.isNaN { throw PrepareError.leaseHeld } // unknown ⇒ hold
-            if clock().timeIntervalSince1970 < owed {
+            // NaN is an unreadable delay, not an infinite one: due now.
+            if owed.isNaN {
+                FileLog.shared.addMessage(
+                    "[VoiceSharing] admit entry=\(entry.name) reason=obligation-unknown disposition=due-now")
+                FileLog.shared.forceFlush()
+            } else if clock().timeIntervalSince1970 < owed {
                 // NOT-YET-DUE must be DISTINGUISHABLE from "someone else owns this entry"
                 // (reviewer c7da2dbe's bounded-attempts evidence exposed the ambiguity): the
                 // caller's budget/stopping rules depend on knowing a delay is owed.
@@ -1912,7 +1951,9 @@ final class VoiceSharingUploadQueue {
                 FileLog.shared.forceFlush()
                 throw PrepareError.notYetDue(retryAt: Date(timeIntervalSince1970: owed))
             }
-            // Due: retire the obligation so it cannot outlive its purpose.
+            // Due (or unreadable, hence due): retire the obligation so it cannot outlive its
+            // purpose. An unreadable one is retired too — it has already been treated as due, and
+            // leaving it would re-hold the entry on the next pass for no reason.
             try? fileManager.removeItem(
                 at: rootDirectory.appendingPathComponent(Self.obligationPrefix + entry.name))
             try? synchronizer(rootDirectory, true)
@@ -1921,7 +1962,12 @@ final class VoiceSharingUploadQueue {
         // REQUIRED-stat + bounded read (reviewer ce001b9a): no `fileExists`, no unbounded `Data`.
         switch Self.statKind(of: url) {
         case .absent: return
-        case .failure: throw PrepareError.leaseHeld
+        case .failure:
+            // Cannot stat it: unknown, hence due now. Logged so the state is attributable.
+            FileLog.shared.addMessage(
+                "[VoiceSharing] admit entry=\(entry.name) reason=notbefore-unknown disposition=due-now")
+            FileLog.shared.forceFlush()
+            return
         case .present: break
         }
         guard let size = fileSizeIfRegularLocked(at: url), size.isRegular,
@@ -1930,7 +1976,14 @@ final class VoiceSharingUploadQueue {
             let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
             let stamp = object["notBefore"] as? Double, stamp.isFinite
         else {
-            throw PrepareError.leaseHeld
+            // Unparseable/oversized/non-regular: unknown, hence due now. The record is RETIRED
+            // below by the due path, so a corrupt stamp cannot hold the entry every pass.
+            FileLog.shared.addMessage(
+                "[VoiceSharing] admit entry=\(entry.name) reason=notbefore-unreadable disposition=due-now")
+            FileLog.shared.forceFlush()
+            try? fileManager.removeItem(at: url)
+            try? synchronizer(rootDirectory, true)
+            return
         }
         if clock().timeIntervalSince1970 < stamp {
             FileLog.shared.addMessage("[VoiceSharing] admit refusal reason=notbefore-not-yet-due")
@@ -3310,11 +3363,12 @@ final class VoiceSharingUploadQueue {
             guard (try? establishStoragePolicyLocked()) != nil else { return [] }
             // Reviewer 243ef92d: retry absent-entry intent reconciliation from serving too.
             reconcileRefusalIntentsLocked()
-            // LEGACY serving path also honors the owner-wide hold (reviewer 35e67a87): an empty
-            // list, never a stale one — this path has no unknown-coverage channel. ADOPTION
-            // (ce001b9a follow-through): it honors the retry hold too — a failed attempt barrier
-            // pauses serving at every entry point, not only admission.
-            guard !revocationHoldLocked, !retryHoldLocked else { return [] }
+            // LEGACY serving path also honors the SHARING-OFF hold (reviewer 35e67a87): an empty
+            // list, never a stale one — this path has no unknown-coverage channel.
+            // It does NOT honor the retry hold (spec d720ab6c, reviewer 4f98b831): a retry hold is
+            // unknown bookkeeping, and excluding every recording from serving on it withheld the
+            // whole queue from the drain. Unknown retry state is due now.
+            guard !revocationHoldLocked else { return [] }
             // The legacy path has no unknown-coverage channel, so it must FAIL CLOSED: if the
             // strict owner authority cannot prove every entry's required state (unreadable
             // ownership included), serve nothing rather than the entries that happen to parse.

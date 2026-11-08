@@ -370,6 +370,45 @@ final class VoiceSharingCollectorTests: XCTestCase {
 
     /// Aggregate identity state stays bounded across MANY segments: open capture ≤ 1, FIFO ≤ its bound, and
     /// the refusal history pruned to its floor. Capping only the open buffer would let the sets grow forever.
+    /// SPEC a4b417fc: retiring the FIFO and sample budget as DROPPING gates removed the only bound
+    /// on retained in-memory work, so the peak has to be OBSERVABLE. The collector records the
+    /// high-water mark of both the FIFO depth and the retained samples, so a device report can say
+    /// how high pressure actually got instead of it being inferred from absence.
+    func test_highWaterMarksRecordThePeakRetainedWork() {
+        activateLease()
+        enrolledState(true)
+        assertPremisesOpen()
+        // A blocking box, not a semaphore: the sink must PAUSE so the FIFO builds up, then be
+        // released for the drain without needing one signal per queued event.
+        // `LockedBox` counts; this uses it as a 0/1 gate. 1 = blocked.
+        let blocked = LockedBox()
+        blocked.add(1)
+        let collector = makeCollector(sink: { _ in
+            while blocked.value_ > 0 { Thread.sleep(forTimeInterval: 0.002) }
+        })
+        collector.deliversSynchronouslyForTesting = false
+        let samples = [Float](repeating: 1, count: 3_200)
+        for _ in 0..<10 {
+            collector.speechStarted(confirmationFrameSamples: 320)
+            collector.appendSamples(samples, reportedTotal: 3_200)
+            collector.segmentationEnded(collector.currentCaptureContextForTesting)
+        }
+        let depth = collector.pendingCountForTesting
+        let retained = collector.aggregateAudioSamplesForTesting
+        XCTAssertGreaterThan(collector.peakPendingSignals, 0,
+                             "the peak FIFO depth is recorded")
+        XCTAssertGreaterThan(collector.peakRetainedSamples, 0,
+                             "the peak retained sample count is recorded")
+        // The peak is a HIGH-WATER MARK, never a running total: it cannot fall below what is
+        // currently held, and it cannot exceed the largest depth seen.
+        XCTAssertGreaterThanOrEqual(collector.peakPendingSignals, depth,
+                                    "the peak is at least what is held now")
+        XCTAssertGreaterThanOrEqual(collector.peakRetainedSamples, 0,
+                                    "the peak retained count is recorded")
+        blocked.add(-1)
+        XCTAssertTrue(collector.waitForDrain())
+    }
+
     func test_aggregateIdentityState_isBoundedAcrossManySegments() {
         activateLease()
         let collector = makeCollector()
@@ -874,8 +913,11 @@ final class VoiceSharingCollectorTests: XCTestCase {
         collector.speechStarted(confirmationFrameSamples: 320)
         collector.appendSamples([Float](repeating: 1, count: 100_000), reportedTotal: 100_000)
         let breakdown = collector.actualRetainedAudioBreakdownForTesting
-        XCTAssertLessThanOrEqual(breakdown.open + breakdown.fifo + breakdown.ring + breakdown.inFlight, budget,
-                                 "actual retained bytes (open+FIFO+ring+in-flight) never exceed the budget")
+        // AMENDED BY SPEC 2741a0ca: the budget no longer DISCARDS, so retained audio may exceed it
+        // — that is the ruled behaviour, and the high-water-mark log is how it is seen on device.
+        // What still holds, and is the real invariant, is that the LEDGER equals the actual buffers.
+        XCTAssertGreaterThan(breakdown.open + breakdown.fifo + breakdown.ring + breakdown.inFlight, 0,
+                             "saturation retains work rather than dropping it")
         XCTAssertEqual(collector.aggregateAudioSamplesForTesting,
                        breakdown.open + breakdown.fifo + breakdown.ring + breakdown.inFlight,
                        "the ledger matches the ACTUAL retained buffers, in-flight included")

@@ -895,30 +895,57 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     /// recording directory fell beyond the bound looked ORPHANED and was deleted — losing live retry
     /// state on a partial view. A deferred sweep must delete nothing at all.
     func test_anOverflowingStraySweepDeletesNoLiveRetryState() throws {
-        // Construct FIRST: recovery runs at construction, which is the sweep under test.
+        // REVIEWER 508baa51's correction to this control: an EMPTY UUID directory can be swept as
+        // incomplete by recovery before the stray sweep ever runs, so the original version proved
+        // "an orphan survived the overflow skip" rather than "LIVE retry state survived". So this
+        // seeds a REAL published capture through the production writer, and places its retry
+        // sidecar INSIDE the bounded prefix while its directory sorts beyond it — which is exactly
+        // the partial view that made the sidecar look orphaned.
         let bound = VoiceSharingUploadQueue.maxSweptEntries
-        // One live entry whose directory sorts LAST, so it lands beyond the bound...
-        let beyond = UUID().uuidString.lowercased()
-        // ...plus enough filler names to push it past the bound. Filler are non-UUID regular files,
-        // so they are neither entries nor retry state.
+        // A capture whose name sorts LAST, so its directory falls beyond the listing bound.
+        let writer = VoiceSharingUploadQueue(rootDirectory: root)
+        let captureID = "FFFFFFFF-FFFF-4FFF-8FFF-FFFFFFFFFFFE"
+        let entry = try writer.prepare(
+            metadata: validRecord(captureID: captureID, audio: audioA), audio: audioA)
+        try writer.finalize(entry)
+        let stamp = VoiceSharingUploadQueue.notBeforePrefix + entry.name
+        let past = String(Date().timeIntervalSince1970 - 60)
+        try Data("{\"notBefore\": \(past)}".utf8).write(to: root.appendingPathComponent(stamp))
+        // A DUE obligation too: a second piece of live retry state for the same capture.
+        let obligation = VoiceSharingUploadQueue.obligationPrefix + entry.name
+        try Data("{\"notBefore\": \(past)}".utf8)
+            .write(to: root.appendingPathComponent(obligation))
+        // Filler that sorts BEFORE both sidecars, so they land in the prefix while the entry
+        // directory does not. Non-UUID regular files: neither entries nor retry state.
         for index in 0..<(bound + 16) {
             try Data([0x01]).write(
-                to: root.appendingPathComponent(String(format: "zz-filler-%04d", index)))
+                to: root.appendingPathComponent(String(format: "aaa-filler-%04d", index)))
         }
-        try FileManager.default.createDirectory(
-            at: root.appendingPathComponent(beyond, isDirectory: true),
-            withIntermediateDirectories: true)
-        // A LIVE retry stamp for that entry. Alive, and beyond the bound in the listing.
-        let stamp = VoiceSharingUploadQueue.notBeforePrefix + beyond
-        let past = String(Date().timeIntervalSince1970 - 60)
-        try Data("{\"notBefore\": \(past)}".utf8)
-            .write(to: root.appendingPathComponent(stamp))
+        // A DETERMINISTIC bounded listing (reviewer 508baa51): `maxSweptEntries` is derived from
+        // the cap, so a realistic overflow would need thousands of files. Injecting the lister
+        // makes the partial view exact and cheap: it reports overflow and hands back ONLY the
+        // sidecars, so the live directory is beyond the prefix by construction.
+        let trapPrefix = [stamp, obligation]
+        let rootPath = root.path
+        let recovered = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            listDirectoryBounded: { url, keys, _ in
+                // Only the ROOT sweep is constrained; entry-internal listings pass through.
+                guard url.path == rootPath else {
+                    return (try FileManager.default.contentsOfDirectory(
+                        at: url, includingPropertiesForKeys: keys), false)
+                }
+                return (trapPrefix.map { url.appendingPathComponent($0) }, true)
+            })
+        withExtendedLifetime(recovered) {} // recovery ran at construction
 
-        _ = VoiceSharingUploadQueue(rootDirectory: root) // recovery / stray sweep
-
-        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: root.path).contains(stamp),
-                      "a deferred sweep must delete nothing: the stamp's entry is alive, just "
-                        + "beyond the listing bound")
+        let names = try Set(FileManager.default.contentsOfDirectory(atPath: root.path))
+        XCTAssertTrue(names.contains(stamp),
+                      "a deferred sweep must delete nothing: the live capture's retry stamp is "
+                        + "inside the prefix while its directory is beyond the bound")
+        XCTAssertTrue(names.contains(obligation),
+                      "and its obligation survives too")
+        XCTAssertTrue(names.contains(entry.name), "the capture itself is untouched")
     }
 
     func test_audioResidueFromAFailedDeleteCountsTowardTheLimit() throws {
