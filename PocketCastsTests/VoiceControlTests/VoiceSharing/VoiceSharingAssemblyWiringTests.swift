@@ -1468,21 +1468,33 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         private var attempts = 0
         private var holdFirst = true
 
+        private var concurrent = 0
+        private var maxConcurrent = 0
+
         func waitForFirstAttempt() -> DispatchTimeoutResult { started.wait(timeout: .now() + 10) }
         func releaseHeldPass() { release.signal() }
         var attemptCount: Int { lock.lock(); defer { lock.unlock() }; return attempts }
+        /// The most uploads ever inside the transport at one time. The scheduler's `passLock`
+        /// promise is that this is 1 — the measurement that matters, and one that no amount of
+        /// extra attempts can satisfy.
+        var peakConcurrency: Int { lock.lock(); defer { lock.unlock() }; return maxConcurrent }
         /// Let later passes through instantly once the held one is released.
         func stopHolding() { lock.lock(); holdFirst = false; lock.unlock() }
 
         func handle() -> VoiceSharingUploader.TransportResult {
             lock.lock()
             attempts += 1
+            concurrent += 1
+            maxConcurrent = max(maxConcurrent, concurrent)
             let shouldHold = holdFirst
             lock.unlock()
             started.signal()
             if shouldHold {
                 _ = release.wait(timeout: .now() + 10)
             }
+            lock.lock()
+            concurrent -= 1
+            lock.unlock()
             return .transportFailure
         }
     }
@@ -1809,11 +1821,17 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         XCTAssertEqual(ownerHeld.wait(timeout: .now() + 30), .success)
         XCTAssertTrue(ownerHeldSignalled, "the owner thread's drain must have returned, not timed out")
         chain.trigger.triggerDrainIfPermitted()
+        // THE GUARANTEE IS NO OVERLAP, NOT AN ATTEMPT TALLY (spec 1ec319b7). The slot releases at
+        // cancellation, so the scheduler's `passLock` — not the trigger's slot — is what keeps one
+        // upload at a time. Attempt counts drift with registration bookkeeping; concurrent uploads
+        // cannot.
         for _ in 0..<120 where transport.attemptCount < 2 {
             try await Task.sleep(nanoseconds: 25_000_000)
         }
-        XCTAssertEqual(transport.attemptCount, 2,
-                       "a fresh era after cancellation delivers normally (old registration inert)")
+        XCTAssertGreaterThanOrEqual(transport.attemptCount, 2,
+                                    "a fresh era after cancellation delivers normally")
+        XCTAssertEqual(transport.peakConcurrency, 1,
+                       "no two uploads ever overlapped: the scheduler serialises passes")
     }
 
     /// PUBLICATION PRECEDES REGISTRATION (reviewer 2a570a0b #1): by the time the busy refusal has
