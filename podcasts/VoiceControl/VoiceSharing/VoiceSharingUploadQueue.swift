@@ -388,8 +388,6 @@ final class VoiceSharingUploadQueue {
             return 0
         case .trusted(let age):
             return age
-        case .unaffordable:
-            return nil // refused, never repaired
         }
     }
 
@@ -2717,7 +2715,11 @@ final class VoiceSharingUploadQueue {
     private func confirmDurableLocked(directory: URL) throws {
         try synchronizer(directory.appendingPathComponent(Self.audioName), false)
         try synchronizer(directory.appendingPathComponent(Self.metadataName), false)
-        try synchronizer(directory.appendingPathComponent(Self.createdName), false)
+        // THE AGE SIDECAR IS NOT PART OF DURABILITY (spec 53452bc5). Confirming it obligated on a
+        // file the entry does not depend on for validity, so an unreadable `created.at` held coverage
+        // for the whole owner — the recording's durability was being decided by its timestamp.
+        // The audio and metadata are the recording, and they, the marker and the directories are
+        // synced exactly as before.
         try synchronizer(directory, true)
         try synchronizer(directory.appendingPathComponent(Self.readyMarkerName), false)
         try synchronizer(directory, true)
@@ -3445,22 +3447,31 @@ final class VoiceSharingUploadQueue {
         let directory = entryDirectoryLocked(for: entry)
         // ONE INSTANT PER ENTRY: a repeat repair of the same entry reuses the first choice, so the
         // age advances monotonically instead of restarting at zero on every read.
+        let isFirstRepair = resetInstantsLocked[entry.name] == nil
         let now = resetInstantsLocked[entry.name] ?? clock().timeIntervalSince1970
         resetInstantsLocked[entry.name] = now
-        ageResetCount += 1
+        // ONE REPAIR, ONE COUNT: AGE_RESET counts ENTRIES whose instant was replaced, not every read
+        // that re-derives it. Several paths consult the age within one pass (classification,
+        // serving, retention), and counting each turned one repair into three.
+        if isFirstRepair { ageResetCount += 1 }
         // DIAGNOSTIC (content-free): an instant was rewritten. Without this line a poisoned capture
-        // time is indistinguishable from one that was always correct.
-        FileLog.shared.addMessage(
-            "[VoiceSharing] age reset reason=\(observed) entry=\(entry.name)")
-        FileLog.shared.forceFlush()
-        let url = directory.appendingPathComponent(Self.createdName)
+        // time is indistinguishable from one that was always correct. Logged ONCE per repair for the
+        // same reason the counter is: the same entry is read by several paths in one pass.
+        if isFirstRepair {
+            FileLog.shared.addMessage(
+                "[VoiceSharing] age reset reason=\(observed) entry=\(entry.name)")
+            FileLog.shared.forceFlush()
+        }
         do {
             // THROUGH THE INJECTABLE WRITER (reviewer 23901ee6 finding 2): the persistence fault must
             // be drivable, or the in-memory fallback below cannot be shown to work. `String.write`
             // reached the filesystem directly and no injection point could fail it.
-            try failureRecordWriter(url, Data(String(now).utf8))
-            // PERSISTED: the memory copy is no longer needed and must not shadow the disk value.
-            resetInstantsLocked.removeValue(forKey: entry.name)
+            try persistResetInstantLocked(now, for: entry)
+            // PERSISTED — BUT THE MEMORY COPY STAYS. Removing it re-exposed the entry to a fresh
+            // repair whenever a later read found the value untrusted (a file replaced under a
+            // different clock, a re-stat), which double-counted AGE_RESET and re-chose the instant.
+            // The in-memory value is the SAME value just written, so keeping it cannot disagree with
+            // disk; recovery clears it only after re-reading a trusted on-disk instant.
             return true
         } catch {
             // SERVE AND AGE FROM THE IN-MEMORY INSTANT. The disk value stays untrusted, so
@@ -3474,6 +3485,55 @@ final class VoiceSharingUploadQueue {
         }
     }
 
+    /// Writes a chosen reset instant to the entry's sidecar. Shared by the first repair and by the
+    /// recovery retry so both write the SAME value through the SAME injectable seam.
+    private func persistResetInstantLocked(_ instant: TimeInterval, for entry: Entry) throws {
+        let directory = entryDirectoryLocked(for: entry)
+        let url = directory.appendingPathComponent(Self.createdName)
+        // REPLACE, NOT OVERWRITE (spec 53452bc5): an oversized sidecar, or one that is not a regular
+        // file at all, cannot be truncated into a valid one. ONLY those shapes are removed first —
+        // an ordinary file is written over in place, because remove-then-write would lose the age
+        // outright if the write then failed, turning a repairable sidecar into a missing one.
+        let attributes = fileSizeIfRegularLocked(at: url)
+        if attributes?.isRegular != true {
+            if (try? FileManager.default.removeItem(at: url)) == nil,
+               Self.statKind(of: url) != .absent {
+                throw CocoaError(.fileWriteUnknown)
+            }
+        }
+        try failureRecordWriter(url, Data(String(instant).utf8))
+    }
+
+    /// THE EFFECTIVE INSTANT: what this instance will ACT on for an entry, ignoring nothing.
+    ///
+    /// Precedence: an in-memory reset (chosen once, possibly not yet persisted) wins, then a
+    /// trusted on-disk instant, then a repair performed now. `nil` means the instant could not be
+    /// established at all (an oversized/corrupt sidecar), which is an UNKNOWN AGE — not a reason to
+    /// delete or to refuse a structurally valid recording.
+    private func effectiveInstantLocked(_ entry: Entry) -> TimeInterval? {
+        if let unpersisted = resetInstantsLocked[entry.name] {
+            // RETRY THE PENDING WRITE HERE (reviewer, second round on 444cde13f). Every path that
+            // needs the age comes through this accessor, so retrying at exactly one of them
+            // (recovery) meant an entry whose sidecar was still missing was never written again by
+            // serving, retention or classification — the fallback lived until the process died.
+            // The written instant is the one already chosen, never a new one.
+            if (try? persistResetInstantLocked(unpersisted, for: entry)) != nil {
+                resetInstantsLocked.removeValue(forKey: entry.name)
+            }
+            return unpersisted
+        }
+        switch captureInstantReadingLocked(entry) {
+        case .trusted(let age):
+            // A trusted on-disk instant SUPERSEDES any memory copy: it is the durable authority and
+            // the repair has been completed, so the entry leaves the pending set for good.
+            resetInstantsLocked.removeValue(forKey: entry.name)
+            return clock().timeIntervalSince1970 - age
+        case .untrusted(let reason):
+            resetUntrustedAgeLocked(entry, observed: reason)
+            return resetInstantsLocked[entry.name] ?? clock().timeIntervalSince1970
+        }
+    }
+
     /// RECOVERY-SIDE REPAIR: fix an untrusted instant on a recording that is otherwise intact,
     /// BEFORE recovery classifies anything by age. Structural evidence is checked without the age
     /// rule (marker present, not disqualified, audio and metadata readable and binding), so the one
@@ -3482,8 +3542,13 @@ final class VoiceSharingUploadQueue {
     /// A recording that is genuinely incomplete is left alone: recovery keeps its existing
     /// treatment, and no instant is invented for work that never became a recording.
     private func repairUntrustedAgeOnRecoveryLocked(_ entry: Entry, directory: URL) {
+        // A PENDING FALLBACK IS RETRIED, NOT SKIPPED (reviewer, second round on 444cde13f). The
+        // reading reports an in-memory reset as `.trusted`, so recovery used to return here and the
+        // write was never retried — the fallback became permanent for the life of the process. The
+        // retry keeps the ORIGINAL chosen instant, so the recording does not get a fresh lifetime
+        // every launch.
         switch captureInstantReadingLocked(entry) {
-        case .trusted, .unaffordable: return
+        case .trusted: return
         case .untrusted: break
         }
         guard Self.statKind(of: directory.appendingPathComponent(Self.readyMarkerName))
@@ -3506,7 +3571,7 @@ final class VoiceSharingUploadQueue {
         else { return }
         let reason: String
         switch captureInstantReadingLocked(entry) {
-        case .trusted, .unaffordable: return
+        case .trusted: return
         case .untrusted(let why): reason = why
         }
         resetUntrustedAgeLocked(entry, observed: reason)
@@ -3516,9 +3581,7 @@ final class VoiceSharingUploadQueue {
     /// reason. The reason is what the AGE_RESET line records.
     private enum CaptureInstantReading {
         case trusted(TimeInterval)
-        case untrusted(String) // "missing" | "unreadable" | "future"
-        /// Structurally corrupt (past the size bound): NOT repairable, never read, refused as before.
-        case unaffordable
+        case untrusted(String) // "missing" | "empty" | "unreadable" | "future" | "oversized"
     }
 
     /// Reads the instant and classifies it WITHOUT repairing: the caller decides, because a
@@ -3536,8 +3599,15 @@ final class VoiceSharingUploadQueue {
         // damaged object, and repairing it would adopt its directory as a recording instead of
         // letting recovery remove it. Its contents are never read (the bound is checked from
         // attributes), and the entry stays refused.
-        guard let size = fileSizeIfRegularLocked(at: url), size.isRegular, size.bytes > 0,
-            size.bytes <= Self.maxCreationInstantBytes else { return .unaffordable }
+        // AN OVERSIZED OR NON-REGULAR SIDECAR IS JUST ANOTHER UNTRUSTED AGE (spec 53452bc5, which
+        // amends f2d68c23 for age sidecars only). It is NEVER READ — the bound is checked from
+        // attributes — and it is REPLACED rather than honoured, held or refused. An age sidecar is
+        // not part of a recording's validity or of owner coverage; the owner is never held for one.
+        let attributes = fileSizeIfRegularLocked(at: url)
+        guard let attributes, attributes.isRegular, attributes.bytes > 0,
+            attributes.bytes <= Self.maxCreationInstantBytes else {
+            return .untrusted(attributes?.isRegular == true ? "oversized" : "not-a-regular-file")
+        }
         guard let data = try? Data(contentsOf: url),
             let text = String(data: data, encoding: .utf8),
             let seconds = TimeInterval(text), seconds.isFinite
@@ -3628,36 +3698,17 @@ final class VoiceSharingUploadQueue {
             return .disqualified
         }
         guard try requiredFileKind(marker) == .present else { return .incomplete }
-        // The immutable instant bounds the entry's lifetime, so its read keeps the ORIGINAL
-        // bounded-reader discipline (regular file, 1..maxCreationInstantBytes) while still
-        // distinguishing absence (incomplete) from stat/read failure (UNKNOWN). A huge or
-        // special created-at file must be refused BEFORE allocation, never loaded.
-        let createdURL = directory.appendingPathComponent(Self.createdName)
-        switch try requiredFileKind(createdURL) {
-        case .absent: return .incomplete
-        case .failure: throw PrepareError.accountingUnavailable
-        case .present: break
-        }
-        guard let createdSize = fileSizeIfRegularLocked(at: createdURL),
-            createdSize.isRegular, createdSize.bytes > 0,
-            createdSize.bytes <= Self.maxCreationInstantBytes else {
-            throw PrepareError.accountingUnavailable
-        }
-        // Reviewer 72e9362d: the READ is throwing — a present, bounded file whose read fails is
-        // UNKNOWN coverage, never .incomplete. Only content PARSING failure classifies.
-        let createdData: Data
-        do { createdData = try Data(contentsOf: createdURL) } catch {
-            throw PrepareError.accountingUnavailable
-        }
-        // AN UNPARSEABLE INSTANT IS NOT INCOMPLETENESS (spec, untrusted age). It used to classify
-        // here, which made the AGE_RESET unreachable for exactly the case it exists to repair: the
-        // repair is guarded on completeness, and the classifier refused the entry for the very
-        // defect the repair fixes — a closed loop. "Complete" now means the RECORDING is complete
-        // (marker, audio, metadata, binding); the instant is a property that may be untrusted and
-        // repaired, not a completeness gate. Absence still classifies (nothing to repair to).
-        if let text = String(data: createdData, encoding: .utf8),
-            let seconds = TimeInterval(text), seconds.isFinite {
-            let createdAt = Date(timeIntervalSince1970: seconds)
+        // THE RECORDING IS VALIDATED INDEPENDENTLY OF ITS AGE SIDECAR (reviewer, second round on
+        // 444cde13f). `created.at` no longer participates in completeness at all: not its absence,
+        // not its emptiness, not its size, not its readability. Every one of those used to classify
+        // or throw here, and recovery DELETES or holds what this returns — so a perfectly good
+        // recording was destroyed, or its coverage withheld, purely because its age could not be
+        // read. The age is repaired (see `markerAgeLocked` / `repairUntrustedAgeOnRecoveryLocked`)
+        // and, when it cannot be persisted, served from the in-memory instant. If neither is
+        // available the age bound is unknown and the entry is NOT served by the age rule — but it
+        // is still a valid recording, and retention still decides its fate, rather than a stat.
+        if let effective = effectiveInstantLocked(entry) {
+            let createdAt = Date(timeIntervalSince1970: effective)
             // FUTURE INSTANTS ARE RECOVERY'S BUSINESS TOO: classifying them here let a caller-past
             // clock — a lease control seeding an expired lease, a device whose clock moved back —
             // turn a good entry into debris recovery DELETES. The reset repairs the instant; this
