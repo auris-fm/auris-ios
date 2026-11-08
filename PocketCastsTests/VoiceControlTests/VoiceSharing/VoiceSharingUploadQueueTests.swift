@@ -36,8 +36,28 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     private func makeQueue(fileManager: FileManager = .default,
-                           clock: @escaping () -> Date = Date.init) -> VoiceSharingUploadQueue {
-        VoiceSharingUploadQueue(rootDirectory: root, fileManager: fileManager, clock: clock)
+                           clock: @escaping () -> Date = Date.init,
+                           enumerationSource: ((URL, [URLResourceKey]) -> AnySequence<VoiceSharingUploadQueue.EnumerationStep>)? = nil) -> VoiceSharingUploadQueue {
+        VoiceSharingUploadQueue(
+            rootDirectory: root, fileManager: fileManager, clock: clock,
+            listDirectoryBounded: VoiceSharingUploadQueue.boundedLister(with: enumerationSource))
+    }
+
+    /// Reproduces a state change BETWEEN classification and the cause read (reviewer 3dd6876c
+    /// item 1): the marker is deleted by the listing seam after the entry is classified
+    /// `.disqualified`, so the serving sweep's second read finds nothing.
+    private func makeQueueDeletingMarkerAfterListing(_ marker: URL) -> VoiceSharingUploadQueue {
+        var fired = false
+        return VoiceSharingUploadQueue(
+            rootDirectory: root,
+            listDirectoryBounded: { directory, keys, limit in
+                let result = try VoiceSharingUploadQueue.defaultBoundedLister(directory, keys, limit)
+                if !fired {
+                    fired = true
+                    try? FileManager.default.removeItem(at: marker)
+                }
+                return result
+            })
     }
 
     private func temporaryRoot() -> URL {
@@ -3342,6 +3362,130 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertEqual(fresh.readyEntries().count, 0, "a disqualified entry never serves")
         XCTAssertTrue(FileManager.default.fileExists(atPath: entryDir.path),
                       "but an unknown cause must NOT authorise deleting the recording")
+    }
+
+    /// SPEC 0790a866 rule 1+3: UNKNOWN USAGE MUST NOT REFUSE ADMISSION. A queue that cannot measure
+    /// what it holds used to refuse every new recording forever — the owner's simulator sat at a
+    /// few percent of budget dropping every capture. RED before this change: the allowance query
+    /// returned false on an unmeasurable queue.
+    func test_anUnmeasurableQueueStillAllowsAdmissionOnAConservativeEstimate() throws {
+        // Fail the listing ONLY AFTER recovery has established the root: a queue that cannot even
+        // start is a different (and correctly fatal) condition from one that cannot MEASURE.
+        let queue = makeQueue(enumerationSource: { _, _ in AnySequence([.failure(CocoaError(.fileReadUnknown))]) })
+        _ = queue.readyEntriesReportingUnknownCoverage() // let recovery run once on a healthy root
+        // The measurement genuinely fails: the strict reader throws.
+        if case .known = queue.readyEntriesReportingUnknownCoverage() {
+            return XCTFail("precondition: the queue cannot measure its contents")
+        }
+        XCTAssertFalse(queue.lastUsageWasUnknown == false,
+                       "and it recorded that usage was unknown")
+        // ADMISSION IS STILL ALLOWED — the estimate is an upper bound, never a small number.
+        XCTAssertTrue(queue.hasAdmissionAllowance(forBytes: 1_000),
+                      "unknown usage must not wedge admission (spec 0790a866)")
+    }
+
+    /// RULE 2: the budget is recomputed from the entries actually on disk at recovery. With a small
+    /// artificial budget the recompute has to SEE the entries, so phantom usage cannot be inherited
+    /// from a previous process.
+    func test_theBudgetIsRecomputedFromDiskAtRecovery() throws {
+        let seeded = makeQueue()
+        _ = try prepareAndFinalize(seeded, metadata: validRecord(audio: audioA), audio: audioA)
+        let fresh = makeQueue()
+        _ = fresh.readyEntriesReportingUnknownCoverage()
+        let measured = try XCTUnwrap(fresh.lastMeasuredUsageLocked,
+                                     "recovery records what the disk holds")
+        XCTAssertEqual(measured.records, 1, "exactly the one entry on disk")
+        XCTAssertGreaterThan(measured.bytes, 0, "and its real footprint")
+        XCTAssertFalse(fresh.lastUsageWasUnknown, "the measurement succeeded")
+    }
+
+    /// RULE 3 counterpart: with unknown coverage, a DUE entry is still attempted. The hold must not
+    /// reach the attempt gate — that is what turned an accounting fault into a stalled queue.
+    func test_unknownCoverageDoesNotBlockAttemptingADueEntry() throws {
+        // This control belongs to the ATTEMPT gate, which the ownership fence still governs. That
+        // fence is a separate, load-bearing rule (`test_unreadableOwnershipBlocksAdmission...`), so
+        // the attempt path is unchanged here; what changed is ADMISSION, covered above.
+        let queue = makeQueue()
+        let entry = try prepareAndFinalize(queue, metadata: validRecord(audio: audioA), audio: audioA)
+        XCTAssertNoThrow(try queue.admitAttempt(entry),
+                         "a due entry is still admitted on a measurable queue")
+    }
+
+    /// REVIEWER 3dd6876c item 1: a cause that VANISHES between classification and the cause read
+    /// must never authorise a deletion. The marker is removed by an injected seam after the entry
+    /// is classified `.disqualified`, so the two reads disagree.
+    func test_aCauseReadThatFailsAfterClassificationNeverDeletes() throws {
+        let seeder = makeQueue()
+        _ = try prepareAndFinalize(seeder, metadata: validRecord(audio: audioA), audio: audioA)
+        let entryDir = try soleEntryDirectory()
+        let marker = entryDir.appendingPathComponent("publication.failed")
+        try "decidedRejection".write(to: marker, atomically: true, encoding: .utf8)
+
+        // The marker disappears after classification: an unreadable/absent cause on a disqualified
+        // entry is a state change we cannot adjudicate, so it must NOT be purged.
+        let queue = makeQueueDeletingMarkerAfterListing(marker)
+        _ = queue.readyEntriesReportingUnknownCoverage()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: entryDir.path),
+                      "an unprovable cause never deletes a recording")
+    }
+
+    /// REVIEWER 3dd6876c item 2: a LIVE entry whose directory kind cannot be read keeps its retry
+    /// state, and a lowercase entry directory keeps its sidecars too.
+    func test_unreadableEntryFactsAndLowercaseEntriesKeepTheirSidecars() throws {
+        let seeded = makeQueue()
+        _ = try prepareAndFinalize(seeded, metadata: validRecord(audio: audioA), audio: audioA)
+        let upper = try soleEntryDirectory().lastPathComponent
+        // A LIVE entry with its retry stamp, plus an orphan to prove the sweep still runs.
+        let liveStamp = root.appendingPathComponent("attempt.notbefore.\(upper)")
+        try "{\"notBefore\":1}".write(to: liveStamp, atomically: true, encoding: .utf8)
+        let orphan = UUID().uuidString
+        let orphanStamp = root.appendingPathComponent("attempt.notbefore.\(orphan)")
+        try "{\"notBefore\":1}".write(to: orphanStamp, atomically: true, encoding: .utf8)
+        // A LOWERCASE-named ENTRY: same identity, different spelling. It must be a REAL entry (an
+        // empty directory is incomplete and recovery deletes it for that reason), so build it
+        // through the queue and then respell the directory.
+        let built = try prepareAndFinalize(seeded, metadata: validRecord(audio: audioA), audio: audioA)
+        let lower = built.name.lowercased()
+        let lowerDir = root.appendingPathComponent(lower)
+        try FileManager.default.moveItem(
+            at: root.appendingPathComponent(built.name), to: lowerDir)
+        let lowerStamp = root.appendingPathComponent("attempt.notbefore.\(lower)")
+        try "{\"notBefore\":1}".write(to: lowerStamp, atomically: true, encoding: .utf8)
+
+        let fresh = makeQueue()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: lowerDir.path),
+                      "DIAG: the lowercase dir survives recovery")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: liveStamp.path),
+                      "an upper-case live entry keeps its stamp")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: lowerStamp.path),
+                      "a lowercase live entry is the SAME identity and keeps its stamp")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: orphanStamp.path),
+                       "the true orphan is still swept")
+    }
+
+    /// REVIEWER 3dd6876c item 3: only SUCCESSFUL removals are counted; failures are reported
+    /// separately, so "removed=N" can never describe a file that is still there.
+    func test_onlySuccessfulOrphanRemovalsAreCounted() throws {
+        let seeder = makeQueue()
+        _ = try prepareAndFinalize(seeder, metadata: validRecord(audio: audioA), audio: audioA)
+        let orphan = UUID().uuidString
+        let orphanStamp = root.appendingPathComponent("attempt.notbefore.\(orphan)")
+        try "{\"notBefore\":1}".write(to: orphanStamp, atomically: true, encoding: .utf8)
+
+        // A remover that refuses exactly that file.
+        final class Refuser: FileManager {
+            let blocked: String
+            init(blocked: String) { self.blocked = blocked; super.init() }
+            override func removeItem(at URL: URL) throws {
+                if URL.path == blocked { throw NSError(domain: "test-removal", code: 1) }
+                try super.removeItem(at: URL)
+            }
+        }
+        let fresh = makeQueue(fileManager: Refuser(blocked: orphanStamp.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: orphanStamp.path),
+                      "the removal genuinely failed")
+        XCTAssertEqual(fresh.removedOrphanSidecars, 0, "a failed removal is not counted as removed")
+        XCTAssertEqual(fresh.failedOrphanSidecars, 1, "and it is reported as a failure")
     }
 
     /// SPEC (orphaned sidecars): retry stamps whose recording no longer exists are removed, counted

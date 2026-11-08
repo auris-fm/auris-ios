@@ -1003,6 +1003,44 @@ final class VoiceSharingUploaderTests: XCTestCase {
         }
     }
 
+    /// SPEC 219d3bb6: A 409 AFTER A 5xx FOR THE SAME CAPTURE IS A SERVER BUG, NOT A DELETION.
+    /// The 5xx is retryable and leaves the entry in the queue; the retry then draws a conflict.
+    /// The server may have half-landed the record, and the client cannot re-create the audio, so
+    /// the entry is retained and logged rather than deleted. RED before this change: the 409
+    /// branch abandoned it on the spot.
+    func test_aConflictThatFollowsAServerFailureRetainsInsteadOfDeleting() async throws {
+        let entry = try makeReadyEntry()
+        func errorBody(_ code: String) -> Data {
+            try! JSONSerialization.data(withJSONObject: ["schema_version": 1, "code": code])
+        }
+        // FIRST attempt: the server fails. The entry stays and its attempt count advances.
+        do {
+            let uploader = makeUploader(transport: { _, _, _ in
+                .response(statusCode: 503, body: errorBody("storage_unavailable"))
+            })
+            let outcome = await uploader.upload(entry)
+            guard case .retry = outcome else {
+                return XCTFail("a 5xx is retryable, got \(outcome)")
+            }
+        }
+        // SECOND attempt: the same capture now "conflicts". That is the server disagreeing with
+        // its own earlier failure — never grounds for deleting the recording.
+        do {
+            let uploader = makeUploader(transport: { _, _, _ in
+                .response(statusCode: 409, body: errorBody("capture_conflict"))
+            })
+            let outcome = await uploader.upload(entry)
+            guard case .retry = outcome else {
+                return XCTFail("a conflict after a server failure must RETRY, got \(outcome)")
+            }
+            guard case .known(let after) = queue.readyEntriesReportingUnknownCoverage() else {
+                return XCTFail("coverage known")
+            }
+            XCTAssertTrue(after.contains(where: { $0.name == entry.name }),
+                          "the recording is still queued, not deleted")
+        }
+    }
+
     /// Fault → two restarts held → bounded reconciliation lifts → uploads resume, with the
     /// original boundary minimum preserved (spec c3175492).
     func test_retryHoldReconcilesAfterFaultAndRestarts() throws {
