@@ -234,3 +234,48 @@ be watched on device.
 | `VoiceSharingCollectorTests` | 38/38 |
 | `VoiceSharingClockOrderingRegressionTests` | pre-existing: same 2 tests, same 3 assertions as `f90548c88` |
 | `VoiceSharingAccountModelTests` | pre-existing: 9 tests, identical to `f90548c88` |
+
+## Round after `90a49d5f7` — reviewer `4f98b831` / `508baa51`, spec `80982a60`
+
+### The last retry-state gates (066e2a70 item 2, completed)
+
+| Gate | Where | Why it maps to nothing |
+|------|-------|------------------------|
+| 48 | `refuseIfNotYetDueLocked` threw `leaseHeld` for a NaN obligation | `refuseIfNotYetDueLocked` | Unreadable delay, not an infinite one. This ran below `admitAttempt`'s guard, so the uploader still refused. Unknown ⇒ due now. |
+| 49 | Same, for an unstattable not-before stamp | `refuseIfNotYetDueLocked` | Unknown ⇒ due now. |
+| 50 | Same, for an unparseable/oversized/non-regular stamp | `refuseIfNotYetDueLocked` | Unknown ⇒ due now; the corrupt record is retired so it cannot re-hold every pass. |
+| 51 | `retryHoldLocked` returned `.notWork` from the wake prospect | `retryWakeProspectLocked` | A retry hold suppressed every entry's retry wake, so the queue never scheduled the retry that would clear it. |
+| 52 | Retry-hold intent and flag both returned `nil` from the boundary reader | `secondsUntilNextRetryBoundary` | Same freeze, in wake arithmetic. |
+| 53 | `readyEntries()` returned `[]` under a retry hold | `readyEntries` (legacy path) | Withheld the whole queue from the drain on unknown bookkeeping. |
+
+**A hold that MUST survive, and now does, precisely:** a retry hold still refuses **new admissions**
+(`hasAdmissionAllowance`), read from storage so a marker that lands after construction governs it.
+It never gates serving or an attempt.
+
+**One hazard the removal created, and the clamp that fixes it:** with the hold no longer returning
+`nil`, an ALREADY-DUE boundary armed a wake of **0**, which fires the trigger immediately and re-arms
+forever without progress. Under a retry hold the wake is now clamped to
+`retryHoldWakeFloorSeconds` (15s): the queue keeps waking, but cannot spin. This is the original
+`test_aDueBoundaryUnderARetryHoldArmsNoWake` worry, preserved.
+
+### High-water-mark log (spec `a4b417fc` / `80982a60`)
+
+`VoiceSharingCollector` records `peakPendingSignals` and `peakRetainedSamples` at both enqueue
+points, under the lock, and logs ONE content-free line per NEW peak:
+
+    [VoiceSharing] handoff high-water peak_fifo=<n> peak_retained_samples=<n> capture=<uuid>
+
+`retained` is in samples; pcm_s16le so device bytes = `samples * 2`. This is how the accepted
+memory-pressure exposure is seen on a device instead of inferred from absence.
+
+### Controls corrected in this round
+
+- `test_anOverflowingStraySweepDeletesNoLiveRetryState` — reviewer `508baa51` was right that the
+  original seeded an EMPTY UUID directory, which recovery may sweep as incomplete, so it proved "an
+  orphan survived the skip". It now seeds a **real published capture** through the production writer
+  and injects a deterministic bounded listing that reports overflow and returns only the sidecars,
+  so the sidecar is inside the prefix and the live directory beyond it. Red-proof confirmed against
+  the live capture's retry state.
+- `test_unreadableDelayRecordsStillUpload` — malformed stamp and NaN obligation, through the uploader.
+- `test_aFailedStampWriteDoesNotStopAHealthySiblingsRetry` — per-entry, never owner-wide.
+- Five controls amended from "the hold withholds serving" to "the hold withholds admission".

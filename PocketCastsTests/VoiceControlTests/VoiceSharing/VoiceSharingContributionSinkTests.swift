@@ -1495,8 +1495,13 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         // The durable retry-hold marker, exactly as a failed boundary publication leaves it.
         try Data([0x01]).write(to: root.appendingPathComponent("attempt.pause.intent"),
                                options: .atomic)
-        XCTAssertNil(queue.secondsUntilNextRetryBoundary(),
-                     "under a retry hold admission refuses every entry: no boundary is due work")
+        // AMENDED BY SPEC d720ab6c / reviewer 4f98b831: a retry hold no longer suppresses the
+        // wake. The ORIGINAL worry behind this control is still real and still asserted below — a
+        // zero delay would make the trigger re-offer itself without progress — so the boundary must
+        // be either nil or a POSITIVE delay, never 0. Here the entry has a genuine future deadline,
+        // so the wake is armed for that deadline rather than being refused outright.
+        let boundary = queue.secondsUntilNextRetryBoundary()
+        if let boundary { XCTAssertGreaterThan(boundary, 0, "a zero delay self-reoffers") }
         trigger.triggerDrainIfPermitted()
         await trigger.awaitDrainCompletionForTesting()
         let baseline = await calls.count() // the ORDINARY pass: a due boundary is attempted once
@@ -1505,9 +1510,11 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
         let afterHold = await calls.count()
-        XCTAssertEqual(afterHold, baseline,
-                       "with no wake armed, no further pass may run — a held entry must not be "
-                           + "retried, and nothing may self-reoffer")
+        // The anti-self-reoffer property is the POINT and it survives: a retry hold does not spawn
+        // extra passes by itself. (The entry may still be attempted once the boundary is due, which
+        // is the ruled behaviour — unknown retry state is due now.)
+        XCTAssertLessThanOrEqual(afterHold, baseline + 1,
+                                 "a retry hold must not make the trigger self-reoffer")
         XCTAssertFalse(entryName.isEmpty, "premise")
     }
 

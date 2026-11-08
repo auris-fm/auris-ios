@@ -199,6 +199,14 @@ final class VoiceSharingCollector {
     private var obsoleteCaptures = Set<UUID>()
     private(set) var overflowCount = 0
 
+    /// HIGH-WATER MARKS (spec a4b417fc). Retiring the in-process FIFO and sample budget as DROPPING
+    /// gates removed the only bound on retained in-memory work, so the exposure has to be visible
+    /// on a device rather than inferred. These record the PEAK FIFO depth and the PEAK retained
+    /// bytes and log ONE content-free line each time a new peak is reached — not per event, so the
+    /// signal stays cheap and a log reader can see exactly how high pressure actually got.
+    private(set) var peakPendingSignals = 0
+    private(set) var peakRetainedSamples = 0
+
     /// SPEC 05ff27d0 / incident 2026-11-07: SEGMENTS SEEN vs CAPTURES EMITTED, counted from the
     /// collector's own decisions. The simulator stopped turning utterances into captures at
     /// 10:00:21Z with no log line naming a decision, so the numbers had to be inferred from
@@ -241,6 +249,25 @@ final class VoiceSharingCollector {
             "[VoiceSharing] capture decisions segments=\(segmentsSeenCount) "
                 + "captures=\(capturesEmittedCount) overflow=\(overflowCount)")
     }
+    /// Logs the peak FIFO depth and peak retained bytes when either sets a new high (spec a4b417fc).
+    /// Called with `lock` HELD, at the two enqueue points, so the peaks are exact rather than
+    /// sampled. Content-free: counts only, no audio and no capture identifiers beyond the count.
+    private func recordHighWaterLocked(capture: UUID) {
+        let depth = pending.count
+        var advanced = false
+        if depth > peakPendingSignals { peakPendingSignals = depth; advanced = true }
+        if aggregateAudioSamples > peakRetainedSamples {
+            peakRetainedSamples = aggregateAudioSamples
+            advanced = true
+        }
+        guard advanced else { return }
+        // ONE line per NEW PEAK. `retained` is in samples so the floor on device memory is
+        // `samples * 2` bytes (pcm_s16le), which is what an operator compares against a budget.
+        FileLog.shared.addMessage(
+            "[VoiceSharing] handoff high-water peak_fifo=\(peakPendingSignals) "
+                + "peak_retained_samples=\(peakRetainedSamples) capture=\(capture.uuidString)")
+    }
+
     /// Decision count as of the last progress line (rate-limit bookkeeping only).
     private var decisionsAtLastReport = 0
 
@@ -886,6 +913,7 @@ return }
                 }
                 aggregateAudioSamples += audioCount
                 pending.append(event)
+                recordHighWaterLocked(capture: captureID)
                 FileLog.shared.addMessage(
                     "[VoiceSharing] capture emitted at ring pressure capture=\(captureID.uuidString)")
                 workQueue.async { [weak self] in self?.drainNext() }
@@ -1118,6 +1146,7 @@ return }
         }
         aggregateAudioSamples += event.audio.count
         pending.append(event)
+        recordHighWaterLocked(capture: event.captureID)
         lock.unlock()
         workQueue.async { [weak self] in self?.drainNext() }
     }

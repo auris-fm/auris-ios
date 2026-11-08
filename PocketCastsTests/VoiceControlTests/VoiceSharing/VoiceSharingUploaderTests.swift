@@ -734,11 +734,14 @@ final class VoiceSharingUploaderTests: XCTestCase {
         XCTAssertThrowsError(try failing.applyAttemptResult(
             entry, lease: admitted.lease, outcome: .retryableFailure,
             retryNotBefore: Date().addingTimeInterval(60)))
+        // AMENDED BY SPEC d720ab6c / reviewer 4f98b831: the hold that survives restart is an
+        // ADMISSION hold. It no longer withholds SERVING — that was the queue-wide gate that kept
+        // an unreadable retry record from ever draining.
         let first = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-        XCTAssertTrue(first.readyEntries().isEmpty, "first restart holds")
+        XCTAssertFalse(first.hasAdmissionAllowance(), "first restart holds admission")
         let second = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-        XCTAssertTrue(second.readyEntries().isEmpty,
-                      "SECOND restart must still hold — the intent must survive the first")
+        XCTAssertFalse(second.hasAdmissionAllowance(),
+                       "SECOND restart must still hold — the intent must survive the first")
     }
 
     /// 503's server minimum is not discarded: it is both reported AND persisted, and a FRESH owner
@@ -941,6 +944,10 @@ final class VoiceSharingUploaderTests: XCTestCase {
     }
 
     /// Legacy serving adopts the retry hold: a failed barrier pauses readyEntries() too.
+    /// AMENDED BY SPEC d720ab6c / reviewer 4f98b831: a retry hold does NOT hold serving. It used
+    /// to, and that meant an unreadable retry record withheld the whole queue from the drain — the
+    /// gate 066e2a70 item 2 removed everywhere else. What the hold still does is refuse NEW
+    /// ADMISSIONS, and the recording still serves and still reaches the transport.
     func test_legacyServingHonorsTheRetryHold() throws {
         let entry = try makeReadyEntry()
         XCTAssertEqual(queue.readyEntries().count, 1, "ready before the barrier")
@@ -956,12 +963,16 @@ final class VoiceSharingUploaderTests: XCTestCase {
         XCTAssertThrowsError(try failing.applyAttemptResult(
             entry, lease: admitted.lease, outcome: .retryableFailure,
             retryNotBefore: Date().addingTimeInterval(60)))
-        // The legacy serving path is held like every other entry point. Recovery happens at
-        // construction, so the probe is a NEWLY constructed instance.
-        XCTAssertTrue(failing.readyEntries().isEmpty)
+        // SERVING IS NOT HELD: the recording must remain available to the drain.
+        XCTAssertEqual(failing.readyEntries().count, 1,
+                       "a retry hold may not withhold the recording from serving")
+        // Recovery happens at construction, so the probe is a NEWLY constructed instance.
         let fresh = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-        XCTAssertTrue(fresh.readyEntries().isEmpty,
-                      "a fresh instance re-derives the hold from disk")
+        XCTAssertEqual(fresh.readyEntries().count, 1,
+                       "a fresh instance still serves it: the hold is not a serving gate")
+        // BUT ADMISSION IS REFUSED, which is what the hold is for.
+        XCTAssertFalse(fresh.hasAdmissionAllowance(),
+                       "a retry hold still refuses NEW admissions")
     }
 
     // MARK: - reviewer 3814f4be: status+body agreement, hold reconciliation, transport lifetime
@@ -1114,6 +1125,74 @@ final class VoiceSharingUploaderTests: XCTestCase {
         }
     }
 
+    /// REVIEWER 4f98b831: an UNREADABLE delay record must not refuse the WITHHOLDING of a
+    /// recording. `refuseIfNotYetDueLocked` used to throw `leaseHeld` for an unparseable stamp and
+    /// for a NaN obligation, which is the last surviving form of the retry gate on the path the
+    /// UPLOADER calls. Unknown retry state is due now; only a READABLE future deadline refuses.
+    func test_unreadableDelayRecordsStillUpload() async throws {
+        for shape in ["malformed-stamp", "nan-obligation"] {
+            let entry = try makeReadyEntry()
+            let stampName = VoiceSharingUploadQueue.notBeforeName(for: entry.name)
+            switch shape {
+            case "malformed-stamp":
+                try Data("not-json".utf8).write(to: root.appendingPathComponent(stampName))
+            default:
+                try Data(#"{"notBefore": "NaN"}"#.utf8).write(
+                    to: root.appendingPathComponent(
+                        VoiceSharingUploadQueue.obligationPrefix + entry.name))
+            }
+            queue = VoiceSharingUploadQueue(rootDirectory: root)
+            var sawRequest = false
+            let uploader = makeUploader(transport: { _, _, _ in
+                sawRequest = true
+                return .response(statusCode: 415, body: Data(
+                    #"{"schema_version":1,"code":"unsupported_audio"}"#.utf8))
+            })
+            let outcome = await uploader.upload(entry)
+            XCTAssertTrue(sawRequest,
+                          "\(shape): an unreadable delay must not withhold the recording")
+            guard case .abandoned = outcome else {
+                return XCTFail("\(shape): expected the server's refusal to settle, got \(outcome)")
+            }
+        }
+    }
+
+    /// REVIEWER 4f98b831, the sibling half: a failed stamp write for ONE entry must not stop a
+    /// HEALTHY entry from taking its scheduled retry. Per-entry, never owner-wide.
+    func test_aFailedStampWriteDoesNotStopAHealthySiblingsRetry() async throws {
+        let unhealthy = try makeReadyEntry()
+        let healthy = try makeReadyEntry()
+        let failing = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            failureRecordWriter: { url, data in
+                // Only the UNHEALTHY entry's stamps fail.
+                if url.lastPathComponent == VoiceSharingUploadQueue.notBeforeName(for: unhealthy.name) {
+                    throw NSError(domain: "test", code: 1)
+                }
+                try data.write(to: url, options: .atomic)
+            })
+        queue = failing
+        let admitted = try XCTUnwrap(try failing.admitAttempt(unhealthy))
+        XCTAssertThrowsError(try failing.applyAttemptResult(
+            unhealthy, lease: admitted.lease, outcome: .retryableFailure,
+            retryNotBefore: Date().addingTimeInterval(600)))
+
+        // The healthy sibling is DUE and must still be offered and sent.
+        var sent: [String] = []
+        let uploader = VoiceSharingUploader(
+            queue: failing, retryPolicy: retryPolicy(),
+            isAuthorized: { true }, currentIdentity: { nil },
+            endpoint: { URL(string: "https://unit.test/api/v1/contributions") },
+            transport: { request, _, _ in
+                sent.append(request.url?.lastPathComponent ?? "")
+                return .response(statusCode: 415, body: Data(
+                    #"{"schema_version":1,"code":"unsupported_audio"}"#.utf8))
+            })
+        let outcome = await uploader.upload(healthy)
+        XCTAssertFalse(sent.isEmpty,
+                       "a sibling's failed stamp write must not stop a healthy retry; outcome=\(outcome)")
+    }
+
     func test_aLocallyUnbindableCaptureIsSentAndTheServersRefusalDeletesIt() async throws {
         // A BOUND queue: the fence must still attribute the attempt to the owning account even
         // though the record itself no longer parses.
@@ -1191,10 +1270,11 @@ final class VoiceSharingUploaderTests: XCTestCase {
         XCTAssertThrowsError(try failing.applyAttemptResult(
             entry, lease: admitted.lease, outcome: .retryableFailure,
             retryNotBefore: Date().addingTimeInterval(60)))
-        // Two restarts: both hold.
+        // Two restarts: both hold ADMISSION (spec d720ab6c — the hold is an admission gate, not a
+        // serving gate).
         for _ in 0..<2 {
-            XCTAssertTrue(VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-                .readyEntries().isEmpty, "held across restart")
+            XCTAssertFalse(VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+                .hasAdmissionAllowance(), "held across restart")
         }
         // Bounded reconciliation on a fresh instance: state is provable (the failing writer only
         // failed the STAMP, which never landed; the intent did), so it lifts.
@@ -1225,7 +1305,11 @@ final class VoiceSharingUploaderTests: XCTestCase {
             to: root.appendingPathComponent(stampName), options: .atomic)
         let reconciler = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         XCTAssertFalse(reconciler.reconcileRetryHold(), "unprovable state keeps the hold")
-        XCTAssertTrue(reconciler.readyEntries().isEmpty)
+        // AMENDED BY SPEC d720ab6c: keeping the HOLD is not the same as refusing to SERVE. The
+        // hold refuses new admissions; the recording stays available to the drain. A garbage stamp
+        // is an unreadable delay, hence due now.
+        XCTAssertEqual(reconciler.readyEntries().count, 1,
+                       "an unprovable retry state may not withhold the recording from serving")
     }
 
     /// Reviewer a29e62a2's exact scenario: the STAMP writer fails but the write-ahead obligation
