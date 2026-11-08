@@ -522,7 +522,12 @@ final class VoiceSharingUploadQueue {
         guard fileManager.fileExists(atPath: entryDir.path, isDirectory: &isDirectory),
             isDirectory.boolValue else { return .notWork } // purged entry: orphan debris
         let entry = Entry(root: rootDirectory, name: entryName)
-        guard isCompleteEntryLocked(at: entry) else { return .notWork } // not ready to serve
+        // SENDABLE, not COMPLETE (reviewer 616555f7): the wake must use the same predicate the
+        // serving and upload paths use, or a readable-but-malformed or digest-mismatched recording
+        // that earns a RETRYABLE server response loses its automatic retry — it would need another
+        // utterance or a restart to be sent again. `isCompleteEntryLocked` additionally demands a
+        // successful LOCAL binding, which is not a server fact.
+        guard isServedEntryLocked(at: entry) else { return .notWork }
         // AN ATTEMPT ALREADY IN FLIGHT OWNS THIS ENTRY: its own completion re-offers (the trigger's
         // drainWasRefused/workPending handoff), so a wake here would race it for nothing.
         if inFlightAttempts[entry] != nil { return .notWork }
@@ -663,8 +668,24 @@ final class VoiceSharingUploadQueue {
                 // live entry's future retry indefinitely. Debris is SKIPPED; only live boundaries
                 // produce a wake.
                 guard UUID(uuidString: entryName) != nil else { continue }
-                guard let size = fileSizeIfRegularLocked(at: url), size.isRegular,
-                    size.bytes > 0, size.bytes <= Self.maxSettlementRecordBytes else { continue }
+                // AN UNREADABLE OR OVERSIZED STAMP IS AN UNKNOWN DELAY, NOT A REASON TO SKIP
+                // (reviewer 616555f7). Skipping it before reaching the "unknown means due" helper
+                // meant an entry whose own delay record is corrupt never got a retry wake at all —
+                // the queue-wide gate was fixed but the boundary loop re-imposed it per entry.
+                // The prospect helper below already maps unknown to due-now.
+                switch fileSizeIfRegularLocked(at: url) {
+                case nil:
+                    // UNKNOWN size: unreadable now. An unknown delay is due now, so schedule it
+                    // rather than letting one corrupt record suppress a real retry.
+                    earliest = min(earliest ?? .infinity, Self.retryHoldWakeFloorSeconds)
+                    continue
+                case let size? where !(size.isRegular && size.bytes > 0
+                    && size.bytes <= Self.maxSettlementRecordBytes):
+                    earliest = min(earliest ?? .infinity, Self.retryHoldWakeFloorSeconds)
+                    continue
+                case .some:
+                    break
+                }
                 switch retryWakeProspectLocked(forEntryNamed: entryName, at: now) {
                 case .unknown, .notWork:
                     // No wake: unknown state waits for a real signal, and a fact admission refuses

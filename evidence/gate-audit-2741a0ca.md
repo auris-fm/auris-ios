@@ -303,3 +303,24 @@ admission" to "admission and serving continue; the durable obligation survives t
 **KISS note:** this removes the last queue-wide flag from the admission path. The only admission
 gate left is the count of captures holding audio (plus unknown count, plus unknown sharing-off
 state).
+
+### Round after `b8e15a6f2` — reviewer `616555f7`: the wake re-imposed the gate per entry
+
+The queue-wide retry gates were gone, but **wake selection** still carried two:
+
+| Where | Before | Consequence |
+|-------|--------|-------------|
+| `retryWakeProspectLocked` | `guard isCompleteEntryLocked(at: entry)` | `isCompleteEntryLocked` demands a successful **local binding**. A readable-but-unbindable or digest-mismatched recording that earns a RETRYABLE server response lost its automatic retry — it needed another utterance or a restart. Serving and upload already used `isServedEntryLocked`. |
+| `secondsUntilNextRetryBoundary` boundary loop | skipped unreadable/oversized stamps *before* the "unknown means due" helper | One corrupt delay record silenced that entry's wake entirely. |
+
+Both now use sendable-entry / due-unknown semantics: the prospect guards on `isServedEntryLocked`,
+and an unreadable or oversized stamp schedules at the positive floor instead of being skipped.
+
+**Controls** (both RED against `e810e5650`, both GREEN now, no uploader and no trigger involved —
+they exercise the scheduler seam directly):
+- `test_theWakeSchedulesALocallyUnbindableCapture`
+- `test_theWakeSchedulesAnEntryWhoseDelayRecordIsUnreadable`
+
+**Note on the floor:** an unknown delay schedules at `retryHoldWakeFloorSeconds` rather than 0, so
+discovery gets one bounded pass over the queue instead of a zero-delay spin. A readable future
+deadline keeps its own delay.

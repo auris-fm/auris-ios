@@ -1238,6 +1238,49 @@ final class VoiceSharingUploaderTests: XCTestCase {
                        "the server's final refusal removes the files")
     }
 
+    /// REVIEWER 616555f7: the wake must use `isServedEntryLocked`, not `isCompleteEntryLocked`.
+    /// A readable capture that the client can no longer BIND still earns a retryable server
+    /// response, and it must come back on its own — without another utterance or a restart. This
+    /// exercises the SCHEDULER seam directly: no uploader, no trigger, just the boundary reader.
+    func test_theWakeSchedulesALocallyUnbindableCapture() throws {
+        let box = IdentityBox(
+            VoiceSharingUploadIdentity(accountScope: "acct-A", enrollmentEpoch: "epoch-1"))
+        let owned = VoiceSharingUploadQueue(rootDirectory: root, currentIdentity: { box.current })
+        queue = owned
+        let entry = try makeReadyEntryOwned(owned)
+        let past = String(Date().timeIntervalSince1970 - 60)
+        try Data("{\"notBefore\": \(past)}".utf8).write(to: root.appendingPathComponent(
+            VoiceSharingUploadQueue.notBeforePrefix + entry.name))
+        // A readable boundary is owed. PRE: the wake CAN see it while the entry still binds.
+        XCTAssertNotNil(owned.secondsUntilNextRetryBoundary(),
+                        "PRE: a bound entry with a past boundary is due now")
+        // Now make it locally UNBINDABLE, exactly as in the test above.
+        try Data("not-json".utf8).write(
+            to: root.appendingPathComponent(entry.name, isDirectory: true)
+                .appendingPathComponent("metadata.json"))
+        let reopened = VoiceSharingUploadQueue(rootDirectory: root, currentIdentity: { box.current })
+        XCTAssertNotNil(
+            reopened.secondsUntilNextRetryBoundary(),
+            "an unbindable-but-readable capture must keep its retry wake: nothing the server did "
+                + "should depend on the client still being able to bind its own record")
+    }
+
+    /// REVIEWER 616555f7, second half: the boundary loop skipped unreadable/oversized stamps
+    /// BEFORE reaching the "unknown means due" helper, so one corrupt delay record suppressed that
+    /// entry's retry wake entirely — the queue-wide gate fixed per entry.
+    func test_theWakeSchedulesAnEntryWhoseDelayRecordIsUnreadable() throws {
+        let entry = try makeReadyEntry()
+        let stamp = root.appendingPathComponent(
+            VoiceSharingUploadQueue.notBeforePrefix + entry.name)
+        // Oversized: well past `maxSettlementRecordBytes`, so it can never be parsed as a delay.
+        try Data(repeating: 0x01, count: VoiceSharingUploadQueue.maxSettlementRecordBytes + 64)
+            .write(to: stamp)
+        let reopened = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        XCTAssertNotNil(
+            reopened.secondsUntilNextRetryBoundary(),
+            "an unreadable delay is UNKNOWN, and unknown is due now — it must not silence the wake")
+    }
+
     func test_aConflictAfterAServerFailureIsTerminalOnceTheServerReopens() async throws {
         let entry = try makeReadyEntry()
         func errorBody(_ code: String) -> Data {
