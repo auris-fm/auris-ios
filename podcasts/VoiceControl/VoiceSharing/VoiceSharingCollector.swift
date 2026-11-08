@@ -872,24 +872,23 @@ return }
                 // Reviewer ea2964b3: the handoff must be BOUNDED and ACCOUNTED. The audio now
                 // moves through the pending FIFO under the SAME caps as every other event — the
                 // aggregate still owns these bytes (added below, never decremented early), so a
-                // blocked worker cannot grow untracked PCM outside the ledger; once the FIFO cap
-                // or the sample budget is reached, further evictions DROP here, counted and
-                // logged. Withdrawal disposal drains this same FIFO at dequeue time.
+                // blocked worker cannot grow untracked PCM outside the ledger. Pressure is counted
+                // and logged but NEVER a reason to discard (spec 2741a0ca): the durable queue's
+                // record limit is the only admission gate. Withdrawal disposal drains this same
+                // FIFO at dequeue time.
                 let audioCount = event.audio.count
                 if pending.count >= Self.maxPendingSignals
                     || aggregateAudioSamples + audioCount > Self.maxAggregateRetainedSamples {
-                    // The record dies here: its bytes already left the ledger above, and no
-                    // event enters it — the discard is complete, counted, and logged.
                     overflowCount += 1
                     FileLog.shared.addMessage(
-                        "[VoiceSharing] capture dropped at ring pressure (handoff full) capture=\(captureID.uuidString)")
-                } else {
-                    aggregateAudioSamples += audioCount
-                    pending.append(event)
-                    FileLog.shared.addMessage(
-                        "[VoiceSharing] capture emitted at ring pressure capture=\(captureID.uuidString)")
-                    workQueue.async { [weak self] in self?.drainNext() }
+                        "[VoiceSharing] handoff under pressure (ring) capture=\(captureID.uuidString) "
+                            + "retained=not-dropped")
                 }
+                aggregateAudioSamples += audioCount
+                pending.append(event)
+                FileLog.shared.addMessage(
+                    "[VoiceSharing] capture emitted at ring pressure capture=\(captureID.uuidString)")
+                workQueue.async { [weak self] in self?.drainNext() }
                 continue
             }
             aggregateAudioSamples -= oldest.value.capture.retained.count
@@ -1101,20 +1100,21 @@ return }
             deliverUnderSinkOwnership(event)
             return
         }
+        // NO IN-PROCESS CAP MAY DISCARD A CAPTURE (spec 2741a0ca). This used to refuse the event
+        // when the handoff FIFO or the retained-sample budget filled, and neither maps to an
+        // allowed gate: the spec allows a recording to stop being collected when sharing is off,
+        // and for no other reason. Both caps are therefore counted as pressure and logged, and the
+        // capture is still queued — the durable queue's 32-record limit is the one admission gate,
+        // and it is the only place allowed to refuse.
         if pending.count >= Self.maxPendingSignals
             || aggregateAudioSamples + event.audio.count > Self.maxAggregateRetainedSamples {
             overflowCount += 1
-            // Reviewer 34aae0fa (4): a silent discard here was a live candidate for the 10:00:21
-            // capture stop — the record simply vanished with no line. The reason distinguishes the
-            // two bounds, because they have different causes and different fixes.
             let why = pending.count >= Self.maxPendingSignals ? "fifo-full" : "sample-budget"
             logDecisionProgressLocked(force: true)
-            lock.unlock()
             FileLog.shared.addMessage(
-                "[VoiceSharing] capture refused reason=queue-overflow-\(why) "
-                    + "capture=\(event.captureID.uuidString)")
+                "[VoiceSharing] handoff under pressure reason=\(why) "
+                    + "capture=\(event.captureID.uuidString) retained=not-dropped")
             FileLog.shared.forceFlush()
-            return
         }
         aggregateAudioSamples += event.audio.count
         pending.append(event)

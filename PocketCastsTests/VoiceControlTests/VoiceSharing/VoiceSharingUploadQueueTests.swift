@@ -802,6 +802,37 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     /// SPEC 746aa9c2: audio left behind by a FAILED DELETE still counts, because the rule is
     /// "capture IDs still holding audio". Without this a removal failure is the way to grow past
     /// the limit — and removal failures are what a full disk produces.
+    /// SPEC 2741a0ca: a queue that is OVER the record limit must still be readable and drainable.
+    /// The root listing was bounded at 64 names while a legal queue holds one directory plus two
+    /// retry sidecars per capture, so ~22 recordings made enumeration refuse — and enumeration is
+    /// how the queue counts, serves and drains. The bound is now derived from the record limit, so
+    /// a queue the spec permits to exist can always be enumerated.
+    func test_anOverCapQueueAfterRestartIsStillReadableAndServes() throws {
+        let q = VoiceSharingUploadQueue(rootDirectory: root)
+        var entries: [VoiceSharingUploadQueue.Entry] = []
+        for _ in 0..<VoiceSharingUploadQueue.maxQueueEntries {
+            let entry = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+            try q.finalize(entry)
+            entries.append(entry)
+        }
+        // Retry sidecars on every entry — exactly what real backoff leaves behind, and what pushed
+        // the root past the old 64-name cap.
+        for entry in entries {
+            try Data("1".utf8).write(
+                to: root.appendingPathComponent(VoiceSharingUploadQueue.notBeforePrefix + entry.name))
+            try Data([0x01]).write(
+                to: root.appendingPathComponent(VoiceSharingUploadQueue.obligationPrefix + entry.name))
+        }
+        let names = try FileManager.default.contentsOfDirectory(atPath: root.path).count
+        XCTAssertGreaterThan(names, 64, "PRE: the root really is past the old cap (\(names) names)")
+
+        // A RESTART over that root: every directory must be discovered, not refused.
+        let reopened = VoiceSharingUploadQueue(rootDirectory: root)
+        XCTAssertEqual(reopened.readyEntries().count, VoiceSharingUploadQueue.maxQueueEntries,
+                       "an over-cap root is still enumerable; it is a legal queue")
+        XCTAssertNotNil(reopened.readyEntries().first, "and it can still serve")
+    }
+
     func test_audioResidueFromAFailedDeleteCountsTowardTheLimit() throws {
         // Construct FIRST, then create the residue: recovery runs at construction and would sweep
         // an unreferenced file as debris. A failed delete during operation happens after recovery,
@@ -899,25 +930,9 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         }
     }
 
-    /// SPEC a3ef694f, the point of the whole change: an uncountable root must NOT refuse admission.
-    /// This is the owner's wedge — a queue that could not measure itself dropped every capture while
-    /// nearly empty. Admission proceeds; the reason is logged once.
-    func test_anUncountableRootStillAllowsAdmission() throws {
-        let q = VoiceSharingUploadQueue(
-            rootDirectory: root,
-            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxRecords: 32),
-            listDirectoryBounded: { url, keys, limit in
-                if url.standardizedFileURL == self.root.standardizedFileURL {
-                    throw CocoaError(.fileReadUnknown)
-                }
-                return try VoiceSharingUploadQueue.defaultBoundedLister(url, keys, limit)
-            })
-        XCTAssertTrue(q.hasAdmissionAllowance(),
-                      "an unreadable root is not a full queue; refusing here is the wedge")
-    }
-
-    /// The count does not care about bytes or debris: a huge entry, or unknown files beside it,
-    /// cannot stop admission the way the byte budget could.
+    /// SPEC a3ef694f: the count does not care about bytes or debris. A huge entry, or unknown files
+    /// beside it, cannot stop admission the way the byte budget could — the budget needed a
+    /// measurement that could fail, and these were the measurements that failed.
     func test_bytesAndDebrisDoNotGateAdmission() throws {
         let q = VoiceSharingUploadQueue(rootDirectory: root)
         let entry = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
@@ -1100,8 +1115,14 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         // Construction performed recovery, so every root scan must have gone through the bounded
         // lister with a finite cap.
         XCTAssertGreaterThan(counter.calls, 0, "recovery must scan the root during construction")
-        XCTAssertLessThanOrEqual(counter.maxLimitSeen, VoiceSharingUploadQueue.maxDirectoryEntries,
+        // The cap must be FINITE and derived from what a legal queue can hold — not merely small.
+        // A cap below that is the over-cap wedge (spec 2741a0ca); an unbounded cap is the allocation
+        // hazard this control was written for. The root bound satisfies both.
+        XCTAssertLessThanOrEqual(counter.maxLimitSeen, VoiceSharingUploadQueue.maxRootEntries,
                                  "recovery must never request an unbounded listing")
+        XCTAssertGreaterThanOrEqual(VoiceSharingUploadQueue.maxRootEntries,
+                                    VoiceSharingUploadQueue.maxQueueEntries,
+                                    "and the bound must fit every record the spec permits")
     }
 
     /// Spec a3ef694f: there is no byte budget any more, so finalize has NO capacity check to do.
@@ -2536,8 +2557,10 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         // recordings. Serving and admitting are different promises — serving an entry we cannot
         // verify would publish bytes we cannot vouch for; admitting one loses nothing, because the
         // record is on disk and will be served once the root is readable again.
-        XCTAssertNoThrow(try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioB), audio: audioB),
-                         "an unreadable root must not stop admission")
+        // ADMISSION refuses while the count is unknown (spec 2741a0ca ruling): the gate is "fewer
+        // than 32 records on disk", which an unknown count cannot satisfy. Neither refusal is
+        // sticky: the restored scan below reopens serving, and the next admission re-counts.
+        XCTAssertThrowsError(try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioB), audio: audioB))
 
         // Restoration: a bounded SUCCESSFUL scan reopens serving.
         failListing = false
@@ -2783,11 +2806,21 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
 
         for (label, candidate) in [("float", floatWav), ("stereo", stereoWav),
                                    ("low-rate", lowRateWav), ("truncated", Data(truncatedWav))] {
-            var q = makeQueue()
+            let bagRoot = temporaryRoot()
+            var q = VoiceSharingUploadQueue(rootDirectory: bagRoot)
             _ = try q.prepare(metadata: validRecord(audio: candidate), audio: candidate)
-            try Data([0x01]).write(to: try soleEntryDirectory().appendingPathComponent("ready.marker"))
-            q = makeQueue() // recovery
-            XCTAssertTrue(q.readyEntries().isEmpty, "\(label) WAV must be rejected as not the documented representation")
+            let dirs = try FileManager.default.contentsOfDirectory(at: bagRoot, includingPropertiesForKeys: nil)
+                .filter { $0.hasDirectoryPath }
+            XCTAssertEqual(dirs.count, 1, "PRE: one prepared entry")
+            try Data([0x01]).write(to: dirs[0].appendingPathComponent("ready.marker"))
+            q = VoiceSharingUploadQueue(rootDirectory: bagRoot) // recovery
+            XCTAssertTrue(q.readyEntries().isEmpty,
+                          "\(label) WAV must not be served as the documented representation")
+            // SPEC 2741a0ca ruling 2: it is NOT deleted either. There is no local "invalid" — the
+            // capture holds audio, so it counts, expires at 7 days, and the server decides.
+            XCTAssertTrue(FileManager.default.fileExists(atPath: dirs[0].path),
+                          "\(label): a local representation verdict must not delete the recording")
+            try? FileManager.default.removeItem(at: bagRoot)
         }
     }
 
@@ -3215,14 +3248,59 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     /// SPEC a3ef694f: an unmeasurable queue must not refuse admission. RED before this change — the
     /// allowance query returned false whenever the root could not be counted, which is the wedge.
     func test_anUnmeasurableQueueStillAllowsAdmission() throws {
-        let queue = makeQueue(enumerationSource: { _, _ in AnySequence([.failure(CocoaError(.fileReadUnknown))]) })
-        _ = queue.readyEntriesReportingUnknownCoverage() // let recovery run once
-        if case .known = queue.readyEntriesReportingUnknownCoverage() {
-            return XCTFail("precondition: the queue cannot count its contents")
-        }
+        // SPEC 2741a0ca RULING: an uncountable root REFUSES a new admission, because the admit gate
+        // is "fewer than 32 records ON DISK" and a count that was not taken cannot satisfy it. The
+        // refusal must be LOGGED and NOT STICKY: the moment the listing reads again, the next
+        // segment is admitted. It must never touch drain, upload or delete.
+        var failing = false
+        let queue = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            listDirectoryBounded: { url, keys, limit in
+                if failing, url.standardizedFileURL == self.root.standardizedFileURL {
+                    throw CocoaError(.fileReadUnknown)
+                }
+                return try VoiceSharingUploadQueue.defaultBoundedLister(url, keys, limit)
+            })
+        XCTAssertTrue(queue.hasAdmissionAllowance(), "PRE: a readable root admits")
+        failing = true
+        XCTAssertFalse(queue.hasAdmissionAllowance(),
+                       "an unknown count cannot satisfy the admit gate")
+        XCTAssertTrue(queue.lastCountWasUnknown, "and the failure is recorded, not silent")
+        // NOT STICKY: a readable listing admits again with no other action.
+        failing = false
         XCTAssertTrue(queue.hasAdmissionAllowance(),
-                      "an uncountable queue is not a full one (spec a3ef694f)")
-        XCTAssertTrue(queue.lastCountWasUnknown, "and it recorded that the count failed")
+                      "the refusal must lift as soon as the disk reads again")
+        XCTAssertFalse(queue.lastCountWasUnknown)
+    }
+
+    /// RULING 2: an unreadable metadata file must NOT become a local verdict. The capture holds
+    /// audio, so it counts toward the limit and stays on disk for the uploader and the 7-day expiry.
+    func test_aCaptureWithUnreadableMetadataIsRetainedNotDeleted() throws {
+        let seeder = makeQueue()
+        let entry = try prepareAndFinalize(seeder, metadata: validRecord(audio: audioA), audio: audioA)
+        let dir = try soleEntryDirectory()
+        // Corrupt the metadata so it can no longer bind, keeping the audio intact.
+        try Data("not-json".utf8).write(to: dir.appendingPathComponent("metadata.json"))
+
+        let fresh = makeQueue()
+        _ = fresh.readyEntriesReportingUnknownCoverage()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dir.path),
+                      "a local parse verdict must never delete a recording")
+        XCTAssertEqual(fresh.readyEntries().count, 0, "and it is not served as bound")
+    }
+
+    /// RULING 1: an unreadable attempt record treats the backoff as DUE — it must not hold the
+    /// upload waiting for a record that may never become readable.
+    func test_anUnreadableAttemptRecordTreatsBackoffAsDue() throws {
+        let q = makeQueue()
+        let entry = try prepareAndFinalize(q, metadata: validRecord(audio: audioA), audio: audioA)
+        // An obligation file with unparseable contents: owed-instant unknown.
+        try Data("garbage".utf8).write(
+            to: root.appendingPathComponent(VoiceSharingUploadQueue.obligationPrefix + entry.name))
+        // The boundary is DUE now, so the queue offers work rather than waiting indefinitely.
+        let seconds = q.secondsUntilNextRetryBoundary()
+        if let seconds { XCTAssertLessThanOrEqual(seconds, 1,
+                                                 "an uncertain record must not defer the upload") }
     }
 
     /// The count at recovery is read from the entries actually on disk, so a restart cannot inherit
