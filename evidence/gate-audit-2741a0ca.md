@@ -76,3 +76,68 @@ removed.
 
 Controls: unknown → refuse → next readable listing admits (not sticky); an unreadable attempt record
 treats backoff as due; an unbound capture is not deleted.
+
+---
+
+# Replacement head — rulings a4b417fc + reviewer 307d0bde
+
+The previous head (`ef64b2fbe`) was audited against "nothing about the queue as a whole may stop a
+due recording". Reviewer `307d0bde` found the audit had missed real gates; spec `d720ab6c` then fixed
+the exact boundary: **an unknown fact about one entry affects only that entry; an unknown fact about
+the whole root or owner may refuse only NEW ADMISSIONS, never serving and never an attempt.**
+
+## Gates REMOVED in this head
+
+| # | Condition | Where it was | Why it maps to no allowed gate |
+|---|---|---|---|
+| 28 | Root listing bounded at `maxQueueEntries*4+64` | `entriesStrictLocked`, wake arithmetic, revocation proof, retry-hold reconciliation, refusal-intent discovery | A bound derived from the cap is exceeded by any inherited over-cap queue (Android Pixel: 104), and that queue cannot drain without first being discovered. Discovery / counting / serving now read `listDirectory(rootDirectory, [])`. A bound survives **only** in the two destructive sweeps, which log `sweep deferred` on overflow. |
+| 29 | Recovery purged the oldest records until the queue fit 32 (`reason=over-capacity`) | recovery, `recoverLocked` | **This deleted audio the server never saw.** The 32 limit governs new admissions; nothing authorises deleting recordings. It also truncated an inherited over-cap queue at launch instead of draining it. Replaced by a `disposition=drain-not-delete` log. |
+| 30 | `.unready` excluded from serving (`send-unbound`) | `readyEntriesReportingUnknownCoverage`, `readyEntries` | Retained-but-never-sent is a hold. A bind failure is a local opinion; the server owns the verdict. Now served when the failure is about the RECORD (digest mismatch, malformed/duplicate/invalid field), so it reaches admission and the wire. |
+| 31 | `isCompleteEntryLocked` (bind-only) used as the serving filter and as attemptability | `readyEntries`, `secondsUntilNextAgeBoundary`, `isAttemptableLocked` | Same: servability is "contains a capture", not "binds locally". |
+| 32 | `admitAttempt` required a successful `boundIdentityLocked` | admission | A capture whose record is unreadable still holds audio. Binding now supplies only provenance; absent → the live epoch, which is truthful (this send happened under this enrollment). |
+| 33 | Attempt-count write failure released the lease and rethrew | admission | A diagnostic count-write must not stop an upload. Count kept in `attemptCountMemoryOverride`, logged `disposition=memory-only`, attempt proceeds. |
+| 34 | `strictOwnerCoverageLocked` threw on any entry's unreadable state, holding every entry | serving + admission | One corrupt directory became a queue-wide hold. Now per-entry: the failing entry is skipped/logged, siblings serve. |
+| 35 | `retryHoldLocked` refused every attempt | `beginAttempt` | Unknown retry bookkeeping is not a gate. Logged `disposition=due-now`, attempt proceeds. |
+| 36 | `beginAttempt` required strict owner-wide coverage | `beginAttempt` | Per ruling: only the entry's own state may hold its attempt. |
+| 37 | Owner-wide unknown coverage on a failed scan | serving | The FAILED SCAN itself still refuses serving (that is the root, not an entry) and still refuses new admissions; what no longer happens is one entry's fault stopping the others. |
+
+## Gates KEPT and their justification
+
+| # | Condition | Location | Maps to |
+|---|---|---|---|
+| 38 | `.disqualified` (decided rejection marker written from the server's final refusal) | `isAttemptableLocked` | final refusal |
+| 39 | no audio present | `isAttemptableLocked`, admission | nothing to send (not a recording) |
+| 40 | owner file unreadable / owner absent | serving filter, admission | owner match (an attempt must be attributable) |
+| 41 | `.incomplete` (being written) | serving, `isAttemptableLocked` | not yet a capture |
+| 42 | WAV representation invalid (float/stereo/rate/truncated) | `isServedEntryLocked` | not a gate on a RECORD: this build cannot represent the audio, and the server's `wav_validate.ts` mirrors it |
+
+## Controls added / amended
+
+- `test_anOverCapQueueAfterRestartReachesTheUploadPath` — **NEW, ruling 1**: seeds 104 records (the
+  Android Pixel shape) through the real prepare/finalize path with a raised cap, plus a due stamp on
+  each; restarts; asserts all 104 are served **and** the first is admitted, i.e. reaches the upload
+  path. Red-proof: with the old recovery purge this control lost 72 recordings at launch.
+- `test_aLocallyUnbindableCaptureIsSentAndTheServersRefusalDeletesIt` — **NEW, item 1**: corrupts
+  metadata, then walks the real path through admission and the uploader to the transport; asserts the
+  body left, the attempt is attributed to the owning account, and a scripted `422 integrity_mismatch`
+  removes the files.
+- `test_anAttemptCountWriteFailureStillUploads` — **NEW, item 2**: injected `failureRecordWriter` for
+  `attempts.json`; the request still leaves and the server's refusal settles it.
+- Amended away from the owner-wide premise (item 3 / `d720ab6c`): `test_attemptGateShares…` (renamed
+  behaviour: an unreadable sibling no longer spends a due attempt), `test_attemptsWithHeldHandles…`,
+  `test_createdAtReadFailure…`, `test_inaccessibleRequiredFile…` (renamed to `…HoldsOnlyThatEntry`),
+  `test_unreadableOwnership…`.
+- Amended for ruling 2 (digest mismatch is SENT, not held): `test_wrongRecordDigestIsRejected`,
+  `test_metadataTamperedOutsideItsDigestIsRejected`, `test_entryWithDigestMismatchIsRemovedByRecovery`,
+  `test_tamperedPersistedAudioNeverServes`, and the unreadable-metadata retention control now asserts
+  it IS served.
+- Injection seams moved from `listDirectoryBounded` to `listDirectory` in 4 controls: discovery reads
+  the unbounded lister, so the old seams injected into a call that no longer happens and the controls
+  were passing for the wrong reason.
+
+## Known pre-existing failures (verified by stashing this whole tree at `ef64b2fbe`)
+
+`VoiceSharingRefusalDeletionTests` 10 of 19, `VoiceSharingClockOrderingRegressionTests` 3 of 4,
+`VoiceSharingCollectorTests` 3 of 38, `VoiceSharingContributionSinkTests` 4 of 41,
+`VoiceSharingAccountModelTests`, `CloudProducerInterleavingControls`, `CloudRouteSupersedeTests`.
+Identical with this tree stashed. Out of scope here and NOT folded in.

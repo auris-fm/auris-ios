@@ -1011,6 +1011,76 @@ final class VoiceSharingUploaderTests: XCTestCase {
     /// A conflict that follows a server failure is TERMINAL once Cloud reopens failed captures
     /// (spec commit 8637a0fd, per spec 418d3d05). This control replaces the earlier retain; it pins
     /// the new contract so the old hold cannot quietly come back.
+    /// REVIEWER 307d0bde item 1 / spec a4b417fc ruling 2: an entry the CLIENT cannot bind must still
+    /// REACH THE SERVER. Retained-but-never-sent is still a hold, and a log line is not a path. This
+    /// walks the real path: locally invalid metadata → authenticated attempt → scripted final
+    /// refusal → the server's verdict removes the files.
+    /// REVIEWER 307d0bde item 2: a diagnostic count-write failure must not stop an upload. The
+    /// attempt count spaces retries and reports; a disk that cannot record it is exactly when the
+    /// recording matters most, so the attempt proceeds and the count is kept in memory.
+    func test_anAttemptCountWriteFailureStillUploads() async throws {
+        let entry = try makeReadyEntry()
+        let uploadQueue = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            failureRecordWriter: { url, data in
+                if url.lastPathComponent == VoiceSharingUploadQueue.attemptRecordName {
+                    throw NSError(domain: "test", code: 1)
+                }
+                try data.write(to: url, options: .atomic)
+            })
+        queue = uploadQueue
+        var sawRequest = false
+        let uploader = makeUploader(transport: { _, _, _ in
+            sawRequest = true
+            return .response(statusCode: 422, body: Data(
+                #"{"schema_version":1,"code":"integrity_mismatch"}"#.utf8))
+        })
+        let outcome = await uploader.upload(entry)
+        XCTAssertTrue(sawRequest,
+                      "an unrecordable attempt count must not stop the request from leaving")
+        guard case .abandoned = outcome else {
+            return XCTFail("the server's refusal settles it; got \(outcome)")
+        }
+    }
+
+    func test_aLocallyUnbindableCaptureIsSentAndTheServersRefusalDeletesIt() async throws {
+        // A BOUND queue: the fence must still attribute the attempt to the owning account even
+        // though the record itself no longer parses.
+        let box = IdentityBox(
+            VoiceSharingUploadIdentity(accountScope: "acct-A", enrollmentEpoch: "epoch-1"))
+        let owned = VoiceSharingUploadQueue(rootDirectory: root, currentIdentity: { box.current })
+        queue = owned
+        let entry = try makeReadyEntryOwned(owned)
+        let directory = root.appendingPathComponent(entry.name, isDirectory: true)
+        // Corrupt the metadata AFTER the entry is durable: the audio is intact, so this is a
+        // capture the client can no longer bind but the server could still judge.
+        try Data("not-json".utf8).write(to: directory.appendingPathComponent("metadata.json"))
+
+        var sawRequest = false
+        let uploader = VoiceSharingUploader(
+            queue: owned, retryPolicy: retryPolicy(),
+            isAuthorized: { true },
+            currentIdentity: { box.current },
+            endpoint: { URL(string: "https://unit.test/api/v1/contributions") },
+            transport: { request, identity, _ in
+                sawRequest = true
+                // The bytes really left: the multipart body carries the raw pair.
+                XCTAssertNotNil(request.httpBody, "the unbound capture must be transmitted")
+                XCTAssertEqual(identity?.accountScope, "acct-A",
+                               "it is still fenced to the account that owns it")
+                // A real owning refusal for the status: 422 pairs with `integrity_mismatch`.
+                return .response(statusCode: 422, body: Data(
+                    #"{"schema_version":1,"code":"integrity_mismatch"}"#.utf8))
+            })
+        let outcome = await uploader.upload(entry)
+        XCTAssertTrue(sawRequest, "a locally unbindable capture must reach the server, not be held")
+        guard case .abandoned = outcome else {
+            return XCTFail("the server's final refusal is what deletes it, got \(outcome)")
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path),
+                       "the server's final refusal removes the files")
+    }
+
     func test_aConflictAfterAServerFailureIsTerminalOnceTheServerReopens() async throws {
         let entry = try makeReadyEntry()
         func errorBody(_ code: String) -> Data {
