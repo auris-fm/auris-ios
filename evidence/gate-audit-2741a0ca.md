@@ -141,3 +141,96 @@ the whole root or owner may refuse only NEW ADMISSIONS, never serving and never 
 `VoiceSharingCollectorTests` 3 of 38, `VoiceSharingContributionSinkTests` 4 of 41,
 `VoiceSharingAccountModelTests`, `CloudProducerInterleavingControls`, `CloudRouteSupersedeTests`.
 Identical with this tree stashed. Out of scope here and NOT folded in.
+
+## Round after `b9e4089fa` — reviewer `1af78cf5` / `066e2a70`, spec `7e0e89fb`
+
+### Gates removed in this round
+
+| # | Gate | Where | Why it maps to nothing |
+|---|------|-------|------------------------|
+| 43 | Overflowing stray sweep logged "deferred" but still deleted from the TRUNCATED listing | `VoiceSharingUploadQueue.swift` `recoverLocked` stray sweep | Not a gate at all — a **destructive regression I introduced**. `liveEntries` was built from the prefix, so a live retry sidecar whose directory fell past the bound looked orphaned and was deleted. Overflow now returns before any removal. |
+| 44 | `admitAttempt` threw on `retryHoldLocked` | `admitAttempt` | Unknown retry bookkeeping on **the path the uploader calls**. `beginAttempt` had been fixed; this one was missed, so the gate survived in production. Unknown retry state ⇒ DUE NOW (spec `d720ab6c`). |
+| 45 | `isAttemptableLocked` threw on an unreadable `attempts.json` | `isAttemptableLocked` | The count spaces retries; it is not a gate. The write-path fallback could never run because the read path refused first. |
+| 46 | `.audioSizeMismatch`, `.audioSampleCountMismatch`, `.invalidAudio` held serving | `isServedEntryLocked` | Readable pair, invalid representation ⇒ a **local** invalid verdict. The server's `wav_validate.ts` owns it; its final refusal deletes. Only an entry with no readable pair is held. |
+| 47 | `entryHoldsAudioLocked` read a stat failure as "absent" | `entryHoldsAudioLocked` | Collapsed unknown into absent, so the limit **under-reported** an unstat-able audio file. Unknown now counts as holding audio. |
+
+### Kept, and why
+
+- `entriesStrictLocked()` still throws when the whole root cannot be listed → `.unknownCoverage`. A root-level unknown is not a per-entry fact.
+- Recovery's `.failure` intent discovery still holds with unknown origin.
+- A decided rejection (`publication.failed`) still blocks an attempt: it derives from the server's own final refusal, not from the client.
+
+### Controls
+
+| Control | Red proof |
+|---------|-----------|
+| `test_anOverflowingStraySweepDeletesNoLiveRetryState` | Reverting only the overflow skip fails this one control, nothing else. |
+| `test_captureWithMalformedAudioIsSentAndTheServersRefusalDeletesIt` | Malformed WAV reaches transport; `415 unsupported_audio` deletes it. |
+| `test_malformedAttemptRecordStillUploads` | Unreadable `attempts.json` still reaches transport. |
+| `test_anOverCapQueueAfterRestartReachesTheUploadPath` | Extended: drains through the real uploader to a transport that records the capture ID. |
+| `test_emptyAndMetadataOnlyDirectoriesNeverOccupySlots` (07a7bb51 a) | Red on the old directory count. |
+| `test_thirtyTwoAudioHoldingEntriesRefuseTheNextCapture` (07a7bb51 b) | The other half, so "count nothing" cannot pass. |
+
+### Baseline correction (spec `7e0e89fb`)
+
+`spec` was right that `ef64b2fbe` is my own uncleared commit and cannot serve as a baseline. Measured at the cleared base `f90548c88`:
+
+| Class | At `f90548c88` | Verdict |
+|-------|---------------|---------|
+| `VoiceSharingContributionSinkTests` | 41/41 **pass** | My regressions — being resolved |
+| `VoiceSharingCollectorTests` | 38/38 **pass** | My regressions — being resolved |
+| `VoiceSharingRefusalDeletionTests` | 19/19 **pass** | My regressions — being resolved |
+| `VoiceSharingClockOrderingRegressionTests` | 3/4 (2 tests) | Genuinely pre-existing |
+| `VoiceSharingAccountModelTests` | 10/13 (9 tests) | Genuinely pre-existing |
+
+### Open, awaiting `spec`'s call
+
+15 controls in `VoiceSharingRefusalDeletionTests` / `VoiceSharingContributionSinkTests` seed their "refused" entry by corrupting audio **locally**, then assert it never serves and is purged. Under `2741a0ca` that premise is gone — these now serve and are retained. The purge machinery is still required for genuine *server* refusals. Not retargeting the fixtures without a ruling.
+
+### Resolution of the 15 controls (spec `84f7065a`, reviewer `c0303918`)
+
+Reseeded, **not retired** — the refusal half of each control was rewritten, the purge/barrier/crash
+mechanic each control exists for was left intact.
+
+| Control | How the refused entry is produced |
+|---------|-----------------------------------|
+| `test_aRecordCheckRejectionIsDeletedAtOnceByServing` | Driven: uploader → `422 integrity_mismatch` → `abandoned` |
+| `test_strictDiscoveryDeletesARefusedRecordCheckAndCoverageStaysKnown` | Driven |
+| `test_aFreshReconstructionDoesNotResurrectARefusedRecordCheck` | Driven |
+| `test_aNeighbouringValidEntryIsUntouchedByARefusalPurge` | Driven, one entry only |
+| `test_aFailedRemovalFailsClosedAndReconcilesOnReconstruction` | `decidedRejection` marker (removal is faulted, so a driven refusal never settles) |
+| `test_aRefusalPurgeFailureHoldsOnlyTheRefusedEntry` | `decidedRejection` marker, same reason |
+| `test_aCrashAfterTheIntentBeforeRemovalResumesOnTheNextPass` | `decidedRejection` marker, same reason |
+| `test_aBarrierFailureBeforeThePurgeMutationFailsClosed` | `decidedRejection` marker, same reason |
+
+New control `test_localCorruptionAloneDoesNotCreateADecidedRejection` is the negative half the
+reviewer asked for: a locally corrupted record now **serves**, is **not deleted**, and has **no**
+`publication.failed` marker. Nothing the client decides locally may delete or hold a recording.
+
+`driveServerRefusal` fails hard rather than skipping: a skip there would report green while proving
+nothing about the refusal. Two controls used it where the faulted remover prevented settlement; that
+surfaced as two silent skips, now replaced with the durable marker.
+
+### Collector controls (spec `2741a0ca`)
+
+The in-process FIFO cap and the aggregate sample budget are **retired as dropping gates** — pressure
+is counted and logged, work is retained, and the durable queue's record limit is the one admission
+gate. Four controls asserted the old bounds and are amended to the ruled behaviour.
+
+**TRADE-OFF, stated plainly:** retained in-memory work is no longer capped by `maxPendingSignals` or
+`maxAggregateRetainedSamples`. A blocked sink can grow the FIFO. The ledger (`aggregateAudioSamples`)
+and `overflowCount` are what an operator can see; there is no longer a bound that discards. This is a
+memory-pressure exposure accepted to satisfy "no in-process cap may discard a capture", and it should
+be watched on device.
+
+### Verified green (head, after all of the above)
+
+| Class | Result |
+|-------|--------|
+| `VoiceSharingUploadQueueTests` | 142/142 |
+| `VoiceSharingUploaderTests` | 43/43 |
+| `VoiceSharingContributionSinkTests` | 41/41 |
+| `VoiceSharingRefusalDeletionTests` | 20/20, no skips |
+| `VoiceSharingCollectorTests` | 38/38 |
+| `VoiceSharingClockOrderingRegressionTests` | pre-existing: same 2 tests, same 3 assertions as `f90548c88` |
+| `VoiceSharingAccountModelTests` | pre-existing: 9 tests, identical to `f90548c88` |

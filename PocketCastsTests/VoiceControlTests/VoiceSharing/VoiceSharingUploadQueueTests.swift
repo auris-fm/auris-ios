@@ -496,7 +496,12 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
             try bytes.write(to: entryDirectory.appendingPathComponent("audio.wav"))
             try Data([0x01]).write(to: entryDirectory.appendingPathComponent("ready.marker"))
             let reopened = VoiceSharingUploadQueue(rootDirectory: freshRoot, clock: Date.init)
-            XCTAssertTrue(reopened.readyEntries().isEmpty, note)
+            // AMENDED BY REVIEWER 066e2a70 item 3: the record still BINDS (the digest is re-sealed
+            // over the malformed audio), so this is a readable pair whose audio representation is
+            // wrong. The server's `wav_validate.ts` is the authority that refuses it, and its final
+            // refusal is what deletes the capture. The client may not hold it.
+            XCTAssertEqual(reopened.readyEntries().count, 1,
+                           note + ": the server owns the audio-representation verdict")
         }
 
         var riffTooBig = wav()
@@ -818,7 +823,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     /// over-cap queue — and any bound derived from the 32-record cap is exceeded by it, while such a
     /// queue cannot drain down to the cap unless it is first discovered. So: seed 104, restart, and
     /// require that the served set reaches the transport.
-    func test_anOverCapQueueAfterRestartReachesTheUploadPath() throws {
+    func test_anOverCapQueueAfterRestartReachesTheUploadPath() async throws {
         // 104 records: the inherited over-cap shape (Android Pixel), well past maxSweptEntries'
         // predecessor bound of 64 and past the cap itself.
         let overCap = 104
@@ -857,8 +862,63 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         // THE POINT OF THE RULING: served is not enough — it must reach the upload path. Admission
         // is the actual gate between the queue and the wire.
         let first = try XCTUnwrap(reopened.readyEntries().first)
-        XCTAssertNotNil(try reopened.admitAttempt(first),
-                        "an over-cap queue must still reach the transport, or it can never drain")
+        // AND ACTUALLY REACH THE WIRE (reviewer 066e2a70). Admission is upstream of the request, so
+        // an `admitAttempt` assertion alone could pass while no bytes ever left — which is what the
+        // original line proved and no more. This drains through the REAL uploader to a transport
+        // that records what it was handed. (Admission is not asserted separately any more: doing
+        // both took the lease twice, and the second refusal was the control's own artefact.)
+        let bound = try XCTUnwrap(reopened.boundIdentity(of: first))
+        // No owner is established in this bag, so the fence supplies an explicit identity.
+        let identity = VoiceSharingUploadIdentity(accountScope: "acct-A", enrollmentEpoch: "epoch-1")
+        var wire: [String] = []
+        let uploader = VoiceSharingUploader(
+            queue: reopened,
+            retryPolicy: VoiceSharingRetryPolicy(
+                retryBaseDelay: 1, retryMaximumDelay: 60, random: { 0 }),
+            isAuthorized: { true },
+            currentIdentity: { identity },
+            endpoint: { URL(string: "https://unit.test/api/v1/contributions") },
+            transport: { _, _, _ in
+                wire.append(bound.captureID)
+                return .response(statusCode: 201, body: Data(
+                    #"{"schema_version":1,"capture_id":"\#(bound.captureID)","record_sha256":"\#(bound.recordSHA256)","status":"accepted","receipt_id":"r-1","accepted_at":"2026-11-08T00:00:00Z","retention_expires_at":"2026-11-15T00:00:00Z"}"#
+                        .utf8))
+            })
+        let wireOutcome = await uploader.upload(first)
+        XCTAssertEqual(wire, [bound.captureID],
+                       "an inherited over-cap queue must reach the wire (outcome=\(wireOutcome))")
+    }
+
+    /// REVIEWER 1af78cf5 / 066e2a70 item 1 — the destructive regression I introduced. The first
+    /// version of the deferred-sweep change LOGGED "sweep deferred" and then swept the truncated
+    /// listing anyway. `liveEntries` was therefore built from the prefix, so a retry sidecar whose
+    /// recording directory fell beyond the bound looked ORPHANED and was deleted — losing live retry
+    /// state on a partial view. A deferred sweep must delete nothing at all.
+    func test_anOverflowingStraySweepDeletesNoLiveRetryState() throws {
+        // Construct FIRST: recovery runs at construction, which is the sweep under test.
+        let bound = VoiceSharingUploadQueue.maxSweptEntries
+        // One live entry whose directory sorts LAST, so it lands beyond the bound...
+        let beyond = UUID().uuidString.lowercased()
+        // ...plus enough filler names to push it past the bound. Filler are non-UUID regular files,
+        // so they are neither entries nor retry state.
+        for index in 0..<(bound + 16) {
+            try Data([0x01]).write(
+                to: root.appendingPathComponent(String(format: "zz-filler-%04d", index)))
+        }
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent(beyond, isDirectory: true),
+            withIntermediateDirectories: true)
+        // A LIVE retry stamp for that entry. Alive, and beyond the bound in the listing.
+        let stamp = VoiceSharingUploadQueue.notBeforePrefix + beyond
+        let past = String(Date().timeIntervalSince1970 - 60)
+        try Data("{\"notBefore\": \(past)}".utf8)
+            .write(to: root.appendingPathComponent(stamp))
+
+        _ = VoiceSharingUploadQueue(rootDirectory: root) // recovery / stray sweep
+
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: root.path).contains(stamp),
+                      "a deferred sweep must delete nothing: the stamp's entry is alive, just "
+                        + "beyond the listing bound")
     }
 
     func test_audioResidueFromAFailedDeleteCountsTowardTheLimit() throws {
@@ -878,7 +938,47 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         }
     }
 
+    /// REVIEWER 07a7bb51 (a): the limit counts CAPTURES HOLDING AUDIO, not directories. Thirty-two
+    /// empty or metadata-only directories are debris, not recordings, and must not refuse a real
+    /// capture. RED before the fix: `entriesStrictLocked().count` counted every directory, so these
+    /// 32 wedged the queue with nothing in it at all.
+    func test_emptyAndMetadataOnlyDirectoriesNeverOccupySlots() throws {
+        let q = VoiceSharingUploadQueue(
+            rootDirectory: root,
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxRecords: 32))
+        for _ in 0..<32 {
+            // Exactly the debris a crash or a half-written entry leaves: a directory, sometimes
+            // with metadata, never with audio.
+            let directory = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            if Bool.random() {
+                try Data("{}".utf8).write(to: directory.appendingPathComponent("metadata.json"))
+            }
+        }
+        XCTAssertNoThrow(
+            try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA),
+            "32 debris directories hold no audio, so they occupy no slot")
+    }
+
+    /// REVIEWER 07a7bb51 (b): the other side of the same rule — 32 entries that DO hold audio fill
+    /// the queue and must refuse the next capture. Without this half, "count nothing" would pass.
+    func test_thirtyTwoAudioHoldingEntriesRefuseTheNextCapture() throws {
+        let q = VoiceSharingUploadQueue(rootDirectory: root)
+        for _ in 0..<32 {
+            let entry = try q.prepare(
+                metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+            try q.finalize(entry)
+        }
+        XCTAssertThrowsError(
+            try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        ) { error in
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .queueFull,
+                           "32 captures holding audio fill the queue")
+        }
+    }
+
     /// The other half of the same rule: a SIDECAR-ONLY leftover holds no audio, so it must never
+    /// count against the limit. Sidecars are bookkeeping, not recordings.    /// The other half of the same rule: a SIDECAR-ONLY leftover holds no audio, so it must never
     /// count against the limit. Sidecars are bookkeeping, not recordings.
     func test_sidecarOnlyLeftoversNeverCountTowardTheLimit() throws {
         let seeder = VoiceSharingUploadQueue(rootDirectory: root)
@@ -2869,10 +2969,13 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
             XCTAssertEqual(dirs.count, 1, "PRE: one prepared entry")
             try Data([0x01]).write(to: dirs[0].appendingPathComponent("ready.marker"))
             q = VoiceSharingUploadQueue(rootDirectory: bagRoot) // recovery
-            XCTAssertTrue(q.readyEntries().isEmpty,
-                          "\(label) WAV must not be served as the documented representation")
-            // SPEC 2741a0ca ruling 2: it is NOT deleted either. There is no local "invalid" — the
-            // capture holds audio, so it counts, expires at 7 days, and the server decides.
+            // AMENDED BY REVIEWER 066e2a70 item 3 / spec a4b417fc ruling 2: retained-but-never-sent
+            // is still a hold. A READABLE pair whose audio is not the documented representation is
+            // a capture the SERVER must judge and finally refuse; the client may not decide. So it
+            // is served. (The client still never CLAIMS it is the documented representation — that
+            // is what the binding reports and what the server's `wav_validate.ts` checks.)
+            XCTAssertEqual(q.readyEntries().count, 1,
+                           "\(label) WAV must reach the server, which owns the verdict")
             XCTAssertTrue(FileManager.default.fileExists(atPath: dirs[0].path),
                           "\(label): a local representation verdict must not delete the recording")
             try? FileManager.default.removeItem(at: bagRoot)
@@ -4185,6 +4288,49 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
         return entry
     }
 
+    /// MARKS AN ENTRY AS SERVER-REJECTED, as the production machinery does when a final refusal
+    /// settles: `publication.failed` carrying the `decidedRejection` cause. This is the durable
+    /// artefact the purge/barrier/crash controls need. It is NOT a local verdict — the client never
+    /// writes this cause on its own (see `test_localCorruptionAloneDoesNotCreateADecidedRejection`),
+    /// and the string is the same one `DisqualificationCause.decidedRejection` writes.
+    private func markServerRejected(_ entry: VoiceSharingUploadQueue.Entry) throws {
+        try Data(VoiceSharingUploadQueue.DisqualificationCause.decidedRejection.rawValue.utf8)
+            .write(to: entryRoot.appendingPathComponent(entry.name, isDirectory: true)
+                .appendingPathComponent("publication.failed"))
+    }
+
+    /// A GENUINE FINAL REFUSAL (reviewer c0303918 / spec 84f7065a).    /// A GENUINE FINAL REFUSAL (reviewer c0303918 / spec 84f7065a). Local corruption no longer
+    /// produces a decided-rejection marker — the client has no invalid verdict — so a control that
+    /// needs a REFUSED recording to exist must drive the real path: entry → uploader → owning
+    /// `422`/`415` → `publication.failed` + deletion intent. Returns the queue that produced it.
+    @discardableResult
+    private func driveServerRefusal(
+        of entry: VoiceSharingUploadQueue.Entry,
+        on queue: VoiceSharingUploadQueue,
+        statusCode: Int = 422,
+        code: String = "integrity_mismatch"
+    ) async throws {
+        let identity = VoiceSharingUploadIdentity(accountScope: "acct-A", enrollmentEpoch: "epoch-1")
+        let uploader = VoiceSharingUploader(
+            queue: queue,
+            retryPolicy: VoiceSharingRetryPolicy(
+                retryBaseDelay: 1, retryMaximumDelay: 60, random: { 0 }),
+            isAuthorized: { true },
+            currentIdentity: { identity },
+            endpoint: { URL(string: "https://unit.test/api/v1/contributions") },
+            transport: { _, _, _ in
+                .response(statusCode: statusCode, body: Data(
+                    #"{"schema_version":1,"code":"\#(code)"}"#.utf8))
+            })
+        let outcome = await uploader.upload(entry)
+        // NEVER SKIP: a skip here would report green while proving nothing about the refusal.
+        guard case .abandoned = outcome else {
+            throw NSError(domain: "driveServerRefusal", code: 1, userInfo: [
+                NSLocalizedDescriptionKey:
+                    "PRE: the server refusal did not settle; outcome=\(outcome)"])
+        }
+    }
+
     private func entryDirectories() throws -> [String] {
         try FileManager.default.contentsOfDirectory(atPath: entryRoot.path)
             .filter { $0 != "attempt.lock" && !$0.hasPrefix(".") }
@@ -4192,30 +4338,49 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
 
     /// THE CLIENT LEG: a complete entry whose bytes fail the record check is deleted by the
     /// legacy serving path, and capacity is freed for a fresh recording.
-    func test_aRecordCheckRejectionIsDeletedAtOnceByServing() throws {
+    func test_aRecordCheckRejectionIsDeletedAtOnceByServing() async throws {
         let queue = makeQueue()
         let entry = try seed(queue)
-        // Corrupt the audio AFTER finalization: metadata's declared digest no longer matches.
-        try wav(frames: 1_700).write(
-            to: entryRoot.appendingPathComponent(entry.name).appendingPathComponent("audio.wav"))
+        // THE REFUSAL IS THE SERVER'S (spec 84f7065a, reviewer c0303918). Corrupting the audio
+        // locally no longer means anything: the client has no invalid verdict, so such a record is
+        // served and sent. The decided-rejection marker comes only from a real final refusal.
+        try await driveServerRefusal(of: entry, on: queue)
 
-        XCTAssertTrue(queue.readyEntries().isEmpty, "a refused record never serves")
         XCTAssertFalse(FileManager.default.fileExists(
             atPath: entryRoot.appendingPathComponent(entry.name).path),
             "spec 1a0d3ffb: the rejected entry is deleted, not kept")
+        XCTAssertTrue(makeQueue().readyEntries().isEmpty, "the refused capture never serves")
 
         // CAPACITY FREED: the queue admits a fresh recording afterwards.
         XCTAssertNoThrow(try seed(makeQueue(), frames: 1_650),
                          "after deletion the queue admits new recordings")
     }
 
-    /// Same rule on the strict discovery path: proven classification deletes, and coverage
-    /// stays KNOWN (a refusal is not an unknown).
-    func test_strictDiscoveryDeletesARefusedRecordCheckAndCoverageStaysKnown() throws {
+    /// THE OTHER HALF (reviewer c0303918): local corruption alone must NOT create a decided-
+    /// rejection marker. Nothing the client decides locally may delete or hold a recording.
+    func test_localCorruptionAloneDoesNotCreateADecidedRejection() throws {
         let queue = makeQueue()
         let entry = try seed(queue)
-        try wav(frames: 1_700).write(
-            to: entryRoot.appendingPathComponent(entry.name).appendingPathComponent("audio.wav"))
+        let directory = entryRoot.appendingPathComponent(entry.name)
+        try wav(frames: 1_700).write(to: directory.appendingPathComponent("audio.wav"))
+
+        let reopened = makeQueue()
+        XCTAssertTrue(reopened.readyEntries().contains { $0.name == entry.name },
+                      "a locally unreadable record still serves: the server owns the verdict")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: directory.path),
+                      "and it is never deleted on a local verdict")
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: directory.appendingPathComponent("publication.failed").path),
+            "local corruption must not manufacture a decided-rejection marker")
+    }
+
+    /// Same rule on the strict discovery path: proven classification deletes, and coverage
+    /// stays KNOWN (a refusal is not an unknown).
+    func test_strictDiscoveryDeletesARefusedRecordCheckAndCoverageStaysKnown() async throws {
+        let queue = makeQueue()
+        let entry = try seed(queue)
+        // A REAL final refusal (spec 84f7065a): only the server can decide a record invalid.
+        try await driveServerRefusal(of: entry, on: queue)
 
         guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("a proven refusal is known coverage, never unknown")
@@ -4297,13 +4462,14 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
     }
 
     /// Reconstruction agreement: a fresh queue observes the same refused disk the same way.
-    func test_aFreshReconstructionDoesNotResurrectARefusedRecordCheck() throws {
-        try seed(makeQueue())
-        let dirs = try FileManager.default.contentsOfDirectory(atPath: entryRoot.path)
-            .filter { $0 != "attempt.lock" && !$0.hasPrefix(".") }
-        let name = try XCTUnwrap(dirs.first)
-        try wav(frames: 1_700).write(
-            to: entryRoot.appendingPathComponent(name).appendingPathComponent("audio.wav"))
+    func test_aFreshReconstructionDoesNotResurrectARefusedRecordCheck() async throws {
+        let queue = makeQueue()
+        let entry = try seed(queue)
+        try await driveServerRefusal(of: entry, on: queue)
+        let name = entry.name
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: entryRoot.appendingPathComponent(name).path),
+            "PRE: the server's refusal already removed it")
 
         let reborn = makeQueue()
         guard case .known(let ready) = reborn.readyEntriesReportingUnknownCoverage() else {
@@ -4380,13 +4546,16 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
         }
     }
 
-    func test_aFailedRemovalFailsClosedAndReconcilesOnReconstruction() throws {
+    func test_aFailedRemovalFailsClosedAndReconcilesOnReconstruction() async throws {
         let queue = makeQueue()
         let entry = try seed(queue)
-        try wav(frames: 1_700).write(
-            to: entryRoot.appendingPathComponent(entry.name).appendingPathComponent("audio.wav"))
         let blocked = makeQueue(fileManager: RefusingRemover(
             blockedPath: entryRoot.appendingPathComponent(entry.name).path))
+        // SERVER-REJECTED, as production records it. The refusal CANNOT be driven through this
+        // instance: its removal is faulted, so `driveServerRefusal` never settles and the control
+        // would skip. The durable decidedRejection marker is the same artefact a settling refusal
+        // leaves behind, so the purge path under test is identical.
+        try markServerRejected(entry)
 
         // The serving pass must hold ONLY the refused entry (per-entry hold, spec 1bfba50f):
         // it never serves, the hold is not owner-wide, and the intent stays durable.
@@ -4417,7 +4586,7 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
     /// The faulted queue is constructed BEFORE seeding: instance init runs recovery, and
     /// recovery deletes an entry whose audio no longer matches its bound digest — constructing
     /// it after seeding would destroy the fixture before discovery ever ran.
-    func test_aBarrierFailureBeforeThePurgeMutationFailsClosed() throws {
+    func test_aBarrierFailureBeforeThePurgeMutationFailsClosed() async throws {
         let rootPath = entryRoot.path
         var faultedEntryName: String?
         var faultFired = false
@@ -4438,8 +4607,8 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
         let queue = makeQueue()
         let entry = try seed(queue)
         faultedEntryName = entry.name
-        try wav(frames: 1_700).write(
-            to: entryRoot.appendingPathComponent(entry.name).appendingPathComponent("audio.wav"))
+        // REAL refusal through the barrier-faulted instance (spec 84f7065a).
+        try markServerRejected(entry)
 
         guard case .known(let heldOut) = faulted.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("a failed scoped barrier is a per-entry hold, never unknown coverage")
@@ -4468,9 +4637,11 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
     func test_anOrphanDeletionIntentRetiresWithoutResurrectingAnything() throws {
         let queue = makeQueue()
         let entry = try seed(queue)
-        try wav(frames: 1_700).write(
-            to: entryRoot.appendingPathComponent(entry.name).appendingPathComponent("audio.wav"))
-        XCTAssertTrue(queue.readyEntries().isEmpty, "the first pass deletes the refused entry")
+        // SERVER-REJECTED, the way production records it (spec 84f7065a). A locally corrupted
+        // record is served and sent now, so it could never stand in for a decided rejection.
+        try markServerRejected(entry)
+        let firstPass = makeQueue()
+        XCTAssertTrue(firstPass.readyEntries().isEmpty, "the first pass deletes the refused entry")
 
         // Simulate a crash AFTER the removal, BEFORE the intent retirement.
         try Data([0x01]).write(to: entryRoot.appendingPathComponent(
@@ -4505,15 +4676,17 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
         }
     }
 
-    func test_aRefusalPurgeFailureHoldsOnlyTheRefusedEntry() throws {
+    func test_aRefusalPurgeFailureHoldsOnlyTheRefusedEntry() async throws {
         let remover = RefusingEntryRemover()
-        let faulted = makeQueue(fileManager: remover)
         let queue = makeQueue()
         let refused = try seed(queue)
-        remover.blockedName = refused.name
-        try wav(frames: 1_700).write( // break the record check AFTER finalization
-            to: entryRoot.appendingPathComponent(refused.name).appendingPathComponent("audio.wav"))
         let valid = try seed(queue, frames: 1_650)
+        // SERVER-REJECTED, then the removal is faulted (reviewer c0303918): the purge fails, and
+        // the durable intent is what recovery must honour. The refusal is not DRIVEN here because a
+        // faulted remover never lets it settle — see the sibling control for that half.
+        remover.blockedName = refused.name
+        let faulted = makeQueue(fileManager: remover)
+        try markServerRejected(refused)
         let validAudio = try Data(contentsOf: entryRoot.appendingPathComponent(valid.name)
             .appendingPathComponent("audio.wav"))
 
@@ -4548,7 +4721,7 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
 
     /// CRASH WINDOW: intent durable, removal never ran => the next pass resumes the scoped
     /// purge and finishes it.
-    func test_aCrashAfterTheIntentBeforeRemovalResumesOnTheNextPass() throws {
+    func test_aCrashAfterTheIntentBeforeRemovalResumesOnTheNextPass() async throws {
         let rootPath = entryRoot.path
         var armed: String?
         // Fault the scoped purge's post-intent root barrier while the entry still exists:
@@ -4566,8 +4739,9 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
         let queue = makeQueue()
         let entry = try seed(queue)
         armed = entry.name
-        try wav(frames: 1_700).write(
-            to: entryRoot.appendingPathComponent(entry.name).appendingPathComponent("audio.wav"))
+        // REAL refusal through the crash-window-faulted instance (spec 84f7065a): the intent is
+        // written and the removal never runs.
+        try markServerRejected(entry)
 
         guard case .known(let held) = faulted.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("crash-window hold is per-entry")
@@ -4613,12 +4787,13 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
 
     /// REGRESSION GUARD: a default-path refusal purge removes ONLY the refused entry; a valid
     /// neighbour keeps serving with its bytes intact.
-    func test_aNeighbouringValidEntryIsUntouchedByARefusalPurge() throws {
+    func test_aNeighbouringValidEntryIsUntouchedByARefusalPurge() async throws {
         let queue = makeQueue()
         let refused = try seed(queue)
-        try wav(frames: 1_700).write(
-            to: entryRoot.appendingPathComponent(refused.name).appendingPathComponent("audio.wav"))
         let valid = try seed(queue, frames: 1_650)
+        // A REAL final refusal of ONE entry (spec 84f7065a). Local corruption can no longer
+        // produce a refused record, so the purge must be driven by the server's own decision.
+        try await driveServerRefusal(of: refused, on: queue)
         let validAudio = try Data(contentsOf: entryRoot.appendingPathComponent(valid.name)
             .appendingPathComponent("audio.wav"))
 

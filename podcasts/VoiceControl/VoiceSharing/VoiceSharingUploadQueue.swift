@@ -936,6 +936,12 @@ final class VoiceSharingUploadQueue {
     func hasAdmissionAllowance() -> Bool {
         serialQueue.sync {
             guard (try? establishStoragePolicyLocked()) != nil else { return false }
+            // WHICH INTENT IT IS DECIDES (spec 84f7065a item 2). A sharing-off / withdrawal intent
+            // whose state is UNKNOWN refuses admission, because the COLLECT gate is "sharing is
+            // proven on" and an unreadable withdrawal marker proves nothing. A retry or attempt
+            // intent says nothing about whether there is room, so it must never refuse here — and
+            // `retryHoldLocked` is deliberately NOT consulted below.
+            guard !revocationHoldLocked else { return false }
             // AN UNCOUNTABLE ROOT REFUSES ADMISSION (spec 2741a0ca ruling). The gate is "fewer than
             // 32 audio records ON DISK", and a count that could not be taken cannot satisfy it. So
             // this refuses — but ONLY this: the refusal is logged with `count_unknown`, it is never
@@ -958,13 +964,16 @@ final class VoiceSharingUploadQueue {
         }
     }
 
-    /// HOW MANY ENTRIES ARE ON DISK, counted fresh (spec a3ef694f).
+    /// HOW MANY CAPTURES HOLDING AUDIO ARE ON DISK, counted fresh (spec a3ef694f, 746aa9c2).
     ///
-    /// A DISQUALIFIED ENTRY STILL OCCUPIES A SLOT. It is retained precisely because it has not been
-    /// removed yet, so counting only servable entries would let a queue of retained failures admit
-    /// past its limit — the limit is about how many directories this queue may hold, and a
-    /// disqualified one is one of them. (RED-PROOF: using `entriesStrictLocked()` here admitted the
-    /// 33rd entry while holding 32, one of them disqualified.)
+    /// A DISQUALIFIED CAPTURE STILL OCCUPIES A SLOT *while it still holds audio* (reviewer
+    /// 07a7bb51). It is retained precisely because it has not been removed yet, so counting only
+    /// servable entries would let a queue of retained failures admit past its limit.
+    ///
+    /// BUT A DIRECTORY IS NOT A CAPTURE. Counting directories (the first version of this) let 32
+    /// empty or metadata-only debris directories refuse a real recording — a wedge built out of
+    /// nothing, since no audio existed to drain. The limit is "fewer than 32 audio records on
+    /// disk", so the identity counted is the capture ID and the predicate is "holds audio".
     ///
     /// Counting on disk rather than in memory is what keeps the limit honest across restarts and
     /// removals. Throws when the root cannot be listed — the caller decides whether that is a
@@ -991,8 +1000,25 @@ final class VoiceSharingUploadQueue {
     /// empty audio file is still audio the server may want to refuse — the count is about
     /// occupancy, and the server owns the verdict on the bytes.
     private func entryHoldsAudioLocked(_ entry: Entry) -> Bool {
-        Self.statKind(of: entryDirectoryLocked(for: entry).appendingPathComponent(Self.audioName))
-            == .present
+        switch audioPresenceLocked(entry) {
+        case .present, .unknown: return true
+        case .absent: return false
+        }
+    }
+
+    /// ABSENT vs UNKNOWN for a capture's audio (reviewer 066e2a70 item 4). `fileExists`-style
+    /// predicates collapse a permission fault into "absent", which made the count UNDER-REPORT an
+    /// audio file it simply could not stat — an unreadable queue reading as empty, the misreading
+    /// this whole audit exists to remove. Unknown is treated as HOLDING audio: it may refuse a new
+    /// admission (the count is not provably under 32), and it never affects any other entry.
+    private enum AudioPresence { case present, absent, unknown }
+    private func audioPresenceLocked(_ entry: Entry) -> AudioPresence {
+        switch Self.statKind(of: entryDirectoryLocked(for: entry).appendingPathComponent(Self.audioName))
+        {
+        case .present: return .present
+        case .absent: return .absent
+        case .failure: return .unknown
+        }
     }
 
     /// Audio left behind by a failed delete, counted by SUFFIX, not by directory: a trailing entry
@@ -1570,10 +1596,14 @@ final class VoiceSharingUploadQueue {
                 FileLog.shared.forceFlush()
                 throw PrepareError.accountingUnavailable
             }
-            guard !retryHoldLocked else {
-                FileLog.shared.addMessage("[VoiceSharing] admit refusal reason=retry-hold")
+            // AN UNKNOWN RETRY-STATE FACT IS NOT A GATE ON AN ATTEMPT (spec d720ab6c, reviewer
+            // 066e2a70 item 2). This threw, and it is the path the UPLOADER actually calls, so the
+            // gate survived here even after beginAttempt was corrected. Unknown retry bookkeeping
+            // means DUE NOW; it may only refuse new admissions.
+            if retryHoldLocked {
+                FileLog.shared.addMessage(
+                    "[VoiceSharing] admit entry=\(entry.name) reason=retry-state-unknown disposition=due-now")
                 FileLog.shared.forceFlush()
-                throw PrepareError.accountingUnavailable
             }
             guard entry.root == rootDirectory,
                 UUID(uuidString: entry.name) != nil,
@@ -2675,7 +2705,19 @@ final class VoiceSharingUploadQueue {
         // recording: an `.incomplete` entry has no audio and no marker yet, so there is nothing to
         // send. Only `.unready` (audio present, record unusable) is the case the ruling frees.
         guard isServedEntryLocked(at: entry) else { return false }
-        return admitCountPermits(try attemptCountLocked(for: entry))
+        // AN UNREADABLE COUNT IS NOT A REASON TO HOLD (reviewer 066e2a70 item 2). This call used to
+        // THROW, so a malformed or unreadable `attempts.json` stopped the upload before the
+        // count-write fallback in `admitAttempt` could ever run — the fallback repaired the write
+        // path while the read path still refused. The count spaces retries; it is not a gate.
+        let count: Int
+        do { count = try attemptCountLocked(for: entry) } catch {
+            FileLog.shared.addMessage(
+                "[VoiceSharing] attempt count unreadable entry=\(entry.name) "
+                    + "reason=\(type(of: error)) disposition=due-now")
+            FileLog.shared.forceFlush()
+            return true
+        }
+        return admitCountPermits(count)
     }
 
     /// Writes the attempt record and confirms its durability. Returns only after the record and its
@@ -4056,9 +4098,15 @@ final class VoiceSharingUploadQueue {
         // rather than the audio's representability.
         switch boundFailureLocked(at: entry) {
         case .digestMismatch, .audioDigestMismatch, .malformedJSON, .duplicateKey,
-             .nonFiniteNumber, .missingField, .unknownField, .invalidField:
+             .nonFiniteNumber, .missingField, .unknownField, .invalidField,
+             // REVIEWER 066e2a70 item 3, ruling a4b417fc ruling 2: a READABLE pair whose audio is
+             // malformed, wrongly sized or not the representation claimed is still a capture the
+             // server must judge. The first version of this split excluded these, which was a local
+             // invalid verdict — the exact class of gate the ruling removes. Server's final refusal
+             // deletes it; only an entry with NO readable pair is held.
+             .audioSizeMismatch, .audioSampleCountMismatch, .invalidAudio:
             return true
-        case .audioSizeMismatch, .audioSampleCountMismatch, .invalidAudio, .none:
+        case .none:
             return false
         }
     }
@@ -4213,13 +4261,26 @@ final class VoiceSharingUploadQueue {
         // stays queue-owned. Discovery here is BOUNDED too: construction must not eagerly
         // materialise an oversized root just because recovery tolerates failures. On overflow we
         // skip cleanup (fail-closed) rather than enumerate past the bound.
-        if let listed = try? listDirectoryBounded(
-            rootDirectory, [.isDirectoryKey], Self.maxSweptEntries) {
-            if listed.overflowed {
-                FileLog.shared.addMessage(
-                    "[VoiceSharing] sweep deferred reason=over-bound pass=stray-orphans entries=\(listed.urls.count)")
-                FileLog.shared.forceFlush()
-            }
+        // A DEFERRED SWEEP MUST PERFORM NO DELETION (reviewer 1af78cf5 / 066e2a70 item 1). The
+        // first version of this logged "deferred" and then swept the TRUNCATED list anyway, which
+        // is worse than not logging: `liveEntries` was built from the prefix, so a retry sidecar
+        // whose recording directory sat beyond the bound looked orphaned and was DELETED. Removing
+        // live retry state on a partial view is exactly the destructive gate this audit exists to
+        // remove, so overflow now returns before anything is removed.
+        let listedSweep: (urls: [URL], overflowed: Bool)
+        do {
+            listedSweep = try listDirectoryBounded(
+                rootDirectory, [.isDirectoryKey], Self.maxSweptEntries)
+        } catch {
+            listedSweep = ([], true) // unlistable: nothing may be deleted either
+        }
+        if listedSweep.overflowed {
+            FileLog.shared.addMessage(
+                "[VoiceSharing] sweep deferred reason=over-bound pass=stray-orphans "
+                    + "entries=\(listedSweep.urls.count) removed=0")
+            FileLog.shared.forceFlush()
+        } else {
+            let listed = listedSweep
             // WHICH ENTRIES STILL EXIST, established once: an attempt sidecar is only meaningful
             // while its recording does. Orphans are what is left after an entry was removed, and
             // they were previously kept forever — the owner's queue showed nine of them with no
@@ -4338,7 +4399,7 @@ final class VoiceSharingUploadQueue {
                         + "names=\(orphanSidecarNames.prefix(8).joined(separator: ","))")
                 FileLog.shared.forceFlush()
             }
-        }
+        } // end of the non-overflowed sweep: a deferred sweep deletes nothing
         // Settlement records are recovery state, not debris: reconcile-retire them here. Runs
         // ALREADY on the serial queue, so the in-place variant is used — the public entry point
         // takes the queue itself and would trap (deadlock) called from inside it.
