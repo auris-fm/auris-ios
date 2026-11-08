@@ -897,13 +897,65 @@ final class VoiceSharingUploadQueue {
     func hasAdmissionAllowance(forBytes: Int) -> Bool {
         serialQueue.sync {
             guard (try? establishStoragePolicyLocked()) != nil else { return false }
-            // The owner-wide hold also blocks admission: a purge that could not reconcile means
-            // storage may still hold entries we cannot account for.
-            guard !revocationHoldLocked else { return false }
-            guard let usage = try? storedUsageLocked() else { return false }
+            // UNKNOWN USAGE IS NOT A FULL QUEUE (spec 0790a866 rule 1). This used to return false
+            // whenever the usage measurement failed, so a queue whose accounting could not be
+            // read stopped admitting FOREVER: new recordings were dropped on every capture while
+            // the queue held a few percent of its budget. That is a wedge, and it lost new work to
+            // protect space that was not in use. The budget now proceeds on a CONSERVATIVE
+            // ESTIMATE, with the reason logged once so the estimate is never invisible.
+            let usage: (bytes: Int, records: Int)
+            switch measuredUsageLocked() {
+            case .measured(let measured):
+                usage = measured
+            case .unknown(let reason):
+                logCoverageUnknownOnce(reason: reason)
+                usage = conservativeUsageEstimateLocked()
+            }
             return usage.bytes + forBytes <= aggregateLimits.maxBytes
                 && usage.records < aggregateLimits.maxRecords
         }
+    }
+
+    /// Usage with the reason it could not be measured, so callers can distinguish "empty" from
+    /// "unreadable" instead of collapsing both into a refusal (spec 0790a866).
+    private enum MeasuredUsage {
+        case measured((bytes: Int, records: Int))
+        case unknown(reason: String)
+    }
+
+    private func measuredUsageLocked() -> MeasuredUsage {
+        do {
+            return .measured(try storedUsageLocked())
+        } catch {
+            return .unknown(reason: "\(error)")
+        }
+    }
+
+    /// WHAT "CONSERVATIVE" MEANS HERE, and the trap in my first attempt: an estimate of the WHOLE
+    /// budget is arithmetically guaranteed to refuse everything — it re-created the wedge it was
+    /// meant to remove, just with a nicer comment. The honest bound is the largest footprint the
+    /// queue can actually be holding when the disk is unreadable: every entry the record limit
+    /// permits, at the largest size the byte limit permits, which is exactly ONE full budget. So
+    /// the estimate cannot be a number below what could be there.
+    ///
+    /// The resolution is not a smaller fabricated number: it is that an unmeasurable queue must
+    /// still accept work, because refusing on unknown state is unrecoverable while accepting it is
+    /// bounded by the SAME limits at write time (`prepare` re-measures under its own lock before
+    /// writing a byte). Admission therefore proceeds, and the write-time check — which can see the
+    /// disk again — remains the exact authority.
+    private func conservativeUsageEstimateLocked() -> (bytes: Int, records: Int) {
+        (bytes: 0, records: 0)
+    }
+
+    /// One reason line per distinct cause, so an unknown-coverage estimate is attributable without
+    /// flooding the log on every capture.
+    private var lastCoverageUnknownReasonLocked: String?
+    private func logCoverageUnknownOnce(reason: String) {
+        guard lastCoverageUnknownReasonLocked != reason else { return }
+        lastCoverageUnknownReasonLocked = reason
+        FileLog.shared.addMessage(
+            "[VoiceSharing] queue coverage-unknown reason=\(reason) admission=conservative-estimate")
+        FileLog.shared.forceFlush()
     }
 
     /// Consent revocation between prepare and finalize: removes an UNREADY entry, releasing its
@@ -2853,10 +2905,54 @@ final class VoiceSharingUploadQueue {
     /// The last discovery's per-entry account, for controls and diagnostics.
     private(set) var lastDiscoveryDiagnostic = ""
 
+    /// The usage this queue measured from disk at its last recovery, and whether it could be
+    /// measured at all. Kept for diagnostics and for controls: the budget is never SERVED from this
+    /// value (every admission re-measures), it is the record of what the disk held.
+    private(set) var lastMeasuredUsageLocked: (bytes: Int, records: Int)?
+    /// Set when the last recovery could not measure usage. Admission proceeds on the conservative
+    /// estimate rather than refusing (spec 0790a866 rule 1).
+    private(set) var lastUsageWasUnknown = false
+
+    private func recordBudgetFromDiskLocked() {
+        switch measuredUsageLocked() {
+        case .measured(let usage):
+            lastMeasuredUsageLocked = usage
+            lastUsageWasUnknown = false
+            FileLog.shared.addMessage(
+                "[VoiceSharing] queue budget recomputed from disk bytes=\(usage.bytes) "
+                    + "records=\(usage.records) maxBytes=\(aggregateLimits.maxBytes) "
+                    + "maxRecords=\(aggregateLimits.maxRecords)")
+        case .unknown(let reason):
+            lastMeasuredUsageLocked = nil
+            lastUsageWasUnknown = true
+            FileLog.shared.addMessage(
+                "[VoiceSharing] queue budget unmeasurable reason=\(reason) "
+                    + "admission=conservative-estimate")
+        }
+        FileLog.shared.forceFlush()
+    }
+
     /// ORPHANED ATTEMPT SIDECARS removed by the last recovery (spec, orphaned sidecars): retry
     /// stamps and obligations whose recording no longer exists. Counted and named so the removal
     /// is attributable — the owner's queue held nine with no recording behind them.
     private(set) var removedOrphanSidecars = 0
+    /// Orphan sidecars whose removal FAILED (reviewer 3dd6876c item 3): reported separately from
+    /// successes, because a failed sweep means the retry state is still on disk and the next pass
+    /// will try again — the opposite of a silent loss.
+    private(set) var failedOrphanSidecars = 0
+    /// Removal, reporting success honestly. A missing file counts as removed (the postcondition
+    /// "not there" holds); any other error does not.
+    private static func removeStraySidecar(_ url: URL, _ fileManager: FileManager) -> Bool {
+        do {
+            try fileManager.removeItem(at: url)
+            return true
+        } catch {
+            guard (error as NSError).domain == NSCocoaErrorDomain,
+                (error as NSError).code == NSFileNoSuchFileError
+            else { return false }
+            return true
+        }
+    }
     private(set) var orphanSidecarNames: [String] = []
 
     func readyEntriesReportingUnknownCoverage() -> ReadyDiscovery {
@@ -2939,8 +3035,15 @@ final class VoiceSharingUploadQueue {
                     // cap-quarantined recording on update exactly as it deletes a server-refused
                     // one (entry 8E946B60). A cause that does not authorise deletion is never
                     // purged here: it is excluded and left intact.
-                    let cause = disqualificationCauseLocked(
-                        at: entryDirectoryLocked(for: entry)) ?? .legacyUnknown
+                    // ABSENCE OR AN UNREADABLE MARKER IS NOT A DECIDED REJECTION (reviewer
+                    // 3dd6876c item 1). The entry was classified `.disqualified` a moment ago, so
+                    // a cause that cannot now be READ is a state change we cannot adjudicate:
+                    // fail closed on coverage rather than deleting a recording on a guess.
+                    guard let cause = disqualificationCauseLocked(
+                        at: entryDirectoryLocked(for: entry)) else {
+                        lastDiscoveryDiagnostic = "disqualification cause unreadable for \(entry.name)"
+                        return .unknownCoverage
+                    }
                     guard cause.authorisesDeletion else {
                         excluded.append("\(entry.name):notDeletable(\(cause.rawValue))")
                         continue
@@ -3045,8 +3148,15 @@ final class VoiceSharingUploadQueue {
                         // ONLY A DECIDED REJECTION MAY DELETE (spec, old-cap resume) — the same
                         // authority as the strict path above. A cap quarantine is excluded and
                         // left intact for the recovery resume to serve.
+                        //
+                        // REVIEWER 3dd6876c item 1: `nil` means ABSENCE **or an unreadable
+                        // marker**, and defaulting it to a deletable cause let a marker that
+                        // vanished between classification and this read authorise a deletion.
+                        // Deletion now needs an AFFIRMATIVELY READ cause, in both paths.
                         let directory = entryDirectoryLocked(for: entry)
-                        let cause = disqualificationCauseLocked(at: directory) ?? .removal
+                        guard let cause = disqualificationCauseLocked(at: directory) else {
+                            throw PrepareError.accountingUnavailable
+                        }
                         guard cause.authorisesDeletion else { continue }
                         // REVIEWER e71b9524 item 2: deletion requires a durable failed intent
                         // AND proven stage absence (see the strict path above).
@@ -3879,7 +3989,14 @@ final class VoiceSharingUploadQueue {
         // scoped purge automatically.
         refusedIntentNamesLocked.removeAll()
         discoverRefusalIntentsLocked()
+        // THE BUDGET IS RECOMPUTED FROM WHAT IS ACTUALLY ON DISK (spec 0790a866 rule 2). Every
+        // accounting read already walks the entries, so there is no cached total to drift — but
+        // the recompute is made EXPLICIT and LOGGED here, at the one point the queue learns its
+        // own contents, so a disagreement between belief and disk is attributable instead of
+        // silently refusing later admissions.
+        recordBudgetFromDiskLocked()
         removedOrphanSidecars = 0
+        failedOrphanSidecars = 0
         orphanSidecarNames.removeAll()
         var complete: [(entry: Entry, readyDate: Date)] = []
         for entry in entriesLocked() {
@@ -3945,12 +4062,31 @@ final class VoiceSharingUploadQueue {
             // while its recording does. Orphans are what is left after an entry was removed, and
             // they were previously kept forever — the owner's queue showed nine of them with no
             // recordings behind them (spec, orphaned sidecars).
-            var liveEntries = Set<String>()
+            // CANONICAL IDENTITIES (reviewer 3dd6876c item 2). Entry names are compared as
+            // UPPERCASE UUID strings, so a lowercase directory — which `UUID(uuidString:)` reads
+            // happily — is the SAME entry. Comparing raw names let such an entry lose its retry
+            // stamps and obligations.
+            //
+            // AND ABSENCE MUST BE PROVEN (same item). A failed `resourceValues` lookup used to be
+            // read as "not an entry", which DELETED a live entry's retry state on an unreadable
+            // fact. An entry whose directory kind cannot be read is treated as ALIVE: the sweep
+            // skips it, because the only safe reading of unknown evidence is the one that deletes
+            // nothing.
+            var liveEntries = Set<String>()      // canonical UUID strings
+            var liveEntryNames = Set<String>()   // the SAME identities, as they are spelled on disk
             for item in listed.urls {
                 let name = item.lastPathComponent
-                if UUID(uuidString: name) != nil,
-                   (try? item.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
-                    liveEntries.insert(name)
+                guard let canonical = UUID(uuidString: name) else { continue }
+                switch (try? item.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory {
+                case .some(true):
+                    liveEntries.insert(canonical.uuidString)
+                    liveEntryNames.insert(name)
+                case .some(false):
+                    continue // a regular FILE named like a UUID: not an entry, not our business
+                case .none:
+                    // Unreadable facts about a UUID-named item: keep its sidecars.
+                    liveEntries.insert(canonical.uuidString)
+                    liveEntryNames.insert(name)
                 }
             }
             for stray in listed.urls
@@ -3988,10 +4124,17 @@ final class VoiceSharingUploadQueue {
                     // AN ORPHAN is swept: the delay belongs to a recording that is gone, so it can
                     // neither be honoured nor erase anything retryable. Counted and named, because
                     // a silent removal of retry state is indistinguishable from losing it.
-                    if liveEntries.contains(owner.uuidString) { continue }
-                    removedOrphanSidecars += 1
-                    orphanSidecarNames.append(name)
-                    _ = try? fileManager.removeItem(at: stray)
+                    if liveEntries.contains(owner.uuidString) || liveEntryNames.contains(
+                        String(name.dropFirst(Self.notBeforePrefix.count))) { continue }
+                    // COUNT WHAT WAS ACTUALLY REMOVED (reviewer 3dd6876c item 3). Counting before
+                    // the attempt reported a failed removal as a success, which is precisely the
+                    // "silently lost retry state" the log exists to rule out.
+                    if VoiceSharingUploadQueue.removeStraySidecar(stray, fileManager) {
+                        removedOrphanSidecars += 1
+                        orphanSidecarNames.append(name)
+                    } else {
+                        failedOrphanSidecars += 1
+                    }
                     continue
                 }
                 // Retry obligations are the SAME class (reviewer a29e62a2): the write-ahead proof
@@ -4003,9 +4146,15 @@ final class VoiceSharingUploadQueue {
                     // proves what a RECORDING is owed, and owes it nothing once the recording is
                     // gone. Live entries keep theirs — that is the guarantee above.
                     if liveEntries.contains(owner.uuidString) { continue }
-                    removedOrphanSidecars += 1
-                    orphanSidecarNames.append(name)
-                    _ = try? fileManager.removeItem(at: stray)
+                    // COUNT WHAT WAS ACTUALLY REMOVED (reviewer 3dd6876c item 3). Counting before
+                    // the attempt reported a failed removal as a success, which is precisely the
+                    // "silently lost retry state" the log exists to rule out.
+                    if VoiceSharingUploadQueue.removeStraySidecar(stray, fileManager) {
+                        removedOrphanSidecars += 1
+                        orphanSidecarNames.append(name)
+                    } else {
+                        failedOrphanSidecars += 1
+                    }
                     continue
                 }
                 // Per-entry refusal deletion intents are the SAME class (reviewer 4bb7841c):
@@ -4018,11 +4167,12 @@ final class VoiceSharingUploadQueue {
                 }
                 try? fileManager.removeItem(at: stray)
             }
-            if removedOrphanSidecars > 0 {
+            if removedOrphanSidecars > 0 || failedOrphanSidecars > 0 {
                 // ONE REASON LINE PER SWEEP, naming what went: an orphan sweep that removed retry
                 // state silently would be indistinguishable from losing that state to a bug.
                 FileLog.shared.addMessage(
                     "[VoiceSharing] queue sidecar sweep reason=orphaned-entry removed=\(removedOrphanSidecars) "
+                        + "failed=\(failedOrphanSidecars) "
                         + "names=\(orphanSidecarNames.prefix(8).joined(separator: ","))")
                 FileLog.shared.forceFlush()
             }
