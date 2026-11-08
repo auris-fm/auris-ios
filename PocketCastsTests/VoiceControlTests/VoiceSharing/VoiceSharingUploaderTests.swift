@@ -734,14 +734,19 @@ final class VoiceSharingUploaderTests: XCTestCase {
         XCTAssertThrowsError(try failing.applyAttemptResult(
             entry, lease: admitted.lease, outcome: .retryableFailure,
             retryNotBefore: Date().addingTimeInterval(60)))
-        // AMENDED BY SPEC d720ab6c / reviewer 4f98b831: the hold that survives restart is an
-        // ADMISSION hold. It no longer withholds SERVING — that was the queue-wide gate that kept
-        // an unreadable retry record from ever draining.
+        // AMENDED BY SPEC cdeba18e: this marker gates NEITHER serving NOR admission. What must
+        // survive the restart is the DURABLE RECORD of the owed retry — asserted directly — while
+        // the queue keeps serving and admitting. An unprovable schedule is resolved per entry.
+        let obligation = root.appendingPathComponent(
+            VoiceSharingUploadQueue.obligationPrefix + entry.name)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: obligation.path),
+                      "PRE: the owed boundary was written ahead of the failed stamp")
         let first = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-        XCTAssertFalse(first.hasAdmissionAllowance(), "first restart holds admission")
+        XCTAssertTrue(first.hasAdmissionAllowance(), "a retry hold is not an admission gate")
         let second = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-        XCTAssertFalse(second.hasAdmissionAllowance(),
-                       "SECOND restart must still hold — the intent must survive the first")
+        XCTAssertTrue(second.hasAdmissionAllowance(), "nor is it one on the second restart")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: obligation.path),
+                      "the durable obligation — the OWED retry — still survives both restarts")
     }
 
     /// 503's server minimum is not discarded: it is both reported AND persisted, and a FRESH owner
@@ -970,9 +975,11 @@ final class VoiceSharingUploaderTests: XCTestCase {
         let fresh = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         XCTAssertEqual(fresh.readyEntries().count, 1,
                        "a fresh instance still serves it: the hold is not a serving gate")
-        // BUT ADMISSION IS REFUSED, which is what the hold is for.
-        XCTAssertFalse(fresh.hasAdmissionAllowance(),
-                       "a retry hold still refuses NEW admissions")
+        // AND ADMISSION IS NOT REFUSED (spec cdeba18e): this marker is internal write-ahead
+        // bookkeeping for an unpublishable not-before stamp, not the sharing-off intent and not a
+        // server backoff, so it is not on the allowed admit gate list. A new clip goes on disk.
+        XCTAssertTrue(fresh.hasAdmissionAllowance(),
+                      "a retry hold is not an admission gate")
     }
 
     // MARK: - reviewer 3814f4be: status+body agreement, hold reconciliation, transport lifetime
@@ -1270,11 +1277,13 @@ final class VoiceSharingUploaderTests: XCTestCase {
         XCTAssertThrowsError(try failing.applyAttemptResult(
             entry, lease: admitted.lease, outcome: .retryableFailure,
             retryNotBefore: Date().addingTimeInterval(60)))
-        // Two restarts: both hold ADMISSION (spec d720ab6c — the hold is an admission gate, not a
-        // serving gate).
+        // AMENDED BY SPEC cdeba18e: the durable hold survives restarts, but it is not a serving or
+        // admission gate. Serving and admissions continue; the owed boundary is what persists.
         for _ in 0..<2 {
-            XCTAssertFalse(VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-                .hasAdmissionAllowance(), "held across restart")
+            let reopened = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+            XCTAssertTrue(reopened.hasAdmissionAllowance(), "not an admission gate")
+            XCTAssertTrue(reopened.readyEntries().contains { $0.name == entry.name },
+                          "and not a serving gate either — the entry still drains")
         }
         // Bounded reconciliation on a fresh instance: state is provable (the failing writer only
         // failed the STAMP, which never landed; the intent did), so it lifts.

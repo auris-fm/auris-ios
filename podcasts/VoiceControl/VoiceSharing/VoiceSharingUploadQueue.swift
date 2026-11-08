@@ -964,12 +964,14 @@ final class VoiceSharingUploadQueue {
             // whose state is UNKNOWN refuses admission, because the COLLECT gate is "sharing is
             // proven on" and an unreadable withdrawal marker proves nothing.
             //
-            // A RETRY HOLD ALSO REFUSES ADMISSION, and no more than that (spec d720ab6c): an
-            // attempt barrier that could not be published left the retry schedule unprovable, and
-            // admitting MORE captures into a queue whose retry state is unsettled is the one thing
-            // the hold is for. It stops there — serving and attempts are never gated on it, which
-            // is why the same flag is absent from `readyEntries` and from the attempt path.
-            guard !revocationHoldLocked, !retryHoldLocked else { return false }
+            // A RETRY HOLD DOES NOT REFUSE ADMISSION (spec cdeba18e, keeping KISS). It is an
+            // internal write-ahead marker — `attempt.pause.intent` — set when a settlement's
+            // not-before stamp could not be published, so the retry schedule is unprovable. It is
+            // NOT the sharing-off intent and NOT a server backoff, so it is not on the allowed
+            // admit gate list ("fewer than 32 with audio", count unknown, sharing-off state
+            // unknown). A new clip goes on disk and waits like any other; the unprovable schedule
+            // is handled where it belongs, per entry, by treating unknown retry state as due now.
+            guard !revocationHoldLocked else { return false }
             // AN UNCOUNTABLE ROOT REFUSES ADMISSION (spec 2741a0ca ruling). The gate is "fewer than
             // 32 audio records ON DISK", and a count that could not be taken cannot satisfy it. So
             // this refuses — but ONLY this: the refusal is logged with `count_unknown`, it is never

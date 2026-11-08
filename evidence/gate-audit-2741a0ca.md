@@ -279,3 +279,27 @@ memory-pressure exposure is seen on a device instead of inferred from absence.
 - `test_unreadableDelayRecordsStillUpload` — malformed stamp and NaN obligation, through the uploader.
 - `test_aFailedStampWriteDoesNotStopAHealthySiblingsRetry` — per-entry, never owner-wide.
 - Five controls amended from "the hold withholds serving" to "the hold withholds admission".
+
+### Round after `e810e5650` — spec `cdeba18e`: the retry hold is not an admission gate
+
+**What it is:** `attempt.pause.intent`, written by `engageRetryHoldLocked()` from exactly one place
+— the `.retryableFailure` settlement, when the not-before stamp could not be published. It is
+write-ahead bookkeeping for "a delay was owed and its boundary is unprovable".
+
+**What it is not:** the sharing-off/withdrawal intent, and not a server backoff. So it is not on
+spec `a4b417fc`'s allowed admit gate list, and it must not refuse admission.
+
+| Site | Before | Now |
+|------|--------|-----|
+| `hasAdmissionAllowance()` | `guard !revocationHold, !retryHold` | `guard !revocationHold` |
+
+The unprovable schedule is handled where it belongs — per entry, by treating unknown retry state as
+due now. A new clip goes on disk and waits like the others.
+
+**What the hold still does:** it is durable, it survives restarts, and its obligation record proves a
+delay was owed. It now gates nothing on the drive path. Four controls amended from "refuses
+admission" to "admission and serving continue; the durable obligation survives two restarts".
+
+**KISS note:** this removes the last queue-wide flag from the admission path. The only admission
+gate left is the count of captures holding audio (plus unknown count, plus unknown sharing-off
+state).
