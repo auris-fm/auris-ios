@@ -689,7 +689,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         guard case .revocationHeld = failingFileSyncQueue.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("the owner-wide hold must block serving after an unconfirmed purge")
         }
-        XCTAssertFalse(failingFileSyncQueue.hasAdmissionAllowance(forBytes: 1_000))
+        XCTAssertFalse(failingFileSyncQueue.hasAdmissionAllowance())
     }
 
     /// Reviewer 35e67a87: a FRESH queue must not serve an unmarked survivor after a revocation
@@ -723,7 +723,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
             return XCTFail("a fresh queue must not serve after an unconfirmed revocation")
         }
         XCTAssertEqual(fresh.readyEntries().count, 0, "legacy serving path must honor the hold too")
-        XCTAssertFalse(fresh.hasAdmissionAllowance(forBytes: 1_000), "preflight must refuse")
+        XCTAssertFalse(fresh.hasAdmissionAllowance(), "preflight must refuse")
         XCTAssertThrowsError(try fresh.prepare(metadata: Data("{}".utf8), audio: Data([0, 0]))) { error in
             XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .accountingUnavailable,
                            "the AUTHORITATIVE admission path must refuse")
@@ -752,7 +752,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         guard case .revocationHeld = refusingListQueue.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("a refused listing must leave the owner held")
         }
-        XCTAssertFalse(refusingListQueue.hasAdmissionAllowance(forBytes: 1_000))
+        XCTAssertFalse(refusingListQueue.hasAdmissionAllowance())
         XCTAssertEqual(refusingListQueue.readyEntries().count, 0)
         // A FRESH queue sees the durable intent and stays held.
         let fresh = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
@@ -831,7 +831,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
             return XCTFail("unknown intent discovery must HOLD the owner, never resume serving")
         }
         XCTAssertEqual(fresh.readyEntries().count, 0, "legacy path must not serve either")
-        XCTAssertFalse(fresh.hasAdmissionAllowance(forBytes: 1_000))
+        XCTAssertFalse(fresh.hasAdmissionAllowance())
         XCTAssertThrowsError(try fresh.prepare(metadata: Data("{}".utf8), audio: Data([0, 0])))
     }
 

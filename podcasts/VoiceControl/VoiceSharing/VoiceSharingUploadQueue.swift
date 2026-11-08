@@ -52,13 +52,15 @@ final class VoiceSharingUploadQueue {
     /// QUEUE-WIDE budgets. Per-entry bounds cannot bound the queue: N individually-legal entries
     /// still multiply. These are compiled defaults; like every other numeric limit here they are
     /// implementation bounds, NOT owner-approved activation values.
+    /// THE ONLY QUEUE-WIDE LIMIT IS A RECORD COUNT (spec a3ef694f). There is no byte budget: it
+    /// required accounting that could not be read, and accounting that cannot be read stops
+    /// admission forever — which is what wedged the owner's queue while it held 3.6% of its
+    /// allowance. A count of entries on disk cannot fail that way, and it is the bound the spec
+    /// actually asks for.
     struct AggregateLimits {
-        let maxBytes: Int
         let maxRecords: Int
 
-        static let `default` = AggregateLimits(
-            maxBytes: VoiceSharingUploadQueue.maxQueueBytes,
-            maxRecords: VoiceSharingUploadQueue.maxQueueEntries)
+        static let `default` = AggregateLimits(maxRecords: VoiceSharingUploadQueue.maxQueueEntries)
     }
 
     /// Durable proof of attempt ownership. `generation` is the FENCE: identity, not elapsed time,
@@ -118,8 +120,9 @@ final class VoiceSharingUploadQueue {
 
     /// Upper bound on bytes this queue itself writes for one entry, excluding the caller's audio and
     /// metadata: `created.at` (a bounded decimal instant), `stage.publishing` (1 byte),
-    /// `publication.failed` (1 byte), `ready.marker` (1 byte) and a temporary marker name. Reserving
-    /// a fixed bound keeps admission arithmetic closed-form and independent of filename length.
+    /// `publication.failed` (1 byte), `ready.marker` (1 byte) and a temporary marker name.
+    /// NOT admission arithmetic any more (spec a3ef694f removed the byte budget); it survives as the
+    /// sink's worst-case size input.
     static let protocolOverheadBytes = 256
 
     /// Hard cap on directory entries examined during discovery. A cap checked AFTER an eager listing
@@ -143,16 +146,10 @@ final class VoiceSharingUploadQueue {
     /// prefix + well-formed UUID, and all work over them is budgeted.
     static let temporaryMarkerPrefix = "\(readyMarkerName).tmp-"
 
-    /// Queue-wide byte budget. 32 entries x 60 s of 16 kHz mono PCM16 = 1920 s of audio, i.e. ~32
-    /// minutes in total (32 entries x 60 s each), not a queue-wide 30-second window.
-    static let maxQueueBytes = 32 * (16_000 * 2 * 60)
-
     enum PrepareError: Error, Equatable {
         case queueFull
         case audioTooLarge
         case metadataTooLarge
-        /// The queue-wide byte budget would be exceeded. Distinct from per-entry `audioTooLarge`.
-        case queueBytesExceeded
         /// Stored usage could not be determined, so admission is refused rather than assuming the
         /// unknown space is free.
         case accountingUnavailable
@@ -193,6 +190,8 @@ final class VoiceSharingUploadQueue {
     /// carries none. A truncated stage file is distinguishable from an absent one.
     private static let stageName = "stage.publishing"
     private static let audioName = "audio.wav"
+    /// Suffix for audio a failed delete left behind outside its entry directory (spec 746aa9c2).
+    static let audioResidueSuffix = ".audio.wav"
     private static let metadataName = "metadata.json"
     /// The IMMUTABLE admission instant: written once at prepare, never refreshed by finalize or a
     /// retried publication. Queue age is measured from here, so a preparation held past the bound
@@ -840,18 +839,17 @@ final class VoiceSharingUploadQueue {
             do {
                 guard audio.count <= Self.maxEntryAudioBytes else { throw PrepareError.audioTooLarge }
                 guard metadata.count <= Self.maxMetadataBytes else { throw PrepareError.metadataTooLarge }
-                // Aggregate admission is measured from what is ACTUALLY stored, not from a running
-                // counter: a counter drifts the moment any write, removal or crash disagrees with
-                // it, and the queue would then admit past its budget or refuse within it forever.
-                let usage = try storedUsageLocked()
-                guard usage.records < aggregateLimits.maxRecords else { throw PrepareError.queueFull }
-                // Reserve the WHOLE entry footprint, not just the two caller-supplied blobs: prepare
-                // writes `created.at`, finalize writes `stage.publishing` and a temporary marker, and
-                // the completed entry carries `ready.marker`. Charging only audio+metadata would let
-                // a budget equal to audio+metadata be exceeded by preparation itself.
-                let incoming = audio.count + metadata.count + Self.protocolOverheadBytes
-                guard usage.bytes + incoming <= aggregateLimits.maxBytes else {
-                    throw PrepareError.queueBytesExceeded
+                // ADMISSION COUNTS COMPLETE ENTRIES ON DISK (spec a3ef694f). Read from the disk
+                // every time, never from a running tally: a tally drifts the moment any write,
+                // removal or crash disagrees with it, and the queue then refuses within its limit
+                // forever. A count also cannot become "unknown" the way a byte measure can — the
+                // whole failure mode this replaces.
+                // AN UNCOUNTABLE ROOT DOES NOT REFUSE (spec a3ef694f): the write below would
+                // either succeed — in which case the room existed — or fail on its own terms, and
+                // that is a better answer than an admission refused by a limit nobody could check.
+                // A count that IS available is still enforced exactly.
+                if let count = try? entryCountOnDiskLocked() {
+                    guard count < aggregateLimits.maxRecords else { throw PrepareError.queueFull }
                 }
                 try fileManager.createDirectory(at: entryDirectory, withIntermediateDirectories: true)
                 try audio.write(to: entryDirectory.appendingPathComponent(Self.audioName), options: .atomic)
@@ -894,74 +892,87 @@ final class VoiceSharingUploadQueue {
     /// Measured, NON-CONSUMING admission check for callers that must refuse before allocating
     /// (the contribution sink encodes its WAV copies only if the budget can carry the worst-case
     /// entry). `prepare` remains the exact authority at write time.
-    func hasAdmissionAllowance(forBytes: Int) -> Bool {
+    /// Preflight for the contribution sink, and it answers ONE question: is there room for another
+    /// record? (spec a3ef694f). The `forBytes:` parameter is GONE rather than ignored: a size-shaped
+    /// argument would advertise a byte bound the queue no longer enforces.
+    func hasAdmissionAllowance() -> Bool {
         serialQueue.sync {
             guard (try? establishStoragePolicyLocked()) != nil else { return false }
-            // UNKNOWN USAGE IS NOT A FULL QUEUE (spec 0790a866 rule 1). This used to return false
-            // whenever the usage measurement failed, so a queue whose accounting could not be
-            // read stopped admitting FOREVER: new recordings were dropped on every capture while
-            // the queue held a few percent of its budget. That is a wedge, and it lost new work to
-            // protect space that was not in use. The budget now proceeds on a CONSERVATIVE
-            // ESTIMATE, with the reason logged once so the estimate is never invisible.
-            let usage: (bytes: Int, records: Int)
-            switch measuredUsageLocked() {
-            case .measured(let measured):
-                usage = measured
-            case .unknown(let reason):
-                logCoverageUnknownOnce(reason: reason)
-                usage = conservativeUsageEstimateLocked()
+            // NOTHING ABOUT THE QUEUE'S OWN BOOKKEEPING MAY STOP ADMISSION (spec a3ef694f). An
+            // uncountable root is not a full queue: refusing here is what turned an accounting
+            // fault into a permanent wedge. A count that cannot be taken admits, and the count is
+            // re-taken — exactly — at write time by `prepare`.
+            guard let count = try? entryCountOnDiskLocked() else {
+                logCoverageUnknownOnce(reason: "admission-count")
+                return true
             }
-            return usage.bytes + forBytes <= aggregateLimits.maxBytes
-                && usage.records < aggregateLimits.maxRecords
+            return count < aggregateLimits.maxRecords
         }
     }
 
-    /// Usage with the reason it could not be measured, so callers can distinguish "empty" from
-    /// "unreadable" instead of collapsing both into a refusal (spec 0790a866).
-    private enum MeasuredUsage {
-        case measured((bytes: Int, records: Int))
-        case unknown(reason: String)
-    }
-
-    private func measuredUsageLocked() -> MeasuredUsage {
-        do {
-            return .measured(try storedUsageLocked())
-        } catch {
-            return .unknown(reason: "\(error)")
-        }
-    }
-
-    /// WHAT "CONSERVATIVE" MEANS HERE, and the trap in my first attempt: an estimate of the WHOLE
-    /// budget is arithmetically guaranteed to refuse everything — it re-created the wedge it was
-    /// meant to remove, just with a nicer comment. The honest bound is the largest footprint the
-    /// queue can actually be holding when the disk is unreadable: every entry the record limit
-    /// permits, at the largest size the byte limit permits, which is exactly ONE full budget. So
-    /// the estimate cannot be a number below what could be there.
+    /// HOW MANY ENTRIES ARE ON DISK, counted fresh (spec a3ef694f).
     ///
-    /// The resolution is not a smaller fabricated number: it is that an unmeasurable queue must
-    /// still accept work, because refusing on unknown state is unrecoverable while accepting it is
-    /// bounded by the SAME limits at write time (`prepare` re-measures under its own lock before
-    /// writing a byte). Admission therefore proceeds, and the write-time check — which can see the
-    /// disk again — remains the exact authority.
-    private func conservativeUsageEstimateLocked() -> (bytes: Int, records: Int) {
-        (bytes: 0, records: 0)
+    /// A DISQUALIFIED ENTRY STILL OCCUPIES A SLOT. It is retained precisely because it has not been
+    /// removed yet, so counting only servable entries would let a queue of retained failures admit
+    /// past its limit — the limit is about how many directories this queue may hold, and a
+    /// disqualified one is one of them. (RED-PROOF: using `entriesStrictLocked()` here admitted the
+    /// 33rd entry while holding 32, one of them disqualified.)
+    ///
+    /// Counting on disk rather than in memory is what keeps the limit honest across restarts and
+    /// removals. Throws when the root cannot be listed — the caller decides whether that is a
+    /// refusal (prepare) or an admission (the sink's preflight).
+    private func entryCountOnDiskLocked() throws -> Int {
+        // STRICT, not lenient: `entriesLocked()` turns an unreadable root into `[]` so the count
+        // would silently read as ZERO — an unreadable queue reported as empty, the one misreading
+        // this change must not reintroduce.
+        var count = try entriesStrictLocked().count
+        // AUDIO RESIDUE COUNTS (spec 746aa9c2). A failed delete can leave a capture's audio behind
+        // with its directory name gone; that audio is still "a capture ID holding audio", so it still
+        // occupies a slot. Counting only directories would let removal failures grow the queue past
+        // its limit — and residue is exactly what a full disk produces.
+        count += audioResidueCountLocked()
+        return count
     }
 
-    /// One reason line per distinct cause, so an unknown-coverage estimate is attributable without
-    /// flooding the log on every capture.
+    /// Audio left behind by a failed delete, counted by SUFFIX, not by directory: a trailing entry
+    /// that could not be removed keeps its bytes in a `*.audio.wav`-shaped name (or the entry's own
+    /// directory). Sidecar-only leftovers (retry stamps, obligations, locks) are NOT captures — they
+    /// hold no audio — and never count (spec 746aa9c2). This is why the rule is "capture IDs still
+    /// holding audio" rather than "names in the root".
+    private func audioResidueCountLocked() -> Int {
+        guard let listed = try? listDirectoryBounded(rootDirectory, [], Self.maxDirectoryEntries),
+              !listed.overflowed else { return 0 }
+        var ids = Set<String>()
+        for url in listed.urls {
+            let name = url.lastPathComponent
+            guard name.hasSuffix(Self.audioResidueSuffix),
+                  let id = UUID(uuidString: String(name.dropLast(Self.audioResidueSuffix.count)))
+            else { continue }
+            // A residue file whose capture still has a directory is already counted above.
+            if fileManager.fileExists(atPath: rootDirectory.appendingPathComponent(id.uuidString).path) {
+                continue
+            }
+            ids.insert(id.uuidString)
+        }
+        return ids.count
+    }
+
+    /// ONE line per distinct cause, so an uncountable root stays attributable without flooding the
+    /// log on every capture. Admission still proceeds — the log records why the count was skipped,
+    /// it does not gate anything (spec a3ef694f).
     private var lastCoverageUnknownReasonLocked: String?
     private func logCoverageUnknownOnce(reason: String) {
         guard lastCoverageUnknownReasonLocked != reason else { return }
         lastCoverageUnknownReasonLocked = reason
         FileLog.shared.addMessage(
-            "[VoiceSharing] queue coverage-unknown reason=\(reason) admission=conservative-estimate")
+            "[VoiceSharing] queue count-unavailable reason=\(reason) admission=allowed")
         FileLog.shared.forceFlush()
     }
 
     /// Consent revocation between prepare and finalize: removes an UNREADY entry, releasing its
     /// charge. A ready entry is refused (publication goes through the settlement protocol, never
     /// an unowned delete), a foreign handle is a refusal, and a cleanup FAILURE throws with the
-    /// entry left in place — retained, still charged, never silently "gone".
+    /// entry left in place — retained, never silently "gone".
     @discardableResult
     func discardUnready(_ entry: Entry) throws -> Bool {
         try serialQueue.sync {
@@ -1267,19 +1278,6 @@ final class VoiceSharingUploadQueue {
             }
             let marker = directory.appendingPathComponent(Self.readyMarkerName)
             let stage = directory.appendingPathComponent(Self.stageName)
-            // CAPACITY CHECK BEFORE GROWTH. Publication and repeated finalization both write files,
-            // so the budget must be re-verified against actual stored bytes before those writes
-            // happen — not assumed from the admission decision, which other entries may have
-            // consumed in the meantime. Refusing here is the fail-closed direction: no bytes are
-            // written for an entry the queue cannot afford.
-            // `storedUsageLocked` already charges EVERY entry its protocol headroom (published or
-            // not), so the current growth of THIS entry is already covered by that charge. What must
-            // be re-verified is that the total still fits — the earlier admission decision may have
-            // been overtaken by other entries.
-            let usageBefore = try storedUsageLocked()
-            guard usageBefore.bytes <= aggregateLimits.maxBytes else {
-                throw PrepareError.queueBytesExceeded
-            }
             // The lifecycle stage is recorded BEFORE publication begins, so that after any crash the
             // presence of this file means "publication was attempted and may not have completed".
             // Written with the plain (non-atomic) route so a crash HERE leaves nothing rather than a
@@ -2905,29 +2903,26 @@ final class VoiceSharingUploadQueue {
     /// The last discovery's per-entry account, for controls and diagnostics.
     private(set) var lastDiscoveryDiagnostic = ""
 
-    /// The usage this queue measured from disk at its last recovery, and whether it could be
-    /// measured at all. Kept for diagnostics and for controls: the budget is never SERVED from this
-    /// value (every admission re-measures), it is the record of what the disk held.
-    private(set) var lastMeasuredUsageLocked: (bytes: Int, records: Int)?
-    /// Set when the last recovery could not measure usage. Admission proceeds on the conservative
-    /// estimate rather than refusing (spec 0790a866 rule 1).
-    private(set) var lastUsageWasUnknown = false
+    /// The complete-entry count this queue measured from disk at its last recovery, and whether it
+    /// could be measured at all. Diagnostics and controls only — every admission re-counts, so the
+    /// limit is never served from a stale value (spec a3ef694f).
+    private(set) var lastCompleteEntryCountLocked: Int?
+    /// Set when the last recovery could not count the root. Admission still proceeds.
+    private(set) var lastCountWasUnknown = false
 
     private func recordBudgetFromDiskLocked() {
-        switch measuredUsageLocked() {
-        case .measured(let usage):
-            lastMeasuredUsageLocked = usage
-            lastUsageWasUnknown = false
+        do {
+            let count = try entryCountOnDiskLocked()
+            lastCompleteEntryCountLocked = count
+            lastCountWasUnknown = false
             FileLog.shared.addMessage(
-                "[VoiceSharing] queue budget recomputed from disk bytes=\(usage.bytes) "
-                    + "records=\(usage.records) maxBytes=\(aggregateLimits.maxBytes) "
+                "[VoiceSharing] queue record count recomputed from disk records=\(count) "
                     + "maxRecords=\(aggregateLimits.maxRecords)")
-        case .unknown(let reason):
-            lastMeasuredUsageLocked = nil
-            lastUsageWasUnknown = true
+        } catch {
+            lastCompleteEntryCountLocked = nil
+            lastCountWasUnknown = true
             FileLog.shared.addMessage(
-                "[VoiceSharing] queue budget unmeasurable reason=\(reason) "
-                    + "admission=conservative-estimate")
+                "[VoiceSharing] queue record count unmeasurable reason=\(error) admission=allowed")
         }
         FileLog.shared.forceFlush()
     }
@@ -3453,22 +3448,6 @@ final class VoiceSharingUploadQueue {
         return directory
     }
 
-    /// Actual bytes and records currently stored, read from disk. Any file inside an entry
-    /// directory counts, not just audio/metadata: a partial or stray file still consumes storage and
-    /// the budget must account for it or the bound is fictional.
-    /// Throws when usage cannot be determined. "Unknown" must never be treated as "free": a queue
-    /// that cannot read its own storage is not trusted to admit more of it.
-    private func storedUsageLocked() throws -> (bytes: Int, records: Int) {
-        var bytes = 0
-        var records = 0
-        for entry in try entriesStrictLocked() {
-            let directory = entryDirectoryLocked(for: entry)
-            bytes += try chargeLocked(for: entry)
-            records += 1
-        }
-        return (bytes, records)
-    }
-
     /// The queue's OWNED on-disk format for one entry directory: a FLAT set of regular files drawn
     /// from a closed set of names. Accounting is therefore bounded by `knownNames.count` stat calls
     /// per entry, not by whatever happens to be in the directory.
@@ -3476,31 +3455,14 @@ final class VoiceSharingUploadQueue {
     /// Anything else — nested directories, unknown files, symlinks — is outside the owned format and
     /// makes the footprint unknowable. That is a refusal, not an invitation to enumerate: an
     /// attacker-controlled or debris directory must not be able to inflate or hide usage.
-    /// Charge that keeps the reservation HONEST for entries not yet published. A preparing entry has
-    /// been admitted but will still grow (stage, marker) before it is published, and an uncertain one
-    /// may be rewritten. Charging only its current footprint would let later admissions consume the
-    /// headroom those entries still need, and a later finalize would then exceed the cap that
-    /// admitted the newer entries. So an unpublished entry is charged its full bounded footprint.
-    private func chargeLocked(for entry: Entry) throws -> Int {
-        let directory = entryDirectoryLocked(for: entry)
-        let physical = try entryFootprintLocked(at: directory)
-        // EVERY entry holds the protocol headroom, published or not. A published entry can still be
-        // finalized again, and each attempt may leave a temporary behind, so "already published"
-        // does not mean "will not grow". Charging only physical bytes once a marker exists would let
-        // another admission consume the space a later finalize needs.
-        return physical + Self.protocolOverheadBytes
-    }
-
-    /// Removes this queue's own leftover `ready.marker.tmp-<UUID>` files.
-    ///
     /// NOT bounded by a fixed name set: the UUID suffix permits arbitrarily many such names, so a
     /// bounded number of files can become an unbounded number of temporary names. Cleanup therefore
     /// operates under an explicit entry budget (below) and fails closed when it is exceeded, rather
     /// than claiming a bound it does not have.
     private func cleanupTemporaryMarkersLocked(in directory: URL) {
         // Bounded discovery of our own temporaries. If the directory overflows the cap we simply do
-        // not clean: the files stay on disk, so they stay CHARGED by accounting, which is the
-        // fail-closed direction. Cleanup never makes usage look smaller than it is.
+        // not clean: the files stay on disk. Cleanup never tidies less than it can see, and a failed
+        // removal leaves the file in place rather than being reported as reclaimed space.
         guard let listed = try? listDirectoryBounded(directory, [], Self.maxDirectoryEntries),
               !listed.overflowed else { return }
         for file in listed.urls {
@@ -3508,48 +3470,8 @@ final class VoiceSharingUploadQueue {
             guard name.hasPrefix(Self.temporaryMarkerPrefix),
                   UUID(uuidString: String(name.dropFirst(Self.temporaryMarkerPrefix.count))) != nil
             else { continue }
-            // A failed removal leaves the file in place, so its charge persists: correct, because the
-            // bytes are still there. Never treat a failed cleanup as reclaimed space.
             try? fileManager.removeItem(at: file)
         }
-    }
-
-    /// Physical bytes of one entry directory, restricted to the owned format.
-    private func entryFootprintLocked(at directory: URL) throws -> Int {
-        // A read failure is UNKNOWABLE usage, not zero usage: surface it as the refusal case so the
-        // caller cannot mistake "could not read" for "nothing stored".
-        let contents: [URL]
-        do {
-            let listed = try listDirectoryBounded(
-                directory, [.isRegularFileKey, .fileSizeKey, .isSymbolicLinkKey],
-                Self.maxDirectoryEntries)
-            guard !listed.overflowed else { throw PrepareError.accountingUnavailable }
-            contents = listed.urls
-        } catch {
-            throw PrepareError.accountingUnavailable
-        }
-        var bytes = 0
-        for file in contents {
-            let name = file.lastPathComponent
-            let isOwnedTemporary = name.hasPrefix(Self.temporaryMarkerPrefix)
-                && UUID(uuidString: String(name.dropFirst(Self.temporaryMarkerPrefix.count))) != nil
-            guard Self.knownEntryNames.contains(name) || isOwnedTemporary else {
-                throw PrepareError.accountingUnavailable
-            }
-            let values: URLResourceValues
-            do {
-                values = try file.resourceValues(
-                    forKeys: [.isRegularFileKey, .fileSizeKey, .isSymbolicLinkKey])
-            } catch {
-                throw PrepareError.accountingUnavailable
-            }
-            guard values.isSymbolicLink != true, values.isRegularFile == true,
-                  let size = values.fileSize, size >= 0 else {
-                throw PrepareError.accountingUnavailable
-            }
-            bytes += size
-        }
-        return bytes
     }
 
     private func countEntriesLocked() -> Int {
@@ -3557,8 +3479,8 @@ final class VoiceSharingUploadQueue {
     }
 
     private func entriesLocked() -> [Entry] {
-        // Lenient variant for read paths that must not fail (recovery, listing). Accounting must NOT
-        // use this: an unreadable root would then look like an empty queue.
+        // Lenient variant for read paths that must not fail (recovery, listing). The ADMISSION COUNT
+        // must NOT use this: an unreadable root would then look like an empty queue.
         (try? entriesStrictLocked()) ?? []
     }
 

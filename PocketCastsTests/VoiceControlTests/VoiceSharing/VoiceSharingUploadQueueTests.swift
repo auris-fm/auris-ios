@@ -797,69 +797,70 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertEqual(reopened.readyEntries().map(\.name), [prep.name])
     }
 
-    // MARK: Aggregate accounting (spec: admission gates on queue-wide budgets)
+    // MARK: Record-count admission (spec a3ef694f + 746aa9c2: 32 captures holding audio)
 
-    func test_prepareRefusesWhenAggregateQueueBytesWouldExceedTheBound() throws {
-        // Per-entry bounds alone are not enough: N individually-legal entries can still blow the
-        // queue-wide byte budget. Admission must account for what is already stored.
+    /// SPEC 746aa9c2: audio left behind by a FAILED DELETE still counts, because the rule is
+    /// "capture IDs still holding audio". Without this a removal failure is the way to grow past
+    /// the limit — and removal failures are what a full disk produces.
+    func test_audioResidueFromAFailedDeleteCountsTowardTheLimit() throws {
+        // Construct FIRST, then create the residue: recovery runs at construction and would sweep
+        // an unreferenced file as debris. A failed delete during operation happens after recovery,
+        // which is the state this control has to represent.
         let q = VoiceSharingUploadQueue(
             rootDirectory: root,
-            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 6_000, maxRecords: 32))
-        // Each real WAV here is ~3.2 kB, so the second entry must be refused.
-        _ = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxRecords: 1))
+        try Data(repeating: 0, count: 64)
+            .write(to: root.appendingPathComponent("\(UUID().uuidString).audio.wav"))
         XCTAssertThrowsError(
-            try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioB), audio: audioB)
+            try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
         ) { error in
-            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .queueBytesExceeded)
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .queueFull,
+                           "residue holds a slot; it is a capture still holding audio")
         }
     }
 
-    func test_aggregateAccountingCountsMetadataNotJustAudio() throws {
-        // Budget sits between ONE and TWO of these padded entries, so counting metadata is the only
-        // way the second admission can be refused: audio-only accounting would let both in.
-        // A large-but-legal metadata body must be counted; ignoring it would let the budget leak.
-        var padded = try JSONSerialization.jsonObject(
-            with: validRecord(captureID: UUID().uuidString, audio: audioA)) as! [String: Any]
-        padded["capture_session_id"] = String(repeating: "x", count: 2_000)
-        let big = try JSONSerialization.data(withJSONObject: padded)
-        // The stored-vs-incoming split is what this control distinguishes. `incoming` (this entry's
-        // audio + metadata) is always counted, so the discriminating quantity is the STORED side:
-        // budget is set so a stored entry measured as audio-only leaves room for a second entry,
-        // while a stored entry measured as audio+metadata does not.
-        //   stored full   = 3244 + 3080 = 6324 ; stored audio-only = 3244
-        //   incoming      = 6324
-        //   budget        = 6324 + 3244 + 500 = 10068 -> full: 6324+6324=12648 > 10068 REFUSE
-        //                                            -> audio-only: 3244+6324=9568 <= 10068 ADMIT
-        let budget = (audioA.count + big.count) + audioA.count + 500
+    /// The other half of the same rule: a SIDECAR-ONLY leftover holds no audio, so it must never
+    /// count against the limit. Sidecars are bookkeeping, not recordings.
+    func test_sidecarOnlyLeftoversNeverCountTowardTheLimit() throws {
+        let seeder = VoiceSharingUploadQueue(rootDirectory: root)
+        let entry = try seeder.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try seeder.finalize(entry)
+        // A retry stamp and an obligation for a capture that holds no audio anywhere.
+        let ghost = UUID().uuidString
+        try Data("1".utf8).write(to: root.appendingPathComponent("attempt.notbefore.\(ghost)"))
+        try Data("1".utf8).write(to: root.appendingPathComponent("attempt.obligation.\(ghost)"))
         let q = VoiceSharingUploadQueue(
             rootDirectory: root,
-            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(
-                maxBytes: budget, maxRecords: 32))
-        _ = try q.prepare(metadata: big, audio: audioA)
-        // Precondition: the padded metadata really is on disk at the size that matters.
-        let stored = try soleEntryDirectory().appendingPathComponent("metadata.json")
-        let storedSize = (try FileManager.default.attributesOfItem(atPath: stored.path)[.size] as? Int) ?? 0
-        XCTAssertGreaterThan(storedSize, 2_000,
-                             "precondition: padded metadata is stored (size \(storedSize))")
-
-        XCTAssertThrowsError(try q.prepare(metadata: big, audio: audioA)) { error in
-            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .queueBytesExceeded)
-        }
-        // Discrimination asserted explicitly: with stored usage measured as audio-only, the same
-        // budget WOULD have admitted this entry — so counting stored metadata is what discriminates.
-        XCTAssertLessThanOrEqual(storedSize + audioA.count + big.count, budget,
-                                 "audio-only stored accounting would admit the second entry")
-        XCTAssertGreaterThan(audioA.count + big.count + audioA.count + big.count, budget,
-                             "full accounting must refuse it")
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxRecords: 2))
+        XCTAssertNoThrow(
+            try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA),
+            "sidecar-only leftovers are not recordings and must not fill the queue")
     }
 
-    func test_aggregateRecordCountBoundIsEnforcedAcrossReadyAndPreparingEntries() throws {
+    /// A residue file whose capture still HAS its entry directory is one capture, not two.
+    func test_residueBesideALiveEntryIsNotDoubleCounted() throws {
+        let seeder = VoiceSharingUploadQueue(rootDirectory: root)
+        let entry = try seeder.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try seeder.finalize(entry)
+        try Data(repeating: 0, count: 32)
+            .write(to: root.appendingPathComponent("\(entry.name).audio.wav"))
         let q = VoiceSharingUploadQueue(
             rootDirectory: root,
-            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 2))
-        let a = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
-        try q.finalize(a)
-        _ = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxRecords: 2))
+        XCTAssertNoThrow(
+            try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA),
+            "one capture with residue is still one capture")
+    }
+
+    /// The spec's limit, pinned at its real value: 32 complete entries admit, the 33rd is refused.
+    /// Setting a smaller limit would prove only that SOME number works.
+    func test_thirtyTwoOnDiskRecordsAdmitAndTheThirtyThirdIsRefused() throws {
+        let q = VoiceSharingUploadQueue(rootDirectory: root)
+        for _ in 0..<VoiceSharingUploadQueue.maxQueueEntries {
+            let entry = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+            try q.finalize(entry)
+        }
+        XCTAssertEqual(q.readyEntries().count, VoiceSharingUploadQueue.maxQueueEntries)
         XCTAssertThrowsError(
             try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
         ) { error in
@@ -867,186 +868,64 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         }
     }
 
-    func test_removingAnEntryReleasesItsAggregateBudget() throws {
+    /// The count is read from DISK, so a removal frees a slot with no bookkeeping to update.
+    func test_theRecordLimitIsReleasedByRemovalBecauseItIsCountedOnDisk() throws {
         let q = VoiceSharingUploadQueue(
             rootDirectory: root,
-            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 6_000, maxRecords: 32))
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxRecords: 1))
         let first = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try q.finalize(first)
         XCTAssertThrowsError(
-            try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioB), audio: audioB))
+            try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA))
         try q.remove(first)
-        // Budget is released only if accounting reflects actual on-disk state, not a counter.
         XCTAssertNoThrow(
-            try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioB), audio: audioB))
+            try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA))
     }
 
-    func test_exactLimitAdmissionAccountsForProtocolOverhead() throws {
-        // Reviewer 589a0315: charging only audio+metadata lets preparation itself exceed the cap,
-        // because prepare writes created.at and finalize writes stage/temp/marker files.
-        let overhead = VoiceSharingUploadQueue.protocolOverheadBytes
-        let record = validRecord(captureID: UUID().uuidString, audio: audioA)
-        // Budget exactly equals the caller-supplied bytes: WITHOUT overhead reservation this
-        // would be admitted, then immediately exceed the stated stored-byte cap.
-        let budget = audioA.count + record.count
+    /// The count is on disk, so it survives a restart without any in-memory tally to rebuild.
+    func test_theRecordCountIsReadFromDiskAfterAReopen() throws {
         let q = VoiceSharingUploadQueue(
             rootDirectory: root,
-            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: budget, maxRecords: 32))
-        XCTAssertThrowsError(try q.prepare(metadata: record, audio: audioA)) { error in
-            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .queueBytesExceeded,
-                           "protocol overhead must be reserved, not discovered after writing")
-        }
-        // And a budget that covers the overhead is admitted, so the control discriminates on the
-        // reservation rather than refusing everything.
-        // The admitted entry is charged physical+overhead, so a budget that admits it must also
-        // cover that charge at finalize (which re-verifies total usage before growing).
-        let roomy = VoiceSharingUploadQueue(
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxRecords: 1))
+        let entry = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try q.finalize(entry)
+        let reopened = VoiceSharingUploadQueue(
             rootDirectory: root,
-            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(
-                maxBytes: budget + overhead * 2, maxRecords: 32))
-        let prep = try roomy.prepare(metadata: record, audio: audioA)
-        try roomy.finalize(prep)
-        // After finalization the entry must still fit the stated cap: the reservation was honest.
-        let stored = try soleEntryDirectory()
-        let contents = try FileManager.default.contentsOfDirectory(atPath: stored.path)
-        let onDisk = contents.reduce(0) { sum, name in
-            sum + ((try? FileManager.default.attributesOfItem(
-                atPath: stored.appendingPathComponent(name).path)[.size] as? Int) ?? 0)
-        }
-        XCTAssertLessThanOrEqual(onDisk, budget + overhead * 2,
-                                 "stored bytes (\(onDisk)) must fit the reserved bound")
-    }
-
-    func test_accountingFailureRefusesInsteadOfTreatingUnknownSpaceAsFree() throws {
-        // Reviewer 589a0315: a stat/listing failure currently reads as zero usage.
-        // Listing failure is the seam (FileManager's contentsOfDirectory cannot be subclassed).
-        final class ListingFailure { var failing = false }
-        let listing = ListingFailure()
-        let q = VoiceSharingUploadQueue(
-            rootDirectory: root,
-            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32),
-            listDirectoryBounded: { url, keys, limit in
-                if listing.failing { throw CocoaError(.fileReadUnknown) }
-                return try VoiceSharingUploadQueue.defaultBoundedLister(url, keys, limit)
-            })
-        let existing = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
-        try q.finalize(existing)
-
-        listing.failing = true
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxRecords: 1))
         XCTAssertThrowsError(
-            try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+            try reopened.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
         ) { error in
-            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .accountingUnavailable,
-                           "unknown usage must refuse, not read as free capacity")
-        }
-        listing.failing = false
-        // The existing entry is preserved across the refusal; accounting is not destructive.
-        XCTAssertEqual(q.readyEntries().map(\.name), [existing.name])
-    }
-
-    func test_foreignOrNestedContentMakesAccountingUnavailable() throws {
-        // Reviewer 589a0315: flat enumeration does not bound arbitrary debris/nested files.
-        let q = VoiceSharingUploadQueue(
-            rootDirectory: root,
-            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32))
-        _ = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
-        let entryDirectory = try soleEntryDirectory()
-        // An unknown file inside an entry directory is outside the owned on-disk format.
-        try Data(repeating: 0, count: 100).write(to: entryDirectory.appendingPathComponent("debris.bin"))
-        XCTAssertThrowsError(
-            try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
-        ) { error in
-            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .accountingUnavailable)
+            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .queueFull)
         }
     }
 
-    func test_unreadableRootRefusesAdmissionInsteadOfLookingLikeAnEmptyQueue() throws {
-        // Reviewer 7ebb7887/1: entriesLocked swallowed root listing failure as [], bypassing the seam.
+    /// SPEC a3ef694f, the point of the whole change: an uncountable root must NOT refuse admission.
+    /// This is the owner's wedge — a queue that could not measure itself dropped every capture while
+    /// nearly empty. Admission proceeds; the reason is logged once.
+    func test_anUncountableRootStillAllowsAdmission() throws {
         let q = VoiceSharingUploadQueue(
             rootDirectory: root,
-            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32),
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxRecords: 32),
             listDirectoryBounded: { url, keys, limit in
-                // Fail ONLY the root listing; entry-level listing still works.
                 if url.standardizedFileURL == self.root.standardizedFileURL {
                     throw CocoaError(.fileReadUnknown)
                 }
                 return try VoiceSharingUploadQueue.defaultBoundedLister(url, keys, limit)
             })
-        XCTAssertThrowsError(
-            try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
-        ) { error in
-            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .accountingUnavailable,
-                           "an unreadable root is unknown usage, not an empty queue")
-        }
+        XCTAssertTrue(q.hasAdmissionAllowance(),
+                      "an unreadable root is not a full queue; refusing here is the wedge")
     }
 
-    func test_markedEntryGrowthIsRefusedWhenAnotherAdmissionConsumedTheCapacity() throws {
-        // Reviewer 02cd9c53/3: a published entry can still be finalized again and grow, and
-        // chargeLocked must keep charging its headroom. Prove the CAP, not just that a prepare
-        // succeeds: with an already-marked entry, an intervening admission, and a failing
-        // replacement, either the footprint stays within the limit or growth is refused.
-        let record = validRecord(captureID: UUID().uuidString, audio: audioA)
-        // Measure one entry's physical footprint from a probe queue.
-        let probeRoot = temporaryRoot()
-        let probe = VoiceSharingUploadQueue(
-            rootDirectory: probeRoot,
-            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32))
-        _ = try probe.prepare(metadata: record, audio: audioA)
-        let probeName = try FileManager.default.contentsOfDirectory(atPath: probeRoot.path)
-            .first { !$0.hasPrefix(".") } ?? ""
-        let physical = try FileManager.default.contentsOfDirectory(
-            atPath: probeRoot.appendingPathComponent(probeName).path
-        ).reduce(0) { sum, file in
-            sum + ((try? FileManager.default.attributesOfItem(
-                atPath: probeRoot.appendingPathComponent(probeName).appendingPathComponent(file).path)[.size] as? Int) ?? 0)
-        }
-        let overhead = VoiceSharingUploadQueue.protocolOverheadBytes
-        // Budget placed INSIDE the gap between the two charging rules, which is the only place the
-        // marked-entry headroom is observable:
-        //   correct (marked entry still charged physical+overhead): usage 4573 + incoming 4573 > budget
-        //   mutant  (marked entry charged physical only):          usage 4317 + incoming 4573 <= budget
-        // A budget admitting exactly one charged entry (physical+overhead) cannot distinguish them.
-        let budget = physical + (physical + overhead)
-        let q = VoiceSharingUploadQueue(
-            rootDirectory: root,
-            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: budget, maxRecords: 32))
-        let marked = try q.prepare(metadata: record, audio: audioA)
-        try q.finalize(marked)
-
-        // Another admission must be refused: the marked entry still holds its headroom.
-        XCTAssertThrowsError(try q.prepare(metadata: record, audio: audioA)) { error in
-            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .queueBytesExceeded,
-                           "a published entry must keep holding its growth headroom")
-        }
-
-        // Repeated finalize on the marked entry: growth is permitted only within the budget, and
-        // the assertion is on the ACTUAL footprint, not on a prepare succeeding.
-        let failing = VoiceSharingUploadQueue(
-            rootDirectory: root,
-            markerReplacer: { _, _ in
-                // Strand the temporary on disk, then fail: this is the growth case.
-                throw CocoaError(.fileWriteUnknown)
-            },
-            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: budget, maxRecords: 32))
-        for _ in 0..<3 {
-            do {
-                _ = try failing.finalize(marked)
-                XCTFail("growth beyond the budget must be refused, not written")
-            } catch let error as VoiceSharingUploadQueue.PrepareError {
-                XCTAssertTrue(error == .queueBytesExceeded || error == .publicationUncertain,
-                              "unexpected \(error)")
-            } catch {
-                XCTFail("unexpected \(error)")
-            }
-        }
-
-        let entryDirectory = try soleEntryDirectory()
-        let footprint = try FileManager.default.contentsOfDirectory(atPath: entryDirectory.path)
-            .reduce(0) { sum, file in
-                sum + ((try? FileManager.default.attributesOfItem(
-                    atPath: entryDirectory.appendingPathComponent(file).path)[.size] as? Int) ?? 0)
-            }
-        XCTAssertLessThanOrEqual(footprint, budget,
-                                 "stored footprint (\(footprint)) must stay within the limit (\(budget))")
+    /// The count does not care about bytes or debris: a huge entry, or unknown files beside it,
+    /// cannot stop admission the way the byte budget could.
+    func test_bytesAndDebrisDoNotGateAdmission() throws {
+        let q = VoiceSharingUploadQueue(rootDirectory: root)
+        let entry = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
+        try q.finalize(entry)
+        try Data(repeating: 0, count: 2_000_000)
+            .write(to: try soleEntryDirectory().appendingPathComponent("debris.bin"))
+        XCTAssertTrue(q.hasAdmissionAllowance(),
+                      "only the record count gates admission; bytes and debris must not")
     }
 
     func test_strandedTemporaryMarkerIsCleanedAndDoesNotBlockAdmission() throws {
@@ -1054,7 +933,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         // replacement could strand it and permanently block admission.
         let q = VoiceSharingUploadQueue(
             rootDirectory: root,
-            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32))
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxRecords: 32))
         let original = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
         try q.finalize(original)
         let entryDirectory = try soleEntryDirectory()
@@ -1072,42 +951,35 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                        "both finalized entries survive; only the stranded temp is removed")
     }
 
-    func test_foreignTemporaryLookingNameIsNotTreatedAsOwned() throws {
-        // The temp allowance must not become a hole: only prefix + well-formed UUID qualifies.
-        let q = VoiceSharingUploadQueue(
-            rootDirectory: root,
-            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32))
+    /// SPEC a3ef694f inverts this control. A directory holding a name outside the owned format used
+    /// to refuse admission, because the byte accounting could not price it. There is no price to
+    /// compute any more: such an entry counts as ONE record and the queue admits. Refusing here was
+    /// a way for debris to stop recording forever.
+    func test_debrisInsideAnEntryDirectoryNoLongerBlocksAdmission() throws {
+        let q = VoiceSharingUploadQueue(rootDirectory: root)
         _ = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
         let entryDirectory = try soleEntryDirectory()
         try Data([0x01]).write(to: entryDirectory.appendingPathComponent("ready.marker.tmp-not-a-uuid"))
-        XCTAssertThrowsError(
-            try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
-        ) { error in
-            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .accountingUnavailable)
-        }
+        XCTAssertNoThrow(
+            try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA),
+            "an unpriced file is not a reason to stop admitting")
     }
 
-    func test_oversizedDirectoryIsRefusedRatherThanEnumerated() throws {
-        // Reviewer 7b897fbb: a cap checked AFTER eager listing does not bound allocation, so
-        // discovery must refuse on overflow instead of materialising everything first.
+    /// Likewise for an unbounded number of temporary-looking names: the record count does not walk
+    /// entry contents at all, so an oversized directory cannot refuse an admission. The files stay
+    /// put; nothing is deleted to make room, and nothing is blocked.
+    func test_anOversizedEntryDirectoryDoesNotBlockAdmission() throws {
         let cap = VoiceSharingUploadQueue.maxDirectoryEntries
-        let q = VoiceSharingUploadQueue(
-            rootDirectory: root,
-            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32))
+        let q = VoiceSharingUploadQueue(rootDirectory: root)
         _ = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
         let entryDirectory = try soleEntryDirectory()
-        // More owned temporary names than the cap: an unbounded number of these is exactly what a
-        // UUID suffix permits.
         for _ in 0...(cap + 4) {
             try Data([0x01]).write(
                 to: entryDirectory.appendingPathComponent("ready.marker.tmp-\(UUID().uuidString)"))
         }
-        XCTAssertThrowsError(
-            try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
-        ) { error in
-            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .accountingUnavailable,
-                           "discovery overflow is a refusal, not an unbounded enumeration")
-        }
+        XCTAssertNoThrow(
+            try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA),
+            "a directory the queue cannot enumerate is still just one record")
     }
 
     func test_boundedListerReportsOverflowForAnOversizedDirectory() throws {
@@ -1131,7 +1003,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         let record = validRecord(captureID: UUID().uuidString, audio: audioA)
         let q = VoiceSharingUploadQueue(
             rootDirectory: root,
-            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32))
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxRecords: 32))
         let prep = try q.prepare(metadata: record, audio: audioA)
         try q.finalize(prep)
 
@@ -1218,7 +1090,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         let counter = ListingCounter()
         let q = VoiceSharingUploadQueue(
             rootDirectory: root,
-            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32),
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxRecords: 32),
             listDirectoryBounded: { url, keys, limit in
                 counter.calls += 1
                 counter.maxLimitSeen = max(counter.maxLimitSeen, limit)
@@ -1232,49 +1104,22 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                                  "recovery must never request an unbounded listing")
     }
 
-    func test_finalizeRefusesBeforeGrowthWhenCapacityWasConsumedAfterAdmission() throws {
-        // Reviewer 02cd9c53/3: the capacity check must precede GROWTH. It is reachable when other
-        // entries consume capacity between admission and finalize — the admission decision is stale
-        // by then, which is exactly why re-verifying is required.
-        let record = validRecord(captureID: UUID().uuidString, audio: audioA)
-        let probeRoot = temporaryRoot()
-        let probe = VoiceSharingUploadQueue(
-            rootDirectory: probeRoot,
-            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32))
-        _ = try probe.prepare(metadata: record, audio: audioA)
-        let probeName = try FileManager.default.contentsOfDirectory(atPath: probeRoot.path)
-            .first { !$0.hasPrefix(".") } ?? ""
-        let physical = try FileManager.default.contentsOfDirectory(
-            atPath: probeRoot.appendingPathComponent(probeName).path
-        ).reduce(0) { sum, file in
-            sum + ((try? FileManager.default.attributesOfItem(
-                atPath: probeRoot.appendingPathComponent(probeName).appendingPathComponent(file).path)[.size] as? Int) ?? 0)
+    /// Spec a3ef694f: there is no byte budget any more, so finalize has NO capacity check to do.
+    /// This control pins the replacement contract explicitly — a queue holding entries whose bytes
+    /// far exceed any old budget still finalizes, because only the record count bounds the queue.
+    /// (The old `queueBytesExceeded` refusal here was the fail-closed half of a limit the spec
+    /// removed; leaving it would resurrect the budget through its most destructive path.)
+    func test_finalizeIsNotGatedOnBytesOnlyOnTheRecordCount() throws {
+        let q = VoiceSharingUploadQueue(rootDirectory: root)
+        var prepared: [VoiceSharingUploadQueue.Entry] = []
+        for _ in 0..<8 {
+            prepared.append(try q.prepare(
+                metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA))
         }
-        let overhead = VoiceSharingUploadQueue.protocolOverheadBytes
-
-        // Two entries' worth, so both can be ADMITTED while preparing...
-        let budget = (physical + overhead) * 2
-        let q = VoiceSharingUploadQueue(
-            rootDirectory: root,
-            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: budget, maxRecords: 32))
-        let first = try q.prepare(metadata: record, audio: audioA)
-        let second = try q.prepare(metadata: record, audio: audioA)
-
-        // ...then cap the SAME queue to one entry's worth, simulating capacity consumed elsewhere.
-        // Finalize must re-verify and refuse BEFORE growth; a second queue cannot be used because
-        // its construction runs recovery, which would remove the still-preparing entries.
-        q.setAggregateLimitsForTesting(
-            VoiceSharingUploadQueue.AggregateLimits(maxBytes: physical + overhead, maxRecords: 32))
-        let stagePath = root.appendingPathComponent(first.name)
-            .appendingPathComponent("stage.publishing").path
-        XCTAssertThrowsError(try q.finalize(first)) { error in
-            XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .queueBytesExceeded,
-                           "finalize must re-verify capacity before growth")
+        for entry in prepared {
+            XCTAssertNoThrow(try q.finalize(entry), "bytes never gate finalize")
         }
-        // And it genuinely refused BEFORE growth: no stage record was written.
-        XCTAssertFalse(FileManager.default.fileExists(atPath: stagePath),
-                       "finalize must refuse before writing the stage record")
-        _ = second
+        XCTAssertEqual(q.readyEntries().count, 8)
     }
 
     // MARK: Attempt ownership (spec: attempts count across process restarts)
@@ -1473,7 +1318,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         // Spec: "Exhaustion or expiry removes the local entry with a content-free terminal counter."
         let q = VoiceSharingUploadQueue(
             rootDirectory: root,
-            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32),
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxRecords: 32),
             attemptLimits: VoiceSharingUploadQueue.AttemptLimits(optionalCap: 2))
         let prep = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
         try q.finalize(prep)
@@ -1541,7 +1386,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         // exceeding the reserve.
         let q = VoiceSharingUploadQueue(
             rootDirectory: root, clock: Date.init,
-            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32),
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxRecords: 32),
             attemptLimits: VoiceSharingUploadQueue.AttemptLimits(optionalCap: 100))
         let prep = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
         try q.finalize(prep)
@@ -1618,7 +1463,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
             synchronizer: { url, isDirectory in
                 if !isDirectory, url.lastPathComponent == "attempts.json" { throw CocoaError(.fileWriteUnknown) }
             },
-            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32))
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxRecords: 32))
         let prep = try failing.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
         try failing.finalize(prep)
         XCTAssertThrowsError(try failing.beginAttempt(prep)) { error in
@@ -1642,7 +1487,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         let q = VoiceSharingUploadQueue(
             rootDirectory: root,
             clock: Date.init,
-            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32),
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxRecords: 32),
             attemptLimits: VoiceSharingUploadQueue.AttemptLimits(optionalCap: 1))
         let prep = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
         try q.finalize(prep)
@@ -1891,7 +1736,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         // Reviewer 3ab75638/3: a refusal after claiming must settle the lease.
         let q = VoiceSharingUploadQueue(
             rootDirectory: root, clock: Date.init,
-            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32),
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxRecords: 32),
             attemptLimits: VoiceSharingUploadQueue.AttemptLimits(optionalCap: 1))
         let prep = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
         try q.finalize(prep)
@@ -2050,7 +1895,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         // driven through the OWNING instance: a fresh queue would simply start its own attempt.
         let limited = VoiceSharingUploadQueue(
             rootDirectory: root, clock: Date.init,
-            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32),
+            aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxRecords: 32),
             attemptLimits: VoiceSharingUploadQueue.AttemptLimits(optionalCap: 2))
         try limited.recordAttempt(prep) // count -> 2 = exhausted (q already spent 1)
         _ = try? limited.beginAttempt(prep) // refused after claiming; removes the entry
@@ -2069,7 +1914,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         // Reviewer 17c4310f: UUID-per-entry locks accumulated forever, and past the root's bounded
         // discovery limit admission was permanently disabled even with an empty queue. The fixed
         // lock pool must bound root artifacts across repeated acquire/exhaust/remove cycles.
-        let limits = VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32)
+        let limits = VoiceSharingUploadQueue.AggregateLimits(maxRecords: 32)
         for cycle in 0..<80 {
             let q = VoiceSharingUploadQueue(
                 rootDirectory: root, clock: Date.init,
@@ -2121,7 +1966,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         let recorders = (0..<12).map { _ in
             VoiceSharingUploadQueue(
                 rootDirectory: root, clock: Date.init,
-                aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxBytes: 10_000_000, maxRecords: 32),
+                aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxRecords: 32),
                 attemptLimits: VoiceSharingUploadQueue.AttemptLimits(optionalCap: 100))
         }
         let barrier = DispatchGroup()
@@ -2682,13 +2527,17 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         }
         XCTAssertEqual(ready.count, 1)
 
-        // Scan failure: serving is HELD (unknown), not read as an empty queue. Admission is
-        // equally held (fail-closed accounting).
+        // Scan failure: serving is HELD (unknown), not read as an empty queue.
         failListing = true
         guard case .unknownCoverage = q.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("unknown coverage must hold serving, not report an empty queue")
         }
-        XCTAssertThrowsError(try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioB), audio: audioB))
+        // ADMISSION, however, is NOT held (spec a3ef694f): an unreadable root must never stop new
+        // recordings. Serving and admitting are different promises — serving an entry we cannot
+        // verify would publish bytes we cannot vouch for; admitting one loses nothing, because the
+        // record is on disk and will be served once the root is readable again.
+        XCTAssertNoThrow(try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioB), audio: audioB),
+                         "an unreadable root must not stop admission")
 
         // Restoration: a bounded SUCCESSFUL scan reopens serving.
         failListing = false
@@ -2731,8 +2580,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
             "the live entry is untouched by the refusal sweep")
         // ...and its charge is gone: the same budget that previously held live + survivor
         // now admits a fresh candidate.
-        let limits = VoiceSharingUploadQueue.AggregateLimits(
-            maxBytes: 10 * 1024 * 1024, maxRecords: 8)
+        let limits = VoiceSharingUploadQueue.AggregateLimits(maxRecords: 8)
         let reopened = VoiceSharingUploadQueue(
             rootDirectory: root, clock: Date.init, aggregateLimits: limits)
         XCTAssertNoThrow(try reopened.prepare(
@@ -3364,39 +3212,28 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                       "but an unknown cause must NOT authorise deleting the recording")
     }
 
-    /// SPEC 0790a866 rule 1+3: UNKNOWN USAGE MUST NOT REFUSE ADMISSION. A queue that cannot measure
-    /// what it holds used to refuse every new recording forever — the owner's simulator sat at a
-    /// few percent of budget dropping every capture. RED before this change: the allowance query
-    /// returned false on an unmeasurable queue.
-    func test_anUnmeasurableQueueStillAllowsAdmissionOnAConservativeEstimate() throws {
-        // Fail the listing ONLY AFTER recovery has established the root: a queue that cannot even
-        // start is a different (and correctly fatal) condition from one that cannot MEASURE.
+    /// SPEC a3ef694f: an unmeasurable queue must not refuse admission. RED before this change — the
+    /// allowance query returned false whenever the root could not be counted, which is the wedge.
+    func test_anUnmeasurableQueueStillAllowsAdmission() throws {
         let queue = makeQueue(enumerationSource: { _, _ in AnySequence([.failure(CocoaError(.fileReadUnknown))]) })
-        _ = queue.readyEntriesReportingUnknownCoverage() // let recovery run once on a healthy root
-        // The measurement genuinely fails: the strict reader throws.
+        _ = queue.readyEntriesReportingUnknownCoverage() // let recovery run once
         if case .known = queue.readyEntriesReportingUnknownCoverage() {
-            return XCTFail("precondition: the queue cannot measure its contents")
+            return XCTFail("precondition: the queue cannot count its contents")
         }
-        XCTAssertFalse(queue.lastUsageWasUnknown == false,
-                       "and it recorded that usage was unknown")
-        // ADMISSION IS STILL ALLOWED — the estimate is an upper bound, never a small number.
-        XCTAssertTrue(queue.hasAdmissionAllowance(forBytes: 1_000),
-                      "unknown usage must not wedge admission (spec 0790a866)")
+        XCTAssertTrue(queue.hasAdmissionAllowance(),
+                      "an uncountable queue is not a full one (spec a3ef694f)")
+        XCTAssertTrue(queue.lastCountWasUnknown, "and it recorded that the count failed")
     }
 
-    /// RULE 2: the budget is recomputed from the entries actually on disk at recovery. With a small
-    /// artificial budget the recompute has to SEE the entries, so phantom usage cannot be inherited
-    /// from a previous process.
-    func test_theBudgetIsRecomputedFromDiskAtRecovery() throws {
+    /// The count at recovery is read from the entries actually on disk, so a restart cannot inherit
+    /// a phantom tally from a previous process.
+    func test_theRecordCountIsRecomputedFromDiskAtRecovery() throws {
         let seeded = makeQueue()
         _ = try prepareAndFinalize(seeded, metadata: validRecord(audio: audioA), audio: audioA)
         let fresh = makeQueue()
         _ = fresh.readyEntriesReportingUnknownCoverage()
-        let measured = try XCTUnwrap(fresh.lastMeasuredUsageLocked,
-                                     "recovery records what the disk holds")
-        XCTAssertEqual(measured.records, 1, "exactly the one entry on disk")
-        XCTAssertGreaterThan(measured.bytes, 0, "and its real footprint")
-        XCTAssertFalse(fresh.lastUsageWasUnknown, "the measurement succeeded")
+        XCTAssertEqual(fresh.lastCompleteEntryCountLocked, 1, "exactly the one entry on disk")
+        XCTAssertFalse(fresh.lastCountWasUnknown, "the count succeeded")
     }
 
     /// RULE 3 counterpart: with unknown coverage, a DUE entry is still attempted. The hold must not
@@ -4081,7 +3918,7 @@ final class VoiceSharingBackupPolicyTests: XCTestCase {
             XCTAssertThrowsError(try blocked.finalize(unready)) {
                 XCTAssertEqual($0 as? VoiceSharingUploadQueue.PrepareError, .storagePolicyUnavailable)
             }
-            XCTAssertFalse(blocked.hasAdmissionAllowance(forBytes: 1))
+            XCTAssertFalse(blocked.hasAdmissionAllowance())
             XCTAssertTrue(blocked.readyEntries().isEmpty)
             if case .unknownCoverage = blocked.readyEntriesReportingUnknownCoverage() {} else {
                 XCTFail("unverified backup policy must report unknown coverage, not known zero")
