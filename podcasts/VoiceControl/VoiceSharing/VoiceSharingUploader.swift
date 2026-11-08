@@ -309,24 +309,6 @@ final class VoiceSharingUploader {
                     return unknownOutcome(entry: entry, lease: lease, attempt: attemptNumber,
                                           reason: "terminal status with non-owning body")
                 }
-                // A 409 AFTER A SERVER-SIDE FAILURE IS NOT A VERDICT (spec 219d3bb6). A 5xx is
-                // always retryable, so the entry comes back with its attempt count increased; if
-                // the server then answers `capture_conflict` for the SAME capture, that is a
-                // server-side bug (the earlier failure may have half-landed the record), not a
-                // reason to destroy a recording the client cannot re-create. Retain and log.
-                //
-                // ATTEMPT NUMBER IS THE EVIDENCE: attempt 1 means this is the first answer the
-                // queue ever got for this entry, so nothing earlier failed and the conflict is
-                // the server's genuine first word. Above 1, an earlier attempt existed — and the
-                // only dispositions this client retries are the ones that are NOT verdicts.
-                if statusCode == 409 && code == "capture_conflict" && attemptNumber > 1 {
-                        FileLog.shared.addMessage(
-                            "[VoiceSharing] upload disposition entry=\(entry.name) "
-                                + "reason=conflict-after-server-failure disposition=retain attempt=\(attemptNumber)")
-                        FileLog.shared.forceFlush()
-                    return settleRetry(entry: entry, lease: lease, attempt: attemptNumber,
-                                       serverRetryAfter: Self.retryAfterSeconds(body))
-                }
                 if statusCode == 400 && code == "invalid_request" {
                         // SPEC 1a0d3ffb: a recording the server refuses permanently is deleted
                         // from the queue at once, not kept. This supersedes the quarantine

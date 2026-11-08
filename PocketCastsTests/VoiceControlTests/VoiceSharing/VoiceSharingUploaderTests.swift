@@ -1008,12 +1008,14 @@ final class VoiceSharingUploaderTests: XCTestCase {
     /// The server may have half-landed the record, and the client cannot re-create the audio, so
     /// the entry is retained and logged rather than deleted. RED before this change: the 409
     /// branch abandoned it on the spot.
-    func test_aConflictThatFollowsAServerFailureRetainsInsteadOfDeleting() async throws {
+    /// A conflict that follows a server failure is TERMINAL once Cloud reopens failed captures
+    /// (spec commit 8637a0fd, per spec 418d3d05). This control replaces the earlier retain; it pins
+    /// the new contract so the old hold cannot quietly come back.
+    func test_aConflictAfterAServerFailureIsTerminalOnceTheServerReopens() async throws {
         let entry = try makeReadyEntry()
         func errorBody(_ code: String) -> Data {
             try! JSONSerialization.data(withJSONObject: ["schema_version": 1, "code": code])
         }
-        // FIRST attempt: the server fails. The entry stays and its attempt count advances.
         do {
             let uploader = makeUploader(transport: { _, _, _ in
                 .response(statusCode: 503, body: errorBody("storage_unavailable"))
@@ -1023,21 +1025,12 @@ final class VoiceSharingUploaderTests: XCTestCase {
                 return XCTFail("a 5xx is retryable, got \(outcome)")
             }
         }
-        // SECOND attempt: the same capture now "conflicts". That is the server disagreeing with
-        // its own earlier failure — never grounds for deleting the recording.
-        do {
-            let uploader = makeUploader(transport: { _, _, _ in
-                .response(statusCode: 409, body: errorBody("capture_conflict"))
-            })
-            let outcome = await uploader.upload(entry)
-            guard case .retry = outcome else {
-                return XCTFail("a conflict after a server failure must RETRY, got \(outcome)")
-            }
-            guard case .known(let after) = queue.readyEntriesReportingUnknownCoverage() else {
-                return XCTFail("coverage known")
-            }
-            XCTAssertTrue(after.contains(where: { $0.name == entry.name }),
-                          "the recording is still queued, not deleted")
+        let uploader = makeUploader(transport: { _, _, _ in
+            .response(statusCode: 409, body: errorBody("capture_conflict"))
+        })
+        let outcome = await uploader.upload(entry)
+        guard case .abandoned = outcome else {
+            return XCTFail("a conflict is terminal under 8637a0fd, got \(outcome)")
         }
     }
 

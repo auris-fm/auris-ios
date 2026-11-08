@@ -135,16 +135,12 @@ final class VoiceSharingContributionSink {
 
     private func process(_ pending: PendingEvent) {
         testingWorkerGate?()
-        // Admission BEFORE allocation: the queue's measured remaining allowance must cover the
-        // worst-case entry (WAV payload + largest legal metadata + protocol overhead) before any
-        // encoded copy exists. prepare re-checks exactly at write time.
-        let worstCase = pending.event.audio.count * 2
-            + VoiceSharingRecordBinding.wavHeaderBytes
-            + VoiceSharingUploadQueue.maxMetadataBytes
-            + VoiceSharingUploadQueue.protocolOverheadBytes
-        guard queue.hasAdmissionAllowance(forBytes: worstCase) else {
+        // Admission BEFORE allocation: is there room for another RECORD? (spec a3ef694f). The queue
+        // no longer bounds bytes, so there is no worst-case size to compute — and no size arithmetic
+        // that can itself fail and drop the capture.
+        guard queue.hasAdmissionAllowance() else {
             FileLog.shared.addMessage(
-                "[VoiceSharing] contribution dropped (queue budget) capture=\(pending.event.captureID)")
+                "[VoiceSharing] contribution dropped (queue full) capture=\(pending.event.captureID)")
             return
         }
 
