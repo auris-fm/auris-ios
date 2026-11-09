@@ -21,23 +21,37 @@ final class VoiceSharingUploadTrigger {
     /// The one pending retry wake.
     private var retryWake: Task<Void, Never>?
     /// Cancels whatever the transport has in flight, so `stop()` reaches the transfer itself.
-    private let onStop: (() -> Void)?
+    private let cancelInFlight: () -> Void
 
     init(uploader: VoiceSharingUploader,
          surfaceEnabled: @escaping () -> Bool = { VoiceSharingSettingsModel.surfaceEnabled },
          isAuthorized: @escaping () -> Bool,
-         onStop: (() -> Void)? = nil) {
+         cancelInFlight: @escaping () -> Void = {}) {
         self.uploader = uploader
         self.surfaceEnabled = surfaceEnabled
         self.isAuthorized = isAuthorized
-        self.onStop = onStop
+        self.cancelInFlight = cancelInFlight
     }
 
     /// Asks for a pass. Returns immediately; the pass runs on its own task.
+    ///
+    /// There is no permanent latch: `stop()` halts the current work, and the next permission —
+    /// sharing turned back on, a new recording, the app foregrounded — resumes it via this same call.
     func trigger() {
         guard surfaceEnabled() else { return }
         lock.lock()
-        if stopped { lock.unlock(); return }
+        if stopped {
+            // A pass is only refused while sharing is actually off. Re-reading the live
+            // authorization here means turning sharing back on needs no separate re-enable call.
+            guard !isAuthorized() else {
+                stopped = false
+                lock.unlock()
+                trigger()
+                return
+            }
+            lock.unlock()
+            return
+        }
         if running {
             // One remembered request is enough: the pass that is about to finish will serve it.
             pending = true
@@ -57,9 +71,10 @@ final class VoiceSharingUploadTrigger {
         pending = false
         retryWake?.cancel()
         retryWake = nil
-        let cancel = onStop
         lock.unlock()
-        cancel?()
+        // The transfer is cancelled, not merely left to finish: a recording must not keep
+        // travelling to the server after the user said stop.
+        cancelInFlight()
     }
 
     /// Test seam: whether a pass is currently running.
@@ -79,20 +94,22 @@ final class VoiceSharingUploadTrigger {
     /// Re-arming replaces the previous wake, so there is never more than one pending.
     func armRetryWake() async {
         guard surfaceEnabled() else { return }
-        retryWake?.cancel()
         guard let delay = await uploader.secondsUntilNextRetry() else {
-            retryWake = nil
+            lock.lock(); retryWake?.cancel(); retryWake = nil; lock.unlock()
             return
         }
+        // The slot is read and written under the same lock `stop()` takes, so arming and stopping
+        // cannot interleave into a timer that outlives the stop.
         lock.lock()
-        let allowed = !stopped
-        lock.unlock()
-        guard allowed else { return }
-        retryWake = Task { [weak self] in
+        guard !stopped else { lock.unlock(); return }
+        retryWake?.cancel()
+        let task = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard !Task.isCancelled else { return }
             self?.trigger()
         }
+        retryWake = task
+        lock.unlock()
     }
 
     private func finish() {

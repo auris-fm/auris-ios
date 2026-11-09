@@ -475,10 +475,12 @@ class VoiceControlAssembly {
         currentIdentity: @escaping () -> (account: String, epoch: String)?,
         baseURLProvider: @escaping () -> String = { CloudConfig.shared.baseUrl },
         tokenProvider: CloudTokenProviding,
-        session: URLSession = .shared,
+        session: URLSession? = nil,
         clock: @escaping () -> Date = Date.init,
         surfaceEnabled: @escaping () -> Bool = { VoiceSharingSettingsModel.surfaceEnabled }
     ) -> VoiceSharingUploadTrigger {
+        // `nil` lets the transport build its own session with the elapsed-time budget. Passing
+        // `.shared` here would silently discard that budget in production.
         let transport = VoiceSharingUploadTransport(
             baseURLProvider: baseURLProvider, tokenProvider: tokenProvider, session: session)
         let uploader = VoiceSharingUploader(
@@ -495,7 +497,7 @@ class VoiceControlAssembly {
             log: { FileLog.shared.addMessage("[VoiceSharing] \($0)") })
         return VoiceSharingUploadTrigger(
             uploader: uploader, surfaceEnabled: surfaceEnabled, isAuthorized: isAuthorized,
-            onStop: { transport.cancelInFlight() })
+            cancelInFlight: { transport.cancelInFlight() })
     }
 
 
@@ -640,23 +642,39 @@ final class VoiceSharingLifetime {
     private let enrollmentStore: VoiceSharingEnrollmentStore
     private let queue: VoiceSharingQueue
     private let enrollmentObserver: UUID
-    private let queueObserver: UUID
+    private let foregroundObserver: NSObjectProtocol?
+    private let notificationCenter: NotificationCenter
 
     init(settingsModel: VoiceSharingSettingsModel,
          uploadTrigger: VoiceSharingUploadTrigger,
          enrollmentStore: VoiceSharingEnrollmentStore,
-         queue: VoiceSharingQueue) {
+         queue: VoiceSharingQueue,
+         notificationCenter: NotificationCenter = .default) {
         self.settingsModel = settingsModel
         self.uploadTrigger = uploadTrigger
         self.enrollmentStore = enrollmentStore
         self.queue = queue
-        enrollmentObserver = enrollmentStore.addObserver { [weak settingsModel] _ in
+        self.notificationCenter = notificationCenter
+        enrollmentObserver = enrollmentStore.addObserver { [weak settingsModel, weak uploadTrigger] _ in
             Task { await settingsModel?.refreshLiveState() }
+            // Sign-in restored or an enrollment changed: the one entry point re-checks permission,
+            // so no separate wake is needed for each source.
+            uploadTrigger?.trigger()
         }
-        queueObserver = UUID()
+        // The advertised foreground wake. A backgrounded app may have missed the moment a retry
+        // became due; returning to the foreground is the natural point to offer the queue again.
+        foregroundObserver = notificationCenter.addObserver(
+            forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
+        ) { [weak uploadTrigger] _ in
+            uploadTrigger?.trigger()
+        }
+        // Startup: anything retained from a previous run is offered once, without waiting for an
+        // unrelated event.
+        uploadTrigger.trigger()
     }
 
     deinit {
         enrollmentStore.removeObserver(enrollmentObserver)
+        if let foregroundObserver { notificationCenter.removeObserver(foregroundObserver) }
     }
 }

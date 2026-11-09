@@ -553,7 +553,8 @@ final class VoiceSharingAccountModel: ObservableObject {
     enum DeletionStatus: Equatable {
         case idle, sending, unavailable, unauthorized
         case refused(VoiceSharingMutationOutcome.RefusalReason)
-        case pending(String)
+        /// The server deleted account data synchronously and said so with an empty `204`.
+        case deleted
     }
     @Published private(set) var membershipStatus: MembershipStatus = .idle
     @Published private(set) var deletionStatus: DeletionStatus = .idle
@@ -849,9 +850,9 @@ final class VoiceSharingAccountModel: ObservableObject {
         // client, and a NEWER deletion may have replaced this one meanwhile. A stale completion must
         // not write status for an operation that is no longer current.
         guard session() == operation.originatingGeneration else { storeChanged(); return }
-        guard deletion?.requestID == operation.requestID else { return }
+        guard deletion == operation else { return }
         switch result {
-        case .pending(let id): deletion = nil; deletionStatus = .pending(id)
+        case .deleted: deletion = nil; deletionStatus = .deleted
         case .unauthorized: deletion = nil; deletionStatus = .unauthorized
         case .refused(let reason): deletion = nil; deletionStatus = .refused(reason)
         // Temporary: the operation is RETAINED so an identical retry can be sent later.
@@ -868,8 +869,8 @@ final class VoiceSharingAccountModel: ObservableObject {
     // control could replace an in-flight deletion the real button would refuse. Controls now drive
     // the public entry points only.
 
-    /// The request ID of the deletion operation currently awaiting completion, if any.
-    var pendingDeletionRequestIDForTesting: String? { deletion?.requestID }
+    /// Whether a deletion operation is still awaiting a definitive answer.
+    var hasPendingDeletionForTesting: Bool { deletion != nil }
 
     deinit { if let observer { store.removeObserver(observer) } }
 }

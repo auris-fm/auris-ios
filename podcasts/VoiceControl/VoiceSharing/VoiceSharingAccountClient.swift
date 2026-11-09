@@ -222,18 +222,16 @@ final class VoiceSharingAccountClient {
 
     // MARK: - DELETE accepted data (separate operation, separate request identity)
 
-    /// Deletion carries its own immutable request identity; retrying an unknown outcome must reuse BOTH the
-    /// original request_id and the original cutoff, since retries keep the same request identity per spec.
-    struct DeletionOperation {
-        let requestID: String
-        let body: [String: Any]
+    /// Account-wide deletion is one request with no body and no receipt: the server answers `204` when
+    /// it has deleted and nothing otherwise. The operation still carries the session it was begun
+    /// under, so a reply cannot be reported under an account that did not ask for it.
+    struct DeletionOperation: Equatable {
         let originatingGeneration: SessionIdentity
     }
 
     func beginDeletion() -> DeletionOperation? {
         guard let generation = sessionIdentity() else { return nil }
-        let id = requestIDFactory()
-        return DeletionOperation(requestID: id, body: [Field.requestId: id], originatingGeneration: generation)
+        return DeletionOperation(originatingGeneration: generation)
     }
 
     /// Requires an explicit operation: there is no implicit "begin + send" form, because an unknown outcome
@@ -242,11 +240,12 @@ final class VoiceSharingAccountClient {
         // Identity fence FIRST, before the credential await inside makeRequest — otherwise a transition that
         // lands during token acquisition would go unnoticed by this path.
         guard sessionIdentity() == operation.originatingGeneration else { return .unavailableBackend }
-        guard let request = await makeRequest(
+        guard var request = await makeRequest(
             path: Self.dataPath,
             method: "DELETE",
-            body: op_body(of: operation)
+            body: nil
         ) else { return .unavailableBackend }
+        request.httpBody = nil
         guard sessionIdentity() == operation.originatingGeneration else { return .unavailableBackend }
         do {
             let (data, response) = try await session.data(for: request)
@@ -255,16 +254,12 @@ final class VoiceSharingAccountClient {
             // belonging to a superseded session must not be reported under the current one.
             guard sessionIdentity() == operation.originatingGeneration else { return .unavailableBackend }
             switch http.statusCode {
-            case 202:
-                // A receipt is only a receipt if it says so in the contracted shape: schema_version 1,
-                // status exactly `deletion_pending`, and a non-empty opaque identifier. Anything else is an
-                // unknown outcome (retryable with the SAME operation), never a success to display.
-                guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      Self.isExactInteger(object[Field.schemaVersion], 1),
-                      (object[Field.status] as? String) == "deletion_pending",
-                      let id = Self.nonEmptyString(object[Field.deletionRequestId])
-                else { return .unavailableBackend }
-                return .pending(deletionRequestId: id)
+            case 204:
+                // The only success: deleted, synchronously, with nothing to follow up on. There is no
+                // receipt to track, so nothing is reported as pending.
+                return .deleted
+            case 200 where data.isEmpty:
+                return .deleted
             case 401:
                 await tokenProvider.handleUnauthorized(rejectedToken: request.value(forHTTPHeaderField: "Authorization")?
                     .replacingOccurrences(of: "Bearer ", with: ""))
@@ -341,7 +336,6 @@ final class VoiceSharingAccountClient {
     /// Builds the request. Callers capture session identity before awaiting here, because the credential
     /// fetch is a suspension point where an account transition can land; this function never reads identity
     /// itself, so there is exactly one pre-await capture per operation.
-    private func op_body(of operation: DeletionOperation) -> [String: Any] { operation.body }
 
     private func makeRequest(path: String, method: String, body: [String: Any]?) async -> URLRequest? {
         guard let url = VoiceSharingOrigin.url(origin: baseURLProvider(), path: path) else { return nil }
@@ -376,7 +370,8 @@ final class VoiceSharingAccountClient {
         // schema_version must be exactly the integer 1 — not "1", not 1.0, not absent.
         guard Self.isExactInteger(object[Field.schemaVersion], 1) else { return nil }
 
-        guard let revision = nonEmptyString(object[Field.membershipRevision]) else { return nil }
+        // The server no longer issues `membership_revision`; requiring it refused every real answer.
+        let revision = nonEmptyString(object[Field.membershipRevision]) ?? ""
         guard let planRaw = nonEmptyString(object[Field.plan]), let plan = VoiceSharingMembership.Plan(rawValue: planRaw) else { return nil }
         guard let enrolled = strictBool(object[Field.enrolled]) else { return nil }
         guard let withdrawalRaw = nonEmptyString(object[Field.withdrawalState]),
@@ -422,7 +417,6 @@ final class VoiceSharingAccountClient {
     static func decodeRejectionReason(_ data: Data) -> String? {
         guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return "not-a-json-object" }
         guard Self.isExactInteger(object[Field.schemaVersion], 1) else { return Field.schemaVersion }
-        if Self.nonEmptyString(object[Field.membershipRevision]) == nil { return Field.membershipRevision }
         if Self.nonEmptyString(object[Field.plan]) == nil { return Field.plan }
         if VoiceSharingMembership.Plan(rawValue: object[Field.plan] as? String ?? "") == nil { return "\(Field.plan)-enum" }
         if Self.strictBool(object[Field.enrolled]) == nil { return Field.enrolled }

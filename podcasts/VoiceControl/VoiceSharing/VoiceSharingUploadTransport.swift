@@ -1,40 +1,5 @@
 import Foundation
 
-/// Bridges one `URLSessionDataTask` to an `async` call, including its deadline.
-///
-/// A data task with a per-task delegate is what makes an elapsed-time budget possible: the timeout
-/// handler fires for the whole transfer, not for a single stall, and cancelling the task settles the
-/// awaiting call instead of leaving it suspended.
-private final class TransferBridge: NSObject, URLSessionDataDelegate {
-    private let lock = NSLock()
-    private var result: Result<(Data, URLResponse), Error>?
-    var continuation: CheckedContinuation<(Data, URLResponse), any Error>?
-
-    var settled: Bool { lock.lock(); defer { lock.unlock() }; return result != nil }
-
-    // MARK: URLSessionDataDelegate
-
-    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        // The body is not read: only the status decides what happens next.
-    }
-
-    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?) {
-        if let error { settle(.failure(error)) }
-        else if let response = task.response { settle(.success((Data(), response))) }
-        else { settle(.failure(URLError(.badServerResponse))) }
-    }
-
-    func settle(_ outcome: Result<(Data, URLResponse), Error>) {
-        lock.lock()
-        guard result == nil else { lock.unlock(); return }
-        result = outcome
-        let waiting = continuation
-        continuation = nil
-        lock.unlock()
-        waiting?.resume(with: outcome)
-    }
-}
-
 /// Sends one recording as a single multipart request and reduces the answer to what the uploader
 /// decides on. There is no reservation, no second step and no receipt matching.
 final class VoiceSharingUploadTransport {
@@ -44,10 +9,10 @@ final class VoiceSharingUploadTransport {
     private let session: URLSession
     /// The credential the last request presented, so a 401 can name what was rejected.
     private var lastPresentedToken: String?
-    /// The request currently in flight, so a consent loss can cancel it rather than merely stop
-    /// scheduling new work. Without this, "stop" leaves a recording already on its way to the wire.
+    /// The transfer currently in flight, so a consent loss can cancel it rather than merely stop
+    /// scheduling new work. Cancelling the task cancels the underlying request.
     private let inFlightLock = NSLock()
-    private var inFlight: URLSessionDataTask?
+    private var inFlight: Task<(Data, URLResponse), any Error>?
 
     init(baseURLProvider: @escaping () -> String,
          tokenProvider: CloudTokenProviding,
@@ -99,7 +64,7 @@ final class VoiceSharingUploadTransport {
         request.setValue(String(body.count), forHTTPHeaderField: "Content-Length")
         lastPresentedToken = token
         do {
-            let (_, response) = try await transfer(request)
+            let (_, response) = try await runInFlight(request, body: body)
             guard let http = response as? HTTPURLResponse else { return .noAnswer }
             return .response(status: http.statusCode)
         } catch {
@@ -107,25 +72,25 @@ final class VoiceSharingUploadTransport {
         }
     }
 
-    /// Runs one request under a whole-transfer budget and returns once it settles or is cancelled.
-    ///
-    /// `URLRequest.timeoutInterval` bounds a single stall, not the elapsed time of a transfer that
-    /// keeps trickling bytes. This bounds the whole thing: past the deadline the task is cancelled,
-    /// which is a retry, not a delete.
-    private func transfer(_ request: URLRequest) async throws -> (Data, URLResponse) {
-        let bridge = TransferBridge()
-        let task = session.dataTask(with: request)
-        inFlightLock.lock(); inFlight = task; inFlightLock.unlock()
-        defer { inFlightLock.lock(); inFlight = nil; inFlightLock.unlock() }
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                bridge.continuation = continuation
-                task.delegate = bridge
-                session.delegateQueue.addOperation { task.resume() }
-            }
-        } onCancel: {
-            task.cancel()
+    /// Runs one transfer, publishing it so `cancelInFlight()` can reach it.
+    private func runInFlight(_ request: URLRequest, body: Data) async throws -> (Data, URLResponse) {
+        let task = Task { [session] in
+            try await session.upload(for: request, from: body)
         }
+        inFlightLock.lock()
+        guard !Task.isCancelled else { inFlightLock.unlock(); task.cancel(); throw URLError(.cancelled) }
+        inFlight = task
+        inFlightLock.unlock()
+        defer { inFlightLock.lock(); inFlight = nil; inFlightLock.unlock() }
+        return try await task.value
+    }
+
+    /// One request under the session's elapsed-time budget.
+    ///
+    /// `timeoutIntervalForResource` counts wall-clock time for the whole transfer, so a body that
+    /// keeps trickling bytes cannot outlast it. Cancelling the enclosing task cancels the request.
+    private func transfer(_ request: URLRequest, body: Data) async throws -> (Data?, URLResponse) {
+        try await session.upload(for: request, from: body)
     }
 
     /// Cancels the request in flight, if any. Called when consent is withdrawn: the recording must

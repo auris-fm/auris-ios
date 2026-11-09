@@ -434,7 +434,8 @@ struct VoiceSharingAccountSections: View {
         case .unavailable: return L10n.voiceSharingAccountOperationFailed
         case .unauthorized: return L10n.voiceSharingAccountSignInAgain
         case .refused: return L10n.voiceSharingAccountRefused
-        case .pending: return L10n.voiceSharingAccountDeletionPending
+        // The server deleted synchronously and said so; there is nothing left to wait for.
+        case .deleted: return L10n.voiceSharingAccountDeletionDone
         }
     }
 }

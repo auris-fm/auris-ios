@@ -67,9 +67,9 @@ enum VoiceSharingMutationOutcome: Equatable {
 
 /// Deletion is its own operation with its own request identity, independent of enrollment and plan.
 enum VoiceSharingDeletionOutcome: Equatable {
-    /// `202` with opaque `deletion_request_id` + `status: deletion_pending`. Local UI must show this as
-    /// PENDING, never as completed, because local queue removal alone proves nothing about server state.
-    case pending(deletionRequestId: String)
+    /// `204` with an empty body: the server deleted synchronously. There is no receipt and nothing to
+    /// follow up on, so this is the one outcome that may be shown as completed.
+    case deleted
     case refused(reason: VoiceSharingMutationOutcome.RefusalReason)
     case unauthorized
     case unavailableBackend

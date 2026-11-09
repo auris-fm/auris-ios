@@ -6774,6 +6774,7 @@
 "voice_sharing_account_withdrawn" = "Withdrawal is confirmed. New sharing is stopped.";
 "voice_sharing_account_withdrawal_pending" = "Sharing is stopped locally. Server withdrawal is not yet confirmed.";
 "voice_sharing_account_deletion_pending" = "Deletion request acknowledged and pending. This does not confirm removal.";
+"voice_sharing_account_deletion_done" = "Voice recordings held by the service were deleted.";
 "voice_sharing_account_cleanup_unresolved" = "Some pending recordings could not be confirmed removed. Sharing has stopped locally; try cleanup again.";
 
 "voice_sharing_disclosure_title" = "Share voice recordings with auris";
