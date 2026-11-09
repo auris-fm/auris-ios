@@ -394,7 +394,13 @@ final class VoiceSharingBearerTraceControls: XCTestCase {
         // (e) CONTRAST — explicit withdrawal still purges through the SAME production handler.
         _ = store.withdrawLocally(acceptedServerProjectionAfterward: false)
         coordinator.consentGateLostForTesting()
-        let entriesAfterWithdrawal = await queue.entries()
+        // The purge runs on its own task, so reading the queue straight after the notification races
+        // the deletion. Wait for the decision to be recorded rather than assuming it has landed.
+        var entriesAfterWithdrawal: [VoiceSharingQueue.Entry] = [entry]
+        for _ in 0..<200 where !entriesAfterWithdrawal.isEmpty {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+            entriesAfterWithdrawal = await queue.entries()
+        }
         XCTAssertTrue(entriesAfterWithdrawal.isEmpty, "withdrawal clears pending recordings")
         let purges = purgeDecisions(logged)
         XCTAssertFalse(purges.isEmpty, "withdrawal records a purge decision: \(logged)")

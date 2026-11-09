@@ -12,11 +12,6 @@ final class VoiceSharingUploadTransport {
     /// The transfer currently in flight, so a consent loss can cancel it rather than merely stop
     /// scheduling new work. Cancelling the task cancels the underlying request.
     private let inFlightLock = NSLock()
-    /// Test seam for the withdrawal window: called under the registration lock, after permission is
-    /// answered and before the transfer is published. A caller that withdraws here exercises the one
-    /// ordering that could strand a transfer, so a control can prove the denied path both sends
-    /// nothing and finishes.
-    var afterPermissionBeforeRegistrationForTesting: (() -> Void)?
     private var inFlight: Task<(Data, URLResponse), any Error>?
 
     init(baseURLProvider: @escaping () -> String,
@@ -99,7 +94,6 @@ final class VoiceSharingUploadTransport {
             inFlightLock.unlock()
             throw CancellationError()
         }
-        afterPermissionBeforeRegistrationForTesting?()
         let task = Task { [session] in
             try await session.upload(for: request, from: body)
         }
