@@ -350,7 +350,8 @@ final class LfmIntentRouter {
                 raw: generated,
                 utterance: trimmed,
                 tool: tool,
-                action: action
+                action: action,
+                textLanguage: Self.repairTextLanguage(for: inputFormat)
             ) else {
                 stages.parseRepairMs = elapsedMs(since: parseStart)
                 report(
@@ -491,6 +492,21 @@ final class LfmIntentRouter {
     private struct DiagnosticBase {
         let sourceLanguage: String?
         let translationKind: String
+    }
+
+    /// The language of the text handed to repair.
+    ///
+    /// Repair needs this only where a word collides across languages — "once" is the Spanish
+    /// numeral eleven but an English clause marker — so the value must describe the text itself,
+    /// not what the speaker was recorded saying. An `english_v1` routing input is English by
+    /// construction however it was produced, including when a translation supplied it.
+    static func repairTextLanguage(for format: RouterInputFormat) -> String? {
+        switch format {
+        case .englishV1: return "en"
+        // The source and dual inputs carry the transcript's own language, which repair is not
+        // given here; leaving it unstated keeps repair from guessing one.
+        case .sourceV1, .dualV1, .unknown: return nil
+        }
     }
 
     private func elapsedMs(since mark: CFTimeInterval) -> Double {

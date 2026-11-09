@@ -359,9 +359,12 @@ enum SlotRepair {
         // A quoted title is a name, not a condition, so the words inside it are blanked before the
         // condition is read. Blanking preserves offsets, leaving identical words outside the quote
         // observable.
-        var conditionText = utterance
+        // Quotes are normalized first so a smart-quoted title is recognized as a title below;
+        // otherwise its words stay visible and a name reads as a condition.
+        let normalized = Self.normalizedQuotes(utterance)
+        var conditionText = normalized
         if !actionParams.isDisjoint(with: ["title", "query", "ref", "episode", "podcast"]) {
-            for title in quotedSpans(utterance) {
+            for title in quotedSpans(normalized) {
                 for quote in ["\"", "'"] {
                     let literal = quote + title + quote
                     conditionText = conditionText.replacingOccurrences(
@@ -377,7 +380,7 @@ enum SlotRepair {
         }
         // A correction settles the value it affirms, but it cannot erase a condition stated
         // outside it, so only the numeric text is stripped of quotes and corrected below.
-        let numericText = utterance.replacingOccurrences(of: "\"", with: "")
+        let numericText = normalized.replacingOccurrences(of: "\"", with: "")
             .replacingOccurrences(of: "'", with: "")
 
         conditionText = replace(politeConditionalRegex, in: conditionText, with: "")
@@ -460,6 +463,19 @@ enum SlotRepair {
         return String(text[range.upperBound...])
     }
 
+    /// Curly quotes and CJK brackets become their ASCII equivalents, so a quoted name is
+    /// recognized whatever produced the punctuation.
+    private static func normalizedQuotes(_ text: String) -> String {
+        var result = text
+        for (from, to) in [
+            ("\u{201C}", "\""), ("\u{201D}", "\""), ("\u{300C}", "\""), ("\u{300D}", "\""),
+            ("\u{300E}", "\""), ("\u{300F}", "\""), ("\u{2018}", "'"), ("\u{2019}", "'"),
+        ] {
+            result = result.replacingOccurrences(of: from, with: to)
+        }
+        return result
+    }
+
     private static let numericParamKeys: Set<String> = [
         "delta_seconds", "position_seconds", "minutes", "seconds", "duration", "level", "index",
     ]
@@ -479,7 +495,7 @@ enum SlotRepair {
     private static let unresolvedNumber =
         #"(?<![A-Za-z])(?:(?:a\s+)?couple|"# + unresolvedBaseNumber + #"\s+(?:halves|quarters|thirds)"#
         + #"|"# + unresolvedBaseNumber + #"\s+and\s+(?:a\s+)?(?:half|quarter)|(?:a\s+)?(?:half|quarter)"#
-        + #"|"# + unresolvedBaseNumber + #"|cero|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez"#
+        + #"|"# + unresolvedBaseNumber + #"|an?|cero|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez"#
         + #"|once|doce|trece|catorce|quince|dieciséis|dieciseis|diecisiete|dieciocho|diecinueve"#
         + #"|veinte|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa"#
         + #"|[零〇一二三四五六七八九十百千万萬两兩]+)(?![A-Za-z])"#

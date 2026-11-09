@@ -170,12 +170,91 @@ final class UnresolvedSlotRepairTests: XCTestCase {
                 raw: raw,
                 utterance: fixture.utterance,
                 tool: fixture.predicted.tool,
-                action: fixture.predicted.action)
+                action: fixture.predicted.action,
+                textLanguage: fixture.textLanguage)
 
             // A nil call is the only outcome that cannot produce a seek: there is nothing to map.
             XCTAssertNil(
                 call,
                 "\(fixture.id) produced \(String(describing: call?.arguments)) and would reach the sink")
+        }
+    }
+
+    /// Two shapes the shared fixtures do not cover, reported from source probes.
+    ///
+    /// "at least a minute" is an unrestricted quantity written with an article, and
+    /// "half an hour" is a name that contains a temporal word. Both are ordinary settled requests;
+    /// deferring them would refuse a clear instruction.
+    func test_articleQuantitiesAndQuotedTitlesStaySettled() {
+        // An article is a quantity, so a bound on it is still a bound: this one must defer.
+        XCTAssertNil(
+            SlotRepair.repair(
+                raw: "<|tool_call_start|>[playback(action='seek_relative', direction='backward')]<|tool_call_end|>",
+                utterance: "rewind at least a minute",
+                tool: "playback", action: "seek_relative", textLanguage: "en"),
+            "a bound with an article is still a bound")
+
+        // The same article in a plain amount states one value and must survive.
+        let plain = SlotRepair.repair(
+            raw: "<|tool_call_start|>[playback(action='seek_relative', direction='backward')]<|tool_call_end|>",
+            utterance: "rewind a minute",
+            tool: "playback", action: "seek_relative", textLanguage: "en")
+        XCTAssertNotNil(plain, "a plain article amount is settled")
+        XCTAssertEqual(plain?.arguments["delta_seconds"] as? Int, -60)
+
+        // A quoted title is a name. Smart quotes must be normalized, or the title's own words
+        // read as a condition and a clear bookmark command gets refused.
+        // `play` takes a `ref`, which is where a bookmark name lands; the fixture set covers the
+        // straight-quoted form, so this pins the smart-quoted one.
+        for (opening, closing) in [("\u{201C}", "\u{201D}"), ("\u{300C}", "\u{300D}")] {
+            let call = SlotRepair.repair(
+                raw: "<|tool_call_start|>[bookmark(action='play', ref='x')]<|tool_call_end|>",
+                utterance: "play bookmark \(opening)When This Episode Ends\(closing)",
+                tool: "bookmark", action: "play", textLanguage: "en")
+            XCTAssertNotNil(call, "a quoted bookmark name is a reference, not a condition (\(opening))")
+        }
+    }
+
+    /// What the service actually does with a deferred turn.
+    ///
+    /// Repair returning nil is not the end of the story: the router reports a failed parse, and the
+    /// escalation policy decides what happens next. A deferred turn must reach the service rather
+    /// than a local sink, because the alternatives, bounds and conditions are answers the local
+    /// model could not give and the service may. The counterpart matters just as much: the turn
+    /// must not also be executed locally, since that is the wrong action this work exists to
+    /// prevent.
+    func test_aDeferredUtteranceEscalatesInsteadOfTouchingALocalSink() throws {
+        let fixtures = try loadFixtures().filter { $0.repaired == nil }
+        XCTAssertFalse(fixtures.isEmpty, "expected deferred fixtures to exist")
+
+        for fixture in fixtures {
+            let raw = "<|tool_call_start|>[\(rawCall(fixture.predicted))]<|tool_call_end|>"
+            let call = SlotRepair.repair(
+                raw: raw,
+                utterance: fixture.utterance,
+                tool: fixture.predicted.tool,
+                action: fixture.predicted.action,
+                textLanguage: fixture.textLanguage)
+            XCTAssertNil(call, "\(fixture.id): a deferred turn must not produce a call to execute")
+
+            // The reason the router reports when repair declines.
+            let reason = RouterStageDiagnostic.reasonParseOrRepairFailed
+            XCTAssertEqual(
+                RouteFailureEscalationPolicy.outcome(for: reason), .escalate,
+                "\(fixture.id): a deferred turn asks the service rather than staying silent")
+
+            // The mapper is how a parsed call becomes an intent a sink executes, so an unmappable
+            // call proves the local route is empty rather than merely unvisited.
+            // `call` is proven nil above, so nothing can be mapped. Stated as a property of the
+            // mapper rather than of this one value: a call reconstructed from the predicted
+            // arguments would be the wrong action, and deferring must not leave that reachable.
+            if let unmapped = call {
+                let intent: (any VoiceIntent)? = ToolCallMapper().map(unmapped)
+                XCTAssertNil(
+                    intent,
+                    "\(fixture.id): mapped to \(String(describing: intent)) — the deferred turn "
+                        + "would have executed locally as well as escalated")
+            }
         }
     }
 }

@@ -349,6 +349,21 @@ final class LfmIntentRouterTests: XCTestCase {
         XCTAssertEqual(metrics?.finalOutcome, RouterStageDiagnostic.outcomeIntent)
     }
 
+    /// Repair sees the language of the text, not of the recording.
+    ///
+    /// An `english_v1` routing input is English however it was produced, so a Spanish speaker
+    /// routed through translation must still reach repair as English. Getting this wrong is not
+    /// cosmetic: Spanish "once" is the numeral eleven, and telling repair the text is Spanish
+    /// would settle a different amount than the English reading of the same words.
+    func test_repairTextLanguage_followsTheRoutingTextNotTheSource() {
+        XCTAssertEqual(LfmIntentRouter.repairTextLanguage(for: .englishV1), "en")
+        // The other formats carry the transcript's own language, which is not known here; repair
+        // must be told nothing rather than told something plausible.
+        XCTAssertNil(LfmIntentRouter.repairTextLanguage(for: .sourceV1))
+        XCTAssertNil(LfmIntentRouter.repairTextLanguage(for: .dualV1))
+        XCTAssertNil(LfmIntentRouter.repairTextLanguage(for: .unknown("future_v9")))
+    }
+
     private func createRouter(
         inference: FakeLfmInference,
         now: @escaping () -> CFTimeInterval = { CACurrentMediaTime() }
