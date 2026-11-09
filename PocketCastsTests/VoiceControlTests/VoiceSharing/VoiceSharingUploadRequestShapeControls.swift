@@ -47,6 +47,32 @@ final class VoiceSharingUploadRequestShapeControls: XCTestCase {
                      "no chunked encoding")
     }
 
+    /// A STOP cancels the attempt it was asked to cancel and nothing after it. Once the user turns
+    /// sharing back on, the very next send must reach the wire: a stop that also refused every later
+    /// transfer would leave the feature permanently unable to upload, and nothing would report it.
+    func test_aCancelledAttemptDoesNotRefuseTheNextOne() async throws {
+        RecordingWire.shared.reset()
+        let queue = VoiceSharingQueue(root: root, log: { _ in })
+        _ = await queue.publish(audio: Data(repeating: 5, count: 1_024),
+                          metadata: Data(#"{"enrollment_epoch":"epoch-1"}"#.utf8),
+                          name: "one")
+        let published = await queue.entries()
+        let entry = try XCTUnwrap(published.first)
+
+        let transport = VoiceSharingUploadTransport(
+            baseURLProvider: { "https://unit.test" },
+            tokenProvider: RecordingTokens(),
+            session: RecordingWire.session)
+
+        // A stop while nothing is in flight must not poison the transport.
+        transport.cancelInFlight()
+
+        let answer = await transport.send(entry: entry)
+        XCTAssertEqual(answer, .response(status: 201),
+                       "a send after a stop is a fresh attempt, not a cancelled one")
+        XCTAssertNotNil(RecordingWire.shared.request, "the request reached the wire after the stop")
+    }
+
     /// Both parts arrive, in the order the server reads them, with `metadata` carrying no filename:
     /// its whole value is the record JSON.
     func test_thePartsArriveInOrderAndMetadataCarriesNoFilename() async throws {

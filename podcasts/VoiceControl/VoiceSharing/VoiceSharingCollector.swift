@@ -44,20 +44,6 @@ final class VoiceSharingCollector {
     /// per hop, so anything older than the live window cannot still be in flight; prune to half once exceeded.
     static let maxTerminalHistoryIDs = 512
 
-    /// ONE aggregate ceiling over every float the collector OWNS, across open capture, FIFO events
-    /// (INCLUDING the one currently in the sink, counted until the sink call RETURNS — a release at
-    /// dequeue would declare still-retained bytes free while the sink is mid-delivery), and the
-    /// terminal ring — enforced, not merely documented. At the compiled ceilings this allows
-    /// 4 × 960,000 samples = 3.84 M floats = **15.36 MB** (mono Float, 4 bytes): one slot for the open
-    /// capture, one for ring-held late-outcome audio, two for FIFO-held event audio (which includes the
-    /// one transient COW copy made when a completed capture's buffer is shared between the ring entry
-    /// and its event — arrays share storage until mutated, so accounting counts each owner, not raw
-    /// uniqueness). EXACT ownership boundaries: a delivered event's bytes leave this budget when the
-    /// sink returns — from that point the sink/uploader is the owner and the budget cannot see it;
-    /// a dropped event's bytes leave immediately; ring-held bytes stay counted until eviction or
-    /// disposal. Exceeding the ceiling drops the NEWEST contribution work (same policy as the FIFO
-    /// bound) and counts the drop.
-    static let maxAggregateRetainedSamples = 4 * maxRetainedSamples
 
     /// Half-open sample interval `[start, end)` on the original segment timeline.
     struct DropSpan: Equatable {
@@ -205,8 +191,6 @@ final class VoiceSharingCollector {
     /// bytes and log ONE content-free line each time a new peak is reached — not per event, so the
     /// signal stays cheap and a log reader can see exactly how high pressure actually got.
     private(set) var peakPendingSignals = 0
-    private(set) var peakRetainedSamples = 0
-
     /// / incident: SEGMENTS seen vs CAPTURES emitted, counted from the
     /// collector's own decisions. The simulator stopped turning utterances into captures at
     /// 10:00:21Z with no log line naming a decision, so the numbers had to be inferred from
@@ -256,16 +240,12 @@ final class VoiceSharingCollector {
         let depth = pending.count
         var advanced = false
         if depth > peakPendingSignals { peakPendingSignals = depth; advanced = true }
-        if aggregateAudioSamples > peakRetainedSamples {
-            peakRetainedSamples = aggregateAudioSamples
-            advanced = true
-        }
         guard advanced else { return }
         // ONE line per NEW peak. `retained` is in samples so the floor on device memory is
         // `samples * 2` bytes (pcm_s16le), which is what an operator compares against a budget.
         FileLog.shared.addMessage(
             "[VoiceSharing] handoff high-water peak_fifo=\(peakPendingSignals) "
-                + "peak_retained_samples=\(peakRetainedSamples) capture=\(capture.uuidString)")
+                + "capture=\(capture.uuidString)")
     }
 
     /// Decision count as of the last progress line (rate-limit bookkeeping only).
@@ -393,7 +373,6 @@ final class VoiceSharingCollector {
             var abandoned = stale
             abandoned.terminal = true
             current = nil
-            aggregateAudioSamples -= abandoned.retained.count
             markTerminal(abandoned, discarded: true)
             staleEvent = makeEvent(kind: .cancelled, from: abandoned)
         }
@@ -428,7 +407,6 @@ final class VoiceSharingCollector {
         // ever written.
         done.deferEmissionUntilFinalized = true
         current = nil
-        aggregateAudioSamples -= done.retained.count
         markTerminal(done)
         let deadline = registerOutcomeDeadlineLocked(for: done.id)
         lock.unlock()
@@ -466,18 +444,15 @@ final class VoiceSharingCollector {
         // every append would trigger a copy-on-write of the WHOLE buffer (O(n²) per segment). With `c`
         // uniquely owned, `append` writes in place. Restored before unlock.
         current = nil
-        // Reserve before growth: the open capture may not push the aggregate over budget even though
-        // its own per-capture cap still has room — otherwise open growth could exceed the budget and
-        // wait for a later submit/evict to notice.
+        // The per-capture ceiling is the only bound on growth here: admission is decided by the
+        // record count in the queue, not by a running total of bytes this object happens to hold.
         let perCaptureRoom = c.clipSampleCeiling - c.retained.count
-        let aggregateRoom = Self.maxAggregateRetainedSamples - aggregateAudioSamples
-        let take = min(samples.count, max(perCaptureRoom, 0), max(aggregateRoom, 0))
+        let take = min(samples.count, max(perCaptureRoom, 0))
         if take > 0 { c.retained.append(contentsOf: samples.prefix(take)) }
         c.original = max(c.original ?? 0, reportedTotal ?? c.retained.count)
         if take < samples.count, c.droppedFrom == nil {
             c.droppedFrom = c.retained.count
         }
-        aggregateAudioSamples += take
         current = c
         lock.unlock()
     }
@@ -616,7 +591,6 @@ final class VoiceSharingCollector {
         current = nil                       // detach A's completed audio ownership HERE, synchronously,
                                             // before any successor can start; the ring entry and the
                                             // event share it via COW from this point
-        aggregateAudioSamples -= c.retained.count
         markTerminal(c)                     // ring re-registers the (immutable, completed) capture
         if c.deferEmissionUntilFinalized {
             // DOWNSTREAM stages still run: ASR/translation/routing
@@ -678,7 +652,6 @@ final class VoiceSharingCollector {
             var c = open
             c.terminal = true
             current = nil
-            aggregateAudioSamples -= c.retained.count
             markTerminal(c, discarded: true)   // a genuine cancel discards the partial FOREVER
             let event = makeEvent(kind: .cancelled, from: c)
             lock.unlock()
@@ -711,7 +684,6 @@ return }
             var c = open
             c.terminal = true
             current = nil
-            aggregateAudioSamples -= c.retained.count
             markTerminal(c, discarded: true)
             let event = makeEvent(kind: .cancelled, from: c)
             lock.unlock()
@@ -759,7 +731,6 @@ return }
     private func consumed(_ c: FrozenCapture) -> FrozenCapture {
         var identityOnly = c
         cancelOutcomeDeadlineLocked(c.id)
-        aggregateAudioSamples -= identityOnly.retained.count
         identityOnly.retained = []
         return identityOnly
     }
@@ -784,7 +755,6 @@ return }
         // stamps the deferral flag for the ordinary ASR→routing path).
         c.deferEmissionUntilFinalized = false
         current = nil
-        aggregateAudioSamples -= c.retained.count
         markTerminal(c)
         terminalRing[c.id]?.emitted = true
         cancelOutcomeDeadlineLocked(c.id)
@@ -824,7 +794,6 @@ return }
         // counts, truncation metadata) and carries NO audio. GATE-control events still bypass the
         // live dequeue check — their whole point is to report the loss — but they cannot carry old
         // speech, so the bypass cannot deliver withdrawn audio.
-        for i in pending.indices { aggregateAudioSamples -= pending[i].audio.count }
         pending.removeAll()
         disposeRingAudio()
         for key in terminalRing.keys { terminalRing[key]?.noContribution = true }
@@ -832,7 +801,6 @@ return }
         if var c = current, !c.terminal {
             c.terminal = true
             current = nil
-            aggregateAudioSamples -= c.retained.count
             c.retained.removeAll()
             markTerminal(c, discarded: true)
             cancelEvent = makeEvent(kind: .cancelled, from: c)   // audio empty: withdrawal is content-free
@@ -867,17 +835,12 @@ return }
 
     private var terminalRing: [UUID: TerminalRecord] = [:]
 
-    /// Live count of audio floats the collector owns right now (open + FIFO + ring). Mutated only under
-    /// `lock`. Enforced against `maxAggregateRetainedSamples` at every growth point.
-    private var aggregateAudioSamples = 0
-
     private func rememberTerminal(_ c: FrozenCapture, noContribution: Bool = false) {
-        aggregateAudioSamples += c.retained.count
         terminalSequence &+= 1
         terminalRing[c.id] = TerminalRecord(
             capture: c, emitted: false, noContribution: noContribution,
             deferredOrder: terminalSequence)
-        while terminalRing.count > 32 || aggregateAudioSamples > Self.maxAggregateRetainedSamples {
+        while terminalRing.count > 32 {
             guard let oldest = terminalRing.first else { break }
             // NO-SILENT-LOSS: a record that is neither emitted nor
             // marked non-contribution is REAL work — evicting it used to cancel its outcome
@@ -895,7 +858,6 @@ return }
                 // Ledger transition: the ring's retained bytes (which include the confirmation
                 // frame, unlike the event audio) leave the ledger; the event's exact audio enters
                 // it below. The bytes are owned somewhere at every instant.
-                aggregateAudioSamples -= evicted.retained.count
                 // the handoff must be BOUNDED and ACCOUNTED. The audio now
                 // moves through the pending FIFO under the SAME caps as every other event — the
                 // aggregate still owns these bytes (added below, never decremented early), so a
@@ -904,14 +866,12 @@ return }
                 // record limit is the only admission gate. Withdrawal disposal drains this same
                 // FIFO at dequeue time.
                 let audioCount = event.audio.count
-                if pending.count >= Self.maxPendingSignals
-                    || aggregateAudioSamples + audioCount > Self.maxAggregateRetainedSamples {
+                if pending.count >= Self.maxPendingSignals {
                     overflowCount += 1
                     FileLog.shared.addMessage(
                         "[VoiceSharing] handoff under pressure (ring) capture=\(captureID.uuidString) "
                             + "retained=not-dropped")
                 }
-                aggregateAudioSamples += audioCount
                 pending.append(event)
                 recordHighWaterLocked(capture: captureID)
                 FileLog.shared.addMessage(
@@ -919,7 +879,6 @@ return }
                 workQueue.async { [weak self] in self?.drainNext() }
                 continue
             }
-            aggregateAudioSamples -= oldest.value.capture.retained.count
             cancelOutcomeDeadlineLocked(oldest.key)
             terminalRing.removeValue(forKey: oldest.key)
         }
@@ -975,7 +934,6 @@ return }
         outcomeDeadlines.removeAll()
         for key in terminalRing.keys {
             guard var rec = terminalRing[key] else { continue }
-            aggregateAudioSamples -= rec.capture.retained.count
             var disposed = rec.capture
             disposed.retained.removeAll()
             rec.capture = disposed
@@ -1051,7 +1009,6 @@ return }
         current = nil
         // Correct the transfer: the open ownership is subtracted and the ring records identity
         // only (discarded), so the move neither double-charges nor strands the partial's bytes.
-        aggregateAudioSamples -= c.retained.count
         markTerminal(abandoned, discarded: true)
         let event = makeEvent(kind: .cancelled, from: abandoned)
         lock.unlock()
@@ -1118,12 +1075,9 @@ return }
 
     /// Audio bytes CURRENTLY owned inside an in-sink call: registered before the sink runs,
     /// released when it returns. Part of actual ownership for the whole sink duration.
-    private var inFlightSinkAudioSamples = 0
-
     private func submit(_ event: SegmentEvent) {
         lock.lock()
         if deliversSynchronouslyForTesting {
-            aggregateAudioSamples += event.audio.count
             lock.unlock()
             deliverUnderSinkOwnership(event)
             return
@@ -1134,17 +1088,15 @@ return }
         // and for no other reason. Both caps are therefore counted as pressure and logged, and the
         // capture is still queued — the durable queue's 32-record limit is the one admission gate,
         // and it is the only place allowed to refuse.
-        if pending.count >= Self.maxPendingSignals
-            || aggregateAudioSamples + event.audio.count > Self.maxAggregateRetainedSamples {
+        if pending.count >= Self.maxPendingSignals {
             overflowCount += 1
-            let why = pending.count >= Self.maxPendingSignals ? "fifo-full" : "sample-budget"
+            let why = "fifo-full"
             logDecisionProgressLocked(force: true)
             FileLog.shared.addMessage(
                 "[VoiceSharing] handoff under pressure reason=\(why) "
                     + "capture=\(event.captureID.uuidString) retained=not-dropped")
             FileLog.shared.forceFlush()
         }
-        aggregateAudioSamples += event.audio.count
         pending.append(event)
         recordHighWaterLocked(capture: event.captureID)
         lock.unlock()
@@ -1172,7 +1124,6 @@ return }
         lock.unlock()
         guard stillValid else {
             lock.lock()
-            aggregateAudioSamples -= event.audio.count
             // (4): this drop used to be SILENT. It names its bound so the two
             // cases are separable: the account/session moved, or consent closed behind the event.
             let why = event.authorizationSession == sessionIdentity()
@@ -1205,13 +1156,10 @@ return }
         case .started, .cancelled:
             break
         }
-        inFlightSinkAudioSamples += n
         lock.unlock()
         sink(event)
         // Ownership ends when the sink RETURNS — not at enqueue.
         lock.lock()
-        inFlightSinkAudioSamples -= n
-        aggregateAudioSamples -= n
         lock.unlock()
     }
 
@@ -1224,22 +1172,13 @@ return }
         return pending.count
     }
 
-    /// Live aggregate owned-audio count (open + FIFO + ring) — the value the byte budget enforces.
-    var aggregateAudioSamplesForTesting: Int {
-        lock.lock(); defer { lock.unlock() }
-        return aggregateAudioSamples
-    }
-
-    /// The ledger AUDITED against the live buffers: actually walks what is retained (open buffer,
-    /// every queued event's audio, every ring entry's audio, plus the bytes of any event currently
-    /// INSIDE a sink call). A budget that only trusts its own counter could drift from reality;
-    /// this is the control that catches that.
-    var actualRetainedAudioBreakdownForTesting: (open: Int, fifo: Int, ring: Int, inFlight: Int) {
+    /// What is actually retained right now, walked from the live buffers.
+    var actualRetainedAudioBreakdownForTesting: (open: Int, fifo: Int, ring: Int) {
         lock.lock(); defer { lock.unlock() }
         let openCount = current?.retained.count ?? 0
         let fifoCount = pending.reduce(0) { $0 + $1.audio.count }
         let ringCount = terminalRing.values.reduce(0) { $0 + $1.capture.retained.count }
-        return (openCount, fifoCount, ringCount, inFlightSinkAudioSamples)
+        return (openCount, fifoCount, ringCount)
     }
 
     var retainedSampleCountForTesting: Int {
