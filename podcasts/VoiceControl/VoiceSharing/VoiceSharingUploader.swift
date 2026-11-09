@@ -48,6 +48,9 @@ final class VoiceSharingUploader {
         case abandoned(reason: String)
         /// The local entry could not be read or is not ready; nothing was sent.
         case unavailable(reason: String)
+        /// A retry is OWED but not yet due, so no attempt started. Distinct from `unavailable`
+        /// because nothing is wrong with the entry: the schedule is holding it deliberately.
+        case deferred(reason: String)
     }
 
     struct Receipt {
@@ -132,7 +135,16 @@ final class VoiceSharingUploader {
             }
             admitted = granted
         } catch {
-            // Includes the enforced not-before refusal: a fresh owner is refused until due.
+            // A retry that is owed but not yet due is the delay working, not a rejection: no
+            // attempt started and nothing is wrong with the entry. Naming it `refused` here made
+            // a healthy recording look like a rejected one in the only surface an operator reads.
+            if case VoiceSharingUploadQueue.PrepareError.notYetDue = error {
+                FileLog.shared.addMessage(
+                    "[VoiceSharing] upload disposition entry=\(entry.name) reason=not-yet-due disposition=deferred")
+                FileLog.shared.forceFlush()
+                return .deferred(reason: "attempt deferred: not-yet-due")
+            }
+            // Every other throw here does refuse the attempt for a reason that is not a schedule.
             FileLog.shared.addMessage(
                 "[VoiceSharing] upload disposition entry=\(entry.name) reason=admission-error disposition=refused")
             FileLog.shared.forceFlush()

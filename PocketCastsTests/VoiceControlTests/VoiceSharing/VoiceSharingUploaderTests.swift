@@ -800,6 +800,48 @@ final class VoiceSharingUploaderTests: XCTestCase {
         }
     }
 
+    /// A SCHEDULED refusal is not a refusal.
+    ///
+    /// When a retry is owed but not yet due, admission throws `notYetDue` and no attempt starts.
+    /// That is the delay doing its job, so the uploader must report it as deferred, not as a
+    /// generic refusal. The log is the only surface an operator sees, and "refused" there reads
+    /// as "this recording was rejected" when the recording is healthy and simply waiting.
+    func test_aNotYetDueEntryIsDeferredNotRefused() async throws {
+        let entry = try makeReadyEntry()
+        // A 503 stamps a retry delay, so the same entry is not yet due afterwards.
+        let uploader = makeUploader(
+            retryPolicy: VoiceSharingRetryPolicy(
+                retryBaseDelay: 600, retryMaximumDelay: 3600, random: { 0 }),
+            transport: { _, _, _ in
+                .response(statusCode: 503, body: Data("{\"retry_after_s\":600}".utf8))
+            })
+        let first = await uploader.upload(entry)
+        guard case .retry = first else {
+            return XCTFail("expected the 503 to schedule a retry, got \(first)")
+        }
+
+        // A FRESH queue instance (restart/reclaim) enforces the same schedule and refuses the
+        // attempt without starting one. The reason must say deferred, and name the schedule.
+        let fresh = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let freshUploader = VoiceSharingUploader(
+            queue: fresh, retryPolicy: VoiceSharingRetryPolicy(
+                retryBaseDelay: 600, retryMaximumDelay: 3600, random: { 0 }),
+            isAuthorized: { true }, currentIdentity: { nil },
+            endpoint: { URL(string: "https://unit.test/api/v1/contributions") },
+            transport: { _, _, _ in
+                XCTFail("a not-yet-due entry must not reach the wire")
+                return .transportFailure
+            })
+        let second = await freshUploader.upload(entry)
+        guard case .deferred(let reason) = second else {
+            return XCTFail("expected deferred, got \(second)")
+        }
+        XCTAssertTrue(reason.contains("not-yet-due") || reason.contains("notYetDue"),
+                      "the reason must name the schedule, got \(reason)")
+        XCTAssertFalse(reason.contains("refused"),
+                       "a scheduled delay is not a refusal, got \(reason)")
+    }
+
     /// The admitted token is ONE value: the lease and count come from the same transaction, so a
     /// reclaim cannot make this uploader settle under a successor's lease.
     func test_admissionReturnsLeaseAndCountTogether() throws {
