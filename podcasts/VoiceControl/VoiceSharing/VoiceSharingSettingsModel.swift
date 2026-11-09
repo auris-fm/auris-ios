@@ -70,15 +70,17 @@ final class VoiceSharingSettingsModel {
         /// True only when storage was fully enumerated AND no survivor remains unconfirmed.
         var isFullyResolvedLocally: Bool {
             switch disposition {
-            case .reconciled(let removed, let durablyDisqualified):
-                return removed >= 0 && durablyDisqualified >= 0
+            case .reconciled(_, let durablyDisqualified):
+                // A deletion that left recordings behind is NOT resolved locally: those bytes are
+                // still on the device, and saying otherwise would tell the user they are gone.
+                return durablyDisqualified == 0
             case .incomplete, .refused:
                 return false
             }
         }
     }
 
-    private let queue: VoiceSharingUploadQueue
+    private let queue: VoiceSharingQueue
     private let isCollectionPermitted: () -> Bool?
 
     private let isEnrolled: () -> Bool?
@@ -91,7 +93,7 @@ final class VoiceSharingSettingsModel {
 
     /// `nil`-returning reads are REQUIRED: a wiring that cannot determine enrollment or opt-in must
     /// report `unknown`, not `false`. Passing a constant `false` closure would invent an opt-out.
-    init(queue: VoiceSharingUploadQueue,
+    init(queue: VoiceSharingQueue,
          isCollectionPermitted: @escaping () -> Bool?,
          isAccountEnrolled: @escaping () -> Bool?,
          isLocallyOptedIn: @escaping () -> Bool?,
@@ -116,17 +118,14 @@ final class VoiceSharingSettingsModel {
     /// Read-only projection. "Could not determine" is reported as `.unknown`, never as a zero
     /// count — the reviewer's point that a held owner must not render "Stored contributions: 0".
     func status() -> ContributionStatus {
-        switch queue.readyEntriesReportingUnknownCoverage() {
-        case .unknownCoverage:
+        // Folders are the only queue state, so the count is the count. The one distinction worth
+        // keeping is readability: a folder we cannot list is unknown, never an empty device.
+        guard queue.isReadable else {
             return ContributionStatus(storage: .unknown,
                                       collectionPermitted: isCollectionPermitted() ?? false)
-        case .revocationHeld:
-            return ContributionStatus(storage: .revocationInDoubt,
-                                      collectionPermitted: isCollectionPermitted() ?? false)
-        case .known(let entries):
-            return ContributionStatus(storage: .knownReady(entries.count),
-                                      collectionPermitted: isCollectionPermitted() ?? false)
         }
+        return ContributionStatus(storage: .knownReady(queue.count()),
+                                  collectionPermitted: isCollectionPermitted() ?? false)
     }
 
     /// Deletes all retained contributions through the owner-wide purge. Never claims success it
@@ -135,25 +134,16 @@ final class VoiceSharingSettingsModel {
     /// account-wide deletion — accepted data on the server is a separate operation the client does
     /// not perform here (spec: local removal never stands for server completion).
     func deletePendingRecordingsOnThisDevice() -> DeleteResult {
-        let outcome = queue.purgeAll()
-        // the gate-loss handler is not the only purge path. This user-initiated
-        // deletion records the same diagnostic, so no purge anywhere on the app is silent.
-        FileLog.shared.addMessage("[VoiceSharing] durable queue PURGE cause=user-request outcome=\(outcome)")
-        switch outcome {
-        case .reconciled(let removed, let retained):
-            // `retained` here are entries whose removal failed but whose disqualification IS
-            // durable: they stay on disk, provably dead, and the UI must say both things.
-            return DeleteResult(disposition: .reconciled(removed: removed,
-                                                         durablyDisqualified: retained))
-        case .held(let removed, let retained):
-            return DeleteResult(disposition: .incomplete(removed: removed,
-                                                         survivorsUnknown: retained))
-        case .refused:
-            // Nothing could be enumerated: do not report 0 removed / 0 retained as if that were a
-            // measurement of an empty device.
-            return DeleteResult(disposition: .refused)
-        }
+        let before = queue.count()
+        queue.deleteAll(reason: "user-request")
+        // A delete can fail (a file system that refuses removal). Whatever survives is reported
+        // rather than assumed gone: claiming removal we did not achieve would tell the user their
+        // recordings are gone while they are still on disk.
+        let surviving = queue.count()
+        return DeleteResult(disposition: .reconciled(
+            removed: before - surviving, durablyDisqualified: surviving))
     }
+
 
     /// The compiled bounds, for a read-only "what the app will do" line. Not editable, not
     /// activation values.
@@ -164,8 +154,8 @@ final class VoiceSharingSettingsModel {
     }
 
     var compiledBoundsDescription: String {
-        let days = Int(VoiceSharingUploadQueue.maxEntryAge / (24 * 60 * 60))
-        return "Audio up to \(VoiceSharingUploadQueue.maxEntryAudioBytes / 1024) KB per contribution, "
+        let days = Int(VoiceSharingQueue.maximumAge / (24 * 60 * 60))
+        return "At most \(VoiceSharingQueue.capacity) recordings, "
             + "retained for at most \(days) \(days == 1 ? "day" : "days")."
     }
     // MARK: - Recovery / stopped state
@@ -460,21 +450,10 @@ final class VoiceSharingSettingsModel {
         // account/enrollment move between the queue coverage read and the first stamp used to be
         // invisible. No read happens outside the interval.
         let before = coherenceStamp()
-        let fault: StoppedReason.StorageFault
-        let readyCount: Int?
-        switch queue.readyEntriesReportingUnknownCoverage() {
-        case .revocationHeld:
-            fault = .revocationInDoubt
-            readyCount = nil
-        case .unknownCoverage:
-            fault = .unreadable
-            readyCount = nil
-        case .known(let entries):
-            fault = .none
-            // The serving authority's OWN count, so the displayed number can never disagree with
-            // what is served.
-            readyCount = entries.count
-        }
+        // Folders are the only state, so there is no "unknown coverage" to report: the count is a
+        // direct read of the directory.
+        let fault: StoppedReason.StorageFault = .none
+        let readyCount: Int? = queue.count()
         let permits = isCollectionPermitted()
         let enrolled = isEnrolled()
         let optedIn = isOptedIn()

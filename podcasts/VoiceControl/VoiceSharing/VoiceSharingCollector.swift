@@ -116,7 +116,7 @@ final class VoiceSharingCollector {
         var outcomeWaitExpired = false
         /// A collector event freezes actual invocation identities, including explicit unknown slots.
         var reportedModels: VoiceSharingContributionEncoder.Models? = nil
-        var metadataByteCeiling = VoiceSharingUploadQueue.maxMetadataBytes
+        var metadataByteCeiling = VoiceSharingContributionEncoder.maximumMetadataBytes
     }
 
     /// Validated scheduling input, not an activation default. Missing limits close admission.
@@ -157,7 +157,7 @@ final class VoiceSharingCollector {
         var observedModelSlots: Set<String> = []
         var conflictingModelSlots: Set<String> = []
         var clipSampleCeiling = VoiceSharingCollector.maxRetainedSamples
-        var metadataByteCeiling = VoiceSharingUploadQueue.maxMetadataBytes
+        var metadataByteCeiling = VoiceSharingContributionEncoder.maximumMetadataBytes
         var retained: [Float] = []
         var sawStart = false
         var droppedFrom: Int? = nil
@@ -378,7 +378,7 @@ final class VoiceSharingCollector {
         var frozen = FrozenCapture(id: UUID(), epoch: epoch, session: session,
                                    retained: [], sawStart: true, original: confirmationFrameSamples)
         frozen.clipSampleCeiling = Self.maxRetainedSamples
-        frozen.metadataByteCeiling = VoiceSharingUploadQueue.maxMetadataBytes
+        frozen.metadataByteCeiling = VoiceSharingContributionEncoder.maximumMetadataBytes
         frozen.wakeRequired = wakeRequired
         lock.lock()
         guard stillPermitted(for: frozen) else {
@@ -552,7 +552,7 @@ final class VoiceSharingCollector {
                // classification that never happened. failed still concerns the classified action
                // (its control/78480a17, asserts a failed turn NAMES its
                // classification), and pending means the classification stands unconcluded.
-               VoiceSharingRecordBinding
+               VoiceSharingContributionEncoder
                    .routingDispositionCarriesClassification(outcome.routingDisposition) {
                 return .init(
                     state: outcome.state,

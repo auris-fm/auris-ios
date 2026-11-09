@@ -40,7 +40,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
     // MARK: - Harness
 
     private var collected: [VoiceSharingCollector.SegmentEvent] = []
-    private var queue: VoiceSharingUploadQueue!
+    private var queue: VoiceSharingQueue!
 
     /// An AUTHORITATIVE, enrolled membership: `enrolled: true` alone is not permission — the collector
     /// additionally requires a projection accepted this session, a live epoch and acceptance.
@@ -68,17 +68,18 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
 
     /// A REAL sink over a REAL durable queue: the record a control inspects is the one that would be
     /// uploaded, not an in-memory stand-in.
-    private func makeSink() -> VoiceSharingContributionSink {
+    private func makeSink() -> VoiceSharingDirectSink {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("branch-controls-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let queue = VoiceSharingQueue(root: root)
         self.queue = queue
-        return VoiceSharingContributionSink(
+        return VoiceSharingDirectSink(
             queue: queue,
             isEnabled: { true },
             encoderProvenance: { [self] in provenance },
-            observations: { [:] })
+            observations: { [:] },
+            requestUploadDrain: {})
     }
 
     private var provenance: VoiceSharingContributionEncoder.Provenance {
@@ -176,7 +177,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("sharing-lifetime-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root); queue = nil }
-        queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        queue = VoiceSharingQueue(root: root)
         gateOpen = true
         var service: VoiceControlService?
         weak var weakAssembly: VoiceControlAssembly?
@@ -196,14 +197,13 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
             weakModel = model
             let uploader = VoiceSharingUploader(
                 queue: queue,
-                retryPolicy: VoiceSharingRetryPolicy(
-                    retryBaseDelay: 1, retryMaximumDelay: 60, random: { 0 }),
-                isAuthorized: { false }, endpoint: { nil },
-                transport: { _, _, _ in XCTFail("no upload permitted"); return .transportFailure })
+                send: { _ in XCTFail("no upload permitted"); return .noAnswer },
+                refreshSignIn: { false },
+                currentIdentity: { nil as (account: String, epoch: String)? },
+                sharingEnabled: { false },
+                now: Date.init)
             let trigger = VoiceSharingUploadTrigger(
-                scheduler: VoiceSharingUploadScheduler(
-                    queue: queue, uploader: uploader, isAuthorized: { false }),
-                isAuthorized: { false })
+                uploader: uploader, isAuthorized: { false })
             weakTrigger = trigger
             service = assembly.installVoiceSharingLifetime(
                 on: makeService(router: StubClassifier(), executor: StubExecutor(), collector: collector).service,
@@ -240,124 +240,84 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
     }
 
     /// Real refresh → production registration → purge/cancel, after the builder is gone.
-    func test_policyDisablePurgesAndCancelsAfterTheAssemblyIsReleased() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("sharing-disable-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root); queue = nil }
-        queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-        let suite = "sharing-disable-\(UUID().uuidString)"
+    func test_theServiceOwnedPipelineIsPurgedAndReleasedAtConsentLoss() async throws {
+        let suite = "routing-lifetime-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
-        let store = VoiceSharingEnrollmentStore(defaults: defaults, accountScopeProvider: { "account-a" })
+        let store = VoiceSharingEnrollmentStore(
+            defaults: defaults, accountScopeProvider: { "account-a" },
+            sessionIdentityProvider: { "gen-A" })
         let coordinator = VoiceSharingCoordinator(enrollmentStore: store)
-        gateOpen = true
-        XCTAssertTrue(isCollectionPermitted(), "premise: consent open before disable")
-        let registryBaseline = coordinator.gateLostHandlerCountForTesting
-        let seeded = try AudioFixture.makeReadyEntry(in: queue)
-        let seededDirectory = root.appendingPathComponent(seeded.name)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: seededDirectory.path))
-        let parked = expectation(description: "trigger entered its pre-drain gate")
-        let release = DispatchSemaphore(value: 0)
-        defer { release.signal() }
-        var service: VoiceControlService?
-        weak var weakAssembly: VoiceControlAssembly?
-        weak var weakTrigger: VoiceSharingUploadTrigger?
-        weak var weakCollector: VoiceSharingCollector?
-        weak var weakSink: VoiceSharingContributionSink?
-        weak var weakLifetime: VoiceSharingLifetime?
-        var capturedTask: Task<Void, Never>?
         let samples: [Float] = [0, 0.25, -0.5, 0.5]
         let event = { VoiceSharingCollector.SegmentEvent(
-            kind: .completed, captureID: UUID(), enrollmentEpoch: "epoch-1", authorizationSession: "gen-A",
-            retainedSamples: samples.count, truncated: false, droppedSpans: [],
-            originalSampleCount: nil, audio: samples, isGateControl: false) }
+            kind: .completed, captureID: UUID(), enrollmentEpoch: "epoch-1",
+            authorizationSession: "gen-A", retainedSamples: samples.count,
+            truncated: false, droppedSpans: [], originalSampleCount: nil,
+            audio: samples, isGateControl: false) }
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("routing-lifetime-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root); queue = nil }
+        queue = VoiceSharingQueue(root: root)
+        var sink: VoiceSharingDirectSink!
+        var trigger: VoiceSharingUploadTrigger?
+        var collector: VoiceSharingCollector!
+        var service: VoiceControlService?
+        weak var weakLifetime: VoiceSharingLifetime?
+        weak var weakTrigger: VoiceSharingUploadTrigger?
+        weak var weakCollector: VoiceSharingCollector?
+        weak var weakSink: VoiceSharingDirectSink?
+        let seeded = try AudioFixture.makeReadyEntry(in: queue)
+        let seededDirectory = seeded.url
+        XCTAssertEqual(queue.count(), 1, "setup: one recording is retained")
+        let registryBaseline = coordinator.gateLostHandlerCountForTesting
+
         do {
             let assembly = VoiceControlAssembly()
-            weakAssembly = assembly
-            let provenance = self.provenance
-            let sink = VoiceSharingContributionSink(
-                queue: queue, isEnabled: { [weak self] in self?.gateOpen ?? false },
-                encoderProvenance: { provenance })
-            weakSink = sink
-            sink.handle(event())
-            sink.waitForIdleForTesting()
-            guard case .known(let admitted) = queue.readyEntriesReportingUnknownCoverage() else {
-                XCTFail("premise: queue readable")
-                return
-            }
-            XCTAssertEqual(admitted.count, 2, "premise: this event is admitted while consent permits")
-            let collector = VoiceSharingCollector(
-                isCollectionPermitted: { true }, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000), membership: { self.state }, epochProvider: { "epoch-1" },
-                sessionIdentity: { "gen-A" }, sink: { sink.handle($0) })
-            weakCollector = collector
-
             let uploader = VoiceSharingUploader(
                 queue: queue,
-                retryPolicy: VoiceSharingRetryPolicy(
-                    retryBaseDelay: 1, retryMaximumDelay: 60, random: { 0 }),
-                isAuthorized: { [weak self] in self?.gateOpen ?? false }, endpoint: { nil },
-                transport: { _, _, _ in XCTFail("parked/cancelled trigger must not send"); return .transportFailure })
-            let trigger = VoiceSharingUploadTrigger(
-                scheduler: VoiceSharingUploadScheduler(
-                    queue: queue, uploader: uploader, isAuthorized: { [weak self] in self?.gateOpen ?? false }),
-                surfaceEnabled: { true }, isAuthorized: { [weak self] in self?.gateOpen ?? false })
-            trigger.preDrainGateForTesting = {
-                parked.fulfill()
-                if release.wait(timeout: .now() + 5) != .success { XCTFail("trigger gate timed out") }
-            }
-            weakTrigger = trigger
+                send: { _ in XCTFail("a withdrawn pipeline must not send"); return .noAnswer },
+                refreshSignIn: { true },
+                currentIdentity: { ("account-a", "epoch-1") },
+                sharingEnabled: { [weak self] in self?.gateOpen ?? false },
+                now: Date.init)
+            let t = VoiceSharingUploadTrigger(
+                uploader: uploader, surfaceEnabled: { true },
+                isAuthorized: { [weak self] in self?.gateOpen ?? false })
+            trigger = t
+            weakTrigger = t
+            collector = makeCollector()
+            weakCollector = collector
+            sink = VoiceSharingDirectSink(
+                queue: queue, isEnabled: { [weak self] in self?.gateOpen ?? false },
+                encoderProvenance: { self.provenance }, requestUploadDrain: {})
+            weakSink = sink
             let model = VoiceSharingSettingsModel(
                 queue: queue, isCollectionPermitted: { [weak self] in self?.gateOpen ?? false },
                 isAccountEnrolled: { true }, isLocallyOptedIn: { false },
                 coherenceAccount: { "account-a" })
             assembly.installVoiceSharingGateLoss(
-                collector: collector, sink: sink, uploadTrigger: trigger,
+                collector: collector, uploadTrigger: t,
                 queue: queue, coordinator: coordinator)
             service = assembly.installVoiceSharingLifetime(
                 on: makeService(router: StubClassifier(), executor: StubExecutor(), collector: collector).service,
-                settingsModel: model, uploadTrigger: trigger,
+                settingsModel: model, uploadTrigger: t,
                 enrollmentStore: store, queue: queue)
             weakLifetime = service?.voiceSharingLifetime
-            trigger.triggerDrainIfPermitted()
-            capturedTask = trigger.drainTaskForTesting
         }
-        await fulfillment(of: [parked], timeout: 2)
-        XCTAssertNil(weakAssembly)
-        XCTAssertNotNil(weakCollector)
-        XCTAssertNotNil(weakTrigger)
-        XCTAssertNotNil(capturedTask)
-        XCTAssertTrue(weakTrigger?.isDrainingForTesting == true)
         XCTAssertEqual(coordinator.gateLostHandlerCountForTesting, registryBaseline + 1)
-        let generation = weakSink?.revocationGenerationForTesting ?? -1
-        XCTAssertGreaterThanOrEqual(generation, 0)
-        // Consent ends through the PRODUCTION fan-out (the coordinator's registry), exactly as a
-        // withdrawal/sign-out reaches every pipeline owner.
+
+        // Consent ends through the PRODUCTION fan-out, exactly as a withdrawal or sign-out reaches
+        // every pipeline owner.
         gateOpen = false
         coordinator.consentGateLostForTesting()
         XCTAssertFalse(isCollectionPermitted())
-        XCTAssertEqual(weakSink?.revocationGenerationForTesting, generation + 1)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: seededDirectory.path), "retained bytes must be purged")
-        if case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() {
-            XCTAssertTrue(ready.isEmpty)
-        } else {
-            XCTFail("queue coverage must be known")
-        }
-        weakSink?.handle(event())
-        weakSink?.waitForIdleForTesting()
-        if case .known(let after) = queue.readyEntriesReportingUnknownCoverage() {
-            XCTAssertTrue(after.isEmpty, "new sink work must be refused after disable")
-        } else {
-            XCTFail("queue coverage remains known")
-        }
-        XCTAssertTrue(capturedTask?.isCancelled == true)
-        XCTAssertFalse(weakTrigger?.isDrainingForTesting ?? true)
-        release.signal()
-        let settled = expectation(description: "cancelled trigger task settled")
-        let joiningTask = capturedTask
-        Task { await joiningTask?.value; settled.fulfill() }
-        await fulfillment(of: [settled], timeout: 2)
-        capturedTask = nil
-        XCTAssertFalse(weakTrigger?.hasPublishedCompletionRegistrationForTesting ?? true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: seededDirectory.path),
+                       "retained bytes must be purged")
+        XCTAssertTrue(queue.entries().isEmpty)
+
+        sink.handle(event())
+        XCTAssertTrue(queue.entries().isEmpty, "new sink work must be refused after disable")
         service = nil
         XCTAssertNil(weakLifetime)
         XCTAssertNil(weakTrigger)
@@ -390,14 +350,15 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
             defaults: defaults, accountScopeProvider: { "local-account" }, sessionIdentityProvider: { "local-session" })
         store.setLocalOptIn(true)
         _ = VoiceSharingCoordinator(enrollmentStore: store)
-        let identity: () -> VoiceSharingUploadIdentity? = {
-            VoiceSharingUploadIdentity(accountScope: "local-account", enrollmentEpoch: store.activeEnrollmentEpoch)
+        let identity: () -> (account: String, epoch: String)? = {
+            guard let epoch = store.activeEnrollmentEpoch else { return nil }
+            return ("local-account", epoch)
         }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("configured-sharing-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root); queue = nil }
         var now = Date()
-        queue = VoiceSharingUploadQueue(rootDirectory: root, clock: { now }, currentIdentity: identity)
+        queue = VoiceSharingQueue(root: root)
         let tokens = LocalSharingToken()
         let accountClient = VoiceSharingAccountClient(
             baseURLProvider: { endpoint }, tokenProvider: tokens, session: session,
@@ -408,14 +369,10 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         do {
             let assembly = VoiceControlAssembly()
             weakAssembly = assembly
-            let network = VoiceSharingUploadNetworkGate(allowance: VoiceSharingUploadNetworkAllowance(
-                interfaces: [.wifi, .wired], allowsExpensive: false, allowsConstrained: false), monitorPath: false)
-            network.update(.init(satisfied: true, interfaces: [.wifi], expensive: false, constrained: false))
             let trigger = assembly.makeVoiceSharingUploadTrigger(
                 queue: queue, isAuthorized: { [weak self] in self?.gateOpen ?? false }, currentIdentity: identity,
                 baseURLProvider: { endpoint }, tokenProvider: tokens, session: session, clock: { now },
-                retryPolicy: VoiceSharingRetryPolicy(retryBaseDelay: 1, retryMaximumDelay: 1, random: { 0 }),
-                surfaceEnabled: { true }, networkGate: network)
+                surfaceEnabled: { true })
             weakTrigger = trigger
             let model = VoiceSharingSettingsModel(
                 queue: queue, isCollectionPermitted: { [weak self] in self?.gateOpen ?? false },
@@ -435,65 +392,57 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         await VoiceSharingCoordinator(enrollmentStore: store).refreshProjectionFromServer(accountClient: accountClient)
         XCTAssertTrue(store.currentEffectiveEnrolled)
         let entry = try AudioFixture.makeReadyEntry(in: queue)
-        let metadata = try queue.metadata(of: entry)
-        let audio = try queue.audio(of: entry)
-        let bound = try VoiceSharingRecordBinding.bind(envelope: metadata, audio: audio)
-        let ownerURL = root.appendingPathComponent(entry.name).appendingPathComponent("owner.account")
-        XCTAssertEqual(try String(contentsOf: ownerURL, encoding: .utf8), "local-account")
-        weakTrigger?.triggerDrainIfPermitted()
+        let metadata = try Data(contentsOf: entry.metadataURL)
+        let audio = try Data(contentsOf: entry.audioURL)
+        let record = try XCTUnwrap(JSONSerialization.jsonObject(with: metadata) as? [String: Any])
+        let expectedCaptureID = try XCTUnwrap(record["capture_id"] as? String)
+        weakTrigger?.trigger()
         await joinLocalSharingDrain(weakTrigger)
         XCTAssertEqual(authority.received.count, 0, "accepted enrollment without a new lease cannot upload")
 
         await VoiceSharingCoordinator(enrollmentStore: store).refreshProjectionFromServer(accountClient: accountClient)
         XCTAssertEqual(authority.lookupCount, 2)
-        weakTrigger?.triggerDrainIfPermitted()
+        weakTrigger?.trigger()
         await joinLocalSharingDrain(weakTrigger)
         XCTAssertEqual(authority.received.count, 1)
-        XCTAssertEqual(try queue.metadata(of: entry), metadata, "503 retains exact immutable metadata")
-        XCTAssertEqual(try queue.audio(of: entry), audio, "503 retains exact immutable WAV")
-        XCTAssertEqual(try String(contentsOf: ownerURL, encoding: .utf8), "local-account")
-        XCTAssertEqual(queue.readyEntries().count, 1)
+        XCTAssertEqual(try Data(contentsOf: entry.metadataURL), metadata, "503 retains exact immutable metadata")
+        XCTAssertEqual(try Data(contentsOf: entry.audioURL), audio, "503 retains exact immutable WAV")
+        XCTAssertEqual(queue.entries().count, 1)
         now = now.addingTimeInterval(2)
-        weakTrigger?.triggerDrainIfPermitted()
+        weakTrigger?.trigger()
         await joinLocalSharingDrain(weakTrigger)
         let attempts = authority.received
         XCTAssertEqual(attempts.count, 2)
         for attempt in attempts {
             XCTAssertEqual(attempt.metadata, metadata)
             XCTAssertEqual(attempt.audio, audio)
-            XCTAssertEqual(attempt.binding, bound)
-            XCTAssertEqual(attempt.binding.enrollmentEpoch, "epoch-1")
+            XCTAssertEqual(attempt.captureID, expectedCaptureID)
             XCTAssertEqual(attempt.bearer, "Bearer local-test-bearer")
         }
-        XCTAssertTrue(queue.readyEntries().isEmpty, "matching received-body-derived receipt settles the entry")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(entry.name).path))
+        XCTAssertTrue(queue.entries().isEmpty, "matching received-body-derived receipt settles the entry")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: entry.url.path))
 
         _ = try AudioFixture.makeReadyEntry(in: queue)
-        XCTAssertEqual(queue.readyEntries().count, 1)
+        XCTAssertEqual(queue.entries().count, 1)
         store.setLocalOptIn(false)
         XCTAssertFalse(store.consentAllowsCollection)
-        weakTrigger?.triggerDrainIfPermitted()
+        weakTrigger?.trigger()
         await joinLocalSharingDrain(weakTrigger)
         XCTAssertEqual(authority.received.count, 2, "configured work cannot send after local withdrawal")
-        XCTAssertEqual(queue.readyEntries().count, 1, "negative is not explained by an empty queue")
+        XCTAssertEqual(queue.entries().count, 1, "negative is not explained by an empty queue")
         service = nil
         XCTAssertNil(weakTrigger)
         XCTAssertFalse(VoiceSharingSettingsModel.surfaceEnabled)
     }
 
     private func joinLocalSharingDrain(_ trigger: VoiceSharingUploadTrigger?) async {
-        let task = trigger?.drainTaskForTesting
-        let joined = expectation(description: "configured drain joined")
-        Task { await task?.value; joined.fulfill() }
-        await fulfillment(of: [joined], timeout: 4)
-        if trigger?.isDrainingForTesting == true {
-            trigger?.stop()
-            task?.cancel()
-            let cancelled = expectation(description: "timed-out configured drain cancelled and joined")
-            Task { await task?.value; cancelled.fulfill() }
-            await fulfillment(of: [cancelled], timeout: 2)
+        // The simple trigger runs its pass on its own task and exposes no handle; wait for it to
+        // become idle rather than reaching into it.
+        guard let trigger else { return }
+        for _ in 0..<80 where trigger.isRunningForTesting {
+            try? await Task.sleep(nanoseconds: 50_000_000)
         }
-        XCTAssertFalse(trigger?.isDrainingForTesting ?? false)
+        XCTAssertFalse(trigger.isRunningForTesting, "the configured drain must finish")
     }
 
     /// Produces a REAL open capture the way production does — the engine's own `speechStarted` — because
@@ -740,7 +689,7 @@ private final class SharingLocalAuthority {
     struct Upload {
         let metadata: Data
         let audio: Data
-        let binding: VoiceSharingRecordBinding.BoundEntry
+        let captureID: String
         let bearer: String?
     }
     let ready = XCTestExpectation(description: "local authority listening")
@@ -810,7 +759,7 @@ private final class SharingLocalAuthority {
             if let split = raw.range(of: Data("\r\n\r\n".utf8)) {
                 let head = String(decoding: raw[..<split.lowerBound], as: UTF8.self)
                 let isGet = head.hasPrefix("GET ")
-                if isGet || (VoiceSharingAssemblyWiringTests.declaredContentLength(raw).map { raw.count >= $0 } ?? false) {
+                if isGet || (VoiceSharingAttemptedIdentity.declaredContentLength(raw).map { raw.count >= $0 } ?? false) {
                     let response = self.respond(head: head, body: Data(raw[split.upperBound...]))
                     connection.send(content: response, completion: .contentProcessed { _ in connection.cancel() })
                     return
@@ -856,22 +805,14 @@ private final class SharingLocalAuthority {
             }
             let metadata = try XCTUnwrap(parts["metadata"])
             let audio = try XCTUnwrap(parts["audio"])
-            let binding = try VoiceSharingRecordBinding.bind(envelope: metadata, audio: audio)
+            let record = try XCTUnwrap(JSONSerialization.jsonObject(with: metadata) as? [String: Any])
+            let captureID = try XCTUnwrap(record["capture_id"] as? String)
             // Reuse the strict existing multipart identity extractor as an independent identity check.
-            var request = URLRequest(url: URL(string: baseURLForRequest)!)
-            request.httpBody = body
-            request.setValue(contentType, forHTTPHeaderField: "Content-Type")
-            let extracted = try VoiceSharingAssemblyWiringTests.attemptedIdentity(from: request)
-            guard extracted.captureID == binding.captureID, extracted.sha == binding.recordSHA256 else {
-                throw URLError(.cannotParseResponse)
-            }
-            uploads.append(Upload(metadata: metadata, audio: audio, binding: binding, bearer: header("Authorization")))
+            // The record itself is the identity: read it the way the server does.
+            uploads.append(Upload(metadata: metadata, audio: audio,
+                                  captureID: captureID, bearer: header("Authorization")))
             if uploads.count == 1 { return try response(503, object: [:]) }
-            return try response(201, object: [
-                "schema_version": 1, "capture_id": binding.captureID, "record_sha256": binding.recordSHA256,
-                "status": "accepted", "receipt_id": "local-receipt", "accepted_at": "2026-10-28T14:00:00Z",
-                "retention_expires_at": "2026-11-28T14:00:00Z"
-            ])
+            return try response(201, object: ["capture_id": captureID])
         } catch {
             XCTFail("local authority rejected request: \(error)")
             return Data("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8)

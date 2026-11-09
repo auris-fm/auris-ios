@@ -116,16 +116,3 @@ func seedLfmAssetsForTestingForPositive(manager: ModelManager, labelMap: String 
     try? manifest.write(to: dir.appendingPathComponent("manifest.json"), atomically: true, encoding: .utf8)
 }
 
-/// Finite, memory-only capture authority for collector controls; never linked into the app.
-final class FiniteCaptureAdmission: VoiceSharingCaptureAdmitting {
-    private let lock = NSLock()
-    private var remaining = 32
-    func take(for stamp: VoiceSharingCaptureStamp) -> VoiceSharingCaptureReservation? {
-        lock.lock(); defer { lock.unlock() }
-        guard remaining > 0 else { return nil }
-        remaining -= 1
-        return VoiceSharingCaptureReservation(clipSamples: 160_000, metadataBytes: 65_536)
-    }
-    func requestPreparation() {}
-    func invalidate() { lock.lock(); remaining = 0; lock.unlock() }
-}

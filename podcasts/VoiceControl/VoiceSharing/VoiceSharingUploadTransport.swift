@@ -1,263 +1,101 @@
 import Foundation
-import PocketCastsUtils
 
-/// The PRODUCTION transport for contribution uploads: builds the real request (bearer credential,
-/// real endpoint, bounded timeouts) and executes it through URLSession.
-///
-/// What lives here rather than in `VoiceSharingUploader`: everything that touches the network
-/// stack. The uploader owns the DECISION (settle / retry / unknown / abandon); this type owns the
-/// WIRE. Keeping them apart is what let the uploader's controls run without a network.
-///
-/// Credential lifetime (spec: "Authentication"): a 401 means the credential was rejected, not that
-/// the upload failed permanently. It is reported to the token provider (so a concurrent refresh is
-/// not duplicated) and the attempt is classified as RETRYABLE — the same immutable record is
-/// retried under the next credential. No credential in hand means no request is issued at all:
-/// fail closed, never a request without a bearer.
+/// Sends one recording as a single multipart request and reduces the answer to what the uploader
+/// decides on. There is no reservation, no second step and no receipt matching.
 final class VoiceSharingUploadTransport {
-    /// Production route (worker/src/contributions/upload_route.ts, mounted as
-    /// POST /api/v1/voice-recordings).
-    static let uploadPath = "/api/v1/voice-recordings"
-    /// Receipt bodies are small JSON objects; anything larger is not one.
-    static let maxResponseBytes = 64 * 1024
-    /// Full body deadline: the transfer must COMPLETE within this budget, not merely stay active.
-    /// Starts before the request is issued, so stalled headers count. Injectable for controls.
-    let bodyDeadline: TimeInterval
-
-    /// Receives the response body with a hard byte ceiling (cancel past it) and a hard total
-    /// deadline. Returns nil for any violation — the record's fate stays unknown.
-    /// Receives the response with a hard byte ceiling (cancel past it) and a TOTAL deadline that
-    /// starts before the request is issued — stalled headers count against it too. The underlying
-    /// transfer is cancelled through the session task handle, not just abandoned.
-    private static func receive(
-        session: URLSession, request: URLRequest, byteLimit: Int, deadline: TimeInterval,
-        networkFence: (() -> Bool)?, admittedIdentity: VoiceSharingUploadIdentity?,
-        identityFence: (() -> VoiceSharingUploadIdentity?)?, beforeLaunch: (() async -> Void)?
-    ) async throws -> (HTTPURLResponse, Data)? {
-        let cancellation = VoiceSharingTransferCancellation()
-        return try await withTaskCancellationHandler(operation: {
-        try Task.checkCancellation()
-        // Cancellation owns publication before either unstructured child can start.
-        let transferTask = Task<(HTTPURLResponse, Data)?, Error> {
-            await beforeLaunch?()
-            try Task.checkCancellation()
-            guard !cancellation.isCancelled, networkFence?() ?? true else { throw CancellationError() }
-            // The parent fence precedes an unstructured-child scheduling boundary. Revalidate the
-            // admitted identity here, after suspension and immediately before the actual transfer.
-            // ACCOUNT binding only: this compares the ACCOUNT, matching the two
-            // fences above and the queue's admission rule. Comparing the whole snapshot made the
-            // provenance epoch an accidental gate — an epoch-only move for the SAME owner threw
-            // CancellationError here and the request never left, silently undoing the rule that a
-            // re-enrollment does not invalidate audio the account already captured.
-            if let identityFence, let admittedIdentity {
-                guard let live = identityFence(),
-                      live.accountScope == admittedIdentity.accountScope
-                else { throw CancellationError() }
-            }
-            let (bytes, response) = try await session.bytes(for: request)
-            guard let http = response as? HTTPURLResponse else { return nil }
-            var data = Data()
-            data.reserveCapacity(min(byteLimit, 4096))
-            do {
-                for try await byte in bytes {
-                    data.append(byte)
-                    if data.count > byteLimit {
-                        // Ceiling crossed mid-stream: kill the underlying transfer NOW.
-                        throw URLError(.dataNotAllowed)
-                    }
-                }
-            } catch {
-                return nil
-            }
-            return (http, data)
-        }
-        // Deadline task: races the transfer; the loser is cancelled.
-        let deadlineTask = Task<Void, Error> {
-            try await Task.sleep(nanoseconds: UInt64(deadline * 1_000_000_000))
-            throw URLError(.timedOut)
-        }
-        cancellation.install { transferTask.cancel(); deadlineTask.cancel() }
-        defer {
-            transferTask.cancel()
-            deadlineTask.cancel()
-            cancellation.clear()
-        }
-        return try await withThrowingTaskGroup(
-                of: (HTTPURLResponse, Data)?.self
-            ) { group in
-                group.addTask { [transferTask, deadlineTask] () -> (HTTPURLResponse, Data)? in
-                    defer { deadlineTask.cancel() }
-                    let outcome = try await transferTask.value
-                    return outcome
-                }
-                group.addTask { [transferTask] () -> (HTTPURLResponse, Data)? in
-                    var timedOut = true
-                    do {
-                        _ = try await deadlineTask.value
-                    } catch is CancellationError {
-                        // The LOSER's cancellation (the transfer finished first and released the
-                        // timer) is not a timeout: a successful transfer must
-                        // never race into transportFailure through this child.
-                        timedOut = false
-                    } catch {
-                        // REAL deadline expiry: kill the underlying URL transfer FIRST so the
-                        // transfer child can actually finish, then report the timeout.
-                        transferTask.cancel()
-                        timedOut = true
-                    }
-                    if timedOut { throw URLError(.timedOut) }
-                    return nil
-                }
-                // ONE authoritative result: the timer's loser notification
-                // (nil from a cancelled timer child) must never WIN the race over a successful
-                // transfer. Only a non-nil transfer result or a REAL timeout throw decides; loser
-                // notifications are consumed and ignored.
-                var decided: (HTTPURLResponse, Data)?
-                while let notification = try await group.next() {
-                    if let notification {
-                        decided = notification
-                        break
-                    }
-                    // nil = the cancelled timer child finished: keep waiting for the transfer child.
-                }
-                group.cancelAll()
-                return decided // nil here means a genuine violation, never a lost race
-            }
-        }, onCancel: { cancellation.cancel() })
-    }
-
-    var beforeTransferLaunchForTesting: (() async -> Void)?
 
     private let baseURLProvider: () -> String
     private let tokenProvider: CloudTokenProviding
     private let session: URLSession
+    /// The credential the last request presented, so a 401 can name what was rejected.
+    private var lastPresentedToken: String?
 
-
-    init(
-        baseURLProvider: @escaping () -> String,
-        tokenProvider: CloudTokenProviding,
-        session: URLSession = .shared,
-        bodyDeadline: TimeInterval = 90
-    ) {
+    init(baseURLProvider: @escaping () -> String,
+         tokenProvider: CloudTokenProviding,
+         session: URLSession = .shared) {
         self.baseURLProvider = baseURLProvider
         self.tokenProvider = tokenProvider
         self.session = session
-        self.bodyDeadline = bodyDeadline
     }
 
-    /// The endpoint this transport will use, or nil when configuration is missing. Nil is not
-    /// defaulted to something plausible: an unconfigured build must not upload anywhere.
-    var endpoint: URL? {
-        VoiceSharingOrigin.url(origin: baseURLProvider(), path: Self.uploadPath)
-    }
-
-    /// Executes an already-built request. Returns the wire answer; never throws.
+    /// Sends `metadata` then `audio` as multipart parts, in that order, as the spec requires.
     ///
-    /// The request ARRIVES complete (URL, body, boundary, idempotency key) from the uploader; this
-    /// type adds the credential and executes it. That split means the bytes the controls assert on
-    /// are the bytes that go on the wire.
-    /// - Parameters:
-    /// - admittedIdentity: the identity snapshot this attempt was ADMITTED under (reviewer
-    /// 78f23dca — per SEND, never transport-initialization state). Supplied together with
-    /// `identityFence`, the live reader.
-    /// - identityFence: re-reads the live identity at credential and actual transfer-launch boundaries.
-    func send(
-        request built: URLRequest,
-        admittedIdentity: VoiceSharingUploadIdentity? = nil,
-        identityFence: (() -> VoiceSharingUploadIdentity?)? = nil,
-        networkFence: (() -> Bool)? = nil,
-        networkAllowance: VoiceSharingUploadNetworkAllowance? = nil
-    ) async -> VoiceSharingUploader.TransportResult {
-        guard !Task.isCancelled, networkFence?() ?? true else { return .transportFailure }
-        // No bearer, no call — nothing is created, nothing is sent.
-        guard let credential = await tokenProvider.token(), !credential.isEmpty else {
-            return .transportFailure
+    /// `stillPermitted` is asked immediately before the request leaves, after the credential is in
+    /// hand: a withdrawal that lands while this call is waiting for a credential must stop the
+    /// recording from reaching the network at all.
+    func send(entry: VoiceSharingQueue.Entry,
+              stillPermitted: () -> Bool = { true }) async -> VoiceSharingUploader.Answer {
+        guard let token = await tokenProvider.token(), !token.isEmpty else {
+            // No credential is indistinguishable from an expired one: the caller refreshes.
+            return .response(status: 401)
         }
-        guard !Task.isCancelled, networkFence?() ?? true else { return .transportFailure }
-        // CREDENTIAL-BOUNDARY fence: the identity may have moved WHILE the
-        // credential was being acquired. The declared admitted snapshot must still be live before
-        // a single byte leaves; A's bytes are never sent under B's credential. Checking after the
-        // response cannot repair a disclosure, so this runs at the launch boundary.
-        if let fence = identityFence, let admitted = admittedIdentity {
-            // ACCOUNT binding: A's bytes must not leave under B's account. The
-            // provenance epoch is not compared — a re-enrollment moves it without changing the owner.
-            guard let live = fence(), live.accountScope == admitted.accountScope else { return .transportFailure }
+        guard let url = endpoint() else { return .noAnswer }
+        guard let body = Self.multipartBody(
+            boundary: Self.boundary,
+            metadata: (try? Data(contentsOf: entry.metadataURL)) ?? Data(),
+            audio: (try? Data(contentsOf: entry.audioURL)) ?? Data())
+        else {
+            // Unreadable parts mean the entry itself is unusable; report a final refusal rather than
+            // retrying forever on the same bytes.
+            return .response(status: 400)
         }
-        var request = built
-        if let allowance = networkAllowance {
-            request.allowsCellularAccess = allowance.interfaces.contains(.cellular)
-            request.allowsExpensiveNetworkAccess = allowance.allowsExpensive
-            request.allowsConstrainedNetworkAccess = allowance.allowsConstrained
-        }
-        // The CONFIGURED endpoint decides, not anything the caller supplied: a build with no base
-        // URL must upload nowhere, even if it was handed a well-formed request.
-        guard let endpoint else { return .transportFailure }
-        request.url = endpoint
-        // IDLE deadline (headers or any gap): URLSession natively aborts a transfer that stays
-        // silent this long — cooperative cancellation alone does not interrupt a stalled
-        // stream. The WALL deadline below separately bounds total body lifetime, so a dribbling
-        // body that resets the idle timer still dies.
-        request.timeoutInterval = bodyDeadline
-        // The credential is the only header this type adds: URL, body, content type and the
-        // idempotency key all arrive from the uploader, so what the controls assert is what ships.
-        request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization")
-
-        // FINAL pre-LAUNCH fence: `baseURLProvider`/endpoint evaluation is a
-        // callback that could itself move the identity after the credential-boundary check — the
-        // same window shape as the uploader's endpoint hook. With every mutable callback resolved
-        // and the request fully built, the LAST read before `receive` launches must still see the
-        // admitted snapshot.
-        if let fence = identityFence, let admitted = admittedIdentity {
-            // ACCOUNT binding: A's bytes must not leave under B's account. The
-            // provenance epoch is not compared — a re-enrollment moves it without changing the owner.
-            guard let live = fence(), live.accountScope == admitted.accountScope else { return .transportFailure }
-        }
-
-        guard !Task.isCancelled, networkFence?() ?? true else { return .transportFailure }
+        guard stillPermitted() else { return .cancelled }
+        var request = URLRequest(url: url, timeoutInterval: Self.requestTimeout)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("multipart/form-data; boundary=\(Self.boundary)",
+                         forHTTPHeaderField: "Content-Type")
+        request.httpBody = body
+        lastPresentedToken = token
         do {
-            // STREAMING bound: `session.data` allocates the WHOLE body before
-            // this code runs, so a post-hoc count check is a parse bound, not a memory bound. The
-            // byte ceiling is enforced WHILE receiving and the transfer is cancelled the moment it
-            // is exceeded. A full-body deadline bounds the transfer's total lifetime as well.
-            let transfer = try await Self.receive(
-                session: session, request: request,
-                byteLimit: Self.maxResponseBytes, deadline: bodyDeadline,
-                networkFence: networkFence, admittedIdentity: admittedIdentity,
-                identityFence: identityFence, beforeLaunch: beforeTransferLaunchForTesting)
-            guard let (http, data) = transfer else { return .transportFailure }
-
-            if http.statusCode == 401 {
-                // Report WHICH credential was rejected, then let the caller retry: a 401 is an
-                // authentication event, not a verdict on the record.
-                await tokenProvider.handleUnauthorized(rejectedToken: credential)
-            }
-            return .response(statusCode: http.statusCode, body: data)
+            let (_, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else { return .noAnswer }
+            return .response(status: http.statusCode)
         } catch {
-            // Transport-level failure (offline, timeout, TLS): the record's fate is unknown, which
-            // the uploader treats as retryable — never as delivered.
-            return .transportFailure
+            return .noAnswer
         }
     }
-}
 
-/// Publishes cancellation before task handles exist; a late handle is cancelled on installation.
-private final class VoiceSharingTransferCancellation {
-    private let lock = NSLock()
-    private var cancelled = false
-    private var cancelTasks: (() -> Void)?
-    var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
-    func install(_ body: @escaping () -> Void) {
-        lock.lock()
-        cancelTasks = body
-        let cancelNow = cancelled
-        lock.unlock()
-        if cancelNow { body() }
+    /// Asks the app's own sign-in machinery to restore a credential, then reports whether one is
+    /// available now. The provider refreshes out of band; this reads the result.
+    func refreshSignIn() async -> Bool {
+        let rejectedToken = lastPresentedToken
+        await tokenProvider.handleUnauthorized(rejectedToken: rejectedToken)
+        guard let token = await tokenProvider.token() else { return false }
+        return !token.isEmpty
     }
-    func clear() { lock.lock(); cancelTasks = nil; lock.unlock() }
-    func cancel() {
-        lock.lock()
-        cancelled = true
-        let body = cancelTasks
-        lock.unlock()
-        body?()
+
+    private func endpoint() -> URL? {
+        let base = baseURLProvider()
+        guard !base.isEmpty else { return nil }
+        return URL(string: base)?.appendingPathComponent(String(Self.uploadPath.dropFirst()))
+    }
+
+    static let boundary = "auris-voice-recording"
+
+    /// The one route a recording is sent to.
+    static let uploadPath = "/api/v1/voice-recordings"
+
+    /// The overall deadline for one upload, matching the server's own budget. The body is up to
+    /// 1.9 MB leaving over a phone uplink, so this is dominated by the network, not by the server's
+    /// work. Matching the server means neither end abandons work the other still expects; running
+    /// out is a retry, never a delete.
+    static let requestTimeout: TimeInterval = 60
+
+    /// `metadata` part first, then `audio`, with the WAV named `recording.wav` per the spec.
+    static func multipartBody(boundary: String, metadata: Data, audio: Data) -> Data? {
+        var body = Data()
+        func append(_ s: String) { body.append(contentsOf: Array(s.utf8)) }
+        append("--\(boundary)\r\n")
+        // Plain form field, no filename: the server reads it as the record JSON value.
+        append("Content-Disposition: form-data; name=\"metadata\"\r\n")
+        append("Content-Type: application/json\r\n\r\n")
+        body.append(metadata)
+        append("\r\n--\(boundary)\r\n")
+        append("Content-Disposition: form-data; name=\"audio\"; filename=\"recording.wav\"\r\n")
+        append("Content-Type: audio/wav\r\n\r\n")
+        body.append(audio)
+        append("\r\n--\(boundary)--\r\n")
+        return body
     }
 }

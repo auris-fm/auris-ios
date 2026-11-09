@@ -159,8 +159,8 @@ final class VoiceSharingBearerTraceControls: XCTestCase {
 
     /// A ready, consented recording (the wiring tests' fixture shape).
     @discardableResult
-    private func makeReadyEntry(_ queue: VoiceSharingUploadQueue) throws
-        -> VoiceSharingUploadQueue.Entry {
+    private func makeReadyEntry(_ queue: VoiceSharingQueue) throws
+        -> VoiceSharingQueue.Entry {
         let samples: [Float] = [0, 0.25, -0.5, 0.5]
         let event = VoiceSharingCollector.SegmentEvent(
             kind: .completed, captureID: UUID(),
@@ -173,9 +173,8 @@ final class VoiceSharingBearerTraceControls: XCTestCase {
             conversionVersion: "v1")
         let encoded = try VoiceSharingContributionEncoder.encode(
             event: event, provenance: provenance, observations: [:])
-        let entry = try queue.prepare(metadata: encoded.metadataEnvelope, audio: encoded.wav)
-        try queue.finalize(entry)
-        return entry
+        let name = try XCTUnwrap(queue.publish(audio: encoded.wav, metadata: encoded.metadata))
+        return try XCTUnwrap(queue.entries().first { $0.name == name })
     }
 
     // MARK: - Controls
@@ -288,31 +287,22 @@ final class VoiceSharingBearerTraceControls: XCTestCase {
                 enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "voice-sharing-v1",
                 withdrawalState: .active),
             readUnder: try XCTUnwrap(store.projectionToken())))
-        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let queue = VoiceSharingQueue(root: root)
         let entry = try makeReadyEntry(queue)
 
         var logged: [String] = []
         let coordinator = VoiceSharingCoordinator(enrollmentStore: store, scheduledWorkObserver: .init { _ in })
         let trigger = VoiceControlAssembly().makeVoiceSharingUploadTrigger(
             queue: queue, isAuthorized: { true },
-            currentIdentity: { nil }, tokenProvider: StaticToken())
+            currentIdentity: { nil as (account: String, epoch: String)? }, tokenProvider: StaticToken())
         let collector = VoiceSharingCollector(
             isCollectionPermitted: { store.consentAllowsCollection },
             outcomeWaitLimit: .init(milliseconds: 1_000, ceilingMilliseconds: 1_000),
             sink: { _ in })
-        let sink = VoiceSharingContributionSink(
-            queue: queue, isEnabled: { store.consentAllowsCollection },
-            encoderProvenance: {
-                .init(platform: "ios", appVersion: "test", build: "0",
-                      captureSessionID: "sess-1",
-                      models: .init(vad: nil, wakeword: nil, asr: nil,
-                                    translation: nil, router: nil),
-                      conversionVersion: "v1")
-            })
-        // THE production handler, wired to the real queue; the collector and sink stay alive for the
-        // whole control so their callbacks run too.
+        // THE production handler, wired to the real queue; the collector stays alive for the whole
+        // control so its callbacks run too.
         VoiceControlAssembly().installVoiceSharingGateLoss(
-            collector: collector, sink: sink, uploadTrigger: trigger,
+            collector: collector, uploadTrigger: trigger,
             queue: queue, coordinator: coordinator,
             sessionAlive: { true }, consentGone: { store.consentGoneForPurge },
             log: { logged.append($0) })
@@ -348,7 +338,7 @@ final class VoiceSharingBearerTraceControls: XCTestCase {
         XCTAssertFalse(recoveryRequests.contains { $0.path.contains("/withdrawal") || $0.path.contains("/enrollment") },
                        "recovery never mints a withdrawal/enrollment request")
 
-        XCTAssertEqual(queue.readyEntries(), [entry], "the recording survives the identity reload")
+        XCTAssertEqual(queue.entries(), [entry], "the recording survives the identity reload")
         XCTAssertFalse(store.consentGoneForPurge, "recovery alone never closes the consent gate")
         XCTAssertTrue(purgeDecisions(logged).isEmpty, "no purge decision was taken: \(logged)")
         XCTAssertEqual(store.currentAuthoritativeState?.membership.membershipRevision, "rev-2",
@@ -365,7 +355,7 @@ final class VoiceSharingBearerTraceControls: XCTestCase {
         // The injected client is the recovered one; drive the refusal explicitly through the same
         // boundary's client type so the stanza is deterministic.
         await coordinator.refreshProjectionFromServer(accountClient: refreshStale)
-        XCTAssertEqual(queue.readyEntries(), [entry], "a refused read purges nothing")
+        XCTAssertEqual(queue.entries(), [entry], "a refused read purges nothing")
         XCTAssertFalse(store.consentGoneForPurge, "a refused read is not a withdrawal")
         XCTAssertFalse(store.currentState.explicitOptOut, "no opt-out was recorded by a refused read")
         let persisted = VoiceSharingEnrollmentStore(
@@ -381,8 +371,8 @@ final class VoiceSharingBearerTraceControls: XCTestCase {
             defaults: defaults, accountScopeProvider: { "acct-1" },
             sessionIdentityProvider: { "acct-1" })
         XCTAssertTrue(restartedStore.currentState.localOptIn, "the choice survives a restart")
-        let restartedQueue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-        XCTAssertEqual(restartedQueue.readyEntries(), [entry], "the recording survives a restart")
+        let restartedQueue = VoiceSharingQueue(root: root)
+        XCTAssertEqual(restartedQueue.entries(), [entry], "the recording survives a restart")
 
         // (d) ACCOUNT replacement: the other account inherits neither the choice nor the recordings.
         let otherStore = VoiceSharingEnrollmentStore(
@@ -392,13 +382,13 @@ final class VoiceSharingBearerTraceControls: XCTestCase {
                        "account 2 does not inherit account 1's recorded choice")
         XCTAssertFalse(otherStore.currentState.explicitOptOut,
                        "account 2 is not told account 1 withdrew")
-        XCTAssertEqual(queue.readyEntries(), [entry],
+        XCTAssertEqual(queue.entries(), [entry],
                        "the recordings stay with the account they belong to")
 
         // (e) CONTRAST — explicit withdrawal still purges through the SAME production handler.
         _ = store.withdrawLocally(acceptedServerProjectionAfterward: false)
         coordinator.consentGateLostForTesting()
-        XCTAssertTrue(queue.readyEntries().isEmpty, "withdrawal clears pending recordings")
+        XCTAssertTrue(queue.entries().isEmpty, "withdrawal clears pending recordings")
         let purges = purgeDecisions(logged)
         XCTAssertFalse(purges.isEmpty, "withdrawal records a purge decision: \(logged)")
         XCTAssertTrue(purges.allSatisfy { $0.contains("cause=consent-gone") }, "cause named: \(logged)")

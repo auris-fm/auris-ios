@@ -1,15 +1,11 @@
 import CryptoKit
 import Foundation
 
-/// Turns collector segment events into the queue's canonical immutable record: the UTF-8 JSON
-/// metadata envelope (`record` + `record_sha256`) and the exact WAV bytes the record declares.
+/// Turns collector segment events into the record sent with an upload: plain UTF-8 JSON and the
+/// exact WAV bytes the record describes. There is no canonical form and no digest — the server
+/// parses and validates the fields, so nothing depends on the bytes.
 ///
-/// Composition point: the collector's sink calls this, then hands the result to
-/// `VoiceSharingUploadQueue.prepare(metadata:audio:)`. The encoder refuses to emit anything the
-/// queue's own validator (`VoiceSharingRecordBinding.bind` — the same authority recovery and
-/// readiness apply) would reject: it round-trips every output through `bind` before returning, so
-/// a malformed stage outcome or truncation fact fails at collection time, not as a corrupt queue
-/// entry discovered later.
+/// Composition point: the collector calls this, then publishes the two parts through the queue.
 ///
 /// Truthfulness boundary: the OBSERVATION content (stage states, reasons, text) comes from the
 /// pipeline caller — the encoder never fabricates a stage claim, a transcript, or a duration. It
@@ -136,13 +132,27 @@ enum VoiceSharingContributionEncoder {
     }
 
     struct Encoded {
-        /// Canonicalized `record` object bytes (JCS), the digest preimage.
-        let recordJSON: Data
-        /// `{"record":…,"record_sha256":…}` — the queue's metadata argument.
-        let metadataEnvelope: Data
-        /// The exact WAV bytes the record's audio block declares.
+        /// The `metadata` part: plain JSON of the record.
+        let metadata: Data
+        /// The `audio` part: the exact WAV bytes the record's audio block describes.
         let wav: Data
     }
+
+    /// The reason a recognition reports when it succeeded and returned nothing usable. One spelling,
+    /// named by the producer and read by anyone describing the same fact.
+    static let emptyResultReason = "empty_result"
+
+    /// The execution stage's routing disposition still names the classification while the turn is
+    /// concluded or failed; `not_run` means the router declined, so carrying names would invent a
+    /// classification that never happened.
+    static func routingDispositionCarriesClassification(_ disposition: String?) -> Bool {
+        guard let disposition else { return false }
+        return disposition != "not_run"
+    }
+
+    /// Bounds the metadata part a single recording may carry. Generous: the record is a few hundred
+    /// bytes, and this only stops a malformed observation from producing an unbounded file.
+    static let maximumMetadataBytes = 64 * 1024
 
     static let sampleRateHz = 16_000
 
@@ -174,22 +184,13 @@ enum VoiceSharingContributionEncoder {
             "models": modelsBlock(event.reportedModels ?? provenance.models),
             "observations": observationsBlock(observations, outcomeWaitExpired: event.outcomeWaitExpired),
         ]
-        let canonical = try VoiceSharingRecordBinding.canonicalize(record)
-        let recordJSON = Data(canonical.utf8)
-        let digest = SHA256.hash(data: recordJSON).map { String(format: "%02x", $0) }.joined()
-        let envelope: [String: Any] = ["record": record, "record_sha256": digest]
-        let envelopeCanonical = try VoiceSharingRecordBinding.canonicalize(envelope)
-        let encoded = Encoded(
-            recordJSON: recordJSON,
-            metadataEnvelope: Data(envelopeCanonical.utf8),
-            wav: wav)
-        // THE self-check: the queue must accept exactly what we emit. Any structural or
-        // allowlist failure is a collection-time error, never a persisted corrupt entry.
-        _ = try VoiceSharingRecordBinding.bind(envelope: encoded.metadataEnvelope, audio: encoded.wav)
-        return encoded
+        // Plain JSON. Sorted keys only so a human reading a queue folder sees a stable file; the
+        // server does not depend on the ordering or the bytes.
+        let metadata = try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys])
+        return Encoded(metadata: metadata, wav: wav)
     }
 
-    // MARK: WAV (pcm_s16le, mono, 16 kHz, canonical 44-byte header)
+    // MARK: WAV (pcm_s16le, mono, 16 kHz, 44-byte header)
 
     private static func wavBytes(from samples: [Float]) throws -> Data {
         // Float→Int conversion TRAPS on NaN/infinity/overflow — validate and
@@ -201,7 +202,7 @@ enum VoiceSharingContributionEncoder {
         for sample in samples where !sample.isFinite {
             throw EncodeError.nonFiniteSample
         }
-        var data = Data(capacity: VoiceSharingRecordBinding.wavHeaderBytes + samples.count * 2)
+        var data = Data(capacity: 44 + samples.count * 2)
         let byteRate = sampleRateHz * 2
         func append(_ value: UInt32) { withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) } }
         func append16(_ value: UInt16) { withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) } }
@@ -236,7 +237,6 @@ enum VoiceSharingContributionEncoder {
         event: VoiceSharingCollector.SegmentEvent, wav: Data, provenance: Provenance
     ) -> [String: Any] {
         var block: [String: Any] = [
-            "sha256": SHA256.hash(data: wav).map { String(format: "%02x", $0) }.joined(),
             "byte_count": wav.count,
             "encoding": "pcm_s16le",
             "sample_rate_hz": sampleRateHz,

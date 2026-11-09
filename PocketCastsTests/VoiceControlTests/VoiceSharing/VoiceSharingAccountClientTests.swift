@@ -1098,7 +1098,7 @@ final class VoiceSharingAccountModelTests: XCTestCase {
         harness.seed()
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let queue = VoiceSharingUploadQueue(rootDirectory: root)
+        let queue = VoiceSharingQueue(root: root)
         let entry = try AudioFixture.makeReadyEntry(in: queue)
         let settings = VoiceSharingSettingsModel(queue: queue, isCollectionPermitted: { false }, isAccountEnrolled: { harness.store.currentEnrollmentAnswer }, isLocallyOptedIn: { harness.store.currentState.localOptIn })
         let model = harness.model(purge: { settings.deletePendingRecordingsOnThisDevice() })
@@ -1110,7 +1110,7 @@ final class VoiceSharingAccountModelTests: XCTestCase {
         XCTAssertTrue(model.busy)
         VoiceSharingStubProtocol.onRequest = {
             XCTAssertFalse(harness.store.currentEffectiveEnrolled, "withdrawal stops locally before HTTP")
-            XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(entry.name).path), "actual pending bytes are purged before HTTP")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: entry.url.path), "actual pending bytes are purged before HTTP")
         }
         await model.withdraw()
         XCTAssertEqual(model.membershipStatus, .withdrawnServerConfirmed)
@@ -1395,7 +1395,7 @@ final class VoiceSharingAccountNavigationTests: XCTestCase {
         XCTAssertEqual(built, 0)
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let queue = VoiceSharingUploadQueue(rootDirectory: root)
+        let queue = VoiceSharingQueue(root: root)
         var local: VoiceSharingSettingsModel? = VoiceSharingSettingsModel(queue: queue, isCollectionPermitted: { false }, isAccountEnrolled: { true }, isLocallyOptedIn: { true })
         var account: VoiceSharingAccountModel? = harness.model()
         weak var weakAccount = account

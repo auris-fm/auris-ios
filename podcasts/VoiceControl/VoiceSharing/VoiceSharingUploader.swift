@@ -1,671 +1,199 @@
 import Foundation
-import PocketCastsUtils
 
-/// Uploads ONE immutable queue entry to the contribution endpoint, and settles the entry from the
-/// answer. This is the composition point where the queue, the strict coverage/attempt authorities
-/// and the wire contract finally meet.
+/// Offers due recordings to the server, oldest first.
 ///
-/// The contract this type exists to enforce (voice-recording-uploads spec, "Contribution upload
-/// responses"):
+/// One loop, one recording at a time, and one rule for what an answer means:
 ///
-/// - **A receipt is only acceptance if it MATCHES.** A 2xx whose body is malformed, missing fields,
-/// or naming a different capture identity or record digest is an UNKNOWN outcome: the audio is
-/// retained and the SAME immutable record is retried. It is never treated as delivered, and the
-/// local entry is never deleted for it.
-/// - **Ownership fences the settlement.** The attempt lease taken before the request is the only
-/// thing that may settle the entry. If the lease was reclaimed while the request was in flight
-/// (expiry, revocation, another uploader), the answer is stale: the entry is left alone —
-/// `applyAttemptResult` refuses it — and the uploader reports a stale result rather than
-/// inventing an outcome for an entry it no longer owns.
-/// - **Revocation wins over a late 2xx.** If authorization is withdrawn while a request is in
-/// flight, the entry is not quietly completed from the arriving response; it is discarded
-/// through the queue's revocation path so the durable hold/coverage rules apply.
-/// - **Bounded retry, never a fresh identity.** Retryable failures (5xx, 429, transport) schedule
-/// the retry through `VoiceSharingRetryPolicy` for the SAME entry; the capture identity is minted
-/// once, at collection time, and is never regenerated here.
+/// | answer | outcome |
+/// |---|---|
+/// | `2xx` | accepted — delete |
+/// | `401` | sign-in expired — refresh, retry |
+/// | any other `4xx` | final refusal — delete |
+/// | anything else, or no answer | retry with backoff |
 ///
-/// Disabled by construction: this type performs work only when its caller invokes `upload(_:)`,
-/// and the production composition does not invoke it until the owner approves activation.
+/// A recording that fails never blocks the others: the loop moves on and that entry alone waits.
 final class VoiceSharingUploader {
-    /// The single wire-level answer, before any interpretation.
-    enum TransportResult: Equatable {
-        case response(statusCode: Int, body: Data)
-        case transportFailure
+
+    /// Exponential backoff, capped at one hour. Memory-only, so a restart simply tries again.
+    static let maximumBackoff: TimeInterval = 60 * 60
+
+    /// One HTTP answer, reduced to what the loop decides on.
+    enum Answer: Equatable {
+        case response(status: Int)
+        /// No answer at all: transport failure, timeout, or a cancelled request.
+        case noAnswer
+        /// The request was never made because sharing was no longer permitted. Not a server
+        /// answer: the recording is deleted under the sharing-off rule, never retried.
+        case cancelled
     }
 
-    /// What the uploader did with one entry.
     enum Outcome: Equatable {
-        case delivered(receiptID: String, duplicate: Bool)
-        /// Retry the SAME entry (bounded by the queue's attempt limits).
-        case retry(serverRetryAfterSeconds: Double?, attempt: Int)
-        /// The receipt could not be trusted (malformed / identity mismatch). Audio retained.
-        case unknownOutcome(reason: String)
-        /// Authorization was withdrawn while the request was in flight; the entry is being revoked.
-        case revoked
-        /// The attempt was no longer ours (lease reclaimed) — nothing was settled.
-        case staleAttempt
-        /// Terminal refusal (permanent failure); the entry was abandoned.
-        case abandoned(reason: String)
-        /// The local entry could not be read or is not ready; nothing was sent.
-        case unavailable(reason: String)
+        case accepted
+        case refused(status: Int)
+        case requiresSignIn
+        case retry(delay: TimeInterval)
+        /// Nothing was due, or the queue was empty.
+        case idle
     }
 
-    struct Receipt {
-        let captureID: String
-        let recordSHA256: String
-        let status: ReceiptStatus
-        let receiptID: String
-    }
+    private let queue: VoiceSharingQueue
+    private let send: (VoiceSharingQueue.Entry) async -> Answer
+    private let refreshSignIn: () async -> Bool
+    /// The account and epoch this process is currently signed in and enrolled under. An entry whose
+    /// recorded identity differs is deleted: it belongs to an account or epoch that is no longer live.
+    private let currentIdentity: () -> (account: String, epoch: String)?
+    /// The user's live sharing choice. Turning it off deletes every local recording.
+    private let sharingEnabled: () -> Bool
+    private let now: () -> Date
+    private let log: (String) -> Void
 
-    enum ReceiptError: Error, Equatable {
-        case notJSON
-        case missingField(String)
-        case unexpectedStatus(String)
-        case identityMismatch
-    }
-
-    var beforeNetworkRetryForTesting: (() async -> Void)?
-    private let networkGate: VoiceSharingUploadNetworkGate?
-    private let queue: VoiceSharingUploadQueue
-    private let retryPolicy: VoiceSharingRetryPolicy
-    private let isAuthorized: () -> Bool
-    /// Live identity reader for attempt-lifetime fencing. Returns nil when this process has no
-    /// identity authority (an unbound queue), in which case nothing is fenced.
-    private let currentIdentity: () -> VoiceSharingUploadIdentity?
-    /// The transport receives the admitted identity snapshot and the live reader so IT can fence
-    /// at the credential boundary (the token await is a window the uploader cannot see).
-    private let transport: (URLRequest, VoiceSharingUploadIdentity?, (() -> VoiceSharingUploadIdentity?)?, @escaping () -> Bool) async -> TransportResult
-    private let endpoint: () -> URL?
-    private let clock: () -> Date
+    /// Consecutive retryable failures, per entry, used only to grow the backoff delay.
+    private var failures: [String: Int] = [:]
 
     init(
-        queue: VoiceSharingUploadQueue,
-        networkGate: VoiceSharingUploadNetworkGate? = nil,
-        retryPolicy: VoiceSharingRetryPolicy,
-        isAuthorized: @escaping () -> Bool,
-        currentIdentity: @escaping () -> VoiceSharingUploadIdentity? = { nil },
-        endpoint: @escaping () -> URL?,
-        clock: @escaping () -> Date = Date.init,
-        transport: @escaping (URLRequest, VoiceSharingUploadIdentity?, (() -> VoiceSharingUploadIdentity?)?) async -> TransportResult = { _, _, _ in .transportFailure },
-        networkFenceTransport: ((URLRequest, VoiceSharingUploadIdentity?, (() -> VoiceSharingUploadIdentity?)?, @escaping () -> Bool) async -> TransportResult)? = nil
+        queue: VoiceSharingQueue,
+        send: @escaping (VoiceSharingQueue.Entry) async -> Answer,
+        refreshSignIn: @escaping () async -> Bool,
+        currentIdentity: @escaping () -> (account: String, epoch: String)?,
+        sharingEnabled: @escaping () -> Bool,
+        now: @escaping () -> Date = Date.init,
+        log: @escaping (String) -> Void = { _ in }
     ) {
-        self.networkGate = networkGate
         self.queue = queue
-        self.retryPolicy = retryPolicy
-        self.isAuthorized = isAuthorized
+        self.send = send
+        self.refreshSignIn = refreshSignIn
         self.currentIdentity = currentIdentity
-        self.endpoint = endpoint
-        self.clock = clock
-        self.transport = networkFenceTransport ?? { request, identity, fence, _ in await transport(request, identity, fence) }
+        self.sharingEnabled = sharingEnabled
+        self.now = now
+        self.log = log
     }
 
-    /// Uploads one ready entry. Returns what happened; never throws into the caller's pipeline.
-    func upload(_ entry: VoiceSharingUploadQueue.Entry) async -> Outcome {
-        // AUTHORIZATION first: no request is ever issued without a live permission.
-        guard isAuthorized() else {
-            FileLog.shared.addMessage(
-                "[VoiceSharing] upload disposition entry=\(entry.name) reason=not-authorized disposition=refused")
-            FileLog.shared.forceFlush()
-            return .revoked
+    /// One pass over the queue: sends every due recording until none remain.
+    ///
+    /// Returns the outcomes actually produced, so a caller (and a test) can see what happened rather
+    /// than inferring it from the filesystem alone.
+    @discardableResult
+    func drain() async -> [Outcome] {
+        // Sharing off deletes every local recording, before any other question is asked: the user's
+        // withdrawal is not a reason to hold or skip the bytes, it is a reason to remove them.
+        if !sharingEnabled() {
+            queue.deleteAll(reason: "sharing-off")
+            return []
         }
-        let networkToken = networkGate?.admissionToken()
-        guard !Task.isCancelled, networkGate == nil || networkToken != nil else {
-            FileLog.shared.addMessage(
-                "[VoiceSharing] upload disposition entry=\(entry.name) reason=network-blocked disposition=refused")
-            FileLog.shared.forceFlush()
-            return .unavailable(reason: "network blocked")
-        }
-        // Ownership: taking the lease is what makes this attempt OURS. Note beginAttempt also
-        // enforces the strict owner-wide coverage hold, so an unreconciled owner uploads nothing.
-        // Ownership: ONE atomic admission yields the lease AND the attempt number together
-        // . Reading them separately let a reclaim in between make this uploader
-        // settle under a SUCCESSOR's lease. Only this token may settle from here on.
-        let admitted: VoiceSharingUploadQueue.AdmittedAttempt
-        do {
-            guard let granted = try queue.admitAttempt(entry) else {
-                // The queue logs the PRECISE refusal reason (admit refusal reason=…); this line
-                // records only that the upload attempt ended there.
-                FileLog.shared.addMessage(
-                    "[VoiceSharing] upload disposition entry=\(entry.name) reason=admission-refused disposition=refused")
-                FileLog.shared.forceFlush()
-                return .unavailable(reason: "attempt refused (held, exhausted or owned)")
+        deleteEntriesBelongingToAnotherIdentity()
+
+        var outcomes: [Outcome] = []
+        // `dueEntries()` deletes expired recordings as a side effect, which is itself an outcome of
+        // the pass even though nothing was sent.
+        var due = queue.dueEntries()
+        while let entry = due.first {
+            // Consent is re-read before EVERY request, not just at the start of the pass: a
+            // withdrawal that lands while an earlier request is in flight must stop the next one
+            // from ever reaching the network.
+            guard sharingEnabled() else {
+                queue.deleteAll(reason: "sharing-off")
+                return outcomes
             }
-            admitted = granted
-        } catch {
-            // Includes the enforced not-before refusal: a fresh owner is refused until due.
-            FileLog.shared.addMessage(
-                "[VoiceSharing] upload disposition entry=\(entry.name) reason=admission-error disposition=refused")
-            FileLog.shared.forceFlush()
-            return .unavailable(reason: "attempt refused: \(type(of: error))")
+            let outcome = await attempt(entry)
+            outcomes.append(outcome)
+            if case .retry = outcome {
+                // This entry is now inside its backoff window; the rest of the pass continues.
+                due = queue.dueEntries().filter { $0.name != entry.name }
+            } else {
+                due = queue.dueEntries()
+            }
         }
-        let lease = admitted.lease
-        let attemptNumber = admitted.attemptNumber
+        return outcomes
+    }
 
-        // DIAGNOSTIC (content-free): the attempt is now OURS and has consumed budget. Without this
-        // line an attempt that never reaches the wire is invisible, and "no request" and "no drain"
-        // look identical from outside the process. Entry/capture only — no audio, no credentials.
-        FileLog.shared.addMessage(
-            "[VoiceSharing] upload attempt start entry=\(entry.name) "
-                + "capture=\(entryCaptureIDForDiagnostics(entry)) attempt=\(attemptNumber)")
-
-        guard let url = endpoint() else {
-            FileLog.shared.addMessage(
-                "[VoiceSharing] upload disposition entry=\(entry.name) reason=no-endpoint disposition=retry")
-            FileLog.shared.forceFlush()
-            _ = try? queue.applyAttemptResult(entry, lease: lease, outcome: .retryableFailure)
-            return .retry(serverRetryAfterSeconds: nil, attempt: attemptNumber)
-        }
-        let request: URLRequest
-        do {
-            request = try makeRequest(entry: entry, url: url)
-        } catch {
-            FileLog.shared.addMessage(
-                "[VoiceSharing] upload disposition entry=\(entry.name) reason=request-build-failed disposition=retry")
-            FileLog.shared.forceFlush()
-            _ = try? queue.applyAttemptResult(entry, lease: lease, outcome: .retryableFailure)
-            return .unavailable(reason: "entry unreadable: \(type(of: error))")
-        }
-
-        // LAUNCH fence — THE last point before bytes leave: the request is
-        // built and about to go to the transport, which will acquire the credential and send.
-        // An identity move since admission must stop here: A's bytes are never launched under
-        // B's authority, and a post-response check cannot repair that disclosure.
-        if let admittedIdentity = admitted.identity, !isIdentityCurrent(admittedIdentity) {
-            FileLog.shared.addMessage(
-                "[VoiceSharing] upload disposition entry=\(entry.name) reason=identity-moved-since-admission disposition=revoked")
-            FileLog.shared.forceFlush()
-            _ = try? queue.applyAttemptResult(entry, lease: lease, outcome: .retryableFailure)
-            return .revoked
-        }
-        // The transport re-fences at its credential boundary with THIS attempt's admitted
-        // snapshot: the token await inside is the one window the uploader-side fence cannot see.
-        // When the queue carries no identity (unbound), the fence parameters stay nil and the
-        // uploader-side checks are the only enforcement — same as before this seam existed.
-        guard !Task.isCancelled, networkGate == nil || networkToken.map({ networkGate!.isCurrent($0) }) == true else {
-            await beforeNetworkRetryForTesting?()
-            return settleRetry(entry: entry, lease: lease, attempt: attemptNumber, serverRetryAfter: nil)
-        }
-        let result = await transport(request, admitted.identity, currentIdentity, { [networkGate] in
-            networkGate == nil || networkToken.map { networkGate!.isCurrent($0) } == true
-        })
-
-        // DIAGNOSTIC — IMMEDIATELY after the await, before any cancellation/network/identity/
-        // authorization fence: a received response must never vanish from the
-        // trace because a fence fired first. Content-free: status and fixed-vocabulary code only.
-        switch result {
-        case .transportFailure:
-            FileLog.shared.addMessage(
-                "[VoiceSharing] upload response entry=\(entry.name) response=none")
-        case .response(let statusCode, let body):
-            FileLog.shared.addMessage(
-                "[VoiceSharing] upload response entry=\(entry.name) status=\(statusCode) "
-                    + "code=\(Self.diagnosticCode(body))")
-        }
-        FileLog.shared.forceFlush()
-
-        guard !Task.isCancelled, networkGate == nil || networkToken.map({ networkGate!.isCurrent($0) }) == true else {
-            FileLog.shared.addMessage(
-                "[VoiceSharing] upload disposition entry=\(entry.name) reason=cancelled-or-network-moved disposition=retry")
-            FileLog.shared.forceFlush()
-            await beforeNetworkRetryForTesting?()
-            return settleRetry(entry: entry, lease: lease, attempt: attemptNumber, serverRetryAfter: nil)
-        }
-
-        // ATTEMPT-LIFETIME fence: the identity this attempt was ADMITTED under must
-        // still be the live one. Admission-time binding alone cannot see an account/epoch move that
-        // lands while the request is in flight, and a late 2xx must not settle an entry whose
-        // identity has since changed. Only checked when the queue supplied an identity.
-        if let admittedIdentity = admitted.identity, !isIdentityCurrent(admittedIdentity) {
-            // The lease must still be released; the entry belongs to the retired identity.
-            FileLog.shared.addMessage(
-                "[VoiceSharing] upload disposition entry=\(entry.name) reason=identity-moved-in-flight disposition=revoked")
-            FileLog.shared.forceFlush()
-            _ = try? queue.applyAttemptResult(entry, lease: lease, outcome: .retryableFailure)
-            return .revoked
-        }
-        // REVOCATION check immediately after the await (reviewer/spec obligation): a withdrawal
-        // that landed while the request was in flight must not be overridden by a late 2xx.
-        if !isAuthorized() {
-            // The lease must still be released; the entry is left for the revocation path.
-            FileLog.shared.addMessage(
-                "[VoiceSharing] upload disposition entry=\(entry.name) reason=revoked-in-flight disposition=revoked")
-            FileLog.shared.forceFlush()
-            _ = try? queue.applyAttemptResult(entry, lease: lease, outcome: .retryableFailure)
-            return .revoked
-        }
-
-        switch result {
-        case .transportFailure:
-            // Final disposition of a response-less attempt. Observable fact only: no response
-            // arrived; this does not establish whether bytes left the device.
-            FileLog.shared.addMessage(
-                "[VoiceSharing] upload disposition entry=\(entry.name) reason=no-response disposition=retry")
-            FileLog.shared.forceFlush()
-            return settleRetry(entry: entry, lease: lease, attempt: attemptNumber,
-                               serverRetryAfter: nil)
-        case .response(let statusCode, let body):
-            // Status/code were already logged immediately after the await (before the fences);
-            // each branch below logs its FINAL fixed-vocabulary disposition.
-            switch statusCode {
-            case 200, 201:
-            FileLog.shared.addMessage(
-                "[VoiceSharing] upload disposition entry=\(entry.name) reason=receipt-validation-pending disposition=accept-pending-receipt")
-            FileLog.shared.forceFlush()
-                // 201 = newly accepted, 200 = previously accepted (idempotent replay). Both are
-                // only trustworthy when the receipt body validates against OUR record identity.
-                return settleReceipt(entry: entry, lease: lease, body: body,
-                                     statusCode: statusCode, attempt: attemptNumber)
-            case 401:
-            FileLog.shared.addMessage(
-                "[VoiceSharing] upload disposition entry=\(entry.name) reason=unauthorized disposition=retry")
-            FileLog.shared.forceFlush()
-                // AUTHENTICATION, not a verdict on the record. The credential
-                // is refreshed out of band and the SAME immutable entry is retried; deleting it
-                // here would discard a valid recording because of a stale token.
-                return settleRetry(entry: entry, lease: lease, attempt: attemptNumber,
-                                   serverRetryAfter: nil)
-            case 503:
-            FileLog.shared.addMessage(
-                "[VoiceSharing] upload disposition entry=\(entry.name) reason=upload-pending disposition=retry")
-            FileLog.shared.forceFlush()
-                // "upload_pending": transient by contract, and the server may still tell us when.
-                // Its minimum is PRESERVED and ENFORCED through the persisted not-before stamp.
-                return settleRetry(entry: entry, lease: lease, attempt: attemptNumber,
-                                   serverRetryAfter: Self.retryAfterSeconds(body))
-            case 429:
-            FileLog.shared.addMessage(
-                "[VoiceSharing] upload disposition entry=\(entry.name) reason=quota-exceeded disposition=retry")
-            FileLog.shared.forceFlush()
-                // quota_exceeded: the day is metered from ACTUAL accepted bytes
-                // and resets at next UTC midnight. A day-scale refusal is not something the
-                // exponential ladder should burn attempts against: the floor applies whether or
-                // not the server sent a hint, and a hint can only extend it, never shorten it
-                // (both halves pinned by VoiceSharingQuotaRetryFloorTests).
-                return settleRetry(entry: entry, lease: lease, attempt: attemptNumber,
-                                   serverRetryAfter: Self.effectiveRetryAfter(
-                                       statusCode: 429, body: body,
-                                       hint: Self.retryAfterSeconds(body), now: Date()))
-            case 408:
-            FileLog.shared.addMessage(
-                "[VoiceSharing] upload disposition entry=\(entry.name) reason=request-timeout disposition=retry")
-            FileLog.shared.forceFlush()
-                // Request timeout: transient by the owning table, never a judgement on the record.
-                return settleRetry(entry: entry, lease: lease, attempt: attemptNumber,
-                                   serverRetryAfter: nil)
-            case 400, 409, 410, 413, 415, 422:
-                // THE owning table's terminal dispositions only — and the BODY must carry the
-                // code the table pairs with this status: a malformed body or an
-                // unrelated code under a terminal-looking status is not proof; it retains.
-                // 400 invalid_request, 409 capture_conflict, 410 record_gone/enrollment_retired,
-                // 413 payload_too_large, 415 unsupported_audio, 422 integrity_mismatch.
-                let code = Self.errorCode(body)
-        let owning = code == Self.owningCode[statusCode]
-            || (statusCode == 410 && code == "enrollment_retired")
-        guard owning else {
-                    FileLog.shared.addMessage(
-                        "[VoiceSharing] upload disposition entry=\(entry.name) "
-                            + "reason=terminal-status-non-owning-body disposition=retain")
-                    FileLog.shared.forceFlush()
-                    return unknownOutcome(entry: entry, lease: lease, attempt: attemptNumber,
-                                          reason: "terminal status with non-owning body")
-                }
-                if statusCode == 400 && code == "invalid_request" {
-                        // a recording the server refuses permanently is deleted
-                        // from the queue at once, not kept. This supersedes the quarantine
-                        // compromise: the queue always
-                        // drains, and capacity must not be held by unservable bytes.
-                        FileLog.shared.addMessage(
-                            "[VoiceSharing] upload disposition entry=\(entry.name) "
-                                + "reason=contract-rejected disposition=delete")
-                        FileLog.shared.forceFlush()
-                        return settleTerminal(entry: entry, lease: lease, statusCode: statusCode)
-                    }
-                        FileLog.shared.addMessage(
-                        "[VoiceSharing] upload disposition entry=\(entry.name) reason=owning-terminal-code disposition=abandon")
-                    FileLog.shared.forceFlush()
-                return settleTerminal(entry: entry, lease: lease, statusCode: statusCode)
-            case 403:
-                // The table's stop disposition — only when the body names it:
-                // not_enrolled / collection_disabled. An unrelated 403 is just unknown.
-                guard let code = Self.errorCode(body),
-                    code == "not_enrolled" || code == "collection_disabled" else {
-                        FileLog.shared.addMessage(
-                        "[VoiceSharing] upload disposition entry=\(entry.name) reason=403-without-owning-code disposition=retain")
-                    FileLog.shared.forceFlush()
-                    return unknownOutcome(entry: entry, lease: lease, attempt: attemptNumber,
-                                          reason: "403 without owning code")
-                }
-                        FileLog.shared.addMessage(
-                        "[VoiceSharing] upload disposition entry=\(entry.name) reason=owning-stop-code disposition=abandon")
-                    FileLog.shared.forceFlush()
-                return settleTerminal(entry: entry, lease: lease, statusCode: statusCode)
-            default:
-                // Everything unmatched (unknown 4xx, 5xx other than 503, odd 3xx): the record's
-                // fate is unknown, so it is retained and retried with bounded backoff.
-                        FileLog.shared.addMessage(
-                        "[VoiceSharing] upload disposition entry=\(entry.name) reason=unmatched-status disposition=retain-retry")
-                    FileLog.shared.forceFlush()
-                return settleRetry(entry: entry, lease: lease, attempt: attemptNumber,
-                                   serverRetryAfter: Self.retryAfterSeconds(body))
+    /// Removes recordings stamped with an account or epoch that is not the current live one.
+    ///
+    /// An entry that cannot be read is deleted too: the spec's list permits removing a recording that
+    /// cannot be parsed, and an unreadable entry could never be sent.
+    private func deleteEntriesBelongingToAnotherIdentity() {
+        guard let identity = currentIdentity() else { return }
+        for entry in queue.entries() {
+            guard let data = try? Data(contentsOf: entry.metadataURL),
+                  let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let epoch = record["enrollment_epoch"] as? String
+            else {
+                queue.delete(entry, reason: "unreadable")
+                continue
+            }
+            if epoch != identity.epoch {
+                queue.delete(entry, reason: "epoch-changed")
+            } else if let account = record["account"] as? String, account != identity.account {
+                queue.delete(entry, reason: "account-changed")
             }
         }
     }
 
-    /// True while the identity the attempt was admitted under is still live. A reader that cannot
-    /// establish an identity (nil) is not a match: an unknown live identity cannot confirm a stale
-    /// one, so the fence holds.
-    private func isIdentityCurrent(_ admitted: VoiceSharingUploadIdentity) -> Bool {
-        // ACCOUNT binding: the identity that must still hold is the ACCOUNT — A's
-        // bytes never leave under B. The provenance epoch is not compared: a re-enrollment moves it
-        // without changing the owner.
-        guard let live = currentIdentity() else { return false }
-        return live.accountScope == admitted.accountScope
-    }
-
-    // MARK: - settlement
-
-    private func settleReceipt(
-        entry: VoiceSharingUploadQueue.Entry, lease: VoiceSharingUploadQueue.AttemptLease,
-        body: Data, statusCode: Int, attempt: Int
-    ) -> Outcome {
-        let expected: VoiceSharingRecordBinding.BoundEntry
-        do {
-            expected = try queue.boundIdentity(of: entry)
-        } catch {
-            return unknownOutcome(entry: entry, lease: lease, attempt: attempt, reason: "local identity unreadable")
+    /// Sends one entry and applies its answer. Exposed so a caller can retry a single recording.
+    @discardableResult
+    func attempt(_ entry: VoiceSharingQueue.Entry) async -> Outcome {
+        // The same check immediately before the send: `attempt` is callable on its own.
+        guard sharingEnabled() else {
+            queue.deleteAll(reason: "sharing-off")
+            return .idle
         }
-        let receipt: Receipt
-        do {
-            receipt = try Self.parseReceipt(body)
-        } catch {
-            // UNKNOWN outcome: retain audio, retry the same record. Never delete for a bad receipt.
-            return unknownOutcome(entry: entry, lease: lease, attempt: attempt, reason: "malformed receipt")
-        }
-        // The PAIR must agree: 201 with "duplicate" or 200 with "accepted" is a contradiction —
-        // the server is describing a different history than the code it sent. Unknown, retained.
-        guard receipt.status.contradicts(statusCode) == false else {
-            return unknownOutcome(entry: entry, lease: lease, attempt: attempt,
-                                  reason: "receipt status contradicts http status")
-        }
-        // The receipt must describe THIS entry. A well-formed receipt for another identity is a
-        // protocol violation, not acceptance of ours.
-        guard receipt.captureID == expected.captureID,
-              receipt.recordSHA256 == expected.recordSHA256 else {
-            return unknownOutcome(entry: entry, lease: lease, attempt: attempt, reason: "receipt identity mismatch")
-        }
-        // VERIFICATION evidence: log the accepted receipt's identifiers so a
-        // drain can be reconciled against the server's object storage and byte accounting.
-        FileLog.shared.addMessage("[VoiceSharing] upload ACCEPTED capture=\(receipt.captureID) receipt=\(receipt.receiptID) sha256=\(receipt.recordSHA256) status=\(receipt.status == .accepted ? "accepted" : "duplicate")")
-        do {
-            try queue.applyAttemptResult(entry, lease: lease, outcome: .delivered)
-        } catch VoiceSharingUploadQueue.PrepareError.resultStale {
-            return .staleAttempt
-        } catch {
-            return .unavailable(reason: "settlement failed: \(type(of: error))")
-        }
-        return .delivered(receiptID: receipt.receiptID, duplicate: receipt.status == .duplicate)
-    }
-
-    private func unknownOutcome(
-        entry: VoiceSharingUploadQueue.Entry, lease: VoiceSharingUploadQueue.AttemptLease,
-        attempt: Int, reason: String, serverRetryAfter: Double? = nil
-    ) -> Outcome {
-        // Same transaction discipline as a 503: unknown is as retryable, so it gets the same
-        // lease-validated, durably published boundary.
-        let delay = retryPolicy.delay(afterAttempt: attempt, serverRetryAfter: serverRetryAfter)
-        do {
-            try queue.applyAttemptResult(
-                entry, lease: lease, outcome: .retryableFailure,
-                retryNotBefore: clock().addingTimeInterval(delay))
-        } catch VoiceSharingUploadQueue.PrepareError.resultStale {
-            return .staleAttempt
-        } catch {
-            return .unavailable(reason: "settlement failed: \(type(of: error))")
-        }
-        return .unknownOutcome(reason: reason)
-    }
-
-    private func settleRetry(
-        entry: VoiceSharingUploadQueue.Entry, lease: VoiceSharingUploadQueue.AttemptLease, attempt: Int,
-        serverRetryAfter: Double?
-    ) -> Outcome {
-        // ONE authoritative transaction: the queue validates
-        // the lease FIRST, publishes the durable boundary inside the same serialized operation,
-        // and only then releases. A stale result can neither settle nor touch a successor's
-        // boundary; a failed barrier engages the owner-wide hold instead of degrading to advisory.
-        let delay = retryPolicy.delay(afterAttempt: attempt, serverRetryAfter: serverRetryAfter)
-        do {
-            try queue.applyAttemptResult(
-                entry, lease: lease, outcome: .retryableFailure,
-                retryNotBefore: clock().addingTimeInterval(delay))
-        } catch VoiceSharingUploadQueue.PrepareError.resultStale {
-            return .staleAttempt
-        } catch {
-            return .unavailable(reason: "settlement failed: \(type(of: error))")
-        }
-        return .retry(serverRetryAfterSeconds: delay, attempt: attempt)
-    }
-
-    private func settleTerminal(
-        entry: VoiceSharingUploadQueue.Entry, lease: VoiceSharingUploadQueue.AttemptLease, statusCode: Int
-    ) -> Outcome {
-        do {
-            try queue.applyAttemptResult(entry, lease: lease, outcome: .abandoned)
-        } catch VoiceSharingUploadQueue.PrepareError.resultStale {
-            return .staleAttempt
-        } catch {
-            return .unavailable(reason: "settlement failed: \(type(of: error))")
-        }
-        return .abandoned(reason: "http \(statusCode)")
-    }
-
-    /// Builds the multipart body for an entry, plus the boundary used. Exposed so the production
-    /// transport can send EXACTLY these bytes (one builder, no drift between what is tested and
-    /// what is sent).
-    static func multipartBody(
-        metadata: Data, audio: Data
-    ) -> (body: Data, boundary: String) {
-        let boundary = "auris-\(UUID().uuidString)"
-        var body = Data()
-        body.append("--\(boundary)\r\n".data(using: .utf8)!)
-        body.append("Content-Disposition: form-data; name=\"metadata\"\r\n".data(using: .utf8)!)
-        body.append("Content-Type: application/json\r\n\r\n".data(using: .utf8)!)
-        body.append(metadata)
-        body.append("\r\n--\(boundary)\r\n".data(using: .utf8)!)
-        body.append("Content-Disposition: form-data; name=\"audio\"; filename=\"recording.wav\"\r\n"
-            .data(using: .utf8)!)
-        body.append("Content-Type: audio/wav\r\n\r\n".data(using: .utf8)!)
-        body.append(audio)
-        body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
-        return (body, boundary)
-    }
-
-    // MARK: - request
-
-    /// Public so the production transport can obtain the EXACT request the uploader built (and so
-    /// controls can assert on it) without duplicating body construction.
-    func makeRequest(
-        entry: VoiceSharingUploadQueue.Entry, url: URL
-    ) throws -> URLRequest {
-        let metadata = try queue.metadata(of: entry)
-        let audio = try queue.audio(of: entry)
-        let (body, boundary) = Self.multipartBody(metadata: metadata, audio: audio)
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("multipart/form-data; boundary=\(boundary)",
-                         forHTTPHeaderField: "Content-Type")
-        request.setValue(String(body.count), forHTTPHeaderField: "Content-Length")
-        // A stable idempotency header lets the server recognize the retry of the SAME immutable
-        // record rather than a second upload (spec: retries carry the same identity/body).
-        if let identity = try? queue.boundIdentity(of: entry) {
-            request.setValue(identity.captureID, forHTTPHeaderField: "Idempotency-Key")
-        }
-        request.httpBody = body
-        return request
-    }
-
-    // MARK: - receipt parsing
-
-    /// Strict: a receipt is accepted only if every required field is the expected type. Anything
-    /// else is `.missingField`/`.notJSON` — which the caller treats as an UNKNOWN outcome.
-    static func parseReceipt(_ data: Data) throws -> Receipt {
-        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw ReceiptError.notJSON
-        }
-        // schema_version must be the INTEGER 1. `as? Int` would bridge a JSON boolean to 1, which
-        // would let `true` authorize a receipt.
-        guard Self.isExactInteger(object["schema_version"], 1) else {
-            throw ReceiptError.missingField("schema_version")
-        }
-        func string(_ key: String) throws -> String {
-            guard let value = object[key] as? String, !value.isEmpty else {
-                throw ReceiptError.missingField(key)
+        let answer = await send(entry)
+        let outcome = decide(answer, entry: entry)
+        switch outcome {
+        case .accepted:
+            queue.delete(entry, reason: "accepted")
+        case .refused(let status):
+            queue.delete(entry, reason: "refused-\(status)")
+        case .requiresSignIn:
+            // The recording is NOT deleted: an expired sign-in says nothing about the recording.
+            let refreshed = await refreshSignIn()
+            log("refresh reason=unauthorized success=\(refreshed) name=\(entry.name)")
+            if refreshed {
+                // Try again immediately with the restored credential.
+                return await attempt(entry)
             }
-            return value
+            scheduleRetry(entry)
+            return .retry(delay: backoffDelay(for: entry))
+        case .retry:
+            scheduleRetry(entry)
+        case .idle:
+            break
         }
-        let captureID = try string("capture_id")
-        let recordSHA = try string("record_sha256")
-        // Digests are lowercase hex of a SHA-256: anything else is not a digest.
-        guard recordSHA.count == 64,
-            recordSHA.allSatisfy({ ($0.isNumber && $0.isASCII) || ("a"..."f").contains($0) })
-        else {
-            throw ReceiptError.missingField("record_sha256")
-        }
-        let rawStatus = try string("status")
-        guard let status = ReceiptStatus(rawValue: rawStatus) else {
-            throw ReceiptError.unexpectedStatus(rawStatus)
-        }
-        let receiptID = try string("receipt_id")
-        // Timestamps are part of the contract, not decoration: a receipt whose times do not parse
-        // cannot be reasoned about for retention, so it is refused.
-        _ = try timestamp(object, "accepted_at")
-        _ = try timestamp(object, "retention_expires_at")
-        return Receipt(captureID: captureID, recordSHA256: recordSHA, status: status,
-                       receiptID: receiptID)
+        return outcome
     }
 
-    /// Accepts only a genuine JSON number that is integral and equal to `expected`. Booleans are
-    /// rejected explicitly because `as? Int` bridges them.
-    static func isExactInteger(_ value: Any?, _ expected: Int) -> Bool {
-        guard let number = value as? NSNumber else { return false }
-        // CFBoolean is an NSNumber subclass: refuse it by type.
-        guard CFGetTypeID(number) != CFBooleanGetTypeID() else { return false }
-        guard number.doubleValue.isFinite, number.doubleValue == Double(expected) else {
-            return false
-        }
-        return true
-    }
-
-    /// ISO-8601 with a timezone designator; fractional seconds are accepted, a zone is required.
-    static func timestamp(_ object: [String: Any], _ key: String) throws -> Date {
-        guard let raw = object[key] as? String, !raw.isEmpty else {
-            throw ReceiptError.missingField(key)
-        }
-        guard raw.hasSuffix("Z") || raw.range(of: "[+-]\\d{2}:\\d{2}$", options: .regularExpression)
-            != nil
-        else {
-            throw ReceiptError.missingField(key)
-        }
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = formatter.date(from: raw) { return date }
-        formatter.formatOptions = [.withInternetDateTime]
-        guard let date = formatter.date(from: raw) else {
-            throw ReceiptError.missingField(key)
-        }
-        return date
-    }
-
-    /// The only two statuses a trustworthy receipt may carry. A string field would let new server
-    /// values silently read as accepted.
-    enum ReceiptStatus: String {
-        case accepted
-        case duplicate
-
-        /// A code/status pair the owning table never produces is a protocol violation.
-        func contradicts(_ httpStatus: Int) -> Bool {
-            switch (httpStatus, self) {
-            case (201, .accepted), (200, .duplicate): return false
-            default: return true
-            }
+    /// Maps one answer to its outcome. Pure, so the table can be checked directly.
+    func decide(_ answer: Answer) -> Outcome {
+        switch answer {
+        case .cancelled:
+            return .idle
+        case .noAnswer:
+            return .retry(delay: 0)
+        case .response(let status):
+            if (200...299).contains(status) { return .accepted }
+            if status == 401 { return .requiresSignIn }
+            if (400...499).contains(status) { return .refused(status: status) }
+            return .retry(delay: 0)
         }
     }
 
-    /// The protocol's fixed error-code vocabulary (specs/voice-recording-uploads.md). Only these
-    /// strings are ever logged: a server-supplied value outside the vocabulary is content and is
-    /// reported as `unknown` WITHOUT being echoed.
-    static let knownErrorCodes: Set<String> = [
-        "invalid_request", "capture_conflict", "record_gone", "enrollment_retired",
-        "payload_too_large", "unsupported_audio", "integrity_mismatch",
-        "not_enrolled", "collection_disabled", "quota_exceeded", "rate_limited",
-        "unauthorized", "upload_pending", "storage_unavailable", "protocol_capability",
-    ]
-
-    /// The logged form of a response code: a recognized protocol code, or `unknown` — never the
-    /// server's own string.
-    static func diagnosticCode(_ body: Data) -> String {
-        guard let code = errorCode(body), knownErrorCodes.contains(code) else { return "unknown" }
-        return code
-    }
-
-    /// The entry's capture identity for logs, or `unknown` when it cannot be read. This value is
-    /// already sent to the server in the record envelope, so logging it discloses nothing new —
-    /// audio, credentials, transcripts and raw bodies are deliberately excluded.
-    private func entryCaptureIDForDiagnostics(_ entry: VoiceSharingUploadQueue.Entry) -> String {
-        (try? queue.boundIdentity(of: entry))?.captureID ?? "unknown"
-    }
-
-    /// The owning status→code pairs (specs/voice-recording-uploads.md). A terminal disposition
-    /// requires BOTH halves.
-    static let owningCode: [Int: String] = [
-        400: "invalid_request",
-        409: "capture_conflict",
-        410: "record_gone",
-        413: "payload_too_large",
-        415: "unsupported_audio",
-        422: "integrity_mismatch",
-    ]
-
-    /// Strict error-body read: `{schema_version: 1, code: nonempty}` exactly (the worker's
-    /// errorBody shape). Anything else yields nil — which retains.
-    static func errorCode(_ body: Data) -> String? {
-        guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
-            isExactInteger(object["schema_version"], 1),
-            let code = object["code"] as? String, !code.isEmpty
-        else { return nil }
-        return code
-    }
-
-    /// The effective Retry-After for a settled attempt. For `429 quota_exceeded` the floor is
-    /// the seconds until the NEXT utc midnight (the quota's actual reset): absent hint → floor;
-    /// hint below the floor → floor; hint above the floor → the hint, unchanged. Any other
-    /// status/code combination returns the hint as received — a non-quota response must keep
-    /// the plain hint-passing behavior, and the floor is a quota mechanism, not a general one.
-    static func effectiveRetryAfter(statusCode: Int, body: Data,
-                                    hint: Double?, now: Date) -> Double? {
-        guard statusCode == 429, errorCode(body) == "quota_exceeded" else { return hint }
-        let floor = nextUTCMidnightInterval(from: now)
-        return max(hint ?? 0, floor)
-    }
-
-    /// Seconds from `now` until the next 00:00:00 UTC boundary. Computed on the calendar so a
-    /// month or year end cannot be miscomputed by 86_400-multiples.
-    static func nextUTCMidnightInterval(from now: Date) -> TimeInterval {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(identifier: "UTC")!
-        let nextMidnight = calendar.startOfDay(for: now).addingTimeInterval(86_400)
-        return nextMidnight.timeIntervalSince(now)
-    }
-
-    /// Retry-After is advisory server guidance; unparseable values are simply absent (the policy
-    /// then uses its own bounded backoff).
-    static func retryAfterSeconds(_ body: Data) -> Double? {
-        guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
-            return nil
+    private func decide(_ answer: Answer, entry: VoiceSharingQueue.Entry) -> Outcome {
+        let outcome = decide(answer)
+        if case .retry = outcome {
+            return .retry(delay: backoffDelay(for: entry))
         }
-        if let value = object["retry_after_s"] as? Double, value > 0, value.isFinite { return value }
-        if let value = object["retry_after_s"] as? Int, value > 0 { return Double(value) }
-        return nil
+        return outcome
+    }
+
+    private func scheduleRetry(_ entry: VoiceSharingQueue.Entry) {
+        let count = (failures[entry.name] ?? 0) + 1
+        failures[entry.name] = count
+        let delay = min(pow(2, Double(count - 1)) * 60, Self.maximumBackoff)
+        queue.deferUntil(now().addingTimeInterval(delay), entry: entry)
+        log("retry delay=\(Int(delay))s name=\(entry.name)")
+    }
+
+    private func backoffDelay(for entry: VoiceSharingQueue.Entry) -> TimeInterval {
+        let count = max(failures[entry.name] ?? 1, 1)
+        return min(pow(2, Double(count - 1)) * 60, Self.maximumBackoff)
     }
 }

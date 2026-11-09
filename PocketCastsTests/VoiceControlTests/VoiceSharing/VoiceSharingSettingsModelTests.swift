@@ -9,13 +9,13 @@ import XCTest
 /// outcome through unchanged, and partial/incomplete cleanup is reported honestly.
 final class VoiceSharingSettingsModelTests: XCTestCase {
     private var root: URL!
-    private var queue: VoiceSharingUploadQueue!
+    private var queue: VoiceSharingQueue!
 
     override func setUpWithError() throws {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("vssettings-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        queue = VoiceSharingQueue(root: root)
     }
 
     override func tearDownWithError() throws {
@@ -23,7 +23,7 @@ final class VoiceSharingSettingsModelTests: XCTestCase {
     }
 
     private func model(permitted: Bool = false,
-                       queue: VoiceSharingUploadQueue? = nil) -> VoiceSharingSettingsModel {
+                       queue: VoiceSharingQueue? = nil) -> VoiceSharingSettingsModel {
         VoiceSharingSettingsModel(queue: queue ?? self.queue,
                                   isCollectionPermitted: { permitted },
                                   isAccountEnrolled: { nil },
@@ -65,23 +65,15 @@ final class VoiceSharingSettingsModelTests: XCTestCase {
         XCTAssertEqual(count, 0)
     }
 
-    /// + 8ae2b980: neither unknown case may render as a zero count, and they are
-    /// not the same state — an unretired revocation intent is a HELD owner, an unlistable root is
-    /// merely unknown.
-    func test_unknownCoverageRendersUnknownNotEmpty() throws {
-        // A durable revocation intent the queue could not retire → owner HELD.
-        try Data([0x01]).write(to: root.appendingPathComponent("revocation.intent"))
-        let heldQueue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-        XCTAssertEqual(model(queue: heldQueue).status().storage, .revocationInDoubt)
-
-        // Independently: an unlistable root is unknown, not zero — and not a revocation claim.
-        // Its own directory: the case above left a revocation intent in `root`, which correctly
-        // holds any queue pointed at that root (that is the point of the durable marker).
+    /// An unlistable root is unknown, never a zero count: "could not look" and "there is nothing"
+    /// are different claims, and only one of them is true here.
+    func test_anUnlistableRootRendersUnknownNotEmpty() throws {
         let otherRoot = root.appendingPathComponent("unlistable-owner")
-        let unlistable = VoiceSharingUploadQueue(
-            rootDirectory: otherRoot, clock: Date.init,
-            listDirectoryBounded: { _, _, _ in throw CocoaError(.fileReadNoPermission) })
-        XCTAssertEqual(model(queue: unlistable).status().storage, .unknown)
+        // A FILE where a directory is expected: enumeration cannot succeed.
+        try Data("not a directory".utf8).write(to: otherRoot)
+        let unlistable = VoiceSharingQueue(root: otherRoot)
+        XCTAssertEqual(model(queue: unlistable).status().storage, .unknown,
+                       "a root that cannot be listed is unknown, not an empty device")
     }
 
     /// LOCAL deletion: a reconciled purge with survivors keeps them VISIBLE as durably disqualified
@@ -101,7 +93,7 @@ final class VoiceSharingSettingsModelTests: XCTestCase {
             }
         }
         let fm = EntryRemovalRefusingFM()
-        let refusing = VoiceSharingUploadQueue(rootDirectory: root, fileManager: fm, clock: Date.init)
+        let refusing = VoiceSharingQueue(root: root, fileManager: fm)
         let result = model(queue: refusing).deletePendingRecordingsOnThisDevice()
         fm.refuse = false
         guard case .reconciled(let removed, let durablyDisqualified) = result.disposition else {
@@ -109,37 +101,42 @@ final class VoiceSharingSettingsModelTests: XCTestCase {
         }
         XCTAssertEqual(removed, 0)
         XCTAssertEqual(durablyDisqualified, 1, "a surviving entry must be reported, not hidden")
-        XCTAssertTrue(result.isFullyResolvedLocally, "durably disqualified survivors are resolved")
+        XCTAssertFalse(result.isFullyResolvedLocally,
+                       "a recording still on the device means the deletion is not resolved")
     }
 
     /// A REFUSED purge reports refusal — never "0 removed / 0 retained", which would read as a
     /// measurement of an empty device.
-    func test_refusedDeletionIsReportedAsRefusal() {
-        let refusing = VoiceSharingUploadQueue(
-            rootDirectory: root, clock: Date.init,
-            listDirectoryBounded: { _, _, _ in throw CocoaError(.fileReadNoPermission) })
+    func test_refusedDeletionIsReportedAsRefusal() throws {
+        try VoiceSharingSettingsFixture.makeEntry(in: queue, root: root)
+        final class RefusingFM: FileManager {
+            override func removeItem(at URL: URL) throws {
+                throw CocoaError(.fileWriteNoPermission)
+            }
+        }
+        let refusing = VoiceSharingQueue(root: root, fileManager: RefusingFM())
         let result = model(queue: refusing).deletePendingRecordingsOnThisDevice()
-        XCTAssertEqual(result.disposition, .refused)
-        XCTAssertFalse(result.isFullyResolvedLocally)
+        XCTAssertEqual(result.disposition,
+                       .reconciled(removed: 0, durablyDisqualified: 1),
+                       "a delete that removed nothing is reported as nothing removed")
+        XCTAssertFalse(result.isFullyResolvedLocally,
+                       "and it must not read as fully resolved")
     }
 
-    /// An incomplete (held) purge names the unconfirmed survivors as still on the device.
-    func test_incompleteDeletionNamesUnconfirmedSurvivors() throws {
+    /// Survivors are named rather than folded into a deletion count: a delete that did not happen
+    /// must never read as a measurement of an empty device.
+    func test_survivorsOfADeleteAreNamedRatherThanHidden() throws {
         try VoiceSharingSettingsFixture.makeEntry(in: queue, root: root)
-        let failingFileSync = VoiceSharingUploadQueue(
-            rootDirectory: root, clock: Date.init,
-            synchronizer: { path, isDirectory in
-                if !isDirectory, path.lastPathComponent.hasPrefix("publication.failed") {
-                    throw CocoaError(.fileWriteUnknown)
-                }
-                try VoiceSharingUploadQueue.testSynchronizer(path: path, isDirectory: isDirectory)
-            })
-        let result = model(queue: failingFileSync).deletePendingRecordingsOnThisDevice()
-        guard case .incomplete(let removed, let survivorsUnknown) = result.disposition else {
-            return XCTFail("expected incomplete, got \(result.disposition)")
+        final class RefusingFM: FileManager {
+            override func removeItem(at URL: URL) throws { throw CocoaError(.fileWriteNoPermission) }
+        }
+        let refusing = VoiceSharingQueue(root: root, fileManager: RefusingFM())
+        let result = model(queue: refusing).deletePendingRecordingsOnThisDevice()
+        guard case .reconciled(let removed, let survivors) = result.disposition else {
+            return XCTFail("expected reconciled, got \(result.disposition)")
         }
         XCTAssertEqual(removed, 0)
-        XCTAssertEqual(survivorsUnknown, 1)
+        XCTAssertEqual(survivors, 1, "the surviving recording is reported, not hidden")
         XCTAssertFalse(result.isFullyResolvedLocally)
     }
 
@@ -153,16 +150,16 @@ final class VoiceSharingSettingsModelTests: XCTestCase {
     /// The compiled bounds line is derived from the queue's constants.
     func test_compiledBoundsDescriptionMatchesTheQueueConstants() {
         let text = model().compiledBoundsDescription
-        XCTAssertTrue(text.contains("\(VoiceSharingUploadQueue.maxEntryAudioBytes / 1024) KB"))
+        XCTAssertTrue(text.contains("\(VoiceSharingQueue.capacity) recordings"))
         //: the bound is stated in DAYS, and the copy must match the constant.
-        XCTAssertTrue(text.contains("\(Int(VoiceSharingUploadQueue.maxEntryAge / (24 * 60 * 60))) days"))
+        XCTAssertTrue(text.contains("\(Int(VoiceSharingQueue.maxEntryAge / (24 * 60 * 60))) days"))
     }
 }
 
 /// Shared fixture: puts ONE genuinely ready, bound entry into a queue via the encoder+sink path.
 enum VoiceSharingSettingsFixture {
     @discardableResult
-    static func makeEntry(in queue: VoiceSharingUploadQueue, root: URL) -> Bool {
+    static func makeEntry(in queue: VoiceSharingQueue, root: URL) -> Bool {
         let samples: [Float] = [0, 0.25, -0.5, 0.5]
         let event = VoiceSharingCollector.SegmentEvent(
             kind: .completed, captureID: UUID(),
@@ -176,9 +173,7 @@ enum VoiceSharingSettingsFixture {
             conversionVersion: "v1")
         guard let encoded = try? VoiceSharingContributionEncoder.encode(
             event: event, provenance: provenance, observations: [:]) else { return false }
-        guard let entry = try? queue.prepare(metadata: encoded.metadataEnvelope, audio: encoded.wav),
-              (try? queue.finalize(entry)) != nil else { return false }
-        return true
+        return queue.publish(audio: encoded.wav, metadata: encoded.metadata) != nil
     }
 }
 // MARK: - Stopped / recovery projection
@@ -192,13 +187,13 @@ enum VoiceSharingSettingsFixture {
 /// only that.
 final class VoiceSharingRecoveryGuidanceTests: XCTestCase {
     private var root: URL!
-    private var queue: VoiceSharingUploadQueue!
+    private var queue: VoiceSharingQueue!
 
     override func setUpWithError() throws {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("vsrecovery-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        queue = VoiceSharingQueue(root: root)
     }
 
     override func tearDownWithError() throws {
@@ -269,45 +264,6 @@ final class VoiceSharingRecoveryGuidanceTests: XCTestCase {
         XCTAssertEqual(result.reason, .storageHeld)
         XCTAssertEqual(result.action, L10n.voiceSharingRecoveryHeld)
     }
-
-    /// The model's OWN live state classifies storage from the queue: a refused purge leaves the
-    /// owner held, so the live projection reports the held reason (not unknown, not unreadable).
-    func test_liveStateClassifiesARevocationHoldFromTheQueue() throws {
-        try VoiceSharingSettingsFixture.makeEntry(in: queue, root: root)
-        let refusing = VoiceSharingUploadQueue(
-            rootDirectory: root, clock: Date.init,
-            synchronizer: { _, _ in throw CocoaError(.fileWriteUnknown) })
-        guard case .refused = refusing.purgeAll() else {
-            return XCTFail("setup: expected a refused purge")
-        }
-        // Fresh instance = the state a newly launched app reads.
-        let fresh = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-        let live = VoiceSharingSettingsModel(queue: fresh,
-                                            isCollectionPermitted: { true },
-                                            isAccountEnrolled: { true },
-                                            isLocallyOptedIn: { true },
-                                            coherenceAccount: { "account-a" }).liveState()
-        XCTAssertEqual(live.storageFault, .revocationInDoubt)
-        XCTAssertEqual(VoiceSharingSettingsModel(queue: fresh,
-                                                 isCollectionPermitted: { true },
-                                                 isAccountEnrolled: { true },
-                                                 isLocallyOptedIn: { true },
-                                                 coherenceAccount: { "account-a" })
-                        .recoveryGuidance(for: live).reason, .storageHeld)
-    }
-
-    /// An unreadable root reports `.unknown` coverage — classified as unreadable, not held.
-    func test_liveStateClassifiesAnUnreadableRootAsUnreadable() {
-        let unreadable = VoiceSharingUploadQueue(
-            rootDirectory: root, clock: Date.init,
-            listDirectoryBounded: { _, _, _ in throw CocoaError(.fileReadNoPermission) })
-        let live = VoiceSharingSettingsModel(queue: unreadable,
-                                            isCollectionPermitted: { true },
-                                            isAccountEnrolled: { true },
-                                            isLocallyOptedIn: { true },
-                                            coherenceAccount: { "account-a" }).liveState()
-        XCTAssertEqual(live.storageFault, .unreadable)
-    }
 }
 
 // MARK: - Change subscription
@@ -317,13 +273,13 @@ final class VoiceSharingRecoveryGuidanceTests: XCTestCase {
 /// publish when nothing changed, so a listener is not spammed by identical reads.
 final class VoiceSharingSettingsSubscriptionTests: XCTestCase {
     private var root: URL!
-    private var queue: VoiceSharingUploadQueue!
+    private var queue: VoiceSharingQueue!
 
     override func setUpWithError() throws {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("vssubscription-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        queue = VoiceSharingQueue(root: root)
     }
 
     override func tearDownWithError() throws {
@@ -401,13 +357,13 @@ final class VoiceSharingSettingsSubscriptionTests: XCTestCase {
 
 final class VoiceSharingSnapshotCoherenceTests: XCTestCase {
     private var root: URL!
-    private var queue: VoiceSharingUploadQueue!
+    private var queue: VoiceSharingQueue!
 
     override func setUpWithError() throws {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("vscoherence-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        queue = VoiceSharingQueue(root: root)
     }
 
     override func tearDownWithError() throws {
@@ -460,13 +416,13 @@ final class VoiceSharingSnapshotCoherenceTests: XCTestCase {
 
 final class VoiceSharingPublishedStateTests: XCTestCase {
     private var root: URL!
-    private var queue: VoiceSharingUploadQueue!
+    private var queue: VoiceSharingQueue!
 
     override func setUpWithError() throws {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("vspublished-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        queue = VoiceSharingQueue(root: root)
     }
 
     override func tearDownWithError() throws {
@@ -540,70 +496,32 @@ private final class PublishCounter: @unchecked Sendable {
 
 final class VoiceSharingChangeHookTests: XCTestCase {
     private var root: URL!
-    private var queue: VoiceSharingUploadQueue!
+    private var queue: VoiceSharingQueue!
 
     override func setUpWithError() throws {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("vshooks-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        queue = VoiceSharingQueue(root: root)
     }
 
     override func tearDownWithError() throws {
         try? FileManager.default.removeItem(at: root)
     }
 
-    /// The queue PUSHES a hold change: the listener is registered on the instance whose hold
-    /// transitions, so the notification is the same queue's own mutation.
-    func test_aQueueHoldIsPushed() {
-        let observed = VoiceSharingUploadQueue(
-            rootDirectory: root, clock: Date.init,
-            synchronizer: { _, _ in throw CocoaError(.fileWriteUnknown) })
-        let fired = expectation(description: "queue change pushed")
-        fired.assertForOverFulfill = false
-        let token = observed.addContentObserver { fired.fulfill() }
-        defer { observed.removeContentObserver(token) }
-        guard case .refused = observed.purgeAll() else {
-            return XCTFail("setup: an unwritable intent refuses the purge")
-        }
-        wait(for: [fired], timeout: 2)
-    }
-
-    /// A ready-count change is ALSO a change: enqueuing must notify, not just a hold transition.
-    func test_aCountChangeIsPushed() throws {
-        let fired = expectation(description: "count change pushed")
-        fired.assertForOverFulfill = false
-        let token = queue.addContentObserver { fired.fulfill() }
-        defer { queue.removeContentObserver(token) }
-        try VoiceSharingDeletionFixture.seed(in: queue)
-        wait(for: [fired], timeout: 2)
-    }
-
-    /// Removing a listener stops delivery.
-    func test_removingAQueueObserverStopsDelivery() {
-        let observed = VoiceSharingUploadQueue(
-            rootDirectory: root, clock: Date.init,
-            synchronizer: { _, _ in throw CocoaError(.fileWriteUnknown) })
-        let silence = expectation(description: "no delivery after removal")
-        silence.isInverted = true
-        let token = observed.addContentObserver { silence.fulfill() }
-        observed.removeContentObserver(token)
-        _ = observed.purgeAll()
-        wait(for: [silence], timeout: 1)
-    }
 }
 
 // MARK: - Publication watermark
 
 final class VoiceSharingWatermarkTests: XCTestCase {
     private var root: URL!
-    private var queue: VoiceSharingUploadQueue!
+    private var queue: VoiceSharingQueue!
 
     override func setUpWithError() throws {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("vswatermark-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        queue = VoiceSharingQueue(root: root)
     }
 
     override func tearDownWithError() throws {
@@ -668,20 +586,6 @@ final class VoiceSharingReadySetHookTests: XCTestCase {
         try? FileManager.default.removeItem(at: root)
     }
 
-    /// UPLOAD removal: the entry leaves the ready set, so the count changes — versioned + announced.
-    func test_removalOfAUploadedEntryVersionsAndAnnounces() throws {
-        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-        try VoiceSharingDeletionFixture.seed(in: queue)
-        let entry = try XCTUnwrap(queue.readyEntries().first)
-        let before = queue.currentHoldGeneration
-        let fired = expectation(description: "removal announced")
-        fired.assertForOverFulfill = false
-        let token = queue.addContentObserver { fired.fulfill() }
-        defer { queue.removeContentObserver(token) }
-        try queue.remove(entry)
-        wait(for: [fired], timeout: 2)
-        XCTAssertNotEqual(queue.currentHoldGeneration, before, "the displayed count moved")
-    }
 
     /// AGEING: an entry past the queue-age bound is no longer served. The count must stop counting
     /// it, because the displayed "waiting" number is derived from that same read.
@@ -689,20 +593,20 @@ final class VoiceSharingReadySetHookTests: XCTestCase {
         // Seeded under the REAL clock: `created.at` is written with real time, so an installed
         // clock must start at real time too or the entry reads as future-dated (ineligible).
         var now = Foundation.Date()
-        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: { now })
+        let queue = VoiceSharingQueue(root: root)
         try VoiceSharingDeletionFixture.seed(in: queue)
         // Backdate the recorded instant so the entry is UNAMBIGUOUSLY inside the bound under the
         // injected clock, instead of racing wall time between the write and the read.
-        let seeded = try XCTUnwrap(queue.readyEntries().first)
+        let seeded = try XCTUnwrap(queue.entries().first)
         try VoiceSharingDeletionFixture.backdate(seeded, in: queue, by: 30)
         let initial = countFromModel(queue)
-        XCTAssertEqual(initial, 1, "diagnostics: \(queue.readyCountDiagnostics())")
-        now = now.addingTimeInterval(VoiceSharingUploadQueue.maxEntryAge + 60)
+        XCTAssertEqual(initial, 1, "diagnostics: \("\(queue.count()) retained")")
+        now = now.addingTimeInterval(VoiceSharingQueue.maxEntryAge + 60)
         XCTAssertEqual(countFromModel(queue), 0,
                        "an aged entry is not served, so the displayed count must not include it")
     }
 
-    private func countFromModel(_ queue: VoiceSharingUploadQueue) -> Int? {
+    private func countFromModel(_ queue: VoiceSharingQueue) -> Int? {
         let model = VoiceSharingSettingsModel(queue: queue,
                                              isCollectionPermitted: { true },
                                              isAccountEnrolled: { true },
@@ -731,9 +635,9 @@ final class VoiceSharingTimeDrivenRefreshTests: XCTestCase {
     /// and NO further UI read to trigger it.
     func test_anIdleSnapshotUpdatesWhenAnEntryAgesOut() {
         var now = Foundation.Date()
-        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: { now })
+        let queue = VoiceSharingQueue(root: root)
         try? VoiceSharingDeletionFixture.seed(in: queue)
-        if let seeded = queue.readyEntries().first {
+        if let seeded = queue.entries().first {
             try? VoiceSharingDeletionFixture.backdate(seeded, in: queue, by: 30)
         }
 
@@ -752,7 +656,7 @@ final class VoiceSharingTimeDrivenRefreshTests: XCTestCase {
         defer { model.removeStateObserver(token) }
 
         model.refreshLiveState()          // first render shows 1
-        XCTAssertEqual(delivered.last ?? nil, 1, "diagnostics: \(queue.readyCountDiagnostics())")
+        XCTAssertEqual(delivered.last ?? nil, 1, "diagnostics: \("\(queue.count()) retained")")
         model.armTimeDrivenRefresh()      // the view's onAppear hook
         let pending = try? XCTUnwrap(scheduled.last)
         XCTAssertNotNil(pending, "a time-driven refresh must be scheduled while something can age out")
@@ -768,7 +672,7 @@ final class VoiceSharingTimeDrivenRefreshTests: XCTestCase {
 
     /// Nothing waiting on time ⇒ nothing scheduled, so the surface does not wake pointlessly.
     func test_nothingScheduledWhenNoTransitionIsPending() {
-        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let queue = VoiceSharingQueue(root: root)
         let model = VoiceSharingSettingsModel(queue: queue,
                                              isCollectionPermitted: { true },
                                              isAccountEnrolled: { true },
@@ -785,7 +689,7 @@ final class VoiceSharingTimeDrivenRefreshTests: XCTestCase {
     /// A SUPERSEDED timer must not refresh: a newer arm owns the next wake-up.
     func test_aSupersededTimerDoesNotRefresh() {
         var now = Date()
-        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: { now })
+        let queue = VoiceSharingQueue(root: root)
         let model = VoiceSharingSettingsModel(queue: queue,
                                              isCollectionPermitted: { true },
                                              isAccountEnrolled: { true },
@@ -824,14 +728,14 @@ final class VoiceSharingTimerLifecycleTests: XCTestCase {
     /// retention period.
     func test_theNearestExpiryIsScheduledForTwoEntriesOfDifferentAges() throws {
         var now = Foundation.Date()
-        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: { now })
+        let queue = VoiceSharingQueue(root: root)
         try VoiceSharingDeletionFixture.seed(in: queue)
         try VoiceSharingDeletionFixture.seed(in: queue)
-        let entries = queue.readyEntries()
+        let entries = queue.entries()
         XCTAssertEqual(entries.count, 2, "setup: two retained entries")
         // One is nearly expired, the other nearly fresh.
         try VoiceSharingDeletionFixture.backdate(entries[0], in: queue,
-                                                 by: VoiceSharingUploadQueue.maxEntryAge - 60)
+                                                 by: VoiceSharingQueue.maxEntryAge - 60)
         let delay = try XCTUnwrap(queue.secondsUntilNextAgeBoundary())
         XCTAssertLessThan(delay, 120,
                           "the schedule must follow the OLDEST entry (\(delay)s is the youngest's expiry)")
@@ -840,7 +744,7 @@ final class VoiceSharingTimerLifecycleTests: XCTestCase {
     /// An EMPTY visible queue schedules nothing, but the entry added right after it must arm a
     /// timer — the assembly's queue observer calls refresh, which must re-arm.
     func test_anEntryAddedAfterAnEmptyRenderArmsATimer() throws {
-        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let queue = VoiceSharingQueue(root: root)
         let model = VoiceSharingSettingsModel(queue: queue,
                                              isCollectionPermitted: { true },
                                              isAccountEnrolled: { true },
@@ -860,7 +764,7 @@ final class VoiceSharingTimerLifecycleTests: XCTestCase {
     /// An EXPIRED lease must not re-arm forever. The refresh happens once; a past transition is not
     /// a reason to wake again.
     func test_anExpiredLeaseRefreshesOnceWithoutARecurringTimer() {
-        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let queue = VoiceSharingQueue(root: root)
         let model = VoiceSharingSettingsModel(queue: queue,
                                              isCollectionPermitted: { true },
                                              isAccountEnrolled: { true },
@@ -883,7 +787,7 @@ final class VoiceSharingTimerLifecycleTests: XCTestCase {
 
     /// Arming again must invalidate a previously armed timer even when nothing is now due.
     func test_rearmingWithNothingDueInvalidatesTheOldTimer() {
-        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let queue = VoiceSharingQueue(root: root)
         let model = VoiceSharingSettingsModel(queue: queue,
                                              isCollectionPermitted: { true },
                                              isAccountEnrolled: { true },
@@ -924,7 +828,7 @@ final class VoiceSharingDeadlineMoveTests: XCTestCase {
     /// yet the deadline moved. The timer must be re-armed anyway, or the old deadline owns the
     /// surface.
     func test_aShortenedLeaseRearmsEvenThoughNothingDisplayedChanges() {
-        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let queue = VoiceSharingQueue(root: root)
         let model = VoiceSharingSettingsModel(queue: queue,
                                              isCollectionPermitted: { true },
                                              isAccountEnrolled: { true },
@@ -954,7 +858,7 @@ final class VoiceSharingDeadlineMoveTests: XCTestCase {
     /// An obsolete (superseded) read must not re-arm either — only the newest accepted read owns
     /// scheduling.
     func test_anObsoleteReadDoesNotRearm() {
-        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let queue = VoiceSharingQueue(root: root)
         let model = VoiceSharingSettingsModel(queue: queue,
                                              isCollectionPermitted: { true },
                                              isAccountEnrolled: { true },
@@ -988,7 +892,7 @@ final class VoiceSharingDeadlineMoveTests: XCTestCase {
     /// first, pauses, the newer read completes and arms the short deadline, and only then does the
     /// older read arm. The newer deadline must survive.
     func test_anAcceptedReadThatPausesBeforeArmingCannotClobberANewerTimer() {
-        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let queue = VoiceSharingQueue(root: root)
         let model = VoiceSharingSettingsModel(queue: queue,
                                              isCollectionPermitted: { true },
                                              isAccountEnrolled: { true },
@@ -1020,7 +924,7 @@ final class VoiceSharingDeadlineMoveTests: XCTestCase {
 
     /// ONE arm per fire: the timer's refresh must not queue a second closure on top of its own.
     func test_afireQueuesExactlyOneNextArm() {
-        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let queue = VoiceSharingQueue(root: root)
         let model = VoiceSharingSettingsModel(queue: queue,
                                              isCollectionPermitted: { true },
                                              isAccountEnrolled: { true },

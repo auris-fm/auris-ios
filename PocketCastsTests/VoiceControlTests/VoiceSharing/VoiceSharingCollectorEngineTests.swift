@@ -563,9 +563,9 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
 /// Backend stand-in that also gives the test a handle on the engine's capture callback and the bleed verdict,
 /// neither of which is otherwise reachable without a real audio session or playback tap.
 /// The FULL production chain, at the boundary it actually covers: real
-/// `VoiceAsrEngine` → real segmenter → real collector → the REAL `VoiceSharingContributionSink` → the
+/// `VoiceAsrEngine` → real segmenter → real collector → the REAL `VoiceSharingDirectSink` → the
 /// REAL durable queue. `VoiceSharingCollectorEngineTests` stops at the collector's event callback;
-/// `VoiceSharingContributionSinkTests` starts at a hand-built event. This joins them with bounded
+/// `VoiceSharingQueueTests` starts at a hand-built event. This joins them with bounded
 /// fixtures instead of microphone capture.
 ///
 /// WHAT this does not prove: the stage observation (wake/bleed/asr/…) is supplied by the sink's
@@ -575,12 +575,12 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
 /// refuses never becomes ready. Live observation provenance remains an open gap.
 final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     private var root: URL!
-    private var queue: VoiceSharingUploadQueue!
+    private var queue: VoiceSharingQueue!
     private var storeState = VoiceSharingEnrollmentStore.State()
     /// The live session source, as production reads it.
     private var engineStoreSession = "gen-A"
     /// The sink the current chain writes through, so a wait can drain its worker queue.
-    private var sinkUnderTest: VoiceSharingContributionSink?
+    private var sinkUnderTest: VoiceSharingDirectSink?
     /// The admission decision these controls open and close.
     private var engineTestGateOpen = false
     /// Events the collector emitted, for the association controls that inspect it directly.
@@ -591,7 +591,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("e2e-vs-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        queue = VoiceSharingQueue(root: root)
         storeState = VoiceSharingEnrollmentStore.State()
         engineTestGateOpen = true
         engineStoreSession = "gen-A"
@@ -904,16 +904,15 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         let ready = waitForReadyEntries(1)
         XCTAssertGreaterThanOrEqual(ready.count, 1,
                                     "a detector failure must still produce a durable record")
-        guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage() else {
-            return XCTFail("coverage known")
-        }
+        let entries = queue.entries()
+        if entries.isEmpty { return XCTFail("coverage known") }
         var carried = false
         for entry in entries {
-            let metadataURL = entry.root.appendingPathComponent(entry.name)
+            let metadataURL = entry.url
                 .appendingPathComponent("metadata.json")
             let envelope = try JSONSerialization.jsonObject(
                 with: Data(contentsOf: metadataURL), options: []) as? [String: Any]
-            let wake = ((envelope?["record"] as? [String: Any])?["observations"]
+            let wake = (envelope?["observations"]
                 as? [String: Any])?["wake"] as? [String: Any]
             if wake?["state"] as? String == "failed" {
                 XCTAssertEqual(wake?["reason"] as? String, "detector_error",
@@ -938,17 +937,17 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
         _ = waitForReadyEntries(1)
 
-        guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage(),
-            !entries.isEmpty else {
+        let entries = queue.entries()
+        if entries.isEmpty {
             return XCTFail("a successful recognition must produce a durable record")
         }
         var transcripts: [String] = []
         for entry in entries {
-            let metadataURL = entry.root.appendingPathComponent(entry.name)
+            let metadataURL = entry.url
                 .appendingPathComponent("metadata.json")
             let envelope = try JSONSerialization.jsonObject(
                 with: Data(contentsOf: metadataURL), options: []) as? [String: Any]
-            let asr = ((envelope?["record"] as? [String: Any])?["observations"]
+            let asr = (envelope?["observations"]
                 as? [String: Any])?["asr"] as? [String: Any]
             guard asr?["state"] as? String == "completed" else { continue }
             if let text = asr?["text"] as? String { transcripts.append(text) }
@@ -970,15 +969,15 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
         _ = waitForReadyEntries(1)
 
-        guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage(),
-            !entries.isEmpty else { return XCTFail("a durable record is required") }
+        let entries = queue.entries()
+        if entries.isEmpty { return XCTFail("a durable record is required") }
         var sawEmptyResult = false
         for entry in entries {
-            let metadataURL = entry.root.appendingPathComponent(entry.name)
+            let metadataURL = entry.url
                 .appendingPathComponent("metadata.json")
             let envelope = try JSONSerialization.jsonObject(
                 with: Data(contentsOf: metadataURL), options: []) as? [String: Any]
-            guard let asr = ((envelope?["record"] as? [String: Any])?["observations"]
+            guard let asr = (envelope?["observations"]
                 as? [String: Any])?["asr"] as? [String: Any] else {
                 XCTFail("entry \(entry.name) has no asr stage; transcribeCalls=\(chain.backend.transcribeCalls)")
                 continue
@@ -1000,7 +999,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("e2e-vs-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        queue = VoiceSharingQueue(root: root)
         let localClaims = claims
         let chain = makeChain(wake: DetectedWake(), claims: { localClaims })
         chain.backend.stubTranscript = "play the latest episode"
@@ -1010,15 +1009,15 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
         _ = waitForReadyEntries(1)
 
-        guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage(),
-            !entries.isEmpty else { return XCTFail("a record is required") }
+        let entries = queue.entries()
+        if entries.isEmpty { return XCTFail("a record is required") }
         var asr: [String: Any]?
         for entry in entries {
-            let metadataURL = entry.root.appendingPathComponent(entry.name)
+            let metadataURL = entry.url
                 .appendingPathComponent("metadata.json")
             let envelope = try JSONSerialization.jsonObject(
                 with: Data(contentsOf: metadataURL), options: []) as? [String: Any]
-            if let stage = ((envelope?["record"] as? [String: Any])?["observations"]
+            if let stage = (envelope?["observations"]
                 as? [String: Any])?["asr"] as? [String: Any] {
                 asr = stage
             }
@@ -1070,11 +1069,9 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             let encoded = try VoiceSharingContributionEncoder.encode(
                 event: completed!, provenance: provenance,
                 observations: completed!.reportedStages)
-            let envelope = try JSONSerialization.jsonObject(
-                with: encoded.metadataEnvelope, options: []) as? [String: Any]
-            _ = try VoiceSharingRecordBinding.bind(
-                envelope: encoded.metadataEnvelope, audio: encoded.wav)
-            return ((envelope!["record"] as! [String: Any])["observations"] as! [String: Any])
+            let record = try JSONSerialization.jsonObject(
+                with: encoded.metadata, options: []) as! [String: Any]
+            return (record["observations"] as! [String: Any])
         }
 
         do { // failed → completed: the failure reason must not leak into the success.
@@ -1098,13 +1095,13 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                                sourceLanguage: "en", routerInput: "pause"), context: ctx)
             collector.engineReported(stage: "asr",
                 outcome: .init(state: "completed",
-                               reason: VoiceSharingRecordBinding.emptyResultReasonForEngine),
+                               reason: VoiceSharingContributionEncoder.emptyResultReason),
                 context: ctx)
             let asr = try encodedObservations(ctx)["asr"] as! [String: Any]
             XCTAssertNil(asr["text"], "empty_result must not inherit previous text")
             XCTAssertNil(asr["router_input"], "empty_result must not inherit previous router_input")
             XCTAssertEqual(asr["reason"] as? String,
-                           VoiceSharingRecordBinding.emptyResultReasonForEngine)
+                           VoiceSharingContributionEncoder.emptyResultReason)
         }
         collectedEvents.removeAll()
 
@@ -1178,7 +1175,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             root = FileManager.default.temporaryDirectory
                 .appendingPathComponent("e2e-vs-\(UUID().uuidString)")
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-            queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+            queue = VoiceSharingQueue(root: root)
             let claims: [String: VoiceSharingContributionEncoder.StageOutcome] = claims
             let chain = makeChain(wake: DetectedWake(), claims: { claims })
             chain.backend.stubTranscript = "bonjour"
@@ -1190,15 +1187,15 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                 level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
             _ = waitForReadyEntries(1)
 
-            guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage(),
-                !entries.isEmpty else { return XCTFail("\(testCase.label): a record is required") }
+            let entries = queue.entries()
+            if entries.isEmpty { return XCTFail("\(testCase.label): a record is required") }
             var found: [String: Any]?
             for entry in entries {
-                let metadataURL = entry.root.appendingPathComponent(entry.name)
+                let metadataURL = entry.url
                     .appendingPathComponent("metadata.json")
                 let envelope = try JSONSerialization.jsonObject(
                     with: Data(contentsOf: metadataURL), options: []) as? [String: Any]
-                if let translation = ((envelope?["record"] as? [String: Any])?["observations"]
+                if let translation = (envelope?["observations"]
                     as? [String: Any])?["translation"] as? [String: Any] {
                     found = translation
                 }
@@ -1232,7 +1229,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             root = FileManager.default.temporaryDirectory
                 .appendingPathComponent("e2e-vs-\(UUID().uuidString)")
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-            queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+            queue = VoiceSharingQueue(root: root)
             let unknownClaims: [String: VoiceSharingContributionEncoder.StageOutcome] = [
                 "wake": .init(state: "completed", decision: "detected"),
                 "bleed": .init(state: "unknown", reason: "observation_unavailable"),
@@ -1271,16 +1268,15 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             }
             _ = waitForReadyEntries(1)
 
-            guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage(),
-                !entries.isEmpty else { return XCTFail("\(testCase.label): a record is required") }
+            let entries = queue.entries()
+            if entries.isEmpty { return XCTFail("\(testCase.label): a record is required") }
             var sawRouting = false
             for entry in entries {
-                let metadataURL = entry.root.appendingPathComponent(entry.name)
+                let metadataURL = entry.url
                     .appendingPathComponent("metadata.json")
                 guard let envelope = try JSONSerialization.jsonObject(
                     with: Data(contentsOf: metadataURL), options: []) as? [String: Any],
-                    let observations = (envelope["record"] as? [String: Any])?["observations"]
-                        as? [String: Any],
+                    let observations = envelope["observations"] as? [String: Any],
                     let routing = observations["routing"] as? [String: Any],
                     routing["state"] as? String != "unknown" else { continue }
                 sawRouting = true
@@ -1292,9 +1288,9 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             }
             if !sawRouting {
                 let dump = entries.compactMap { entry -> String? in
-                    let u = entry.root.appendingPathComponent(entry.name).appendingPathComponent("metadata.json")
+                    let u = entry.url.appendingPathComponent("metadata.json")
                     guard let e = try? JSONSerialization.jsonObject(with: Data(contentsOf: u), options: []) as? [String: Any],
-                        let o = (e["record"] as? [String: Any])?["observations"] as? [String: Any] else { return nil }
+                        let o = e["observations"] as? [String: Any] else { return nil }
                     return o.map { "\($0.key)=\((($0.value as? [String: Any])?["state"] as? String) ?? "?")/\((($0.value as? [String: Any])?["decision"] as? String) ?? "-")" }.sorted().joined(separator: " ")
                 }
                 XCTFail("\(testCase.label): routing must be observed; records=\(dump)")
@@ -1346,7 +1342,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             root = FileManager.default.temporaryDirectory
                 .appendingPathComponent("e2e-vs-\(UUID().uuidString)")
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-            queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+            queue = VoiceSharingQueue(root: root)
             let claims: [String: VoiceSharingContributionEncoder.StageOutcome] = claims
             let chain = makeChain(wake: DetectedWake(),
                                   claims: { claims })
@@ -1382,19 +1378,18 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             }
             _ = waitForReadyEntries(1)
 
-            guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage(),
-                !entries.isEmpty else {
+            let entries = queue.entries()
+            guard !entries.isEmpty else {
                 return XCTFail("\(matrixCase.name): a durable producer record is required")
             }
             // Find THE entry carrying this case's key producer fact, on the emitted bytes.
-            var chosenEntry: VoiceSharingUploadQueue.Entry?
+            var chosenEntry: VoiceSharingQueue.Entry?
             for entry in entries {
-                let metadataURL = entry.root.appendingPathComponent(entry.name)
+                let metadataURL = entry.url
                     .appendingPathComponent("metadata.json")
                 guard let envelope = try JSONSerialization.jsonObject(
                     with: Data(contentsOf: metadataURL), options: []) as? [String: Any],
-                    let observations = (envelope["record"] as? [String: Any])?["observations"]
-                        as? [String: Any],
+                    let observations = envelope["observations"] as? [String: Any],
                     let stage = observations[matrixCase.expectedKey.stage] as? [String: Any],
                     stage[matrixCase.expectedKey.key] as? String == matrixCase.expectedKey.value
                 else { continue }
@@ -1406,26 +1401,19 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                     + "\(matrixCase.expectedKey.stage)/\(matrixCase.expectedKey.key)="
                     + "\(matrixCase.expectedKey.value); entries=\(entries.count)")
             }
-            let metadataURL = entry.root.appendingPathComponent(entry.name)
+            let metadataURL = entry.url
                 .appendingPathComponent("metadata.json")
-            let audioURL = entry.root.appendingPathComponent(entry.name)
+            let audioURL = entry.url
                 .appendingPathComponent("audio.wav")
             let metadata = try Data(contentsOf: metadataURL)
             let audio = try Data(contentsOf: audioURL)
-            // SELF-CONSISTENT: the production binding must accept the producer bytes.
-            let bound = try VoiceSharingRecordBinding.bind(
-                envelope: metadata, audio: audio)
-            XCTAssertFalse(bound.recordSHA256.isEmpty)
+            // Plain JSON the server validates: nothing to bind and no digest to self-check.
+            XCTAssertNotNil(try JSONSerialization.jsonObject(with: metadata) as? [String: Any])
             let dir = base.appendingPathComponent(matrixCase.name)
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             try metadata.write(to: dir.appendingPathComponent("metadata.json"))
             try audio.write(to: dir.appendingPathComponent("audio.wav"))
             let manifest: [String: String] = [
-                "record_sha256": bound.recordSHA256,
-                "metadata_sha256": SHA256.hash(data: metadata)
-                    .map { String(format: "%02x", $0) }.joined(),
-                "audio_sha256": SHA256.hash(data: audio)
-                    .map { String(format: "%02x", $0) }.joined(),
                 "f8_case": matrixCase.name,
                 "producer": "engine-pipeline",
             ]
@@ -1482,19 +1470,19 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
         _ = waitForReadyEntries(1)
 
-        guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage(),
-            !entries.isEmpty else { return XCTFail("an observed negative wake must still publish a record") }
+        let entries = queue.entries()
+        if entries.isEmpty { return XCTFail("an observed negative wake must still publish a record") }
         // A capture produces TWO records by design: a `started` event at segment start, before any engine
         // observation exists, and the completion carrying what the engine actually decided. The COMPLETION
         // is what must state the observed negative; asserting the started record would demand that a
         // pre-observation publish know the future.
         var completionBlocks: [[String: Any]] = []
         for entry in entries {
-            let metadataURL = entry.root.appendingPathComponent(entry.name)
+            let metadataURL = entry.url
                 .appendingPathComponent("metadata.json")
             let envelope = try JSONSerialization.jsonObject(
                 with: Data(contentsOf: metadataURL), options: []) as? [String: Any]
-            guard let record = envelope?["record"] as? [String: Any],
+            guard let record = envelope,
                 let wake = (record["observations"] as? [String: Any])?["wake"] as? [String: Any]
             else { continue }
             // Only the completed capture states an observed wake; the started record still says unknown.
@@ -1512,132 +1500,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                      "a completed stage carries no reason; the negative lives in decision")
     }
 
-    /// DISPOSABLE negative-RECORD server-SCHEMA fixture: the CORRECTED
-    /// engine-to-durable pipeline produces a real synthetic record whose completion states
-    /// wake decision="rejected" (asserted PRESENT before export), then the REAL production
-    /// makeRequest builds the exact wire body + SAFE headers for Cloud's existing local rig.
-    /// No owner record, no live upload, no new harness.
-    func test_exportCorrectedNegativeWakeRecordFixtureForServerSchemaProof() async throws {
-        let claims: [String: VoiceSharingContributionEncoder.StageOutcome] = [
-            "wake": .init(state: "unknown", reason: "observation_unavailable"),
-            "bleed": .init(state: "unknown", reason: "observation_unavailable"),
-            "asr": .init(state: "unknown", reason: "observation_unavailable"),
-            "translation": .init(state: "unknown", reason: "observation_unavailable"),
-            "routing": .init(state: "unknown", reason: "observation_unavailable"),
-            "execution": .init(state: "unknown", reason: "observation_unavailable"),
-        ]
-        let chain = makeChain(wake: NotDetectedWake(), claims: { claims })
-        chain.backend.stubTranscript = "play the latest episode"
-        chain.engine.listeningMode = .continuous
-        await chain.backend.emitSpeechThenSilence(
-            level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
-        _ = waitForReadyEntries(1)
 
-        guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage(),
-            !entries.isEmpty else { return XCTFail("an observed negative wake must still publish") }
-        // Pick the COMPLETION entry and ASSERT the corrected decision is actually present.
-        var exportEntry: VoiceSharingUploadQueue.Entry?
-        for entry in entries {
-            let metadataURL = entry.root.appendingPathComponent(entry.name)
-                .appendingPathComponent("metadata.json")
-            guard let envelope = try? JSONSerialization.jsonObject(
-                with: Data(contentsOf: metadataURL), options: []) as? [String: Any],
-                let record = envelope["record"] as? [String: Any],
-                let wake = (record["observations"] as? [String: Any])?["wake"] as? [String: Any],
-                wake["state"] as? String == "completed" else { continue }
-            XCTAssertEqual(wake["decision"] as? String, "rejected",
-                           "the corrected producer value must be on the durable record")
-            XCTAssertNil(wake["reason"], "completed carries no reason")
-            exportEntry = entry
-            break
-        }
-        let entry = try XCTUnwrap(exportEntry, "no completion entry with wake decision=rejected")
-
-        let uploader = VoiceSharingUploader(
-            queue: queue,
-            retryPolicy: VoiceSharingRetryPolicy(
-                retryBaseDelay: 1, retryMaximumDelay: 60, random: { 0 }),
-            isAuthorized: { true }, currentIdentity: { nil },
-            endpoint: { URL(string: "https://staging.example/api/v1/voice-recordings") },
-            transport: { _, _, _ in .response(statusCode: 503, body: Data()) })
-        let request = try uploader.makeRequest(
-            entry: entry, url: URL(string: "https://staging.example/api/v1/voice-recordings")!)
-        let body = try XCTUnwrap(request.httpBody ?? request.httpBodyStream.map { stream in
-            stream.open()
-            defer { stream.close() }
-            var data = Data()
-            let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: 64 * 1024)
-            defer { buffer.deallocate() }
-            while stream.hasBytesAvailable {
-                let read = stream.read(buffer, maxLength: 64 * 1024)
-                guard read > 0 else { break }
-                data.append(buffer, count: read)
-            }
-            return data
-        })
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("vs-negative-fixture-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try body.write(to: dir.appendingPathComponent("body.bin"))
-        var safeHeaders: [String: String] = [:]
-        for (key, value) in (request.allHTTPHeaderFields ?? [:]) {
-            if key.caseInsensitiveCompare("Authorization") == .orderedSame {
-                let parts = value.split(separator: " ", maxSplits: 1)
-                safeHeaders[key] = parts.count == 2
-                    ? "\(parts[0]) <redacted-bearer-shape-only>" : "<redacted>"
-            } else {
-                safeHeaders[key] = value
-            }
-        }
-        try JSONSerialization.data(
-            withJSONObject: safeHeaders, options: [.prettyPrinted, .sortedKeys])
-            .write(to: dir.appendingPathComponent("safeheaders.json"))
-        print("FIXTURE_PATH: \(dir.path)")
-        print("FIXTURE_BODY_BYTES: \(body.count)")
-    }
-
-    /// THE persisted envelope, WITH A RECOMPUTED digest. Validating an observations
-    /// dictionary proves the observation rule; it does not prove a REAL record carrying the contradiction
-    /// is refused when it comes back through `bind`. Each envelope is re-sealed with the PRODUCTION
-    /// canonicalizer, so the refusal cannot be a stale-digest artifact.
-    func test_aPersistedEnvelopeCarryingANullEmptyResultFieldIsRefusedForThatReason() throws {
-        let observations: [String: VoiceSharingContributionEncoder.StageOutcome] = [
-            "wake": .init(state: "completed", decision: "detected"),
-            "bleed": .init(state: "unknown", reason: "observation_unavailable"),
-            "asr": .init(state: "completed", reason: "empty_result"),
-            "translation": .init(state: "unknown", reason: "observation_unavailable"),
-            "routing": .init(state: "unknown", reason: "observation_unavailable"),
-            "execution": .init(state: "unknown", reason: "observation_unavailable"),
-        ]
-        let encoded = try encodeEmptyResultRecord()
-        let base = try XCTUnwrap(
-            try JSONSerialization.jsonObject(with: encoded.recordJSON) as? [String: Any])
-
-        func refuse(_ label: String, text: Any?, routerInput: Any?, mentioning fragment: String) throws {
-            var object = base
-            var block = try XCTUnwrap((object["observations"] as? [String: Any])?["asr"] as? [String: Any])
-            if let text { block["text"] = text }
-            if let routerInput { block["router_input"] = routerInput }
-            var all = try XCTUnwrap(object["observations"] as? [String: Any])
-            all["asr"] = block
-            object["observations"] = all
-            let sealed = try rescaled(object)
-            do {
-                _ = try VoiceSharingRecordBinding.bind(envelope: sealed, audio: encoded.wav)
-                XCTFail("\(label): expected refusal")
-            } catch let error as VoiceSharingRecordBinding.BindingError {
-                guard case .invalidField(let path, let message) = error else {
-                    return XCTFail("\(label): expected invalidField, got \(error)")
-                }
-                XCTAssertTrue(path.hasPrefix("observations.asr"),
-                              "\(label): refusal must be about the asr stage; got \(path)")
-                XCTAssertTrue((path + message).localizedCaseInsensitiveContains(fragment),
-                              "\(label): cause must be named (\(fragment)); got \(path): \(message)")
-            }
-        }
-        try refuse("text null", text: NSNull(), routerInput: nil, mentioning: "text")
-        try refuse("router_input null", text: nil, routerInput: NSNull(), mentioning: "router_input")
-    }
 
     /// A real encoder fixture whose ASR stage is completed/empty_result — the one legal completed reason.
     private func encodeEmptyResultRecord() throws -> VoiceSharingContributionEncoder.Encoded {
@@ -1671,18 +1534,12 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     private func encodedRecordWithEmptyResult() throws -> [String: Any] {
         let encoded = try encodeEmptyResultRecord()
         return try XCTUnwrap(
-            try JSONSerialization.jsonObject(with: encoded.recordJSON) as? [String: Any])
+            try JSONSerialization.jsonObject(with: encoded.metadata) as? [String: Any])
     }
 
-    /// Re-seals with the PRODUCTION canonicalizer so the digest binds the mutated bytes.
+    /// Serialises a mutated record. Plain JSON: there is no canonical form or digest to rebind.
     private func rescaled(_ record: [String: Any]) throws -> Data {
-        var digest = ""
-        #if canImport(CryptoKit)
-        digest = SHA256.hash(data: try VoiceSharingRecordBinding.canonicalizeForTesting(record))
-            .map { String(format: "%02x", $0) }.joined()
-        #endif
-        let envelope: [String: Any] = ["record": record, "record_sha256": digest]
-        return try JSONSerialization.data(withJSONObject: envelope)
+        try JSONSerialization.data(withJSONObject: record)
     }
 
     /// FINDING a7dfe013 #3: the capture handed to the routing consumer must always be RELEASED, or it
@@ -1717,17 +1574,17 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
 
             // A RELEASE is what makes a completion publish; a capture left owned never reaches here.
             _ = waitForReadyEntries(1)
-            guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage(),
-                !entries.isEmpty else {
+            let entries = queue.entries()
+            if entries.isEmpty {
                 return XCTFail("\(abandoned): a released capture must publish a record")
             }
             var states: [String] = []
             for entry in entries {
-                let metadataURL = entry.root.appendingPathComponent(entry.name)
+                let metadataURL = entry.url
                     .appendingPathComponent("metadata.json")
                 let envelope = try JSONSerialization.jsonObject(
                     with: Data(contentsOf: metadataURL), options: []) as? [String: Any]
-                if let execution = ((envelope?["record"] as? [String: Any])?["observations"]
+                if let execution = (envelope?["observations"]
                     as? [String: Any])?["execution"] as? [String: Any],
                    let state = execution["state"] as? String {
                     states.append(state)
@@ -1833,107 +1690,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         }
     }
 
-    /// #1: an explicit `reason: null` on a completed stage is still a carded reason. The
-    /// first f8 implementation tested the VALUE (`!(reason is NSNull)`) and let exactly the payload f8
-    /// forbids through — the same null-is-not-absence mistake made once before on asr.text.
-    func test_aCompletedStageCarryingAnExplicitNullReasonIsStillRefused() throws {
-        let stages = ["wake", "bleed", "asr", "translation", "routing", "execution"]
-        for stage in stages {
-            var all: [String: Any] = [:]
-            for name in stages {
-                all[name] = ["state": "unknown", "reason": "observation_unavailable"]
-            }
-            var block: [String: Any] = ["state": "completed"]
-            block["reason"] = NSNull()
-            if stage == "asr" { block["text"] = "hello" }
-            all[stage] = block
-            do {
-                try VoiceSharingRecordBinding.validateObservationsForTesting(all)
-                XCTFail("\(stage): an explicit null reason must not pass f8")
-            } catch let error as VoiceSharingRecordBinding.BindingError {
-                guard case .invalidField(let path, let message) = error else {
-                    return XCTFail("\(stage): expected invalidField, got \(error)")
-                }
-                XCTAssertEqual(path, "observations.\(stage).reason")
-                XCTAssertTrue(message.contains("carries no reason"),
-                              "\(stage): refusal must state the rule, got \(message)")
-            }
-        }
-    }
 
-    /// A TRANSLATION skip reason is A DECISION not to run. Each of the
-    /// three is valid only on translation/not_run; on any other stage, or with failed/cancelled/unknown/
-    /// completed, it would claim a skip and a non-skip at once.
-    func test_translationSkipReasonsAreValidOnlyWithTranslationNotRun() throws {
-        let skipReasons = ["source_language_unavailable", "backend_handles_translation",
-                           "translator_unavailable"]
-        let stages = ["wake", "bleed", "asr", "translation", "routing", "execution"]
-        func payload(stage: String, state: String, reason: String) -> [String: Any] {
-            var all: [String: Any] = [:]
-            for name in stages {
-                all[name] = ["state": "unknown", "reason": "observation_unavailable"]
-            }
-            var block: [String: Any] = ["state": state, "reason": reason]
-            if stage == "asr" && state == "completed" { block["text"] = "hello" }
-            all[stage] = block
-            return all
-        }
-        // ACCEPTED first: the one legal combination must bind, or the refusals below prove nothing.
-        for reason in skipReasons {
-            XCTAssertNoThrow(
-                try VoiceSharingRecordBinding.validateObservationsForTesting(
-                    payload(stage: "translation", state: "not_run", reason: reason)),
-                "translation/not_run/\(reason) is the legal pairing")
-        }
-        // REFUSED: right reason, wrong stage — and right stage, wrong state.
-        for stage in stages where stage != "translation" {
-            for reason in skipReasons {
-                do {
-                    try VoiceSharingRecordBinding.validateObservationsForTesting(
-                        payload(stage: stage, state: "not_run", reason: reason))
-                    XCTFail("\(stage)/not_run/\(reason): skip reasons are translation-only")
-                } catch let error as VoiceSharingRecordBinding.BindingError {
-                    guard case .invalidField(let path, let message) = error else {
-                        return XCTFail("\(stage): expected invalidField, got \(error)")
-                    }
-                    XCTAssertEqual(path, "observations.\(stage).reason")
-                    XCTAssertTrue(message.contains("valid only on the translation stage"),
-                                  "\(stage): refusal must state the stage rule, got \(message)")
-                }
-            }
-        }
-        for state in ["failed", "cancelled", "unknown"] {
-            for reason in skipReasons {
-                do {
-                    try VoiceSharingRecordBinding.validateObservationsForTesting(
-                        payload(stage: "translation", state: state, reason: reason))
-                    XCTFail("translation/\(state)/\(reason): a skip requires not_run")
-                } catch let error as VoiceSharingRecordBinding.BindingError {
-                    guard case .invalidField(_, let message) = error else {
-                        return XCTFail("translation/\(state): expected invalidField, got \(error)")
-                    }
-                    XCTAssertTrue(message.contains("requires state not_run"),
-                                  "translation/\(state): refusal must state the state rule, got \(message)")
-                }
-            }
-        }
-        // RE-SEALED persisted envelope: translation/failed carrying a skip reason.
-        let record = try encodedRecordWithEmptyResult()
-        var mutated = record
-        var all = try XCTUnwrap(mutated["observations"] as? [String: Any])
-        all["translation"] = ["state": "failed", "reason": "translator_unavailable"]
-        mutated["observations"] = all
-        do {
-            _ = try VoiceSharingRecordBinding.bind(envelope: try rescaled(mutated), audio: Data())
-            XCTFail("a persisted translation/failed carrying a skip reason must be refused")
-        } catch let error as VoiceSharingRecordBinding.BindingError {
-            guard case .invalidField(let path, let message) = error else {
-                return XCTFail("expected invalidField from the persisted envelope, got \(error)")
-            }
-            XCTAssertEqual(path, "observations.translation.reason")
-            XCTAssertTrue(message.contains("requires state not_run"), "got \(message)")
-        }
-    }
 
     /// PRODUCTION chain for (review: a control must exercise the real path, not a hand-built
     /// event). Real engine bleed branch → real collector → REAL sink → REAL encoder → queue entry → read
@@ -1957,15 +1714,14 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         XCTAssertEqual(chain.backend.transcribeCalls, 0, "premise: bleed skip performs no recognition")
 
         // The queue persists asynchronously even under synchronous delivery; wait for the durable entry.
-        let ready = waitForReadyEntries(1).compactMap { $0 as? VoiceSharingUploadQueue.Entry }
+        let ready = waitForReadyEntries(1)
         XCTAssertEqual(ready.count, 1, "the bleed-rejected segment remains a collectable record")
         // Identified by the record's OWN capture id, never by queue order.
         let expectedID = try XCTUnwrap(frozen?.id.uuidString)
         let record = try XCTUnwrap(ready.compactMap { entry -> [String: Any]? in
-            let url = entry.root.appendingPathComponent(entry.name).appendingPathComponent("metadata.json")
+            let url = entry.url.appendingPathComponent("metadata.json")
             guard let data = try? Data(contentsOf: url),
-                let envelope = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-                let record = envelope["record"] as? [String: Any],
+                let record = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                 record["capture_id"] as? String == expectedID
             else { return nil }
             return record
@@ -1986,191 +1742,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                        "an observed verdict is a completed observation, not an unknown one")
         XCTAssertNil(bleed["reason"],
                      "a completed stage carries no reason; the skip reason belongs to ASR")
-        _ = try queue.boundIdentity(of: ready[0])
         engine.stop()
-    }
-
-    ///: `rejected_by_bleed` states ONE thing — an observed bleed decision skipped ASR.
-    /// The positive must be accepted (or the negatives prove nothing), and every pairing that would
-    /// claim a different fact is refused: another stage, a state that says ASR ran or failed, or a
-    /// completed stage where the transcript is the result. Asserted on the raw observations AND on a
-    /// re-sealed persisted envelope, because recovery cannot accept what intake refuses.
-    func test_bleedSkipReasonIsValidOnlyForAsrNotRun() throws {
-        func observations(stage: String = "asr", block: [String: Any]) -> [String: Any] {
-            var all: [String: Any] = [:]
-            for name in ["wake", "bleed", "asr", "translation", "routing", "execution"] {
-                all[name] = ["state": "unknown", "reason": "observation_unavailable"]
-            }
-            all["bleed"] = ["state": "completed", "decision": "overlap"]
-            all[stage] = block
-            return all
-        }
-        let valid = observations(block: ["state": "not_run", "reason": "rejected_by_bleed"])
-        do {
-            try VoiceSharingRecordBinding.validateObservationsForTesting(valid)
-        } catch {
-            return XCTFail("premise: asr/not_run/rejected_by_bleed must be accepted; got \(error)")
-        }
-
-        let refused: [(String, [String: Any], String)] = [
-            ("asr completed", observations(block: ["state": "completed", "reason": "rejected_by_bleed",
-                                                   "text": "hello"]), "reason"),
-            ("asr failed", observations(block: ["state": "failed", "reason": "rejected_by_bleed"]), "reason"),
-            ("asr cancelled", observations(block: ["state": "cancelled", "reason": "rejected_by_bleed"]), "reason"),
-            ("asr unknown", observations(block: ["state": "unknown", "reason": "rejected_by_bleed"]), "rejected_by_bleed"),
-            ("wake not_run", observations(stage: "wake", block: ["state": "not_run", "reason": "rejected_by_bleed"]), "rejected_by_bleed"),
-            ("bleed not_run", observations(stage: "bleed", block: ["state": "not_run", "reason": "rejected_by_bleed"]), "rejected_by_bleed"),
-            ("translation not_run", observations(stage: "translation",
-                                                 block: ["state": "not_run", "reason": "rejected_by_bleed"]), "rejected_by_bleed"),
-            ("routing not_run", observations(stage: "routing", block: ["state": "not_run", "reason": "rejected_by_bleed"]), "rejected_by_bleed"),
-            ("execution not_run", observations(stage: "execution",
-                                               block: ["state": "not_run", "reason": "rejected_by_bleed"]), "rejected_by_bleed"),
-        ]
-        for (label, payload, fragment) in refused {
-            assertRefused(label, payload, containing: fragment)
-        }
-        // The bleed stage's own observed decision is preserved, never replaced by the skip.
-        let persisted = try XCTUnwrap(valid["bleed"] as? [String: Any])
-        XCTAssertEqual(persisted["decision"] as? String, "overlap")
-
-        // RE-SEALED persisted envelope: the same contradiction coming back through `bind`.
-        for (label, block) in [("completed", ["state": "completed", "reason": "rejected_by_bleed", "text": "hi"]),
-                               ("failed", ["state": "failed", "reason": "rejected_by_bleed"])] {
-            let record = try encodedRecordWithEmptyResult()
-            var mutated = record
-            var all = try XCTUnwrap(mutated["observations"] as? [String: Any])
-            all["asr"] = block
-            mutated["observations"] = all
-            do {
-                _ = try VoiceSharingRecordBinding.bind(envelope: try rescaled(mutated), audio: Data())
-                XCTFail("\(label): a persisted record with rejected_by_bleed outside asr/not_run must be refused")
-            } catch let error as VoiceSharingRecordBinding.BindingError {
-                guard case .invalidField(let path, _) = error else {
-                    return XCTFail("\(label): expected invalidField, got \(error)")
-                }
-                XCTAssertEqual(path, "observations.asr.reason")
-            }
-        }
-    }
-
-    /// SPEC delta f8 ON every stage: a completed stage carries NO reason. Only exact
-    /// asr/completed/empty_result may, where the reason IS the result. Asserted on the raw observations
-    /// AND on a re-sealed persisted envelope, so the rule is proven where records actually come back.
-    func test_aCompletedStageCarriesNoReasonOnEveryStage() throws {
-        let stages = ["wake", "bleed", "asr", "translation", "routing", "execution"]
-        // Each stage's own first enumerated reason, used as the "carries a reason" payload.
-        let reasons: [String: String] = [
-            "wake": "below_threshold",
-            "bleed": "no_playback_reference",
-            "asr": "local_only_action",
-            "translation": "no_text",
-            "routing": "no_candidates",
-            "execution": "client_refused",
-        ]
-        func observations(completedStage: String, reason: String, text: String? = nil) -> [String: Any] {
-            var all: [String: Any] = [:]
-            for stage in stages {
-                all[stage] = ["state": "unknown", "reason": "observation_unavailable"]
-            }
-            var block: [String: Any] = ["state": "completed", "reason": reason]
-            if let text { block["text"] = text }
-            all[completedStage] = block
-            return all
-        }
-        for stage in stages {
-            let payload = observations(completedStage: stage, reason: reasons[stage]!,
-                                       text: stage == "asr" ? "hello" : nil)
-            do {
-                try VoiceSharingRecordBinding.validateObservationsForTesting(payload)
-                XCTFail("\(stage): a completed stage must not carry a reason")
-            } catch let error as VoiceSharingRecordBinding.BindingError {
-                guard case .invalidField(let path, let message) = error else {
-                    return XCTFail("\(stage): expected invalidField, got \(error)")
-                }
-                XCTAssertEqual(path, "observations.\(stage).reason",
-                               "the refusal must name the offending stage")
-                XCTAssertTrue(message.contains("a completed stage carries no reason"),
-                              "\(stage): refusal must state the rule, got \(message)")
-            }
-        }
-        // RE-SEALED persisted envelope: the same contradiction coming back through `bind`.
-        let record = try encodedRecordWithEmptyResult()
-        var mutated = record
-        var all = try XCTUnwrap(mutated["observations"] as? [String: Any])
-        var wake = try XCTUnwrap(all["wake"] as? [String: Any])
-        wake["state"] = "completed"
-        wake["reason"] = "below_threshold"
-        all["wake"] = wake
-        mutated["observations"] = all
-        let sealed = try rescaled(mutated)
-        do {
-            _ = try VoiceSharingRecordBinding.bind(envelope: sealed, audio: Data())
-            XCTFail("a persisted record with a completed stage carrying a reason must be refused")
-        } catch let error as VoiceSharingRecordBinding.BindingError {
-            guard case .invalidField(let path, _) = error else {
-                return XCTFail("expected invalidField from the persisted envelope, got \(error)")
-            }
-            XCTAssertEqual(path, "observations.wake.reason")
-        }
-    }
-
-    /// `empty_result` DESCRIBES one thing only: a recognition that succeeded and
-    /// produced nothing usable. Every contradictory combination is refused, because each one asserts
-    /// something the capture cannot have done — a text alongside "no text", a router input from a command
-    /// that could not exist, a failure dressed as a success.
-    func test_emptyResultIsRefusedOnEveryContradictoryCombination() throws {
-        func stage(_ overrides: [String: Any], stageName: String = "asr") -> [String: Any] {
-            var base: [String: Any] = ["state": "completed", "reason": "empty_result"]
-            for (k, v) in overrides { base[k] = v }
-            // Every stage is required by the record; the others are honest `unknown` non-claims so the
-            // refusal under test can only come from the ASR arrangement.
-            var all: [String: Any] = [:]
-            for other in ["wake", "bleed", "asr", "translation", "routing", "execution"] {
-                all[other] = ["state": "unknown", "reason": "observation_unavailable"]
-            }
-            all[stageName] = base
-            return all
-        }
-        // The valid one must actually be accepted, or the negatives prove nothing about the rule.
-        do {
-            try VoiceSharingRecordBinding.validateObservationsForTesting(stage([:]))
-        } catch {
-            return XCTFail("premise: empty_result on asr/completed must be accepted; got \(error)")
-        }
-
-        let refused: [(String, [String: Any], String)] = [
-            ("text present", stage(["text": "hello"]), "text"),
-            ("router_input present", stage(["router_input": ["intent": "track.play"]]), "router_input"),
-            // ABSENT is not null: an explicit null states the key exists and is empty,
-            // which is not what empty_result declares.
-            ("text null", stage(["text": NSNull()]), "text"),
-            ("router_input null", stage(["router_input": NSNull()]), "router_input"),
-            ("state failed", stage(["state": "failed"]), "completed"),
-            ("state cancelled", stage(["state": "cancelled"]), "completed"),
-            ("state not_run", stage(["state": "not_run"]), "completed"),
-            ("wrong stage", stage([:], stageName: "routing"), "asr"),
-            ("wrong stage execution", stage([:], stageName: "execution"), "asr"),
-            ("wrong stage translation", stage([:], stageName: "translation"), "asr"),
-        ]
-        for (label, observations, expectedFragment) in refused {
-            assertRefused(label, observations, containing: expectedFragment)
-        }
-    }
-
-    /// Proves the REFUSAL is about `empty_result`, not about the arrangement in general: the same payload
-    /// with the reason removed (or replaced) must be refused or accepted for a DIFFERENT stated cause, so a
-    /// control here cannot pass merely because the harness rejects this shape regardless.
-    private func assertRefused(_ label: String, _ observations: [String: Any],
-                               containing fragment: String) {
-        do {
-            _ = try VoiceSharingRecordBinding.validateObservationsForTesting(observations)
-            XCTFail("\(label): expected refusal")
-        } catch let error as VoiceSharingRecordBinding.BindingError {
-            XCTAssertTrue("\(error)".localizedCaseInsensitiveContains(fragment),
-                          "\(label): refusal must name the cause (\(fragment)); got \(error)")
-        } catch {
-            XCTFail("\(label): unexpected error \(error)")
-        }
     }
 
     /// WAKE-only is A SUCCESSFUL recognition. The recogniser returns
@@ -2187,15 +1759,15 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
         _ = waitForReadyEntries(1)
 
-        guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage(),
-            !entries.isEmpty else { return XCTFail("a durable record is required") }
+        let entries = queue.entries()
+        if entries.isEmpty { return XCTFail("a durable record is required") }
         var asrBlocks: [[String: Any]] = []
         for entry in entries {
-            let metadataURL = entry.root.appendingPathComponent(entry.name)
+            let metadataURL = entry.url
                 .appendingPathComponent("metadata.json")
             let envelope = try JSONSerialization.jsonObject(
                 with: Data(contentsOf: metadataURL), options: []) as? [String: Any]
-            if let asr = ((envelope?["record"] as? [String: Any])?["observations"]
+            if let asr = (envelope?["observations"]
                 as? [String: Any])?["asr"] as? [String: Any] {
                 asrBlocks.append(asr)
             }
@@ -2230,18 +1802,17 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         await chain.backend.emitSpeechThenSilence(
             level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
         _ = waitForReadyEntries(1)
-        guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage() else {
-            return XCTFail("coverage known")
-        }
+        let entries = queue.entries()
+        if entries.isEmpty { return XCTFail("coverage known") }
         // Group by capture: the question is what a SINGLE capture's record says, not what some unrelated
         // record in the same run says. The harness can close more than one segment.
         var byCapture: [String: [String: Any]] = [:]
         for entry in entries {
-            let metadataURL = entry.root.appendingPathComponent(entry.name)
+            let metadataURL = entry.url
                 .appendingPathComponent("metadata.json")
             let envelope = try JSONSerialization.jsonObject(
                 with: Data(contentsOf: metadataURL), options: []) as? [String: Any]
-            let record = envelope?["record"] as? [String: Any]
+            let record = envelope
             guard let capture = record?["capture_id"] as? String else { continue }
             byCapture[capture] = (record?["observations"] as? [String: Any])?["wake"] as? [String: Any]
         }
@@ -2275,18 +1846,17 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         await chain.backend.emitSpeechThenSilence(
             level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
         _ = waitForReadyEntries(1)
-        guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage() else {
-            return XCTFail("coverage known")
-        }
+        let entries = queue.entries()
+        if entries.isEmpty { return XCTFail("coverage known") }
         // The negative verdict lives in `decision`, not `reason`: a completed stage
         // carries no reason, so a reason-shaped assertion here would be asserting a refused payload.
         var decisions: [String?] = []
         for entry in entries {
-            let metadataURL = entry.root.appendingPathComponent(entry.name)
+            let metadataURL = entry.url
                 .appendingPathComponent("metadata.json")
             let envelope = try JSONSerialization.jsonObject(
                 with: Data(contentsOf: metadataURL), options: []) as? [String: Any]
-            let wake = ((envelope?["record"] as? [String: Any])?["observations"]
+            let wake = (envelope?["observations"]
                 as? [String: Any])?["wake"] as? [String: Any]
             if wake?["state"] as? String == "completed" {
                 decisions.append(wake?["decision"] as? String)
@@ -2399,11 +1969,12 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         wake: WakeWordDetectorProtocol = DetectedWake(),
         wakeThreshold: Float = 0.8,
         claims: @escaping () -> [String: VoiceSharingContributionEncoder.StageOutcome]
-    ) -> (engine: VoiceAsrEngine, sink: VoiceSharingContributionSink,
+    ) -> (engine: VoiceAsrEngine, sink: VoiceSharingDirectSink,
           backend: EngineStubBackend, grace: GracePeriodSignal) {
-        let sink = VoiceSharingContributionSink(
+        let sink = VoiceSharingDirectSink(
             queue: queue, isEnabled: { true },
-            encoderProvenance: { [self] in provenance }, observations: claims)
+            encoderProvenance: { [self] in provenance }, observations: claims,
+            requestUploadDrain: {})
         let collector = VoiceSharingCollector(
             isCollectionPermitted: { [weak self] in self?.engineTestGateOpen ?? false },
             outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
@@ -2438,12 +2009,12 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     }
 
     private func diagnostic(
-        _ entries: [VoiceSharingUploadQueue.Entry],
-        _ chain: (engine: VoiceAsrEngine, sink: VoiceSharingContributionSink,
+        _ entries: [VoiceSharingQueue.Entry],
+        _ chain: (engine: VoiceAsrEngine, sink: VoiceSharingDirectSink,
                   backend: EngineStubBackend, grace: GracePeriodSignal)
     ) -> String {
         let states: [String] = entries.map { entry in
-            let u = entry.root.appendingPathComponent(entry.name).appendingPathComponent("metadata.json")
+            let u = entry.url.appendingPathComponent("metadata.json")
             guard let e = try? JSONSerialization.jsonObject(with: Data(contentsOf: u), options: []) as? [String: Any],
                 let o = ((e["record"] as? [String: Any])?["observations"] as? [String: Any]) else {
                 return "no-record"
@@ -2457,9 +2028,9 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         return "entries=\(entries.count) transcribe=\(chain.backend.transcribeCalls) states=\(states)"
     }
 
-    private func wakeStates(_ entries: [VoiceSharingUploadQueue.Entry]) -> [String] {
+    private func wakeStates(_ entries: [VoiceSharingQueue.Entry]) -> [String] {
         entries.compactMap { entry in
-            let metadataURL = entry.root.appendingPathComponent(entry.name)
+            let metadataURL = entry.url
                 .appendingPathComponent("metadata.json")
             guard let envelope = try? JSONSerialization.jsonObject(
                 with: Data(contentsOf: metadataURL), options: []) as? [String: Any],
@@ -2469,16 +2040,14 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         }
     }
 
-    private func waitForReadyEntries(_ count: Int, timeout: TimeInterval = 5) -> [Any] {
-        sinkUnderTest?.waitForIdleForTesting()
+    private func waitForReadyEntries(_ count: Int, timeout: TimeInterval = 5) -> [VoiceSharingQueue.Entry] {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if case .known(let ready) = queue.readyEntriesReportingUnknownCoverage(),
-                ready.count >= count { return ready }
+            let ready = queue.entries()
+            if ready.count >= count { return ready }
             RunLoop.current.run(until: Date().addingTimeInterval(0.02))
         }
-        if case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() { return ready }
-        return []
+        return queue.entries()
     }
 
     /// THE control: speech driven through the real engine's capture callback becomes a durable ready
@@ -2504,17 +2073,17 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                        "the real engine's observer must produce a durable ready entry, not just a callback")
         // ANTI-VACUITY: the entry must be produced by a real capture, and its record must actually carry
         // the unknown/observation_unavailable pair — not merely "some entry exists".
-        guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage(),
-            !entries.isEmpty else { return XCTFail("a ready entry is required") }
+        let entries = queue.entries()
+        guard !entries.isEmpty else { return XCTFail("a ready entry is required") }
         // The pipeline can emit more than one record (a segment the wake rejected, then a completed one).
         // Inspect the one that carried the engine's wake report.
         var examined: [String: Any]?
         for entry in entries {
-            let metadataURL = entry.root.appendingPathComponent(entry.name)
+            let metadataURL = entry.url
                 .appendingPathComponent("metadata.json")
-            let envelope = try JSONSerialization.jsonObject(
+            let record = try JSONSerialization.jsonObject(
                 with: Data(contentsOf: metadataURL), options: []) as? [String: Any]
-            let candidate = (envelope?["record"] as? [String: Any])?["observations"] as? [String: Any]
+            let candidate = record?["observations"] as? [String: Any]
             if (candidate?["wake"] as? [String: Any])?["state"] as? String == "completed" {
                 examined = candidate
                 break
@@ -2553,18 +2122,11 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             return broken
         })
         chain.engine.listeningMode = .continuous
-        // ANTI-VACUITY: a marker the SINK itself sets when its worker actually runs
-        // on the event. Waiting a fixed interval would pass even if nothing was ever processed.
-        let processed = XCTestExpectation(description: "the sink worker processed the event")
-        chain.sink.testingWorkerGate = { processed.fulfill() }
         await chain.backend.emitSpeechThenSilence(
             level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
-        wait(for: [processed], timeout: 5)
-        chain.sink.waitForIdleForTesting()
-        guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
-            return XCTFail("coverage known")
-        }
-        XCTAssertEqual(ready.count, 0,
+        // The sink publishes synchronously inside handle(), so by the time the audio has been driven
+        // through the engine any record it produced is already on disk or was never produced.
+        XCTAssertEqual(queue.entries().count, 0,
                        "a record the validator refuses must never become ready, even from the real engine")
     }
     // MARK: - PHASE 2 DURABLE output
@@ -2582,24 +2144,20 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     /// unbindable record is not a record the server would accept, so it cannot count as evidence.
     private func durableRecords(_ file: StaticString = #filePath, line: UInt = #line) throws
         -> [String: [String: Any]] {
-        sinkUnderTest?.waitForIdleForTesting()
-        guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage() else {
-            XCTFail("premise: the queue reports known coverage", file: file, line: line)
-            return [:]
-        }
+        let entries = queue.entries()
         var records: [String: [String: Any]] = [:]
         for entry in entries {
-            let directory = entry.root.appendingPathComponent(entry.name)
+            let directory = entry.url
             let metadata = try Data(contentsOf: directory.appendingPathComponent("metadata.json"))
             let audio = try Data(contentsOf: directory.appendingPathComponent("audio.wav"))
-            // The production binding: the same authority the server's intake applies.
-            let bound = try VoiceSharingRecordBinding.bind(envelope: metadata, audio: audio)
-            let envelope = try XCTUnwrap(
+            _ = audio
+            // Plain JSON: the metadata object IS the record the server validates.
+            let record = try XCTUnwrap(
                 JSONSerialization.jsonObject(with: metadata) as? [String: Any],
                 "the entry's metadata is a JSON object", file: file, line: line)
-            let record = try XCTUnwrap(envelope["record"] as? [String: Any],
-                                       "the envelope carries a record", file: file, line: line)
-            records[bound.captureID] = record
+            let captureID = try XCTUnwrap(record["capture_id"] as? String,
+                                          "the record names its capture", file: file, line: line)
+            records[captureID] = record
         }
         return records
     }
@@ -2612,29 +2170,24 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     /// grace control fail while passing in isolation. Each control calls this once before driving audio,
     /// and only captures not already present are considered its own.
     private func recordWatermark() -> Set<String> {
-        sinkUnderTest?.waitForIdleForTesting()
-        guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage() else { return [] }
-        return Set(entries.map { $0.name })
+        Set(queue.entries().map { $0.name })
     }
 
     private func durableRecordsSince(_ watermark: Set<String>, _ file: StaticString = #filePath,
                                      line: UInt = #line) throws -> [[String: Any]] {
         let records = try durableRecords(file, line: line)
-        guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage() else {
-            return XCTFail("premise: known coverage", file: file, line: line) as! [[String: Any]]
-        }
+        let entries = queue.entries()
         let fresh = Set(entries.map { $0.name }).subtracting(watermark)
         XCTAssertFalse(fresh.isEmpty,
                        "the capture this control drove must reach a durable entry", file: file, line: line)
         var mine: [[String: Any]] = []
         for entry in entries where fresh.contains(entry.name) {
-            let directory = entry.root.appendingPathComponent(entry.name)
+            let directory = entry.url
             let metadata = try Data(contentsOf: directory.appendingPathComponent("metadata.json"))
-            let audio = try Data(contentsOf: directory.appendingPathComponent("audio.wav"))
-            _ = try VoiceSharingRecordBinding.bind(envelope: metadata, audio: audio)
-            let envelope = try XCTUnwrap(
-                JSONSerialization.jsonObject(with: metadata) as? [String: Any])
-            mine.append(try XCTUnwrap(envelope["record"] as? [String: Any]))
+            _ = try Data(contentsOf: directory.appendingPathComponent("audio.wav"))
+            // Plain JSON: the record IS the metadata object, with no envelope around it.
+            mine.append(try XCTUnwrap(
+                JSONSerialization.jsonObject(with: metadata) as? [String: Any]))
         }
         XCTAssertFalse(mine.isEmpty, "a fresh entry decodes to a record", file: file, line: line)
         return mine
@@ -2856,18 +2409,17 @@ private final class NotDetectedWake: WakeWordDetectorProtocol {
 /// Actual engine invocation callbacks → capture snapshot → canonical durable queue records.
 final class VoiceSharingModelProvenanceTests: XCTestCase {
     private var root: URL!
-    private var queue: VoiceSharingUploadQueue!
-    private var sink: VoiceSharingContributionSink!
+    private var queue: VoiceSharingQueue!
+    private var sink: VoiceSharingDirectSink!
     private let pcm = [Float](repeating: 0.1, count: 640)
 
     override func setUpWithError() throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("model-provenance-\(UUID())")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        queue = VoiceSharingUploadQueue(rootDirectory: root)
+        queue = VoiceSharingQueue(root: root)
     }
 
     override func tearDownWithError() throws {
-        sink?.waitForIdleForTesting()
         sink = nil
         queue = nil
         try FileManager.default.removeItem(at: root)
@@ -2894,7 +2446,9 @@ final class VoiceSharingModelProvenanceTests: XCTestCase {
         let provenance = VoiceSharingContributionEncoder.Provenance(
             platform: "ios", appVersion: "test", build: "1", captureSessionID: "session",
             models: .init(vad: latest, wakeword: latest, asr: latest, translation: latest, router: latest), conversionVersion: "v1")
-        let sink = VoiceSharingContributionSink(queue: queue, isEnabled: { true }, encoderProvenance: { provenance })
+        let sink = VoiceSharingDirectSink(
+            queue: queue, isEnabled: { true }, encoderProvenance: { provenance },
+            requestUploadDrain: {})
         self.sink = sink
         let collector = VoiceSharingCollector(
             isCollectionPermitted: { true }, outcomeWaitLimit: .init(milliseconds: 25, ceilingMilliseconds: 100),
@@ -2912,21 +2466,18 @@ final class VoiceSharingModelProvenanceTests: XCTestCase {
     }
 
     private func records() throws -> [String: Data] {
-        sink.waitForIdleForTesting()
         var records: [String: Data] = [:]
-        for entry in queue.readyEntries() {
-            let directory = root.appendingPathComponent(entry.name)
-            let data = try Data(contentsOf: directory.appendingPathComponent("metadata.json"))
-            let audio = try Data(contentsOf: directory.appendingPathComponent("audio.wav"))
-            let bound = try VoiceSharingRecordBinding.bind(envelope: data, audio: audio)
-            XCTAssertNil(records.updateValue(data, forKey: bound.captureID), "one immutable record per capture")
+        for entry in queue.entries() {
+            let data = try Data(contentsOf: entry.metadataURL)
+            let record = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let captureID = try XCTUnwrap(record["capture_id"] as? String)
+            XCTAssertNil(records.updateValue(data, forKey: captureID), "one immutable record per capture")
         }
         return records
     }
 
     private func models(_ data: Data) throws -> [String: Any] {
-        let envelope = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        let record = try XCTUnwrap(envelope["record"] as? [String: Any])
+        let record = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         return try XCTUnwrap(record["models"] as? [String: Any])
     }
 

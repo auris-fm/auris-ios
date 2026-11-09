@@ -34,27 +34,25 @@ final class VoiceSharingAccountDeletionTests: XCTestCase {
     /// A retained recording survives a process that never learned deletion succeeded: the files are
     /// still on this device, which is exactly why the sign-out path must be the purge trigger.
     func test_aLostDeletionCallbackLeavesStoredAudioOnDisk() throws {
-        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let queue = VoiceSharingQueue(root: root)
         try VoiceSharingDeletionFixture.seed(in: queue)
-        let entriesBefore = queue.readyEntries().count
+        let entriesBefore = queue.count()
         XCTAssertEqual(entriesBefore, 1, "setup: one recording is retained")
 
         // The completion never runs (the process is gone), so no sign-out, no purge happens.
         // A NEW process starts with the same storage.
-        let restarted = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-        XCTAssertEqual(restarted.readyEntries().count, entriesBefore,
+        let restarted = VoiceSharingQueue(root: root)
+        XCTAssertEqual(restarted.count(), entriesBefore,
                        "callback loss cannot silently discard or admit the retained recording")
     }
 
     /// The sign-out path — and only a reconciled purge — removes it durably.
     func test_theSignOutPurgeIsWhatRemovesIt() throws {
-        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let queue = VoiceSharingQueue(root: root)
         try VoiceSharingDeletionFixture.seed(in: queue)
-        guard case .reconciled = queue.purgeAll() else {
-            return XCTFail("a purge on healthy storage must reconcile")
-        }
-        let restarted = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-        XCTAssertEqual(restarted.readyEntries().count, 0,
+        queue.deleteAll(reason: "session-gone")
+        let restarted = VoiceSharingQueue(root: root)
+        XCTAssertEqual(restarted.count(), 0,
                        "after the sign-out purge nothing survives a restart")
     }
 
@@ -78,15 +76,13 @@ enum VoiceSharingDeletionFixture {
     /// Seeds OUTSIDE the injected-clock window the tests that use it rely on: the queue writes
     /// `created.at` from its own injected clock, so a test that installs its own clock must reduce
     /// the entry's recorded age before running, rather than depending on wall time.
-    static func backdate(_ entry: VoiceSharingUploadQueue.Entry,
-                         in queue: VoiceSharingUploadQueue,
+    static func backdate(_ entry: VoiceSharingQueue.Entry,
+                         in queue: VoiceSharingQueue,
                          by seconds: TimeInterval) throws {
-        let created = queue.rootDirectory
-            .appendingPathComponent(entry.name, isDirectory: true)
-            .appendingPathComponent("created.at")
-        let text = try String(contentsOf: created, encoding: .utf8)
-        let instant = try XCTUnwrap(TimeInterval(text))
-        try String(instant - seconds).write(to: created, atomically: true, encoding: .utf8)
+        // Age is the folder's own creation date, so ageing an entry means setting it back.
+        try FileManager.default.setAttributes(
+            [.creationDate: entry.createdAt.addingTimeInterval(-seconds)],
+            ofItemAtPath: entry.url.path)
     }
 
     /// A live, authoritative enrollment: the precondition every "previously valid lease" fixture
@@ -111,7 +107,7 @@ enum VoiceSharingDeletionFixture {
         return live
     }
 
-    static func seed(in queue: VoiceSharingUploadQueue) throws {
+    static func seed(in queue: VoiceSharingQueue) throws {
         let sampleFrames: [Float] = [0, 0.2, -0.3, 0.4]
         let event = VoiceSharingCollector.SegmentEvent(
             kind: .completed, captureID: UUID(),
@@ -124,8 +120,7 @@ enum VoiceSharingDeletionFixture {
             conversionVersion: "v1")
         let encoded = try VoiceSharingContributionEncoder.encode(
             event: event, provenance: provenance, observations: [:])
-        let entry = try queue.prepare(metadata: encoded.metadataEnvelope, audio: encoded.wav)
-        try queue.finalize(entry)
+        _ = queue.publish(audio: encoded.wav, metadata: encoded.metadata)
     }
 }
 
@@ -154,42 +149,36 @@ final class VoiceSharingSignOutCompositionTests: XCTestCase {
     /// A retained recording plus a VALID lease, then consent loss through the production registry:
     /// the durable queue must be revoked and must stay revoked across a restart.
     func test_aSignOutThroughTheProductionRegistryRevokesRetainedAudio() throws {
-        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let queue = VoiceSharingQueue(root: root)
         try VoiceSharingDeletionFixture.seed(in: queue)
-        XCTAssertEqual(queue.readyEntries().count, 1, "setup: audio is retained under a valid session")
+        XCTAssertEqual(queue.count(), 1, "setup: audio is retained under a valid session")
 
         let coordinator = VoiceSharingCoordinator(enrollmentStore: VoiceSharingEnrollmentStore(
             defaults: defaults, accountScopeProvider: { "account-a" }))
         // The same handler shape the assembly installs.
-        let subscription = coordinator.registerGateLostHandler { _ = queue.purgeAll() }
+        let subscription = coordinator.registerGateLostHandler { queue.deleteAll(reason: "consent-gone") }
         defer { _ = subscription }
         coordinator.consentGateLostForTesting()
 
-        // CLEAN revocation (a purge that reconciles) leaves `.known` with nothing ready — that is
-        // the SUCCESS shape. Assert the durable facts, not the hold class.
-        guard case .known(let remaining) = queue.readyEntriesReportingUnknownCoverage() else {
-            return XCTFail("a reconciling sign-out purge must leave the owner READABLE, not held")
-        }
-        XCTAssertTrue(remaining.isEmpty, "consent loss revokes the retained set")
-        XCTAssertEqual(queue.readyEntries().count, 0, "and nothing is served afterwards")
-        let restarted = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-        XCTAssertEqual(restarted.readyEntries().count, 0, "the revocation is durable, not process-local")
+        // Assert the durable facts: nothing retained, nothing served.
+        XCTAssertTrue(queue.entries().isEmpty, "consent loss revokes the retained set")
+        XCTAssertEqual(queue.count(), 0, "and nothing is served afterwards")
+        let restarted = VoiceSharingQueue(root: root)
+        XCTAssertEqual(restarted.count(), 0, "the revocation is durable, not process-local")
     }
 
     /// An UNREGISTERED handler (a torn-down pipeline) must not be reached: no revocation from a
     /// registry entry that no longer exists.
     func test_aTornDownHandlerIsNotCalled() throws {
-        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let queue = VoiceSharingQueue(root: root)
         try VoiceSharingDeletionFixture.seed(in: queue)
         let coordinator = VoiceSharingCoordinator(enrollmentStore: VoiceSharingEnrollmentStore(
             defaults: defaults, accountScopeProvider: { "account-a" }))
         var subscription: VoiceSharingCoordinator.GateLostSubscription? =
-            coordinator.registerGateLostHandler { _ = queue.purgeAll() }
+            coordinator.registerGateLostHandler { queue.deleteAll(reason: "consent-gone") }
         subscription = nil // torn down
         coordinator.consentGateLostForTesting()
-        guard case .known = queue.readyEntriesReportingUnknownCoverage() else {
-            return XCTFail("a removed handler must not purge")
-        }
+        XCTAssertEqual(queue.count(), 1, "a removed handler must not purge")
     }
 }
 
@@ -278,12 +267,12 @@ final class VoiceSharingSignOutNotificationTests: XCTestCase {
             VoiceSharingEnrollmentStore(defaults: defaults, accountScopeProvider: { "account-a" },
                                         sessionIdentityProvider: { "gen-1" }),
             defaults: defaults)
-        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let queue = VoiceSharingQueue(root: root)
         try VoiceSharingDeletionFixture.seed(in: queue)
-        XCTAssertEqual(queue.readyEntries().count, 1, "setup: audio retained under a valid session")
+        XCTAssertEqual(queue.count(), 1, "setup: audio retained under a valid session")
 
         let coordinator = VoiceSharingCoordinator(enrollmentStore: store)
-        let subscription = coordinator.registerGateLostHandler { _ = queue.purgeAll() }
+        let subscription = coordinator.registerGateLostHandler { queue.deleteAll(reason: "consent-gone") }
         defer { _ = subscription }
 
         let center = RecordingNotificationCenter()
@@ -293,9 +282,9 @@ final class VoiceSharingSignOutNotificationTests: XCTestCase {
 
         center.post(name: .serverUserWillBeSignedOut)
 
-        XCTAssertEqual(queue.readyEntries().count, 0, "the sign-out notification revokes retained audio")
-        let restarted = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-        XCTAssertEqual(restarted.readyEntries().count, 0, "durably, across a restart")
+        XCTAssertEqual(queue.count(), 0, "the sign-out notification revokes retained audio")
+        let restarted = VoiceSharingQueue(root: root)
+        XCTAssertEqual(restarted.count(), 0, "durably, across a restart")
     }
 
     /// Re-activation must replace the previous registration, so ONE sign-out fires ONE invalidation.
@@ -342,23 +331,23 @@ final class VoiceSharingSignOutNotificationTests: XCTestCase {
             VoiceSharingEnrollmentStore(defaults: defaults, accountScopeProvider: { "account-a" },
                                         sessionIdentityProvider: { "gen-1" }),
             defaults: defaults)
-        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let queue = VoiceSharingQueue(root: root)
         try VoiceSharingDeletionFixture.seed(in: queue)
-        XCTAssertEqual(queue.readyEntries().count, 1, "precondition: servable under a valid lease")
+        XCTAssertEqual(queue.count(), 1, "precondition: servable under a valid lease")
 
         let coordinator = VoiceSharingCoordinator(enrollmentStore: store)
-        let subscription = coordinator.registerGateLostHandler { _ = queue.purgeAll() }
+        let subscription = coordinator.registerGateLostHandler { queue.deleteAll(reason: "consent-gone") }
         defer { _ = subscription }
         let center = RecordingNotificationCenter()
         _ = coordinator.installIdentityInvalidation(onNotificationCenter: center)
         // NO post: the callback never ran.
-        XCTAssertEqual(queue.readyEntries().count, 1, "nothing was revoked, because nothing was told")
+        XCTAssertEqual(queue.count(), 1, "nothing was revoked, because nothing was told")
 
         // MEASURED while still enrolled. (Driving `transitionToAccount` here instead would drop the
         // reading to zero for a reason that has nothing to do with removal — sign-out clears the
         // account scope the queue reads its identity from so this control observes the residue at
         // the only moment it is observable: before that transition.)
-        XCTAssertEqual(queue.readyEntries().count, 1,
+        XCTAssertEqual(queue.count(), 1,
                        "the recording survives, un-revoked, under the still-live lease")
         let files = (try? FileManager.default.contentsOfDirectory(
             at: root, includingPropertiesForKeys: nil)) ?? []
@@ -413,14 +402,14 @@ final class VoiceSharingRealSignOutCompositionTests: XCTestCase {
         // sign-out's identity transition reaches the consent decision these assertions are about.
         let store = try VoiceSharingDeletionFixture.enroll(
             VoiceSharingEnrollmentStore(sessionIdentityProvider: { "gen-1" }), defaults: defaults)
-        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let queue = VoiceSharingQueue(root: root)
         try VoiceSharingDeletionFixture.seed(in: queue)
-        XCTAssertEqual(queue.readyEntries().count, 1, "premise: an actual durable recording is retained")
-        let retained = try XCTUnwrap(queue.readyEntries().first)
+        XCTAssertEqual(queue.count(), 1, "premise: an actual durable recording is retained")
+        let retained = try XCTUnwrap(queue.entries().first)
         let retainedDirectory = root.appendingPathComponent(retained.name, isDirectory: true)
         XCTAssertTrue(FileManager.default.fileExists(atPath: retainedDirectory.path))
         let coordinator = VoiceSharingCoordinator(enrollmentStore: store)
-        let subscription = coordinator.registerGateLostHandler { _ = queue.purgeAll() }
+        let subscription = coordinator.registerGateLostHandler { queue.deleteAll(reason: "consent-gone") }
         defer { subscription.unregisterNow() }
         let removeIdentityObservers = coordinator.installIdentityInvalidation() // SyncManager posts to this default center.
         defer { removeIdentityObservers() }
@@ -436,15 +425,12 @@ final class VoiceSharingRealSignOutCompositionTests: XCTestCase {
         XCTAssertFalse(store.consentAllowsCollection)
         XCTAssertEqual(coordinator.gateLostHandlerCountForTesting, 1,
                        "the sign-out fan-out reaches the registered pipeline owner")
-        guard case .known(let remaining) = queue.readyEntriesReportingUnknownCoverage() else {
-            XCTFail("healthy signout purge must reconcile")
-            return
-        }
-        XCTAssertTrue(remaining.isEmpty)
+        XCTAssertTrue(queue.entries().isEmpty,
+                      "healthy signout purge removes the retained set")
         XCTAssertFalse(FileManager.default.fileExists(atPath: retainedDirectory.path),
                        "signout removed the recording rather than only excluding it from the ready set")
-        let restarted = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-        XCTAssertTrue(restarted.readyEntries().isEmpty, "the purge survives a fresh queue owner")
+        let restarted = VoiceSharingQueue(root: root)
+        XCTAssertTrue(restarted.entries().isEmpty, "the purge survives a fresh queue owner")
     }
 }
 
@@ -519,9 +505,9 @@ final class VoiceSharingDeletionCallbackCompositionTests: XCTestCase {
         // sign-out's identity transition reaches the consent decision these assertions are about.
         let store = try VoiceSharingDeletionFixture.enroll(
             VoiceSharingEnrollmentStore(sessionIdentityProvider: { "gen-1" }), defaults: defaults)
-        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let queue = VoiceSharingQueue(root: root)
         try VoiceSharingDeletionFixture.seed(in: queue)
-        let retained = try XCTUnwrap(queue.readyEntries().first)
+        let retained = try XCTUnwrap(queue.entries().first)
         let retainedDirectory = root.appendingPathComponent(retained.name, isDirectory: true)
         XCTAssertTrue(FileManager.default.fileExists(atPath: retainedDirectory.path))
         // THE pipeline owner's gate-loss handler, exactly as the production registrar installs it:
@@ -530,7 +516,7 @@ final class VoiceSharingDeletionCallbackCompositionTests: XCTestCase {
         let coordinator = VoiceSharingCoordinator(enrollmentStore: store)
         let subscription = coordinator.registerGateLostHandler {
             guard store.consentGoneForPurge else { return }
-            _ = queue.purgeAll()
+            queue.deleteAll(reason: "consent-gone")
         }
         defer { subscription.unregisterNow() }
         let removeObservers = coordinator.installIdentityInvalidation()
@@ -592,7 +578,7 @@ final class VoiceSharingDeletionCallbackCompositionTests: XCTestCase {
         if !signsOut {
             XCTAssertTrue(FileManager.default.fileExists(atPath: retainedDirectory.path),
                           "a rejected deletion must not clear the recording")
-            XCTAssertEqual(VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init).readyEntries().count, 1,
+            XCTAssertEqual(VoiceSharingQueue(root: root).count(), 1,
                            "nor hide it from the ready set")
         }
         if signsOut {

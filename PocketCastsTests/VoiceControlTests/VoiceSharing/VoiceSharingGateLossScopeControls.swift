@@ -20,6 +20,14 @@ import PocketCastsServer
 @testable import podcasts
 
 final class VoiceSharingGateLossScopeControls: XCTestCase {
+    /// Waits for the trigger's pass to finish. The simple trigger exposes no task handle, so the
+    /// wait is on its running flag rather than on an object it doesn't own.
+    private func joinDrain(_ trigger: VoiceSharingUploadTrigger) async {
+        for _ in 0..<80 where trigger.isRunningForTesting {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+    }
+
     private var root: URL!
     private var store: VoiceSharingEnrollmentStore!
     private var previousUserId: String?
@@ -187,7 +195,7 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
                 withdrawalState: .active),
             readUnder: try XCTUnwrap(store.projectionToken()))
 
-        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let queue = VoiceSharingQueue(root: root)
         _ = try makeReadyEntry(queue)
         let coordinator = VoiceSharingCoordinator(enrollmentStore: store)
         let wire = GateLossWire()
@@ -206,10 +214,7 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
         let trigger = VoiceControlAssembly().makeVoiceSharingUploadTrigger(
             queue: queue,
             isAuthorized: { self.store.consentAllowsCollection },
-            currentIdentity: {
-                VoiceSharingUploadIdentity(
-                    accountScope: ServerSettings.userId ?? "signed-out", enrollmentEpoch: "epoch-1")
-            },
+            currentIdentity: { (ServerSettings.userId ?? "signed-out", "epoch-1") },
             baseURLProvider: { "https://unit.test" },
             tokenProvider: GateLossTokens(onAcquire: gate),
             session: wire.session)
@@ -221,7 +226,7 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
         await coordinator.settleObservedWork()
 
         wire.reset()
-        trigger.triggerDrainIfPermitted()
+        trigger.trigger()
         await fulfillment(of: [reached], timeout: 10)
 
         // THE benign projection lands while the drain is suspended mid-TRANSFER-SEQUENCE.
@@ -232,7 +237,7 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
                 withdrawalState: .active),
             readUnder: try XCTUnwrap(store.projectionToken()))
         released.set()
-        await trigger.awaitDrainCompletionForTesting()
+        await joinDrain(trigger)
 
         XCTAssertEqual(wire.uploadRequests, 1,
                        "a drain suspended mid-flight must survive a benign projection and reach the wire")
@@ -252,7 +257,7 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
                 withdrawalState: .active),
             readUnder: try XCTUnwrap(store.projectionToken()))
 
-        let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
+        let queue = VoiceSharingQueue(root: root)
         _ = try makeReadyEntry(queue)
         let coordinator = VoiceSharingCoordinator(enrollmentStore: store)
         let wire = GateLossWire()
@@ -271,10 +276,7 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
         let trigger = VoiceControlAssembly().makeVoiceSharingUploadTrigger(
             queue: queue,
             isAuthorized: { self.store.consentAllowsCollection },
-            currentIdentity: {
-                VoiceSharingUploadIdentity(
-                    accountScope: ServerSettings.userId ?? "signed-out", enrollmentEpoch: "epoch-1")
-            },
+            currentIdentity: { (ServerSettings.userId ?? "signed-out", "epoch-1") },
             baseURLProvider: { "https://unit.test" },
             tokenProvider: GateLossTokens(onAcquire: gate),
             session: wire.session)
@@ -286,7 +288,7 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
 
 
         wire.reset()
-        trigger.triggerDrainIfPermitted()
+        trigger.trigger()
         await fulfillment(of: [reached], timeout: 10)
 
         // CAPTURE the drive
@@ -295,12 +297,10 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
         // in-flight flags, so the completion seam can return before the cancelled acquisition has
         // actually resumed and finished — which would make this control assert zero on work that was
         // still running. Holding the task itself and awaiting it after release closes that.
-        let drainTask = trigger.drainTaskForTesting
-
         // A REAL withdrawal, delivered through the production observer path.
         store.setLocalOptIn(false)
         released.set()
-        await drainTask?.value
+        await joinDrain(trigger)
 
         XCTAssertEqual(wire.uploadRequests, 0,
                        "a genuine consent loss must stop a drain that was already in flight")
@@ -597,8 +597,8 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
         XCTAssertFalse(store.consentAllowsCollection, "premise: consent is gone")
     }
 
-    private func makeReadyEntry(_ queue: VoiceSharingUploadQueue) throws
-        -> VoiceSharingUploadQueue.Entry
+    private func makeReadyEntry(_ queue: VoiceSharingQueue) throws
+        -> VoiceSharingQueue.Entry
     {
         let samples: [Float] = [0, 0.25, -0.5, 0.5]
         let event = VoiceSharingCollector.SegmentEvent(
@@ -612,9 +612,8 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
             conversionVersion: "v1")
         let encoded = try VoiceSharingContributionEncoder.encode(
             event: event, provenance: provenance, observations: [:])
-        let entry = try queue.prepare(metadata: encoded.metadataEnvelope, audio: encoded.wav)
-        try queue.finalize(entry)
-        return entry
+        let name = try XCTUnwrap(queue.publish(audio: encoded.wav, metadata: encoded.metadata))
+        return try XCTUnwrap(queue.entries().first { $0.name == name })
     }
 }
 
@@ -645,7 +644,7 @@ private final class GateLossWire: URLProtocol {
         if path == CloudAuthTokenProvider.tokenPath {
             body = ["access_token": "tok-\(bearer ?? "none")", "refresh_token": "chain",
                     "expires_in": 900, "token_type": "Bearer"]
-        } else if path == VoiceSharingUploadTransport.uploadPath {
+        } else if path == VoiceSharingAttemptedIdentity.uploadPath {
             GateLossWire.lock.lock(); GateLossWire.uploads += 1; GateLossWire.lock.unlock()
             // A refusal, so acceptance is not this control's subject: only the wire is.
             status = 503

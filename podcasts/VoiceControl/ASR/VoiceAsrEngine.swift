@@ -904,7 +904,7 @@ class VoiceAsrEngine {
             // here would make an empty transcript indistinguishable from an unknown language.
             contributionCollector?.engineReported(
                 stage: "asr",
-                outcome: .init(state: "completed", reason: VoiceSharingRecordBinding.emptyResultReasonForEngine,
+                outcome: .init(state: "completed", reason: VoiceSharingContributionEncoder.emptyResultReason,
                                sourceLanguage: asrResult.detectedLanguage),
                 context: utteranceContext)
         }
