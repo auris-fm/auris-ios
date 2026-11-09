@@ -20,13 +20,13 @@ final class VoiceSharingUploadTransport {
     /// Receipt bodies are small JSON objects; anything larger is not one.
     static let maxResponseBytes = 64 * 1024
     /// Full body deadline: the transfer must COMPLETE within this budget, not merely stay active.
-    /// Starts BEFORE the request is issued, so stalled headers count. Injectable for controls.
+    /// Starts before the request is issued, so stalled headers count. Injectable for controls.
     let bodyDeadline: TimeInterval
 
     /// Receives the response body with a hard byte ceiling (cancel past it) and a hard total
     /// deadline. Returns nil for any violation — the record's fate stays unknown.
     /// Receives the response with a hard byte ceiling (cancel past it) and a TOTAL deadline that
-    /// starts BEFORE the request is issued — stalled headers count against it too. The underlying
+    /// starts before the request is issued — stalled headers count against it too. The underlying
     /// transfer is cancelled through the session task handle, not just abandoned.
     private static func receive(
         session: URLSession, request: URLRequest, byteLimit: Int, deadline: TimeInterval,
@@ -43,7 +43,7 @@ final class VoiceSharingUploadTransport {
             guard !cancellation.isCancelled, networkFence?() ?? true else { throw CancellationError() }
             // The parent fence precedes an unstructured-child scheduling boundary. Revalidate the
             // admitted identity here, after suspension and immediately before the actual transfer.
-            // ACCOUNT BINDING ONLY (spec 4afc6e43): this compares the ACCOUNT, matching the two
+            // ACCOUNT binding only: this compares the ACCOUNT, matching the two
             // fences above and the queue's admission rule. Comparing the whole snapshot made the
             // provenance epoch an accidental gate — an epoch-only move for the SAME owner threw
             // CancellationError here and the request never left, silently undoing the rule that a
@@ -95,7 +95,7 @@ final class VoiceSharingUploadTransport {
                         _ = try await deadlineTask.value
                     } catch is CancellationError {
                         // The LOSER's cancellation (the transfer finished first and released the
-                        // timer) is NOT a timeout (reviewer a29e62a2): a successful transfer must
+                        // timer) is not a timeout: a successful transfer must
                         // never race into transportFailure through this child.
                         timedOut = false
                     } catch {
@@ -107,7 +107,7 @@ final class VoiceSharingUploadTransport {
                     if timedOut { throw URLError(.timedOut) }
                     return nil
                 }
-                // ONE AUTHORITATIVE RESULT (reviewer c9416bf7): the timer's loser notification
+                // ONE authoritative result: the timer's loser notification
                 // (nil from a cancelled timer child) must never WIN the race over a successful
                 // transfer. Only a non-nil transfer result or a REAL timeout throw decides; loser
                 // notifications are consumed and ignored.
@@ -144,7 +144,7 @@ final class VoiceSharingUploadTransport {
         self.bodyDeadline = bodyDeadline
     }
 
-    /// The endpoint this transport will use, or nil when configuration is missing. Nil is NOT
+    /// The endpoint this transport will use, or nil when configuration is missing. Nil is not
     /// defaulted to something plausible: an unconfigured build must not upload anywhere.
     var endpoint: URL? {
         VoiceSharingOrigin.url(origin: baseURLProvider(), path: Self.uploadPath)
@@ -156,10 +156,10 @@ final class VoiceSharingUploadTransport {
     /// type adds the credential and executes it. That split means the bytes the controls assert on
     /// are the bytes that go on the wire.
     /// - Parameters:
-    ///   - admittedIdentity: the identity snapshot this attempt was ADMITTED under (reviewer
-    ///     78f23dca — per SEND, never transport-initialization state). Supplied together with
-    ///     `identityFence`, the live reader.
-    ///   - identityFence: re-reads the live identity at credential and actual transfer-launch boundaries.
+    /// - admittedIdentity: the identity snapshot this attempt was ADMITTED under (reviewer
+    /// 78f23dca — per SEND, never transport-initialization state). Supplied together with
+    /// `identityFence`, the live reader.
+    /// - identityFence: re-reads the live identity at credential and actual transfer-launch boundaries.
     func send(
         request built: URLRequest,
         admittedIdentity: VoiceSharingUploadIdentity? = nil,
@@ -173,12 +173,12 @@ final class VoiceSharingUploadTransport {
             return .transportFailure
         }
         guard !Task.isCancelled, networkFence?() ?? true else { return .transportFailure }
-        // CREDENTIAL-BOUNDARY FENCE (reviewer ee5b4547): the identity may have moved WHILE the
+        // CREDENTIAL-BOUNDARY fence: the identity may have moved WHILE the
         // credential was being acquired. The declared admitted snapshot must still be live before
         // a single byte leaves; A's bytes are never sent under B's credential. Checking after the
         // response cannot repair a disclosure, so this runs at the launch boundary.
         if let fence = identityFence, let admitted = admittedIdentity {
-            // ACCOUNT BINDING (spec 4afc6e43): A's bytes must not leave under B's account. The
+            // ACCOUNT binding: A's bytes must not leave under B's account. The
             // provenance epoch is not compared — a re-enrollment moves it without changing the owner.
             guard let live = fence(), live.accountScope == admitted.accountScope else { return .transportFailure }
         }
@@ -197,24 +197,24 @@ final class VoiceSharingUploadTransport {
         // stream. The WALL deadline below separately bounds total body lifetime, so a dribbling
         // body that resets the idle timer still dies.
         request.timeoutInterval = bodyDeadline
-        // The credential is the ONLY header this type adds: URL, body, content type and the
+        // The credential is the only header this type adds: URL, body, content type and the
         // idempotency key all arrive from the uploader, so what the controls assert is what ships.
         request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization")
 
-        // FINAL PRE-LAUNCH FENCE (reviewer 1244fd5e): `baseURLProvider`/endpoint evaluation is a
+        // FINAL pre-LAUNCH fence: `baseURLProvider`/endpoint evaluation is a
         // callback that could itself move the identity after the credential-boundary check — the
         // same window shape as the uploader's endpoint hook. With every mutable callback resolved
         // and the request fully built, the LAST read before `receive` launches must still see the
         // admitted snapshot.
         if let fence = identityFence, let admitted = admittedIdentity {
-            // ACCOUNT BINDING (spec 4afc6e43): A's bytes must not leave under B's account. The
+            // ACCOUNT binding: A's bytes must not leave under B's account. The
             // provenance epoch is not compared — a re-enrollment moves it without changing the owner.
             guard let live = fence(), live.accountScope == admitted.accountScope else { return .transportFailure }
         }
 
         guard !Task.isCancelled, networkFence?() ?? true else { return .transportFailure }
         do {
-            // STREAMING bound (reviewer 8ba9c45f): `session.data` allocates the WHOLE body before
+            // STREAMING bound: `session.data` allocates the WHOLE body before
             // this code runs, so a post-hoc count check is a parse bound, not a memory bound. The
             // byte ceiling is enforced WHILE receiving and the transfer is cancelled the moment it
             // is exceeded. A full-body deadline bounds the transfer's total lifetime as well.

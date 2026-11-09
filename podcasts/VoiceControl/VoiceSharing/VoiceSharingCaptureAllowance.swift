@@ -182,10 +182,10 @@ final class VoiceSharingCaptureAllowance: VoiceSharingCaptureAdmitting {
         worker.async { [weak self] in
             guard let self else { return }
             let authority = self.currentAuthorization()
-            // ONE RULE: no ledger capacity is consumed by an admission that could not have been
+            // ONE rule: no ledger capacity is consumed by an admission that could not have been
             // granted. An installed authority past its own allowance deadline is exactly that case —
             // it would charge the batch and then refuse at `take`, silently burning capacity. So the
-            // lifetime check comes BEFORE the durable charge, and an expired allowance is a request
+            // lifetime check comes before the durable charge, and an expired allowance is a request
             // for another allocation like any other refusal: the producer is woken, and the resulting
             // refresh REUSES the persisted request identity, so the replay costs no new batch.
             let live = authority.map { $0.isLive(atMonotonicMS: self.monotonicNowMS()) } ?? false
@@ -355,7 +355,7 @@ final class VoiceSharingCaptureLedger {
     ) throws -> Bool {
         let firstProvisioning = limits == nil
 
-        // Consumption is persisted PER ACCOUNT AND BATCH (spec): distinct directory per batch so a
+        // Consumption is persisted PER account and batch (spec): distinct directory per batch so a
         // refreshed batch reopens its own ledger and a different batch can never reuse its usage.
         let directory = root.appendingPathComponent(authority.accountDigest, isDirectory: true)
             .appendingPathComponent(authority.batchId, isDirectory: true)
@@ -395,7 +395,7 @@ final class VoiceSharingCaptureLedger {
             let initializer = open(initURL.path, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR)
             // `access` cannot classify "no ledger yet" as anything but failure, so a genuinely NEW
             // batch's zero-usage ledger is established here rather than reported as lost accounting.
-            // A ledger that has been touched (or is ambiguous) is NOT re-established.
+            // A ledger that has been touched (or is ambiguous) is not re-established.
             if initializer >= 0 {
                 close(initializer)
                 guard names == ["claim.lock"] else { throw Failure.unavailable }
@@ -489,7 +489,7 @@ final class VoiceSharingCaptureLedger {
 
     /// Batch binding is enforced by AREA: the distinct batch directory scopes the whole ledger,
     /// so the persisted identity itself needs no batch field — the format is byte-compatible
-    /// with the pre-batch ledger (reviewer 80ef8b5f follow-up).
+    /// with the pre-batch ledger.
     private func matches<Scope: VoiceSharingCaptureAccountScope>(_ identity: Identity, _ authority: Scope) -> Bool {
         identity.schema == 1 && identity.account == authority.accountDigest && identity.binding == authority.accountBinding
             && identity.window == authority.window && UUID(uuidString: identity.incarnation) != nil

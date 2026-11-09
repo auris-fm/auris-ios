@@ -9,20 +9,20 @@ import PocketCastsUtils
 /// responses"):
 ///
 /// - **A receipt is only acceptance if it MATCHES.** A 2xx whose body is malformed, missing fields,
-///   or naming a different capture identity or record digest is an UNKNOWN outcome: the audio is
-///   retained and the SAME immutable record is retried. It is never treated as delivered, and the
-///   local entry is never deleted for it.
+/// or naming a different capture identity or record digest is an UNKNOWN outcome: the audio is
+/// retained and the SAME immutable record is retried. It is never treated as delivered, and the
+/// local entry is never deleted for it.
 /// - **Ownership fences the settlement.** The attempt lease taken before the request is the only
-///   thing that may settle the entry. If the lease was reclaimed while the request was in flight
-///   (expiry, revocation, another uploader), the answer is stale: the entry is left alone —
-///   `applyAttemptResult` refuses it — and the uploader reports a stale result rather than
-///   inventing an outcome for an entry it no longer owns.
+/// thing that may settle the entry. If the lease was reclaimed while the request was in flight
+/// (expiry, revocation, another uploader), the answer is stale: the entry is left alone —
+/// `applyAttemptResult` refuses it — and the uploader reports a stale result rather than
+/// inventing an outcome for an entry it no longer owns.
 /// - **Revocation wins over a late 2xx.** If authorization is withdrawn while a request is in
-///   flight, the entry is not quietly completed from the arriving response; it is discarded
-///   through the queue's revocation path so the durable hold/coverage rules apply.
+/// flight, the entry is not quietly completed from the arriving response; it is discarded
+/// through the queue's revocation path so the durable hold/coverage rules apply.
 /// - **Bounded retry, never a fresh identity.** Retryable failures (5xx, 429, transport) schedule
-///   the retry through `VoiceSharingRetryPolicy` for the SAME entry; the capture identity is minted
-///   once, at collection time, and is never regenerated here.
+/// the retry through `VoiceSharingRetryPolicy` for the SAME entry; the capture identity is minted
+/// once, at collection time, and is never regenerated here.
 ///
 /// Disabled by construction: this type performs work only when its caller invokes `upload(_:)`,
 /// and the production composition does not invoke it until the owner approves activation.
@@ -101,7 +101,7 @@ final class VoiceSharingUploader {
 
     /// Uploads one ready entry. Returns what happened; never throws into the caller's pipeline.
     func upload(_ entry: VoiceSharingUploadQueue.Entry) async -> Outcome {
-        // AUTHORIZATION FIRST: no request is ever issued without a live permission.
+        // AUTHORIZATION first: no request is ever issued without a live permission.
         guard isAuthorized() else {
             FileLog.shared.addMessage(
                 "[VoiceSharing] upload disposition entry=\(entry.name) reason=not-authorized disposition=refused")
@@ -118,13 +118,13 @@ final class VoiceSharingUploader {
         // Ownership: taking the lease is what makes this attempt OURS. Note beginAttempt also
         // enforces the strict owner-wide coverage hold, so an unreconciled owner uploads nothing.
         // Ownership: ONE atomic admission yields the lease AND the attempt number together
-        // (reviewer 7dd1e357). Reading them separately let a reclaim in between make this uploader
+        // . Reading them separately let a reclaim in between make this uploader
         // settle under a SUCCESSOR's lease. Only this token may settle from here on.
         let admitted: VoiceSharingUploadQueue.AdmittedAttempt
         do {
             guard let granted = try queue.admitAttempt(entry) else {
                 // The queue logs the PRECISE refusal reason (admit refusal reason=…); this line
-                // records only that the upload attempt ended there (spec c83a92fa).
+                // records only that the upload attempt ended there.
                 FileLog.shared.addMessage(
                     "[VoiceSharing] upload disposition entry=\(entry.name) reason=admission-refused disposition=refused")
                 FileLog.shared.forceFlush()
@@ -166,7 +166,7 @@ final class VoiceSharingUploader {
             return .unavailable(reason: "entry unreadable: \(type(of: error))")
         }
 
-        // LAUNCH FENCE — THE LAST POINT BEFORE BYTES LEAVE (reviewer ee5b4547): the request is
+        // LAUNCH fence — THE last point before bytes leave: the request is
         // built and about to go to the transport, which will acquire the credential and send.
         // An identity move since admission must stop here: A's bytes are never launched under
         // B's authority, and a post-response check cannot repair that disclosure.
@@ -189,8 +189,8 @@ final class VoiceSharingUploader {
             networkGate == nil || networkToken.map { networkGate!.isCurrent($0) } == true
         })
 
-        // DIAGNOSTIC — IMMEDIATELY after the await, BEFORE any cancellation/network/identity/
-        // authorization fence (reviewer fcbd232c): a received response must never vanish from the
+        // DIAGNOSTIC — IMMEDIATELY after the await, before any cancellation/network/identity/
+        // authorization fence: a received response must never vanish from the
         // trace because a fence fired first. Content-free: status and fixed-vocabulary code only.
         switch result {
         case .transportFailure:
@@ -211,7 +211,7 @@ final class VoiceSharingUploader {
             return settleRetry(entry: entry, lease: lease, attempt: attemptNumber, serverRetryAfter: nil)
         }
 
-        // ATTEMPT-LIFETIME FENCE (spec 67dd62d7): the identity this attempt was ADMITTED under must
+        // ATTEMPT-LIFETIME fence: the identity this attempt was ADMITTED under must
         // still be the live one. Admission-time binding alone cannot see an account/epoch move that
         // lands while the request is in flight, and a late 2xx must not settle an entry whose
         // identity has since changed. Only checked when the queue supplied an identity.
@@ -223,7 +223,7 @@ final class VoiceSharingUploader {
             _ = try? queue.applyAttemptResult(entry, lease: lease, outcome: .retryableFailure)
             return .revoked
         }
-        // REVOCATION CHECK IMMEDIATELY AFTER THE AWAIT (reviewer/spec obligation): a withdrawal
+        // REVOCATION check immediately after the await (reviewer/spec obligation): a withdrawal
         // that landed while the request was in flight must not be overridden by a late 2xx.
         if !isAuthorized() {
             // The lease must still be released; the entry is left for the revocation path.
@@ -237,7 +237,7 @@ final class VoiceSharingUploader {
         switch result {
         case .transportFailure:
             // Final disposition of a response-less attempt. Observable fact only: no response
-            // arrived; this does NOT establish whether bytes left the device.
+            // arrived; this does not establish whether bytes left the device.
             FileLog.shared.addMessage(
                 "[VoiceSharing] upload disposition entry=\(entry.name) reason=no-response disposition=retry")
             FileLog.shared.forceFlush()
@@ -259,7 +259,7 @@ final class VoiceSharingUploader {
             FileLog.shared.addMessage(
                 "[VoiceSharing] upload disposition entry=\(entry.name) reason=unauthorized disposition=retry")
             FileLog.shared.forceFlush()
-                // AUTHENTICATION, not a verdict on the record (reviewer 7dd1e357). The credential
+                // AUTHENTICATION, not a verdict on the record. The credential
                 // is refreshed out of band and the SAME immutable entry is retried; deleting it
                 // here would discard a valid recording because of a stale token.
                 return settleRetry(entry: entry, lease: lease, attempt: attemptNumber,
@@ -276,7 +276,7 @@ final class VoiceSharingUploader {
             FileLog.shared.addMessage(
                 "[VoiceSharing] upload disposition entry=\(entry.name) reason=quota-exceeded disposition=retry")
             FileLog.shared.forceFlush()
-                // quota_exceeded (spec c74d7e30): the day is metered from ACTUAL accepted bytes
+                // quota_exceeded: the day is metered from ACTUAL accepted bytes
                 // and resets at next UTC midnight. A day-scale refusal is not something the
                 // exponential ladder should burn attempts against: the floor applies whether or
                 // not the server sent a hint, and a hint can only extend it, never shorten it
@@ -293,9 +293,9 @@ final class VoiceSharingUploader {
                 return settleRetry(entry: entry, lease: lease, attempt: attemptNumber,
                                    serverRetryAfter: nil)
             case 400, 409, 410, 413, 415, 422:
-                // THE OWNING TABLE's terminal dispositions ONLY — and the BODY must carry the
-                // code the table pairs with this status (spec 8c5eb290): a malformed body or an
-                // unrelated code under a terminal-looking status is NOT proof; it retains.
+                // THE owning table's terminal dispositions only — and the BODY must carry the
+                // code the table pairs with this status: a malformed body or an
+                // unrelated code under a terminal-looking status is not proof; it retains.
                 // 400 invalid_request, 409 capture_conflict, 410 record_gone/enrollment_retired,
                 // 413 payload_too_large, 415 unsupported_audio, 422 integrity_mismatch.
                 let code = Self.errorCode(body)
@@ -312,7 +312,7 @@ final class VoiceSharingUploader {
                 if statusCode == 400 && code == "invalid_request" {
                         // SPEC 1a0d3ffb: a recording the server refuses permanently is deleted
                         // from the queue at once, not kept. This supersedes the quarantine
-                        // compromise (reviewer 12f353d1, incident 2026-11-06): the queue always
+                        // compromise: the queue always
                         // drains, and capacity must not be held by unservable bytes.
                         FileLog.shared.addMessage(
                             "[VoiceSharing] upload disposition entry=\(entry.name) "
@@ -352,10 +352,10 @@ final class VoiceSharingUploader {
     }
 
     /// True while the identity the attempt was admitted under is still live. A reader that cannot
-    /// establish an identity (nil) is NOT a match: an unknown live identity cannot confirm a stale
+    /// establish an identity (nil) is not a match: an unknown live identity cannot confirm a stale
     /// one, so the fence holds.
     private func isIdentityCurrent(_ admitted: VoiceSharingUploadIdentity) -> Bool {
-        // ACCOUNT BINDING (spec 4afc6e43): the identity that must still hold is the ACCOUNT — A's
+        // ACCOUNT binding: the identity that must still hold is the ACCOUNT — A's
         // bytes never leave under B. The provenance epoch is not compared: a re-enrollment moves it
         // without changing the owner.
         guard let live = currentIdentity() else { return false }
@@ -378,7 +378,7 @@ final class VoiceSharingUploader {
         do {
             receipt = try Self.parseReceipt(body)
         } catch {
-            // UNKNOWN OUTCOME: retain audio, retry the same record. Never delete for a bad receipt.
+            // UNKNOWN outcome: retain audio, retry the same record. Never delete for a bad receipt.
             return unknownOutcome(entry: entry, lease: lease, attempt: attempt, reason: "malformed receipt")
         }
         // The PAIR must agree: 201 with "duplicate" or 200 with "accepted" is a contradiction —
@@ -393,7 +393,7 @@ final class VoiceSharingUploader {
               receipt.recordSHA256 == expected.recordSHA256 else {
             return unknownOutcome(entry: entry, lease: lease, attempt: attempt, reason: "receipt identity mismatch")
         }
-        // VERIFICATION EVIDENCE (reviewer 360ede39): log the accepted receipt's identifiers so a
+        // VERIFICATION evidence: log the accepted receipt's identifiers so a
         // drain can be reconciled against the server's object storage and byte accounting.
         FileLog.shared.addMessage("[VoiceSharing] upload ACCEPTED capture=\(receipt.captureID) receipt=\(receipt.receiptID) sha256=\(receipt.recordSHA256) status=\(receipt.status == .accepted ? "accepted" : "duplicate")")
         do {
@@ -429,7 +429,7 @@ final class VoiceSharingUploader {
         entry: VoiceSharingUploadQueue.Entry, lease: VoiceSharingUploadQueue.AttemptLease, attempt: Int,
         serverRetryAfter: Double?
     ) -> Outcome {
-        // ONE AUTHORITATIVE TRANSACTION (reviewer ce001b9a / spec b9a416d6): the queue validates
+        // ONE authoritative transaction: the queue validates
         // the lease FIRST, publishes the durable boundary inside the same serialized operation,
         // and only then releases. A stale result can neither settle nor touch a successor's
         // boundary; a failed barrier engages the owner-wide hold instead of degrading to advisory.
@@ -514,7 +514,7 @@ final class VoiceSharingUploader {
             throw ReceiptError.notJSON
         }
         // schema_version must be the INTEGER 1. `as? Int` would bridge a JSON boolean to 1, which
-        // would let `true` authorize a receipt (reviewer 7dd1e357).
+        // would let `true` authorize a receipt.
         guard Self.isExactInteger(object["schema_version"], 1) else {
             throw ReceiptError.missingField("schema_version")
         }
@@ -577,7 +577,7 @@ final class VoiceSharingUploader {
         return date
     }
 
-    /// The ONLY two statuses a trustworthy receipt may carry. A string field would let new server
+    /// The only two statuses a trustworthy receipt may carry. A string field would let new server
     /// values silently read as accepted.
     enum ReceiptStatus: String {
         case accepted
@@ -638,7 +638,7 @@ final class VoiceSharingUploader {
     }
 
     /// The effective Retry-After for a settled attempt. For `429 quota_exceeded` the floor is
-    /// the seconds until the NEXT UTC midnight (the quota's actual reset): absent hint → floor;
+    /// the seconds until the NEXT utc midnight (the quota's actual reset): absent hint → floor;
     /// hint below the floor → floor; hint above the floor → the hint, unchanged. Any other
     /// status/code combination returns the hint as received — a non-quota response must keep
     /// the plain hint-passing behavior, and the floor is a quota mechanism, not a general one.

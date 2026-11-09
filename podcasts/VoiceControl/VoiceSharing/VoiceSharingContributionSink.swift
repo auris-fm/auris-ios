@@ -4,10 +4,10 @@ import PocketCastsUtils
 /// The collector's production sink: turns completed collector events into durable queue entries
 /// (encode → `prepare` → `finalize`), gated on the live collection policy.
 ///
-/// Authorization binding (reviewer 5357d089/5b1ba085/70e5fc58): each event captures the CURRENT
+/// Authorization binding: each event captures the CURRENT
 /// revocation generation at enqueue (slot lock, short), and the publication transaction — the
 /// final gate re-checks and `finalize` — runs inside ONE critical section (`publicationLock`)
-/// shared with `noteRevocation()`. A withdrawal cannot interleave between the final check and
+/// shared with `noteRevocation`. A withdrawal cannot interleave between the final check and
 /// publication;
 /// an event queued under a superseded authorization never publishes even if the gate later reads
 /// true again (account switch / off→on). Revocation also routes through the ASSEMBLY gate-lost
@@ -17,21 +17,21 @@ import PocketCastsUtils
 /// bound must hold while the worker is blocked, not merely inside it), enqueues, and returns.
 /// Over the compiled ceiling the event is dropped and logged.
 ///
-/// Admission before allocation (reviewer 5b1ba085): the sink asks the queue for its remaining
-/// byte allowance and refuses BEFORE encoding the WAV/metadata copies. `prepare` still re-checks
+/// Admission before allocation: the sink asks the queue for its remaining
+/// byte allowance and refuses before encoding the WAV/metadata copies. `prepare` still re-checks
 /// exactly at write time.
 ///
-/// Error discipline: the sink NEVER throws into the segment pipeline. Failures are logged with
+/// Error discipline: the sink never throws into the segment pipeline. Failures are logged with
 /// opaque IDs only (no audio, no transcript) and the event is dropped.
 final class VoiceSharingContributionSink {
-    /// Compiled ceiling on events awaiting the worker. NOT an activation value.
+    /// Compiled ceiling on events awaiting the worker. not an activation value.
     static let maxPendingEvents = 16
 
     private let queue: VoiceSharingUploadQueue
     private let isEnabled: () -> Bool
     private let encoderProvenance: () -> VoiceSharingContributionEncoder.Provenance
     private let observations: () -> [String: VoiceSharingContributionEncoder.StageOutcome]
-    /// PUBLICATION → DRAIN (spec 5ffbfdd5). A durably published entry is uploadable work, and the
+    /// PUBLICATION → DRAIN. A durably published entry is uploadable work, and the
     /// upload trigger's only other entrances are lifecycle/network events — so a recording made in
     /// an already-foreground app would wait for the owner to leave and return. Invoked ONCE per
     /// successful `finalize`, on the narrow success path only: retry / removal / quarantine also
@@ -41,10 +41,10 @@ final class VoiceSharingContributionSink {
     private let requestUploadDrain: () -> Void
     private let workerQueue = DispatchQueue(label: "fm.auris.voicesharing.contribution-sink")
 
-    /// TWO locks, deliberately (reviewer 70e5fc58): `slotLock` is held ONLY for the short
+    /// TWO locks, deliberately: `slotLock` is held only for the short
     /// admission/accounting steps (slot reservation, generation capture, the final gate read), so
     /// `handle` returns promptly on the audio caller even while a slow publication is running disk
-    /// work. `publicationLock` serializes the publication transaction with `noteRevocation()` so a
+    /// work. `publicationLock` serializes the publication transaction with `noteRevocation` so a
     /// withdrawal cannot interleave between the final checks and `finalize`. Never nest them in the
     /// opposite order: publicationLock → slotLock only, never slotLock → publicationLock.
     private let slotLock = NSLock()
@@ -135,7 +135,7 @@ final class VoiceSharingContributionSink {
 
     private func process(_ pending: PendingEvent) {
         testingWorkerGate?()
-        // Admission BEFORE allocation: is there room for another RECORD? (spec a3ef694f). The queue
+        // Admission before allocation: is there room for another RECORD?. The queue
         // no longer bounds bytes, so there is no worst-case size to compute — and no size arithmetic
         // that can itself fail and drop the capture.
         guard queue.hasAdmissionAllowance() else {
@@ -160,7 +160,7 @@ final class VoiceSharingContributionSink {
             provenance.captureSessionID = session
         }
         do {
-            // ENGINE-PRODUCED OBSERVATIONS WIN (review c48461e6): the event carries the stages the
+            // ENGINE-PRODUCED observations win: the event carries the stages the
             // recogniser actually reported for this capture; a claim supplied by the caller covers only
             // stages the engine did not report. A caller can therefore never overwrite a real
             // observation with its own narrative, and the recorded claim traces to the engine.
@@ -182,7 +182,7 @@ final class VoiceSharingContributionSink {
                 return
             }
             let entry = try queue.prepare(metadata: encoded.metadataEnvelope, audio: encoded.wav)
-            // Gate check 3 + finalize in the SAME critical section: a noteRevocation() cannot
+            // Gate check 3 + finalize in the SAME critical section: a noteRevocation cannot
             // land between this check and publication — it waits for the lock, and the next
             // reader (purge in the assembly) removes what this transaction published.
             guard isEnabled(), currentGeneration() == pending.capturedGeneration else {
@@ -195,7 +195,7 @@ final class VoiceSharingContributionSink {
                 return
             }
             try queue.finalize(entry)
-            // ONLY after `finalize` RETURNED: the entry is then durably ready, so this is the
+            // only after `finalize` RETURNED: the entry is then durably ready, so this is the
             // narrow success path (a thrown finalize never reaches it).
             requestUploadDrain()
         } catch {

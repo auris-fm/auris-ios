@@ -12,9 +12,9 @@ import Foundation
 /// that round-trips to the same `Double` — the same guarantee ECMA-262 step 5 requires. The
 /// PRESENTATION is rebuilt here from the digits and decimal exponent, following ECMA-262
 /// `Number::toString` steps 14–20 exactly:
-///   * `-0` renders as `0` (and `0` as `0`);
-///   * exponent strictly between -6 and 21 (exclusive at 21) renders in fixed notation;
-///   * otherwise exponential with an explicit `+`/`-` and no zero padding.
+/// * `-0` renders as `0` (and `0` as `0`);
+/// * exponent strictly between -6 and 21 (exclusive at 21) renders in fixed notation;
+/// * otherwise exponential with an explicit `+`/`-` and no zero padding.
 ///
 /// Precedent: the reviewed Android lane's `CanonicalJson.formatNumber`/`renderEs` does the same
 /// rendering over its Ryu digits; this is the equivalent over Swift's shortest digits.

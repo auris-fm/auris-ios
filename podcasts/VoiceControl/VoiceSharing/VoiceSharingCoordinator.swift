@@ -6,20 +6,20 @@ import PocketCastsServer
 
 /// Observes consent authority changes and fans out gate-loss.
 ///
-/// SIMPLIFIED CONTRACT (spec `4afc6e43`): there is no policy snapshot, no lease, no exchange,
+/// SIMPLIFIED contract: there is no policy snapshot, no lease, no exchange,
 /// no retry machinery and no second identity lifecycle. The coordinator is now exactly two
 /// things:
 ///
-///   1. THE GATE-LOSS FAN-OUT — one registration point for the pipeline (sink, collector,
-///      trigger, queue purge predicate). Loss of consent or a transient gate move reaches every
-///      registered handler through one snapshot-and-invoke; whether recordings are PURGED is
-///      decided by the consent predicate in the handler (spec e1529db9: explicit withdrawal
-///      clears, temporary loss retains).
-///   2. PROJECTION REFRESH — on sign-in/launch it fetches the account's sharing view and applies
-///      it to the enrollment store. This is how a withdrawal made on another device reaches the
-///      consent authority (store observer → gate-lost fan-out → purge predicate), and how the
-///      settings surface shows the account's enrolled truth. The server re-checks enrollment at
-///      accept; nothing here is an upload-readiness gate.
+/// 1. THE gate-LOSS fan-OUT — one registration point for the pipeline (sink, collector,
+/// trigger, queue purge predicate). Loss of consent or a transient gate move reaches every
+/// registered handler through one snapshot-and-invoke; whether recordings are PURGED is
+/// decided by the consent predicate in the handler (: explicit withdrawal
+/// clears, temporary loss retains).
+/// 2. PROJECTION refresh — on sign-in/launch it fetches the account's sharing view and applies
+/// it to the enrollment store. This is how a withdrawal made on another device reaches the
+/// consent authority (store observer → gate-lost fan-out → purge predicate), and how the
+/// settings surface shows the account's enrolled truth. The server re-checks enrollment at
+/// accept; nothing here is an upload-readiness gate.
 final class VoiceSharingCoordinator {
     static let shared = VoiceSharingCoordinator()
 
@@ -37,7 +37,7 @@ final class VoiceSharingCoordinator {
         let store = enrollmentStore ?? .shared
         self.enrollmentStore = store
         self.cohortPublisher = cohortPublisher ?? VoiceSharingCohortPublisher(store: store)
-        // THE BASELINE ARRIVES FROM THE STORE, ATOMICALLY WITH THE SUBSCRIPTION (spec 8a9c057f).
+        // THE baseline arrives from the store, ATOMICALLY with the subscription.
         // Seeding here from separate reads left a window: a withdrawal landing between the read
         // and the registration was already inside the baseline, so the first comparison found
         // "no change" and the loss was never reported. The observer below is therefore called by
@@ -48,20 +48,20 @@ final class VoiceSharingCoordinator {
         membershipObserverToken = store.addObserver { [weak self] transition in
             guard let self else { return }
             self.refreshCohortAttributes()
-            // THE FAN-OUT IS FOR A CONSENT LOSS, NOT FOR "SOMETHING CHANGED" (2026-11-05). This
-            // observer used to fire `consentGateLost()` on EVERY store notification — including a
+            // THE fan-OUT is for A CONSENT loss, not for "SOMETHING changed". This
+            // observer used to fire `consentGateLost` on EVERY store notification — including a
             // first authoritative projection and the ordinary sign-in transition. The foreground
-            // path refreshes the projection, the refresh applies the membership, `notify()` fires,
-            // and the handler called `uploadTrigger?.stop()` — cancelling the very drain the same
+            // path refreshes the projection, the refresh applies the membership, `notify` fires,
+            // and the handler called `uploadTrigger?.stop` — cancelling the very drain the same
             // foreground event had just started, ~1 ms later. Measured on a live build: 32 retained
             // recordings could never drain because the routine refresh stopped them first.
             //
-            // TWO triggers, both real losses (spec d28fb334): consent truth going permitted →
-            // not, OR the account itself changing — an ACCOUNT REPLACEMENT must cancel even when
+            // TWO triggers, both real losses: consent truth going permitted →
+            // not, OR the account itself changing — an ACCOUNT replacement must cancel even when
             // both accounts are opted in, because in-flight work belongs to the old owner. A
             // same-account projection refresh is neither, so it stops nothing.
             //
-            // ORDER, NOT JUST MUTUAL EXCLUSION (spec 8a9c057f). `notify()` invokes callbacks on
+            // ORDER, not just mutual exclusion. `notify` invokes callbacks on
             // the mutating thread outside the store lock, so two notifications can be delivered
             // out of order: an OLDER snapshot arriving after a newer one. A lock alone makes each
             // comparison safe and still lets that stale callback overwrite the newer baseline —
@@ -121,7 +121,7 @@ final class VoiceSharingCoordinator {
     /// replacement even if the injected scope string stays identical.
     private var lastConsentUserID: String?
     private var lastConsentTruth = false
-    /// The account scope the last notification described, so an ACCOUNT REPLACEMENT is told apart
+    /// The account scope the last notification described, so an ACCOUNT replacement is told apart
     /// from a same-account membership update even when both accounts hold consent.
     private var lastConsentScope: String?
     private var gateLostHandlers: [UUID: () -> Void] = [:]
@@ -188,7 +188,7 @@ final class VoiceSharingCoordinator {
         startupAuthReadable: @escaping () -> Bool = { SyncManager.isUserLoggedIn() },
         // The refresh the identity notifications SCHEDULE must be driveable by a control at the
         // exact boundary where it happens, instead of being replaced afterwards by a separate call
-        // that never awaits those tasks (reviewer 6a607a01).
+        // that never awaits those tasks.
         scheduledRefreshClient: VoiceSharingAccountClient? = nil,
         loginStateReadable: @escaping () -> Bool = { SyncManager.isUserLoggedIn() }
     ) -> () -> Void {
@@ -232,15 +232,15 @@ final class VoiceSharingCoordinator {
         }
     }
 
-    /// Scheduled-work OBSERVER (spec c2d2f7fe): the coordinator keeps NO registry of its refresh
+    /// Scheduled-work OBSERVER: the coordinator keeps NO registry of its refresh
     /// tasks. Production passes nothing, so a notification's refresh is an ordinary fire-and-forget
     /// `Task` that the runtime owns and releases — there is no list to grow, no cap to enforce and
     /// no handle to leak. A control passes an observer to be handed each task as it is created, so
     /// it can settle exactly the work the notification started.
     ///
     /// Why not a registry: an earlier version kept one and capped it. Capping discards handles for
-    /// work that is still running, so `awaitScheduledRefreshes()` could no longer await it
-    /// (reviewer 4546a238) — a test convenience that silently changes what is observable.
+    /// work that is still running, so `awaitScheduledRefreshes` could no longer await it
+    /// — a test convenience that silently changes what is observable.
     struct ScheduledWorkObserver {
         let didSchedule: (Task<Void, Never>) -> Void
         init(didSchedule: @escaping (Task<Void, Never>) -> Void) { self.didSchedule = didSchedule }
@@ -278,7 +278,7 @@ final class VoiceSharingCoordinator {
 
     /// Fetches the account's sharing view and applies it to the store. Called on sign-in, at
     /// launch (from the ordinary remote-config refresh entry) and by account operations that need
-    /// a follow-up read. This is the ONLY remaining coordinator-driven server interaction, and it
+    /// a follow-up read. This is the only remaining coordinator-driven server interaction, and it
     /// is not a readiness gate: unknown/stale projections keep consent as the user left it.
     func refreshProjectionFromServer(accountClient: VoiceSharingAccountClient? = nil) async {
         let client = accountClient ?? CloudTokenProviderRouter.voiceSharingProvider().map {

@@ -1,7 +1,7 @@
 import Foundation
 
 /// Binds upload authorization to the identity it was granted under — account scope plus the
-/// server-issued enrollment epoch (spec 724577f3).
+/// server-issued enrollment epoch.
 ///
 /// `permitsCollection` answers "may this account collect NOW". That is not the same question a
 /// queued entry needs: an entry queued under epoch A must not be uploaded when the account has
