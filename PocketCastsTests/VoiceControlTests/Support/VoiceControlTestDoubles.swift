@@ -115,4 +115,3 @@ func seedLfmAssetsForTestingForPositive(manager: ModelManager, labelMap: String 
     """
     try? manifest.write(to: dir.appendingPathComponent("manifest.json"), atomically: true, encoding: .utf8)
 }
-

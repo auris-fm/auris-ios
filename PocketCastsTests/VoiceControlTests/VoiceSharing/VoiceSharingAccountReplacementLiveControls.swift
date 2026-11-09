@@ -30,14 +30,17 @@ final class VoiceSharingAccountReplacementLiveControls: XCTestCase {
     /// An entry whose epoch does not match the live identity is deleted, and nothing is sent.
     func test_aRecordingFromASupersededEpochIsDeletedRatherThanSent() async throws {
         let queue = VoiceSharingQueue(root: root)
-        try AudioFixture.makeReadyEntry(in: queue)
-        XCTAssertEqual(queue.count(), 1, "setup: one recording is retained")
-
+        _ = try await AudioFixture.makeReadyEntry(in: queue)
+        let pendingCount = await queue.count()
+        XCTAssertEqual(pendingCount, 1, "setup: one recording is retained")
         var sent: [VoiceSharingQueue.Entry] = []
         // The live identity now names a different epoch from the one on the record.
         let uploader = VoiceSharingUploader(
             queue: queue,
-            send: { entry in sent.append(entry); return .response(status: 201) },
+            send: { entry, _ in
+                sent.append(entry)
+                return .response(status: 201)
+            },
             refreshSignIn: { true },
             currentIdentity: { (account: "acct-2", epoch: "epoch-2") },
             sharingEnabled: { true },
@@ -47,15 +50,15 @@ final class VoiceSharingAccountReplacementLiveControls: XCTestCase {
 
         XCTAssertTrue(sent.isEmpty,
                       "a recording from another epoch must never be sent, not even to be refused")
-        XCTAssertEqual(queue.count(), 0,
-                       "and it does not survive: it belongs to an epoch that is gone")
+        let surviving = await queue.count()
+        XCTAssertEqual(surviving, 0, "and it does not survive: it belongs to an epoch that is gone")
     }
 
     /// The same recording IS sent while its own epoch is still current — so the refusal above is
     /// attributable to the epoch, not to the uploader simply never working.
     func test_aRecordingIsSentWhileItsOwnEpochIsCurrent() async throws {
         let queue = VoiceSharingQueue(root: root)
-        let fixture = try AudioFixture.makeReadyEntry(in: queue)
+        let fixture = try await AudioFixture.makeReadyEntry(in: queue)
         let record = try XCTUnwrap(
             JSONSerialization.jsonObject(with: Data(contentsOf: fixture.metadataURL)) as? [String: Any])
         let recordedEpoch = try XCTUnwrap(record["enrollment_epoch"] as? String)
@@ -63,7 +66,10 @@ final class VoiceSharingAccountReplacementLiveControls: XCTestCase {
         var sent: [VoiceSharingQueue.Entry] = []
         let uploader = VoiceSharingUploader(
             queue: queue,
-            send: { entry in sent.append(entry); return .response(status: 201) },
+            send: { entry, _ in
+                sent.append(entry)
+                return .response(status: 201)
+            },
             refreshSignIn: { true },
             currentIdentity: { (account: "acct-1", epoch: recordedEpoch) },
             sharingEnabled: { true },
@@ -72,6 +78,7 @@ final class VoiceSharingAccountReplacementLiveControls: XCTestCase {
         await uploader.drain()
 
         XCTAssertEqual(sent.count, 1, "the owning epoch's recording does reach the wire")
-        XCTAssertEqual(queue.count(), 0, "and an accepted recording is deleted")
+        let pendingCount = await queue.count()
+        XCTAssertEqual(pendingCount, 0, "and an accepted recording is deleted")
     }
 }

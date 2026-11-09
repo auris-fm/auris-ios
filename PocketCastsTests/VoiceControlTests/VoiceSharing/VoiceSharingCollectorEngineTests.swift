@@ -901,10 +901,10 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         await chain.backend.emitSpeechThenSilence(
             level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
 
-        let ready = waitForReadyEntries(1)
+        let ready = await waitForReadyEntries(1)
         XCTAssertGreaterThanOrEqual(ready.count, 1,
                                     "a detector failure must still produce a durable record")
-        let entries = queue.entries()
+        let entries = await queue.entries()
         if entries.isEmpty { return XCTFail("coverage known") }
         var carried = false
         for entry in entries {
@@ -935,9 +935,9 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         chain.engine.listeningMode = .continuous
         await chain.backend.emitSpeechThenSilence(
             level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
-        _ = waitForReadyEntries(1)
+        _ = await waitForReadyEntries(1)
 
-        let entries = queue.entries()
+        let entries = await queue.entries()
         if entries.isEmpty {
             return XCTFail("a successful recognition must produce a durable record")
         }
@@ -967,9 +967,9 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         chain.engine.listeningMode = .continuous
         await chain.backend.emitSpeechThenSilence(
             level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
-        _ = waitForReadyEntries(1)
+        _ = await waitForReadyEntries(1)
 
-        let entries = queue.entries()
+        let entries = await queue.entries()
         if entries.isEmpty { return XCTFail("a durable record is required") }
         var sawEmptyResult = false
         for entry in entries {
@@ -1007,9 +1007,9 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         chain.engine.listeningMode = .continuous
         await chain.backend.emitSpeechThenSilence(
             level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
-        _ = waitForReadyEntries(1)
+        _ = await waitForReadyEntries(1)
 
-        let entries = queue.entries()
+        let entries = await queue.entries()
         if entries.isEmpty { return XCTFail("a record is required") }
         var asr: [String: Any]?
         for entry in entries {
@@ -1185,9 +1185,9 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             chain.engine.listeningMode = .continuous
             await chain.backend.emitSpeechThenSilence(
                 level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
-            _ = waitForReadyEntries(1)
+            _ = await waitForReadyEntries(1)
 
-            let entries = queue.entries()
+            let entries = await queue.entries()
             if entries.isEmpty { return XCTFail("\(testCase.label): a record is required") }
             var found: [String: Any]?
             for entry in entries {
@@ -1266,9 +1266,9 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             guard decisionContext != nil else {
                 return XCTFail("\(testCase.label): routing must receive the frozen capture")
             }
-            _ = waitForReadyEntries(1)
+            _ = await waitForReadyEntries(1)
 
-            let entries = queue.entries()
+            let entries = await queue.entries()
             if entries.isEmpty { return XCTFail("\(testCase.label): a record is required") }
             var sawRouting = false
             for entry in entries {
@@ -1376,9 +1376,9 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                     return XCTFail("\(matrixCase.name): routing must receive the frozen capture")
                 }
             }
-            _ = waitForReadyEntries(1)
+            _ = await waitForReadyEntries(1)
 
-            let entries = queue.entries()
+            let entries = await queue.entries()
             guard !entries.isEmpty else {
                 return XCTFail("\(matrixCase.name): a durable producer record is required")
             }
@@ -1468,9 +1468,9 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         chain.engine.listeningMode = .continuous
         await chain.backend.emitSpeechThenSilence(
             level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
-        _ = waitForReadyEntries(1)
+        _ = await waitForReadyEntries(1)
 
-        let entries = queue.entries()
+        let entries = await queue.entries()
         if entries.isEmpty { return XCTFail("an observed negative wake must still publish a record") }
         // A capture produces TWO records by design: a `started` event at segment start, before any engine
         // observation exists, and the completion carrying what the engine actually decided. The COMPLETION
@@ -1573,8 +1573,8 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             XCTAssertTrue(released, "\(abandoned): the consumer must be handed the capture")
 
             // A RELEASE is what makes a completion publish; a capture left owned never reaches here.
-            _ = waitForReadyEntries(1)
-            let entries = queue.entries()
+            _ = await waitForReadyEntries(1)
+            let entries = await queue.entries()
             if entries.isEmpty {
                 return XCTFail("\(abandoned): a released capture must publish a record")
             }
@@ -1666,7 +1666,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                 released = true
                 return true
             }
-            let watermark = recordWatermark()
+            let watermark = await recordWatermark()
             await chain.backend.emitSpeechThenSilence(
                 level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
             let deadline = Date().addingTimeInterval(5)
@@ -1674,8 +1674,9 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                 try await Task.sleep(nanoseconds: 20_000_000)
             }
             XCTAssertTrue(released, "\(label): the consumer must be handed the capture")
-            _ = waitForReadyEntries(1)
-            let record = try XCTUnwrap(try durableRecordsSince(watermark).first, label)
+            _ = await waitForReadyEntries(1)
+            let freshRecords = try await durableRecordsSince(watermark)
+            let record = try XCTUnwrap(freshRecords.first, label)
             let exec = try XCTUnwrap(
                 (record["observations"] as? [String: Any])?["execution"] as? [String: Any], label)
             if let expected {
@@ -1714,7 +1715,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         XCTAssertEqual(chain.backend.transcribeCalls, 0, "premise: bleed skip performs no recognition")
 
         // The queue persists asynchronously even under synchronous delivery; wait for the durable entry.
-        let ready = waitForReadyEntries(1)
+        let ready = await waitForReadyEntries(1)
         XCTAssertEqual(ready.count, 1, "the bleed-rejected segment remains a collectable record")
         // Identified by the record's OWN capture id, never by queue order.
         let expectedID = try XCTUnwrap(frozen?.id.uuidString)
@@ -1757,9 +1758,9 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         chain.engine.listeningMode = .continuous
         await chain.backend.emitSpeechThenSilence(
             level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
-        _ = waitForReadyEntries(1)
+        _ = await waitForReadyEntries(1)
 
-        let entries = queue.entries()
+        let entries = await queue.entries()
         if entries.isEmpty { return XCTFail("a durable record is required") }
         var asrBlocks: [[String: Any]] = []
         for entry in entries {
@@ -1801,8 +1802,8 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         chain.engine.listeningMode = .continuous
         await chain.backend.emitSpeechThenSilence(
             level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
-        _ = waitForReadyEntries(1)
-        let entries = queue.entries()
+        _ = await waitForReadyEntries(1)
+        let entries = await queue.entries()
         if entries.isEmpty { return XCTFail("coverage known") }
         // Group by capture: the question is what a SINGLE capture's record says, not what some unrelated
         // record in the same run says. The harness can close more than one segment.
@@ -1845,8 +1846,8 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         chain.grace.onWakeWordDetected()
         await chain.backend.emitSpeechThenSilence(
             level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
-        _ = waitForReadyEntries(1)
-        let entries = queue.entries()
+        _ = await waitForReadyEntries(1)
+        let entries = await queue.entries()
         if entries.isEmpty { return XCTFail("coverage known") }
         // The negative verdict lives in `decision`, not `reason`: a completed stage
         // carries no reason, so a reason-shaped assertion here would be asserting a refused payload.
@@ -1981,7 +1982,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { [weak self] in self?.storeState.membership.enrollmentEpoch },
             sessionIdentity: { [weak self] in self?.engineStoreSession ?? "gen-A" },
-            sink: { event in sink.handle(event) })
+            sink: { event in Task { await sink.handle(event) } })
         collector.deliversSynchronouslyForTesting = true
         sinkUnderTest = sink
         let backend = EngineStubBackend()
@@ -2040,14 +2041,14 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         }
     }
 
-    private func waitForReadyEntries(_ count: Int, timeout: TimeInterval = 5) -> [VoiceSharingQueue.Entry] {
+    private func waitForReadyEntries(_ count: Int, timeout: TimeInterval = 5) async -> [VoiceSharingQueue.Entry] {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            let ready = queue.entries()
+            let ready = await queue.entries()
             if ready.count >= count { return ready }
             RunLoop.current.run(until: Date().addingTimeInterval(0.02))
         }
-        return queue.entries()
+        return await queue.entries()
     }
 
     /// THE control: speech driven through the real engine's capture callback becomes a durable ready
@@ -2068,12 +2069,12 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         await chain.backend.emitSpeechThenSilence(
             level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
 
-        let ready = waitForReadyEntries(1)
+        let ready = await waitForReadyEntries(1)
         XCTAssertGreaterThanOrEqual(ready.count, 1,
                        "the real engine's observer must produce a durable ready entry, not just a callback")
         // ANTI-VACUITY: the entry must be produced by a real capture, and its record must actually carry
         // the unknown/observation_unavailable pair — not merely "some entry exists".
-        let entries = queue.entries()
+        let entries = await queue.entries()
         guard !entries.isEmpty else { return XCTFail("a ready entry is required") }
         // The pipeline can emit more than one record (a segment the wake rejected, then a completed one).
         // Inspect the one that carried the engine's wake report.
@@ -2126,7 +2127,8 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
         // The sink publishes synchronously inside handle(), so by the time the audio has been driven
         // through the engine any record it produced is already on disk or was never produced.
-        XCTAssertEqual(queue.entries().count, 0,
+        let survivorEntries = await queue.entries()
+        XCTAssertEqual(survivorEntries.count, 0,
                        "a record the validator refuses must never become ready, even from the real engine")
     }
     // MARK: - PHASE 2 DURABLE output
@@ -2142,9 +2144,9 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     /// Reads every READY entry's `metadata.json` off disk and returns the decoded RECORD objects, keyed by
     /// capture id. Fails the calling control if the queue is not ready or an entry will not bind — an
     /// unbindable record is not a record the server would accept, so it cannot count as evidence.
-    private func durableRecords(_ file: StaticString = #filePath, line: UInt = #line) throws
+    private func durableRecords(_ file: StaticString = #filePath, line: UInt = #line) async throws
         -> [String: [String: Any]] {
-        let entries = queue.entries()
+        let entries = await queue.entries()
         var records: [String: [String: Any]] = [:]
         for entry in entries {
             let directory = entry.url
@@ -2169,15 +2171,23 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     /// asr reason X" silently picked a fixture whose `wake_required` is the default, which made a
     /// grace control fail while passing in isolation. Each control calls this once before driving audio,
     /// and only captures not already present are considered its own.
-    private func recordWatermark() -> Set<String> {
-        Set(queue.entries().map { $0.name })
+    private func recordWatermark() async -> Set<String> {
+        Set(await queue.entries().map { $0.name })
     }
 
     private func durableRecordsSince(_ watermark: Set<String>, _ file: StaticString = #filePath,
-                                     line: UInt = #line) throws -> [[String: Any]] {
-        let records = try durableRecords(file, line: line)
-        let entries = queue.entries()
-        let fresh = Set(entries.map { $0.name }).subtracting(watermark)
+                                     line: UInt = #line) async throws -> [[String: Any]] {
+        let records = try await durableRecords(file, line: line)
+        // Delivery reaches the sink on a task, so the record may land just after the engine returns.
+        // Waiting here keeps a real gap (nothing ever arrives) failing the control below.
+        var entries = await queue.entries()
+        var fresh = Set(entries.map { $0.name }).subtracting(watermark)
+        let deadline = Date().addingTimeInterval(5)
+        while fresh.isEmpty, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+            entries = await queue.entries()
+            fresh = Set(entries.map { $0.name }).subtracting(watermark)
+        }
         XCTAssertFalse(fresh.isEmpty,
                        "the capture this control drove must reach a durable entry", file: file, line: line)
         var mine: [[String: Any]] = []
@@ -2204,11 +2214,12 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         let chain = makeChain(wake: DetectedWake(), wakeThreshold: configuredThreshold,
                               claims: { [self] in claims })
         chain.engine.listeningMode = .wakeWord
-        let watermark = recordWatermark()
+        let watermark = await recordWatermark()
         await chain.backend.emitSpeechThenSilence(
             level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
 
-        let record = try XCTUnwrap(try durableRecordsSince(watermark).first)
+        let freshRecords = try await durableRecordsSince(watermark)
+        let record = try XCTUnwrap(freshRecords.first)
         XCTAssertEqual(record["wake_required"] as? Bool, true,
                        "wake-word mode without grace: the speech needed a wake word")
         let wake = try XCTUnwrap((record["observations"] as? [String: Any])?["wake"] as? [String: Any])
@@ -2234,11 +2245,12 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         chain.engine.listeningMode = .wakeWord
         // The production entry that opens a window; the engine reads `isActive` at segment start.
         chain.grace.onWakeWordDetected()
-        let watermark = recordWatermark()
+        let watermark = await recordWatermark()
         await chain.backend.emitSpeechThenSilence(
             level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
 
-        let record = try XCTUnwrap(try durableRecordsSince(watermark).first)
+        let freshRecords = try await durableRecordsSince(watermark)
+        let record = try XCTUnwrap(freshRecords.first)
         XCTAssertEqual(record["wake_required"] as? Bool, false,
                        "grace is active: the speech did not need a wake word")
         let graceWake = try XCTUnwrap((record["observations"] as? [String: Any])?["wake"] as? [String: Any],
@@ -2257,11 +2269,11 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         chain.engine.listeningMode = .wakeWord
         chain.backend.stubTranscript = "Auris play the news"
         chain.backend.stubLanguage = "en"
-        let watermark = recordWatermark()
+        let watermark = await recordWatermark()
         await chain.backend.emitSpeechThenSilence(
             level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
 
-        let commanded = try durableRecordsSince(watermark).filter {
+        let commanded = try await durableRecordsSince(watermark).filter {
             let asr = ($0["observations"] as? [String: Any])?["asr"] as? [String: Any]
             return (asr?["text"] as? String)?.contains("play the news") == true
         }
@@ -2287,11 +2299,12 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         chain.engine.listeningMode = .wakeWord
         chain.backend.stubTranscript = ""
         chain.backend.stubLanguage = "ja"
-        let watermark = recordWatermark()
+        let watermark = await recordWatermark()
         await chain.backend.emitSpeechThenSilence(
             level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
 
-        let record = try XCTUnwrap(try durableRecordsSince(watermark).first)
+        let freshRecords = try await durableRecordsSince(watermark)
+        let record = try XCTUnwrap(freshRecords.first)
         let asr = try XCTUnwrap((record["observations"] as? [String: Any])?["asr"] as? [String: Any])
         XCTAssertEqual(asr["state"] as? String, "completed",
                        "an empty recognition is a result, not a missing observation")
@@ -2309,11 +2322,11 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         chain.engine.listeningMode = .wakeWord
         chain.backend.stubTranscript = "?!"
         chain.backend.stubLanguage = "en"
-        let watermark = recordWatermark()
+        let watermark = await recordWatermark()
         await chain.backend.emitSpeechThenSilence(
             level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
 
-        let matching = try durableRecordsSince(watermark).filter {
+        let matching = try await durableRecordsSince(watermark).filter {
             (($0["observations"] as? [String: Any])?["asr"] as? [String: Any])?["text"] as? String == "?!"
         }
         XCTAssertEqual(matching.count, 1, "the non-content transcription reaches exactly one durable record")
@@ -2453,7 +2466,7 @@ final class VoiceSharingModelProvenanceTests: XCTestCase {
         let collector = VoiceSharingCollector(
             isCollectionPermitted: { true }, outcomeWaitLimit: .init(milliseconds: 25, ceilingMilliseconds: 100),
             monotonicNow: { scheduler.now }, scheduleOutcome: { scheduler.work.append(($0, $1)) },
-            membership: { membership }, epochProvider: { "epoch" }, sessionIdentity: { "session" }, sink: { sink.handle($0) })
+            membership: { membership }, epochProvider: { "epoch" }, sessionIdentity: { "session" }, sink: { event in Task { await sink.handle(event) } })
         collector.deliversSynchronouslyForTesting = true
         return collector
     }
@@ -2465,9 +2478,10 @@ final class VoiceSharingModelProvenanceTests: XCTestCase {
         return context
     }
 
-    private func records() throws -> [String: Data] {
+    private func records() async throws -> [String: Data] {
         var records: [String: Data] = [:]
-        for entry in queue.entries() {
+        let entries = await queue.entries()
+        for entry in entries {
             let data = try Data(contentsOf: entry.metadataURL)
             let record = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
             let captureID = try XCTUnwrap(record["capture_id"] as? String)
@@ -2496,12 +2510,13 @@ final class VoiceSharingModelProvenanceTests: XCTestCase {
         await fulfillment(of: [entered], timeout: 2)
         backend.replaceIdentity(.init(id: "asr", version: "B"))
         scheduler.fire()
-        let whileHeld = try records()[a.id.uuidString]
+        let heldRecords = try await records()
+        let whileHeld = heldRecords[a.id.uuidString]
         let b = try begin(collector)
         await engine.processUtterance(pcm, frozenContext: b)
         backend.releaseHeld()
         await pending.value
-        let final = try records()
+        let final = try await records()
         let frozen = try XCTUnwrap(whileHeld, "deadline must publish while real engine work remains held")
         XCTAssertEqual(final[a.id.uuidString], frozen, "late A cannot rewrite or duplicate its deadline winner")
         XCTAssertEqual(final.count, 2)
@@ -2515,7 +2530,7 @@ final class VoiceSharingModelProvenanceTests: XCTestCase {
         XCTAssertTrue(aModels["router"] is NSNull, "unused router remains null")
     }
 
-    func test_conflictingAndUnknownInvocationsCannotBecomeASingleVersionClaim() throws {
+    func test_conflictingAndUnknownInvocationsCannotBecomeASingleVersionClaim() async throws {
         let collector = collector()
         let invocations: [VoiceSharingContributionEncoder.ModelRef?] = [.init(id: "asr", version: "A"), nil]
         for first in invocations {
@@ -2525,7 +2540,8 @@ final class VoiceSharingModelProvenanceTests: XCTestCase {
             collector.engineUsedModel(slot: "asr", reference: first, context: context)
             collector.speechCompleted(pcm, context: context, deferEmission: true)
             collector.finalizeDeferredCompletion(context: context)
-            let data = try XCTUnwrap(records()[context.id.uuidString])
+            let allRecords = try await records()
+            let data = try XCTUnwrap(allRecords[context.id.uuidString])
             let models = try models(data)
             XCTAssertTrue(models["asr"] is NSNull)
             XCTAssertTrue(models["translation"] is NSNull)

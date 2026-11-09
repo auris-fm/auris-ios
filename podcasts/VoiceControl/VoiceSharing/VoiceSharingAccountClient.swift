@@ -258,8 +258,6 @@ final class VoiceSharingAccountClient {
                 // The only success: deleted, synchronously, with nothing to follow up on. There is no
                 // receipt to track, so nothing is reported as pending.
                 return .deleted
-            case 200 where data.isEmpty:
-                return .deleted
             case 401:
                 await tokenProvider.handleUnauthorized(rejectedToken: request.value(forHTTPHeaderField: "Authorization")?
                     .replacingOccurrences(of: "Bearer ", with: ""))

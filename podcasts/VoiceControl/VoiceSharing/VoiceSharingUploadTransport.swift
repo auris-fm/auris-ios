@@ -1,5 +1,25 @@
 import Foundation
 
+/// Holds a just-created transfer until its caller has published it for cancellation.
+private final class TransferGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var released = false
+
+    func waitUntilReleased() async {
+        while true {
+            lock.lock()
+            let isReleased = released
+            lock.unlock()
+            if isReleased { return }
+            await Task.yield()
+        }
+    }
+
+    func release() {
+        lock.lock(); released = true; lock.unlock()
+    }
+}
+
 /// Sends one recording as a single multipart request and reduces the answer to what the uploader
 /// decides on. There is no reservation, no second step and no receipt matching.
 final class VoiceSharingUploadTransport {
@@ -13,6 +33,8 @@ final class VoiceSharingUploadTransport {
     /// scheduling new work. Cancelling the task cancels the underlying request.
     private let inFlightLock = NSLock()
     private var inFlight: Task<(Data, URLResponse), any Error>?
+    /// Latched by cancellation, so a transfer that has not yet started never sends.
+    private var stopped = false
 
     init(baseURLProvider: @escaping () -> String,
          tokenProvider: CloudTokenProviding,
@@ -74,29 +96,31 @@ final class VoiceSharingUploadTransport {
 
     /// Runs one transfer, publishing it so `cancelInFlight()` can reach it.
     private func runInFlight(_ request: URLRequest, body: Data) async throws -> (Data, URLResponse) {
-        let task = Task { [session] in
-            try await session.upload(for: request, from: body)
-        }
+        // The task is created INSIDE the lock that `cancelInFlight()` takes, and is published before
+        // it is allowed to run: a stop arriving between creation and registration would otherwise
+        // find nothing to cancel and the upload would proceed anyway.
+        let gate = TransferGate()
         inFlightLock.lock()
-        guard !Task.isCancelled else { inFlightLock.unlock(); task.cancel(); throw URLError(.cancelled) }
+        if stopped {
+            inFlightLock.unlock()
+            throw URLError(.cancelled)
+        }
+        let task = Task { [session] in
+            await gate.waitUntilReleased()
+            return try await session.upload(for: request, from: body)
+        }
         inFlight = task
         inFlightLock.unlock()
         defer { inFlightLock.lock(); inFlight = nil; inFlightLock.unlock() }
+        gate.release()
         return try await task.value
-    }
-
-    /// One request under the session's elapsed-time budget.
-    ///
-    /// `timeoutIntervalForResource` counts wall-clock time for the whole transfer, so a body that
-    /// keeps trickling bytes cannot outlast it. Cancelling the enclosing task cancels the request.
-    private func transfer(_ request: URLRequest, body: Data) async throws -> (Data?, URLResponse) {
-        try await session.upload(for: request, from: body)
     }
 
     /// Cancels the request in flight, if any. Called when consent is withdrawn: the recording must
     /// not keep travelling to the server after the user said stop.
     func cancelInFlight() {
         inFlightLock.lock()
+        stopped = true
         let task = inFlight
         inFlight = nil
         inFlightLock.unlock()

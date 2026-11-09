@@ -32,17 +32,18 @@ final class VoiceSharingUploaderTests: XCTestCase {
         VoiceSharingQueue(root: root, now: now, log: { [weak self] in self?.log.append($0) })
     }
 
-    private func publish(_ queue: VoiceSharingQueue, name: String = UUID().uuidString) throws -> VoiceSharingQueue.Entry {
-        _ = queue.publish(
+    private func publish(_ queue: VoiceSharingQueue, name: String = UUID().uuidString) async throws -> VoiceSharingQueue.Entry {
+        _ = await queue.publish(
             audio: Data(repeating: 7, count: 16),
             metadata: Data(#"{"enrollment_epoch":"epoch-1"}"#.utf8),
             name: name)
-        return try XCTUnwrap(queue.entries().first { $0.name == name })
+        let published = await queue.entries()
+        return try XCTUnwrap(published.first { $0.name == name })
     }
 
     private func uploader(
         _ queue: VoiceSharingQueue,
-        answer: @escaping (VoiceSharingQueue.Entry) async -> VoiceSharingUploader.Answer,
+        answer: @escaping (VoiceSharingQueue.Entry, @escaping () -> Bool) async -> VoiceSharingUploader.Answer,
         refresh: @escaping () async -> Bool = { true },
         identity: @escaping () -> (account: String, epoch: String)? = { ("acct-1", "epoch-1") },
         sharing: @escaping () -> Bool = { true },
@@ -63,21 +64,22 @@ final class VoiceSharingUploaderTests: XCTestCase {
     func test_any2xxDeletesTheRecording() async throws {
         for status in [200, 201, 204] {
             let q = queue()
-            _ = try publish(q)
-            let u = uploader(q, answer: { _ in .response(status: status) })
+            _ = try await publish(q)
+            let u = uploader(q, answer: { _, _ in .response(status: status) })
             await u.drain()
-            XCTAssertEqual(q.count(), 0, "\(status) is an acceptance")
+            let pendingCount = await q.count()
+            XCTAssertEqual(pendingCount, 0, "\(status) is an acceptance")
         }
     }
 
     func test_401RefreshesSignInAndRetriesWithoutDeleting() async throws {
         let q = queue()
-        _ = try publish(q)
+        _ = try await publish(q)
         var refreshed = 0
         var calls = 0
         let u = uploader(
             q,
-            answer: { _ in
+            answer: { _, _ in
                 calls += 1
                 return calls == 1 ? .response(status: 401) : .response(status: 201)
             },
@@ -85,16 +87,18 @@ final class VoiceSharingUploaderTests: XCTestCase {
         await u.drain()
 
         XCTAssertEqual(refreshed, 1, "an expired sign-in is refreshed")
-        XCTAssertEqual(q.count(), 0, "the retry then succeeded")
+        let pendingCount = await q.count()
+        XCTAssertEqual(pendingCount, 0, "the retry then succeeded")
     }
 
     func test_401ThatCannotRefreshRetainsTheRecording() async throws {
         let q = queue()
-        _ = try publish(q)
-        let u = uploader(q, answer: { _ in .response(status: 401) }, refresh: { false })
+        _ = try await publish(q)
+        let u = uploader(q, answer: { _, _ in .response(status: 401) }, refresh: { false })
         await u.drain()
 
-        XCTAssertEqual(q.count(), 1, "a failed refresh says nothing about the recording")
+        let pendingCount = await q.count()
+        XCTAssertEqual(pendingCount, 1, "a failed refresh says nothing about the recording")
         XCTAssertFalse(log.contains { $0.hasPrefix("delete") })
     }
 
@@ -102,10 +106,11 @@ final class VoiceSharingUploaderTests: XCTestCase {
         for status in [400, 403, 404, 409, 410, 413, 415, 422] {
             try resetRoot()
             let q = queue()
-            _ = try publish(q)
-            let u = uploader(q, answer: { _ in .response(status: status) })
+            _ = try await publish(q)
+            let u = uploader(q, answer: { _, _ in .response(status: status) })
             await u.drain()
-            XCTAssertEqual(q.count(), 0, "\(status) is final")
+            let pendingCount = await q.count()
+            XCTAssertEqual(pendingCount, 0, "\(status) is final")
             XCTAssertTrue(log.contains { $0.contains("delete reason=refused-\(status)") },
                           "\(status) must delete for its own reason; log=\(log!)")
         }
@@ -115,54 +120,60 @@ final class VoiceSharingUploaderTests: XCTestCase {
         for status in [500, 502, 503] {
             try resetRoot()
             let q = queue()
-            _ = try publish(q)
-            let u = uploader(q, answer: { _ in .response(status: status) })
+            _ = try await publish(q)
+            let u = uploader(q, answer: { _, _ in .response(status: status) })
             let outcomes = await u.drain()
-            XCTAssertEqual(q.count(), 1,
+            let retained = await q.count()
+            let retainedNames = await q.entries().map(\.name)
+            XCTAssertEqual(retained, 1,
                            "\(status) is retryable; outcomes=\(outcomes) log=\(log!) "
-                           + "entries=\(q.entries().map(\.name))")
+                           + "entries=\(retainedNames)")
         }
     }
 
     func test_noAnswerAtAllRetainsTheRecording() async throws {
         let q = queue()
-        _ = try publish(q)
-        let u = uploader(q, answer: { _ in .noAnswer })
+        _ = try await publish(q)
+        let u = uploader(q, answer: { _, _ in .noAnswer })
         await u.drain()
-        XCTAssertEqual(q.count(), 1)
+        let pendingCount = await q.count()
+        XCTAssertEqual(pendingCount, 1)
     }
 
     // MARK: The delete conditions
 
     func test_sharingOffDeletesEveryRecording() async throws {
         let q = queue()
-        _ = try publish(q, name: "a")
-        _ = try publish(q, name: "b")
-        let u = uploader(q, answer: { _ in .response(status: 201) }, sharing: { false })
+        _ = try await publish(q, name: "a")
+        _ = try await publish(q, name: "b")
+        let u = uploader(q, answer: { _, _ in .response(status: 201) }, sharing: { false })
         await u.drain()
 
-        XCTAssertEqual(q.count(), 0)
+        let pendingCount = await q.count()
+        XCTAssertEqual(pendingCount, 0)
         XCTAssertTrue(log.contains { $0.contains("delete reason=sharing-off") })
     }
 
     func test_aRecordingFromAnotherEpochIsDeleted() async throws {
         let q = queue()
-        _ = try publish(q)
-        let u = uploader(q, answer: { _ in .response(status: 201) }, identity: { ("acct-1", "epoch-2") })
+        _ = try await publish(q)
+        let u = uploader(q, answer: { _, _ in .response(status: 201) }, identity: { ("acct-1", "epoch-2") })
         await u.drain()
 
-        XCTAssertEqual(q.count(), 0)
+        let pendingCount = await q.count()
+        XCTAssertEqual(pendingCount, 0)
         XCTAssertTrue(log.contains { $0.contains("delete reason=epoch-changed") })
     }
 
     func test_anUnreadableRecordingIsDeleted() async throws {
         let q = queue()
-        let entry = try publish(q)
+        let entry = try await publish(q)
         try Data("not json".utf8).write(to: entry.metadataURL)
-        let u = uploader(q, answer: { _ in .response(status: 201) })
+        let u = uploader(q, answer: { _, _ in .response(status: 201) })
         await u.drain()
 
-        XCTAssertEqual(q.count(), 0)
+        let pendingCount = await q.count()
+        XCTAssertEqual(pendingCount, 0)
         XCTAssertTrue(log.contains { $0.contains("delete reason=unreadable") })
     }
 
@@ -170,14 +181,16 @@ final class VoiceSharingUploaderTests: XCTestCase {
 
     func test_oneFailingRecordingDoesNotBlockTheOthers() async throws {
         let q = queue()
-        _ = try publish(q, name: "first")
-        _ = try publish(q, name: "second")
-        let u = uploader(q, answer: { entry in
+        _ = try await publish(q, name: "first")
+        _ = try await publish(q, name: "second")
+        let u = uploader(q, answer: { entry, _ in
             entry.name == "first" ? .response(status: 503) : .response(status: 201)
         })
         await u.drain()
 
-        XCTAssertEqual(q.count(), 1, "only the retryable one remains")
-        XCTAssertEqual(q.entries().first?.name, "first")
+        let pendingCount = await q.count()
+        XCTAssertEqual(pendingCount, 1, "only the retryable one remains")
+        let pendingEntries = await q.entries()
+        XCTAssertEqual(pendingEntries.first?.name, "first")
     }
 }

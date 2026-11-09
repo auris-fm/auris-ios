@@ -1,5 +1,6 @@
 import AVFoundation
 import Combine
+import Network
 import PocketCastsDataModel
 import PocketCastsServer
 import PocketCastsUtils
@@ -643,6 +644,8 @@ final class VoiceSharingLifetime {
     private let queue: VoiceSharingQueue
     private let enrollmentObserver: UUID
     private let foregroundObserver: NSObjectProtocol?
+    private let signInObserver: NSObjectProtocol?
+    private let pathMonitor: NWPathMonitor?
     private let notificationCenter: NotificationCenter
 
     init(settingsModel: VoiceSharingSettingsModel,
@@ -668,6 +671,20 @@ final class VoiceSharingLifetime {
         ) { [weak uploadTrigger] _ in
             uploadTrigger?.trigger()
         }
+        signInObserver = notificationCenter.addObserver(
+            forName: .userLoginDidChange, object: nil, queue: .main
+        ) { [weak uploadTrigger] _ in
+            uploadTrigger?.trigger()
+        }
+        // Network restored: recordings retained while offline should go out when the path is back,
+        // rather than waiting for the next foreground or retry boundary.
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak uploadTrigger] (path: NWPath) in
+            guard path.status == .satisfied else { return }
+            uploadTrigger?.trigger()
+        }
+        monitor.start(queue: DispatchQueue(label: "fm.auris.voice-sharing-network"))
+        pathMonitor = monitor
         // Startup: anything retained from a previous run is offered once, without waiting for an
         // unrelated event.
         uploadTrigger.trigger()
@@ -676,5 +693,7 @@ final class VoiceSharingLifetime {
     deinit {
         enrollmentStore.removeObserver(enrollmentObserver)
         if let foregroundObserver { notificationCenter.removeObserver(foregroundObserver) }
+        if let signInObserver { notificationCenter.removeObserver(signInObserver) }
+        pathMonitor?.cancel()
     }
 }

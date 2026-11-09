@@ -24,10 +24,11 @@ final class VoiceSharingUploadRequestShapeControls: XCTestCase {
     func test_theRequestDeclaresItsExactBodyLengthAndIsNotChunked() async throws {
         RecordingWire.shared.reset()
         let queue = VoiceSharingQueue(root: root, log: { _ in })
-        _ = queue.publish(audio: Data(repeating: 7, count: 4_096),
+        _ = await queue.publish(audio: Data(repeating: 7, count: 4_096),
                           metadata: Data(#"{"enrollment_epoch":"epoch-1"}"#.utf8),
                           name: "one")
-        let entry = try XCTUnwrap(queue.entries().first)
+        let published = await queue.entries()
+        let entry = try XCTUnwrap(published.first)
 
         let transport = VoiceSharingUploadTransport(
             baseURLProvider: { "https://unit.test" },
@@ -52,10 +53,11 @@ final class VoiceSharingUploadRequestShapeControls: XCTestCase {
         RecordingWire.shared.reset()
         let queue = VoiceSharingQueue(root: root, log: { _ in })
         let record = #"{"enrollment_epoch":"epoch-1","wake_required":true}"#
-        _ = queue.publish(audio: Data(repeating: 9, count: 256),
+        _ = await queue.publish(audio: Data(repeating: 9, count: 256),
                           metadata: Data(record.utf8),
                           name: "one")
-        let entry = try XCTUnwrap(queue.entries().first)
+        let published = await queue.entries()
+        let entry = try XCTUnwrap(published.first)
 
         let transport = VoiceSharingUploadTransport(
             baseURLProvider: { "https://unit.test" },

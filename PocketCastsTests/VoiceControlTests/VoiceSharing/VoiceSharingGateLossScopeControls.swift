@@ -196,7 +196,7 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
             readUnder: try XCTUnwrap(store.projectionToken()))
 
         let queue = VoiceSharingQueue(root: root)
-        _ = try makeReadyEntry(queue)
+        _ = try await makeReadyEntry(queue)
         let coordinator = VoiceSharingCoordinator(enrollmentStore: store)
         let wire = GateLossWire()
         // SUSPEND the real drain inside credential acquisition: the token provider is
@@ -258,7 +258,7 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
             readUnder: try XCTUnwrap(store.projectionToken()))
 
         let queue = VoiceSharingQueue(root: root)
-        _ = try makeReadyEntry(queue)
+        _ = try await makeReadyEntry(queue)
         let coordinator = VoiceSharingCoordinator(enrollmentStore: store)
         let wire = GateLossWire()
         // SUSPEND the real drain inside credential acquisition: the token provider is
@@ -597,7 +597,7 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
         XCTAssertFalse(store.consentAllowsCollection, "premise: consent is gone")
     }
 
-    private func makeReadyEntry(_ queue: VoiceSharingQueue) throws
+    private func makeReadyEntry(_ queue: VoiceSharingQueue) async throws
         -> VoiceSharingQueue.Entry
     {
         let samples: [Float] = [0, 0.25, -0.5, 0.5]
@@ -612,8 +612,10 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
             conversionVersion: "v1")
         let encoded = try VoiceSharingContributionEncoder.encode(
             event: event, provenance: provenance, observations: [:])
-        let name = try XCTUnwrap(queue.publish(audio: encoded.wav, metadata: encoded.metadata))
-        return try XCTUnwrap(queue.entries().first { $0.name == name })
+        let published = await queue.publish(audio: encoded.wav, metadata: encoded.metadata)
+        let name = try XCTUnwrap(published)
+        let all = await queue.entries()
+        return try XCTUnwrap(all.first { $0.name == name })
     }
 }
 

@@ -6,7 +6,7 @@ import Foundation
 /// schema change cannot silently divergence a fixture from what the app writes.
 enum AudioFixture {
     @discardableResult
-    static func makeReadyEntry(in queue: VoiceSharingQueue) throws -> VoiceSharingQueue.Entry {
+    static func makeReadyEntry(in queue: VoiceSharingQueue) async throws -> VoiceSharingQueue.Entry {
         let samples: [Float] = [0, 0.25, -0.5, 0.5]
         let event = VoiceSharingCollector.SegmentEvent(
             kind: .completed, captureID: UUID(),
@@ -19,9 +19,11 @@ enum AudioFixture {
             conversionVersion: "v1")
         let encoded = try VoiceSharingContributionEncoder.encode(
             event: event, provenance: provenance, observations: [:])
-        guard let name = queue.publish(audio: encoded.wav, metadata: encoded.metadata),
-              let entry = queue.entries().first(where: { $0.name == name })
+        guard let name = await queue.publish(audio: encoded.wav, metadata: encoded.metadata)
         else { throw XCTSkipWrapper("the queue refused the fixture recording") }
+        let entries = await queue.entries()
+        guard let entry = entries.first(where: { $0.name == name })
+        else { throw XCTSkipWrapper("the published recording is not readable back") }
         return entry
     }
 }

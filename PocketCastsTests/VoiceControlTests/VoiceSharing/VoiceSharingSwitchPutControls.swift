@@ -100,7 +100,7 @@ final class VoiceSharingSwitchPutControls: XCTestCase {
         VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
             Reply(status: 200, body: projectionBody("r8", enrolled: true, epoch: "e8"))
         let op = try XCTUnwrap(client.beginMembership(
-            enrolled: true, acceptedDisclosureVersion: "2026-09", lastReadRevision: "r7"))
+            enrolled: true, acceptedDisclosureVersion: "2026-09"))
         let outcome = await client.perform(op)
 
         XCTAssertEqual(putRequests.count, 1, "one PUT, not a POST pair or a retry")
@@ -126,7 +126,7 @@ final class VoiceSharingSwitchPutControls: XCTestCase {
         VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
             Reply(status: 200, body: projectionBody("r9", enrolled: false, epoch: nil))
         let op = try XCTUnwrap(client.beginMembership(
-            enrolled: false, acceptedDisclosureVersion: nil, lastReadRevision: "r8"))
+            enrolled: false, acceptedDisclosureVersion: nil))
         let outcome = await client.perform(op)
 
         let request = try XCTUnwrap(putRequests.first)
@@ -148,7 +148,7 @@ final class VoiceSharingSwitchPutControls: XCTestCase {
         VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
             Reply(status: 200, body: projectionBody("r8", enrolled: true, epoch: "e8"))
         let op = try XCTUnwrap(client.beginMembership(
-            enrolled: true, acceptedDisclosureVersion: "2026-09", lastReadRevision: "r7"))
+            enrolled: true, acceptedDisclosureVersion: "2026-09"))
         _ = await client.perform(op)
         _ = await client.perform(op)
 
@@ -167,12 +167,12 @@ final class VoiceSharingSwitchPutControls: XCTestCase {
     /// reaches the wire.
     func test_switchingWithNoRevisionReadIsRefusedLocally() async throws {
         XCTAssertNil(client.beginMembership(
-            enrolled: true, acceptedDisclosureVersion: "2026-09", lastReadRevision: nil),
+            enrolled: true, acceptedDisclosureVersion: "2026-09"),
             "no revision held means the client has not read the state, so it must GET first")
         XCTAssertNil(client.beginMembership(
-            enrolled: false, acceptedDisclosureVersion: nil, lastReadRevision: nil))
+            enrolled: false, acceptedDisclosureVersion: nil))
         XCTAssertNil(client.beginMembership(
-            enrolled: true, acceptedDisclosureVersion: "2026-09", lastReadRevision: ""),
+            enrolled: true, acceptedDisclosureVersion: "2026-09"),
             "an empty revision is not a precondition")
         XCTAssertTrue(putRequests.isEmpty)
     }
@@ -186,7 +186,7 @@ final class VoiceSharingSwitchPutControls: XCTestCase {
         VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
             Reply(status: 409, body: projectionBody("r12", enrolled: false, epoch: nil))
         let op = try XCTUnwrap(client.beginMembership(
-            enrolled: true, acceptedDisclosureVersion: "2026-09", lastReadRevision: "r7"))
+            enrolled: true, acceptedDisclosureVersion: "2026-09"))
         let outcome = await client.perform(op)
 
         guard case .conflict(let current, _) = outcome else {
@@ -205,13 +205,13 @@ final class VoiceSharingSwitchPutControls: XCTestCase {
             Reply(status: 200, body: projectionBody("r8", enrolled: true, epoch: "e8"))
         // First send: the user's choice lands.
         let first = try XCTUnwrap(client.beginMembership(
-            enrolled: true, acceptedDisclosureVersion: "2026-09", lastReadRevision: "r7"))
+            enrolled: true, acceptedDisclosureVersion: "2026-09"))
         guard case .applied = await client.perform(first) else {
             return XCTFail("the first switch-on should apply")
         }
         // Resend after an apparent network failure, now holding the revision that send produced.
         let resend = try XCTUnwrap(client.beginMembership(
-            enrolled: true, acceptedDisclosureVersion: "2026-09", lastReadRevision: "r8"))
+            enrolled: true, acceptedDisclosureVersion: "2026-09"))
         let outcome = await client.perform(resend)
         guard case .applied(let membership, _) = outcome else {
             return XCTFail("repeating the state in force must apply, got \(outcome)")
@@ -228,7 +228,7 @@ final class VoiceSharingSwitchPutControls: XCTestCase {
         VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
             Reply(status: 409, body: projectionBody("r12", enrolled: false, epoch: nil))
         let op = try XCTUnwrap(client.beginMembership(
-            enrolled: true, acceptedDisclosureVersion: "2026-09", lastReadRevision: "r7"))
+            enrolled: true, acceptedDisclosureVersion: "2026-09"))
         let outcome = await client.perform(op)
 
         guard case .conflict(let current, _) = outcome else {
@@ -246,9 +246,9 @@ final class VoiceSharingSwitchPutControls: XCTestCase {
     /// consent the user never gave.
     func test_switchOnWithoutADisclosureVersionIsRefusedBeforeAnyRequest() async {
         XCTAssertNil(client.beginMembership(
-            enrolled: true, acceptedDisclosureVersion: nil, lastReadRevision: "r7"))
+            enrolled: true, acceptedDisclosureVersion: nil))
         XCTAssertNil(client.beginMembership(
-            enrolled: true, acceptedDisclosureVersion: "", lastReadRevision: "r7"))
+            enrolled: true, acceptedDisclosureVersion: ""))
         XCTAssertTrue(putRequests.isEmpty)
     }
 
@@ -256,7 +256,7 @@ final class VoiceSharingSwitchPutControls: XCTestCase {
     /// the request is leaving.
     func test_switchOffCarryingADisclosureVersionIsRefused() async {
         XCTAssertNil(client.beginMembership(
-            enrolled: false, acceptedDisclosureVersion: "2026-09", lastReadRevision: "r7"))
+            enrolled: false, acceptedDisclosureVersion: "2026-09"))
         XCTAssertTrue(putRequests.isEmpty)
     }
 }

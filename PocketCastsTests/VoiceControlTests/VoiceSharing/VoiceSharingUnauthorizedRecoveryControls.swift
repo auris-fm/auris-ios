@@ -82,7 +82,7 @@ final class VoiceSharingUnauthorizedRecoveryControls: XCTestCase {
 
     /// Queues a ready, consented recording into `queue` (the wiring tests' fixture shape).
     @discardableResult
-    private func makeReadyEntry(_ queue: VoiceSharingQueue, epoch: String = "epoch-1") throws
+    private func makeReadyEntry(_ queue: VoiceSharingQueue, epoch: String = "epoch-1") async throws
         -> VoiceSharingQueue.Entry {
         let samples: [Float] = [0, 0.25, -0.5, 0.5]
         let event = VoiceSharingCollector.SegmentEvent(
@@ -96,8 +96,10 @@ final class VoiceSharingUnauthorizedRecoveryControls: XCTestCase {
             conversionVersion: "v1")
         let encoded = try VoiceSharingContributionEncoder.encode(
             event: event, provenance: provenance, observations: [:])
-        let name = try XCTUnwrap(queue.publish(audio: encoded.wav, metadata: encoded.metadata))
-        return try XCTUnwrap(queue.entries().first { $0.name == name })
+        let publishedName = await queue.publish(audio: encoded.wav, metadata: encoded.metadata)
+        let name = try XCTUnwrap(publishedName)
+        let published = await queue.entries()
+        return try XCTUnwrap(published.first { $0.name == name })
     }
 
     private func makeGateLoss(
@@ -122,6 +124,19 @@ final class VoiceSharingUnauthorizedRecoveryControls: XCTestCase {
         return (coordinator, { coordinator.consentGateLostForTesting() })
     }
 
+    /// Waits for the queue to empty, bounded, so a handler that purges off the calling thread can be
+    /// asserted on without racing it.
+    private func waitForEmptyQueue(_ queue: VoiceSharingQueue,
+                                   timeout: TimeInterval = 5) async -> [VoiceSharingQueue.Entry] {
+        let deadline = Date().addingTimeInterval(timeout)
+        var entries = await queue.entries()
+        while !entries.isEmpty, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+            entries = await queue.entries()
+        }
+        return entries
+    }
+
     // MARK: - Controls
 
     /// A projection-GET 401 through the REAL account client goes to the auth-recovery
@@ -130,7 +145,7 @@ final class VoiceSharingUnauthorizedRecoveryControls: XCTestCase {
     func test_projection401_recoversWithoutTouchingConsentOrQueue() async throws {
         let store = makeStore()
         let queue = VoiceSharingQueue(root: root)
-        let entry = try makeReadyEntry(queue)
+        let entry = try await makeReadyEntry(queue)
         let provider = CountingTokenProvider(token: "tok-1")
         let session: URLSession = {
             let configuration = URLSessionConfiguration.ephemeral
@@ -158,14 +173,16 @@ final class VoiceSharingUnauthorizedRecoveryControls: XCTestCase {
                        "a transient 401 is not a withdrawal and must not close the purge gate")
         XCTAssertTrue(store.consentAllowsCollection,
                       "the user's sharing choice survives a rejected refresh")
-        XCTAssertEqual(queue.entries(), [entry],
+        let afterRecovery = await queue.entries()
+        XCTAssertEqual(afterRecovery, [entry],
                        "the durable queue survives a 401 recovery untouched")
 
         // And the gate event that the incident window produced still RETAINS, logging why.
         let (_, fire) = makeGateLoss(queue: queue) { store.consentGoneForPurge }
         logged.removeAll()
         fire()
-        XCTAssertEqual(queue.entries(), [entry],
+        let afterGateLoss = await queue.entries()
+        XCTAssertEqual(afterGateLoss, [entry],
                        "gate loss after a transient 401 must retain the recordings")
         XCTAssertEqual(logged.count, 1)
         XCTAssertTrue(logged[0].contains("RETAINED"),
@@ -179,7 +196,7 @@ final class VoiceSharingUnauthorizedRecoveryControls: XCTestCase {
     func test_authRecoveryIssuesNoWithdrawalOrEnrollmentIntent() async throws {
         let store = makeStore()
         let queue = VoiceSharingQueue(root: root)
-        let entry = try makeReadyEntry(queue)
+        let entry = try await makeReadyEntry(queue)
         let provider = RotatingTokenProvider(first: "tok-stale", second: "tok-fresh")
         let session: URLSession = {
             let configuration = URLSessionConfiguration.ephemeral
@@ -230,8 +247,8 @@ final class VoiceSharingUnauthorizedRecoveryControls: XCTestCase {
         let fetched = await client.fetchProjection()
         XCTAssertNotNil(fetched, "the refreshed bearer is published and used")
         XCTAssertFalse(store.consentGoneForPurge, "the refreshed projection keeps consent intact")
-        XCTAssertEqual(queue.entries(), [entry], "the queue survives the whole recovery")
-
+        let remainingEntries = await queue.entries()
+        XCTAssertEqual(remainingEntries, [entry], "the queue survives the whole recovery")
         // THE request-LEVEL assertion: the client only ever issued projection GETs.
         let methods = seen.map(\.method)
         XCTAssertFalse(methods.contains("POST"),
@@ -243,11 +260,11 @@ final class VoiceSharingUnauthorizedRecoveryControls: XCTestCase {
 
     /// CONTRAST: an explicit withdrawal purges, and the diagnostics name the cause and
     /// the reconciled counts — no audio, no credentials in the line.
-    func test_explicitWithdrawal_purgesAndLogsCauseAndCount() throws {
+    func test_explicitWithdrawal_purgesAndLogsCauseAndCount() async throws {
         let store = makeStore()
         let queue = VoiceSharingQueue(root: root)
-        _ = try makeReadyEntry(queue)
-        _ = try makeReadyEntry(queue)
+        _ = try await makeReadyEntry(queue)
+        _ = try await makeReadyEntry(queue)
 
         // The user withdraws — the real local-withdrawal path.
         _ = store.withdrawLocally(acceptedServerProjectionAfterward: false)
@@ -256,7 +273,10 @@ final class VoiceSharingUnauthorizedRecoveryControls: XCTestCase {
         let (_, fire) = makeGateLoss(queue: queue) { store.consentGoneForPurge }
         fire()
 
-        XCTAssertTrue(queue.entries().isEmpty, "explicit withdrawal clears pending recordings")
+        // The purge runs on a task of its own, so the assertion waits for it to land rather than
+        // racing it. A bounded wait still fails if nothing ever happens.
+        let remainingEntries = await waitForEmptyQueue(queue)
+        XCTAssertTrue(remainingEntries.isEmpty, "explicit withdrawal clears pending recordings")
         XCTAssertEqual(logged.count, 1, "exactly one purge diagnostic")
         XCTAssertTrue(logged[0].contains("cause=consent-gone"), "the cause is named: \(logged)")
         XCTAssertTrue(logged[0].contains("removed: 2"),
@@ -267,17 +287,18 @@ final class VoiceSharingUnauthorizedRecoveryControls: XCTestCase {
 
     /// SIGN-OUT purges too, and says so — the third cause the incident window could have
     /// produced silently.
-    func test_signOut_purgesAndLogsSessionGoneCause() throws {
+    func test_signOut_purgesAndLogsSessionGoneCause() async throws {
         let store = makeStore()
         let queue = VoiceSharingQueue(root: root)
-        _ = try makeReadyEntry(queue)
+        _ = try await makeReadyEntry(queue)
 
         let (_, fire) = makeGateLoss(queue: queue,
                                      sessionAlive: { false },
                                      consentGone: { store.consentGoneForPurge })
         fire()
 
-        XCTAssertTrue(queue.entries().isEmpty)
+        let remainingEntries = await waitForEmptyQueue(queue)
+        XCTAssertTrue(remainingEntries.isEmpty)
         XCTAssertEqual(logged.count, 1)
         XCTAssertTrue(logged[0].contains("cause=session-gone"), "the cause is named: \(logged)")
         XCTAssertTrue(logged[0].contains("removed: 1"), "count present: \(logged)")

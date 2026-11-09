@@ -167,7 +167,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
 
     /// Calls the production final composition step, then drops the builder and every local owner.
     /// Backend/router/audio are fixtures; no model loading, microphone or network is exercised.
-    func test_serviceKeepsSharingAliveAfterTheAssemblyIsReleased() throws {
+    func test_serviceKeepsSharingAliveAfterTheAssemblyIsReleased() async throws {
         let suite = "sharing-lifetime-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -192,12 +192,12 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
                 queue: queue, isCollectionPermitted: { false }, isAccountEnrolled: { false },
                 isLocallyOptedIn: { store.currentState.localOptIn },
                 coherenceAccount: { "account-a" })
-            model.refreshLiveState() // baseline only; no refresh after source mutation
+            await model.refreshLiveState() // baseline only; no refresh after source mutation
             _ = model.addStateObserver { published.append($0.state) }
             weakModel = model
             let uploader = VoiceSharingUploader(
                 queue: queue,
-                send: { _ in XCTFail("no upload permitted"); return .noAnswer },
+                send: { _, _ in XCTFail("no upload permitted"); return .noAnswer },
                 refreshSignIn: { false },
                 currentIdentity: { nil as (account: String, epoch: String)? },
                 sharingEnabled: { false },
@@ -267,16 +267,17 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         weak var weakTrigger: VoiceSharingUploadTrigger?
         weak var weakCollector: VoiceSharingCollector?
         weak var weakSink: VoiceSharingDirectSink?
-        let seeded = try AudioFixture.makeReadyEntry(in: queue)
+        let seeded = try await AudioFixture.makeReadyEntry(in: queue)
         let seededDirectory = seeded.url
-        XCTAssertEqual(queue.count(), 1, "setup: one recording is retained")
+        let pendingCount = await queue.count()
+        XCTAssertEqual(pendingCount, 1, "setup: one recording is retained")
         let registryBaseline = coordinator.gateLostHandlerCountForTesting
 
         do {
             let assembly = VoiceControlAssembly()
             let uploader = VoiceSharingUploader(
                 queue: queue,
-                send: { _ in XCTFail("a withdrawn pipeline must not send"); return .noAnswer },
+                send: { _, _ in XCTFail("a withdrawn pipeline must not send"); return .noAnswer },
                 refreshSignIn: { true },
                 currentIdentity: { ("account-a", "epoch-1") },
                 sharingEnabled: { [weak self] in self?.gateOpen ?? false },
@@ -314,10 +315,11 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         XCTAssertFalse(isCollectionPermitted())
         XCTAssertFalse(FileManager.default.fileExists(atPath: seededDirectory.path),
                        "retained bytes must be purged")
-        XCTAssertTrue(queue.entries().isEmpty)
-
-        sink.handle(event())
-        XCTAssertTrue(queue.entries().isEmpty, "new sink work must be refused after disable")
+        let entriesAfterPurge = await queue.entries()
+        XCTAssertTrue(entriesAfterPurge.isEmpty)
+        await sink.handle(event())
+        let entriesAfterDisable = await queue.entries()
+        XCTAssertTrue(entriesAfterDisable.isEmpty, "new sink work must be refused after disable")
         service = nil
         XCTAssertNil(weakLifetime)
         XCTAssertNil(weakTrigger)
@@ -391,7 +393,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         gateOpen = true
         await VoiceSharingCoordinator(enrollmentStore: store).refreshProjectionFromServer(accountClient: accountClient)
         XCTAssertTrue(store.currentEffectiveEnrolled)
-        let entry = try AudioFixture.makeReadyEntry(in: queue)
+        let entry = try await AudioFixture.makeReadyEntry(in: queue)
         let metadata = try Data(contentsOf: entry.metadataURL)
         let audio = try Data(contentsOf: entry.audioURL)
         let record = try XCTUnwrap(JSONSerialization.jsonObject(with: metadata) as? [String: Any])
@@ -407,7 +409,8 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         XCTAssertEqual(authority.received.count, 1)
         XCTAssertEqual(try Data(contentsOf: entry.metadataURL), metadata, "503 retains exact immutable metadata")
         XCTAssertEqual(try Data(contentsOf: entry.audioURL), audio, "503 retains exact immutable WAV")
-        XCTAssertEqual(queue.entries().count, 1)
+        let pendingEntries = await queue.entries()
+        XCTAssertEqual(pendingEntries.count, 1)
         now = now.addingTimeInterval(2)
         weakTrigger?.trigger()
         await joinLocalSharingDrain(weakTrigger)
@@ -419,17 +422,20 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
             XCTAssertEqual(attempt.captureID, expectedCaptureID)
             XCTAssertEqual(attempt.bearer, "Bearer local-test-bearer")
         }
-        XCTAssertTrue(queue.entries().isEmpty, "matching received-body-derived receipt settles the entry")
+        let entriesAfterSettle = await queue.entries()
+        XCTAssertTrue(entriesAfterSettle.isEmpty, "matching received-body-derived receipt settles the entry")
         XCTAssertFalse(FileManager.default.fileExists(atPath: entry.url.path))
 
-        _ = try AudioFixture.makeReadyEntry(in: queue)
-        XCTAssertEqual(queue.entries().count, 1)
+        _ = try await AudioFixture.makeReadyEntry(in: queue)
+        let refreshedEntries = await queue.entries()
+        XCTAssertEqual(refreshedEntries.count, 1)
         store.setLocalOptIn(false)
         XCTAssertFalse(store.consentAllowsCollection)
         weakTrigger?.trigger()
         await joinLocalSharingDrain(weakTrigger)
         XCTAssertEqual(authority.received.count, 2, "configured work cannot send after local withdrawal")
-        XCTAssertEqual(queue.entries().count, 1, "negative is not explained by an empty queue")
+        let entriesAfterWithdrawal = await queue.entries()
+        XCTAssertEqual(entriesAfterWithdrawal.count, 1, "negative is not explained by an empty queue")
         service = nil
         XCTAssertNil(weakTrigger)
         XCTAssertFalse(VoiceSharingSettingsModel.surfaceEnabled)

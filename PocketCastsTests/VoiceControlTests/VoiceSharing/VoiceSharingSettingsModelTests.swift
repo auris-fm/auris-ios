@@ -37,7 +37,7 @@ final class VoiceSharingSettingsModelTests: XCTestCase {
     /// configuration where the surface is intentionally ON. What must hold in BOTH configurations:
     /// the model reports exactly what the build compiled, and nothing else can flip it.
     /// Enabling the surface in a shipped build remains an owner decision.
-    func test_surfaceIsCompiledOff() {
+    func test_surfaceIsCompiledOff() async {
         #if STAGING
         XCTAssertTrue(VoiceSharingSettingsModel.surfaceEnabled,
                       "a STAGING build compiles the surface ON")
@@ -50,16 +50,22 @@ final class VoiceSharingSettingsModelTests: XCTestCase {
     }
 
     /// No settings control may enable collection: the reported value is exactly the live policy's.
-    func test_reportedPermissionIsOnlyEverTheLivePolicy() {
-        XCTAssertFalse(model(permitted: false).status().collectionPermitted)
-        XCTAssertTrue(model(permitted: true).status().collectionPermitted)
-        _ = model(permitted: true).deletePendingRecordingsOnThisDevice()
-        XCTAssertTrue(model(permitted: true).status().collectionPermitted)
+    func test_reportedPermissionIsOnlyEverTheLivePolicy() async {
+        let denyModel = model(permitted: false)
+        let denyStatus = await denyModel.status()
+        XCTAssertFalse(denyStatus.collectionPermitted)
+        let allowModel = model(permitted: true)
+        let allowStatus = await allowModel.status()
+        XCTAssertTrue(allowStatus.collectionPermitted)
+        _ = await allowModel.deletePendingRecordingsOnThisDevice()
+        let afterDelete = await allowModel.status()
+        XCTAssertTrue(afterDelete.collectionPermitted)
     }
 
     /// An empty, readable queue reports a KNOWN zero — the only case where zero is honest.
-    func test_emptyQueueReportsKnownZero() {
-        guard case .knownReady(let count) = model().status().storage else {
+    func test_emptyQueueReportsKnownZero() async {
+        let reported = await model().status()
+        guard case .knownReady(let count) = reported.storage else {
             return XCTFail("an empty root with no intent is known")
         }
         XCTAssertEqual(count, 0)
@@ -67,20 +73,21 @@ final class VoiceSharingSettingsModelTests: XCTestCase {
 
     /// An unlistable root is unknown, never a zero count: "could not look" and "there is nothing"
     /// are different claims, and only one of them is true here.
-    func test_anUnlistableRootRendersUnknownNotEmpty() throws {
+    func test_anUnlistableRootRendersUnknownNotEmpty() async throws {
         let otherRoot = root.appendingPathComponent("unlistable-owner")
         // A FILE where a directory is expected: enumeration cannot succeed.
         try Data("not a directory".utf8).write(to: otherRoot)
         let unlistable = VoiceSharingQueue(root: otherRoot)
-        XCTAssertEqual(model(queue: unlistable).status().storage, .unknown,
+        let unlistableStatus = await model(queue: unlistable).status()
+        XCTAssertEqual(unlistableStatus.storage, .unknown,
                        "a root that cannot be listed is unknown, not an empty device")
     }
 
     /// LOCAL deletion: a reconciled purge with survivors keeps them VISIBLE as durably disqualified
     /// rather than folding them into a bare deletion count.
-    func test_reconciledDeletionWithSurvivorsKeepsThemVisible() throws {
+    func test_reconciledDeletionWithSurvivorsKeepsThemVisible() async throws {
         // Build one ready entry, then make entry removal fail while keeping the marker durable.
-        let sink = VoiceSharingSettingsFixture.makeEntry(in: queue, root: root)
+        let sink = await VoiceSharingSettingsFixture.makeEntry(in: queue, root: root)
         XCTAssertNotNil(sink)
 
         final class EntryRemovalRefusingFM: FileManager {
@@ -94,7 +101,7 @@ final class VoiceSharingSettingsModelTests: XCTestCase {
         }
         let fm = EntryRemovalRefusingFM()
         let refusing = VoiceSharingQueue(root: root, fileManager: fm)
-        let result = model(queue: refusing).deletePendingRecordingsOnThisDevice()
+        let result = await model(queue: refusing).deletePendingRecordingsOnThisDevice()
         fm.refuse = false
         guard case .reconciled(let removed, let durablyDisqualified) = result.disposition else {
             return XCTFail("expected reconciled, got \(result.disposition)")
@@ -107,15 +114,15 @@ final class VoiceSharingSettingsModelTests: XCTestCase {
 
     /// A REFUSED purge reports refusal — never "0 removed / 0 retained", which would read as a
     /// measurement of an empty device.
-    func test_refusedDeletionIsReportedAsRefusal() throws {
-        try VoiceSharingSettingsFixture.makeEntry(in: queue, root: root)
+    func test_refusedDeletionIsReportedAsRefusal() async throws {
+        _ = await VoiceSharingSettingsFixture.makeEntry(in: queue, root: root)
         final class RefusingFM: FileManager {
             override func removeItem(at URL: URL) throws {
                 throw CocoaError(.fileWriteNoPermission)
             }
         }
         let refusing = VoiceSharingQueue(root: root, fileManager: RefusingFM())
-        let result = model(queue: refusing).deletePendingRecordingsOnThisDevice()
+        let result = await model(queue: refusing).deletePendingRecordingsOnThisDevice()
         XCTAssertEqual(result.disposition,
                        .reconciled(removed: 0, durablyDisqualified: 1),
                        "a delete that removed nothing is reported as nothing removed")
@@ -125,13 +132,13 @@ final class VoiceSharingSettingsModelTests: XCTestCase {
 
     /// Survivors are named rather than folded into a deletion count: a delete that did not happen
     /// must never read as a measurement of an empty device.
-    func test_survivorsOfADeleteAreNamedRatherThanHidden() throws {
-        try VoiceSharingSettingsFixture.makeEntry(in: queue, root: root)
+    func test_survivorsOfADeleteAreNamedRatherThanHidden() async throws {
+        _ = await VoiceSharingSettingsFixture.makeEntry(in: queue, root: root)
         final class RefusingFM: FileManager {
             override func removeItem(at URL: URL) throws { throw CocoaError(.fileWriteNoPermission) }
         }
         let refusing = VoiceSharingQueue(root: root, fileManager: RefusingFM())
-        let result = model(queue: refusing).deletePendingRecordingsOnThisDevice()
+        let result = await model(queue: refusing).deletePendingRecordingsOnThisDevice()
         guard case .reconciled(let removed, let survivors) = result.disposition else {
             return XCTFail("expected reconciled, got \(result.disposition)")
         }
@@ -141,14 +148,14 @@ final class VoiceSharingSettingsModelTests: XCTestCase {
     }
 
     /// The deletion text must SCOPE itself to the device: no account/server completion claim.
-    func test_deletionScopeIsExplicitlyLocal() {
+    func test_deletionScopeIsExplicitlyLocal() async {
         let scope = model().deletionScopeDescription
         XCTAssertTrue(scope.contains("this device"))
         XCTAssertTrue(scope.contains("does not delete contributions already accepted"))
     }
 
     /// The compiled bounds line is derived from the queue's constants.
-    func test_compiledBoundsDescriptionMatchesTheQueueConstants() {
+    func test_compiledBoundsDescriptionMatchesTheQueueConstants() async {
         let text = model().compiledBoundsDescription
         XCTAssertTrue(text.contains("\(VoiceSharingQueue.capacity) recordings"))
         //: the bound is stated in DAYS, and the copy must match the constant.
@@ -159,7 +166,7 @@ final class VoiceSharingSettingsModelTests: XCTestCase {
 /// Shared fixture: puts ONE genuinely ready, bound entry into a queue via the encoder+sink path.
 enum VoiceSharingSettingsFixture {
     @discardableResult
-    static func makeEntry(in queue: VoiceSharingQueue, root: URL) -> Bool {
+    static func makeEntry(in queue: VoiceSharingQueue, root: URL) async -> Bool {
         let samples: [Float] = [0, 0.25, -0.5, 0.5]
         let event = VoiceSharingCollector.SegmentEvent(
             kind: .completed, captureID: UUID(),
@@ -173,9 +180,10 @@ enum VoiceSharingSettingsFixture {
             conversionVersion: "v1")
         guard let encoded = try? VoiceSharingContributionEncoder.encode(
             event: event, provenance: provenance, observations: [:]) else { return false }
-        return queue.publish(audio: encoded.wav, metadata: encoded.metadata) != nil
+        return await queue.publish(audio: encoded.wav, metadata: encoded.metadata) != nil
     }
 }
+
 // MARK: - Stopped / recovery projection
 
 /// Every branch of the stopped/recovery projection over EXPLICIT live state:
@@ -217,25 +225,25 @@ final class VoiceSharingRecoveryGuidanceTests: XCTestCase {
                        coherence: .coherent(account: "account-a", generation: 1, version: "v1")))
     }
 
-    func test_permittedEnrolledAndOptedInReportsNotStoppedWithNoAction() {
+    func test_permittedEnrolledAndOptedInReportsNotStoppedWithNoAction() async {
         let result = guidance()
         XCTAssertEqual(result.reason, .notStopped)
         XCTAssertNil(result.action, "nothing to do when sharing works")
     }
 
-    func test_optedOutLocallyReportsTurnedOffLocally() {
+    func test_optedOutLocallyReportsTurnedOffLocally() async {
         XCTAssertEqual(guidance(permits: false, optedIn: false).reason, .turnedOffLocally)
         XCTAssertNotNil(guidance(permits: false, optedIn: false).action)
     }
 
     /// Server-side non-enrollment must not read as a local action.
-    func test_notEnrolledIsNotReportedAsALocalAction() {
+    func test_notEnrolledIsNotReportedAsALocalAction() async {
         let result = guidance(permits: false, enrolled: false, optedIn: true)
         XCTAssertEqual(result.reason, .notEnrolled)
         XCTAssertNotEqual(result.reason, .turnedOffLocally)
     }
 
-    func test_missingLeaseReportsAPauseNotAUserAction() {
+    func test_missingLeaseReportsAPauseNotAUserAction() async {
         let result = guidance(permits: false, enrolled: true, optedIn: true)
         XCTAssertEqual(result.reason, .noActiveLease)
         XCTAssertNotNil(result.action)
@@ -243,7 +251,7 @@ final class VoiceSharingRecoveryGuidanceTests: XCTestCase {
 
     /// The reachable unknown: an undetermined read is reported as unknown, and nothing is claimed
     /// about the user. This is the branch the old `false` defaults made unreachable.
-    func test_anUndeterminedReadReportsUnknownAndBlamesNobody() {
+    func test_anUndeterminedReadReportsUnknownAndBlamesNobody() async {
         XCTAssertEqual(guidance(permits: nil).reason, .unknown)
         XCTAssertEqual(guidance(enrolled: nil).reason, .unknown)
         XCTAssertEqual(guidance(optedIn: nil).reason, .unknown)
@@ -251,7 +259,7 @@ final class VoiceSharingRecoveryGuidanceTests: XCTestCase {
     }
 
     /// An UNREADABLE store is not a failed revocation: different reason, and no remedy offered.
-    func test_unreadableStorageIsNotReportedAsAFailedRevocation() {
+    func test_unreadableStorageIsNotReportedAsAFailedRevocation() async {
         let result = guidance(fault: .unreadable)
         XCTAssertEqual(result.reason, .storageUnreadable)
         XCTAssertNotEqual(result.reason, .storageHeld)
@@ -259,7 +267,7 @@ final class VoiceSharingRecoveryGuidanceTests: XCTestCase {
     }
 
     /// A held owner names the verified remedy: local deletion completes the revocation.
-    func test_heldOwnerNamesLocalDeletionAsTheRemedy() {
+    func test_heldOwnerNamesLocalDeletionAsTheRemedy() async {
         let result = guidance(fault: .revocationInDoubt)
         XCTAssertEqual(result.reason, .storageHeld)
         XCTAssertEqual(result.action, L10n.voiceSharingRecoveryHeld)
@@ -288,7 +296,7 @@ final class VoiceSharingSettingsSubscriptionTests: XCTestCase {
 
     /// The real production shape: the model's opt-in read is the enrollment store's live value, and
     /// an opt-in flip reaches a subscribed observer.
-    func test_aProductionStoreMutationPublishesTheNewState() {
+    func test_aProductionStoreMutationPublishesTheNewState() async {
         let store = VoiceSharingEnrollmentStore(
             defaults: UserDefaults(suiteName: "vs-sub-\(UUID().uuidString)")!,
             accountScopeProvider: { "account-a" })
@@ -299,14 +307,14 @@ final class VoiceSharingSettingsSubscriptionTests: XCTestCase {
             isAccountEnrolled: { false },
             isLocallyOptedIn: { store.currentState.localOptIn },
             coherenceAccount: { "account-a" })
-        model.refreshLiveState() // seed: the first state is the baseline
+        await model.refreshLiveState() // seed: the first state is the baseline
 
         var published: [VoiceSharingSettingsModel.LiveState] = []
         let token = model.addStateObserver { published.append($0.state) }
         defer { model.removeStateObserver(token) }
 
         store.setLocalOptIn(true)   // production mutation
-        model.refreshLiveState()    // the wiring the assembly installs
+        await model.refreshLiveState()    // the wiring the assembly installs
 
         XCTAssertEqual(published.count, 1, "a real change must publish exactly once")
         XCTAssertEqual(published.last?.localOptIn, true)
@@ -318,24 +326,24 @@ final class VoiceSharingSettingsSubscriptionTests: XCTestCase {
 
     /// Identical reads do not publish: a UI that re-renders on every keystroke of state would be
     /// noise, and it would also mask genuinely stuck sources.
-    func test_anUnchangedReadPublishesNothing() {
+    func test_anUnchangedReadPublishesNothing() async {
         let model = VoiceSharingSettingsModel(
             queue: queue,
             isCollectionPermitted: { true },
             isAccountEnrolled: { true },
             isLocallyOptedIn: { true },
             coherenceAccount: { "account-a" })
-        model.refreshLiveState()
+        await model.refreshLiveState()
         var publications = 0
         let token = model.addStateObserver { _ in publications += 1 }
         defer { model.removeStateObserver(token) }
-        model.refreshLiveState()
-        model.refreshLiveState()
+        await model.refreshLiveState()
+        await model.refreshLiveState()
         XCTAssertEqual(publications, 0, "unchanged state must not publish")
     }
 
     /// Removing the observer stops delivery — a torn-down surface must not keep being called.
-    func test_removingTheObserverStopsDelivery() {
+    func test_removingTheObserverStopsDelivery() async {
         var flipped = false
         let model = VoiceSharingSettingsModel(
             queue: queue,
@@ -343,12 +351,12 @@ final class VoiceSharingSettingsSubscriptionTests: XCTestCase {
             isAccountEnrolled: { true },
             isLocallyOptedIn: { true },
             coherenceAccount: { "account-a" })
-        model.refreshLiveState()
+        await model.refreshLiveState()
         var publications = 0
         let token = model.addStateObserver { _ in publications += 1 }
         model.removeStateObserver(token)
         flipped = true
-        model.refreshLiveState()
+        await model.refreshLiveState()
         XCTAssertEqual(publications, 0)
     }
 }
@@ -371,7 +379,7 @@ final class VoiceSharingSnapshotCoherenceTests: XCTestCase {
     }
 
     /// An account move BETWEEN the reads must not be combined into one conclusion.
-    func test_anAccountMoveDuringTheReadsYieldsUnknown() {
+    func test_anAccountMoveDuringTheReadsYieldsUnknown() async {
         var account = "account-a"
         let model = VoiceSharingSettingsModel(
             queue: queue,
@@ -383,32 +391,34 @@ final class VoiceSharingSnapshotCoherenceTests: XCTestCase {
             },
             isLocallyOptedIn: { true },
             coherenceAccount: { account })
-        let live = model.liveState()
+        let live = await model.liveState()
         XCTAssertFalse(live.isCoherent, "reads taken across an account move are not one moment")
         XCTAssertEqual(model.recoveryGuidance(for: live).reason, .unknown)
     }
 
     /// Stamps that agree keep the conclusion available.
-    func test_agreeingStampsStayCoherent() {
+    func test_agreeingStampsStayCoherent() async {
         let model = VoiceSharingSettingsModel(
             queue: queue,
             isCollectionPermitted: { true },
             isAccountEnrolled: { true },
             isLocallyOptedIn: { true },
             coherenceAccount: { "account-a" })
-        XCTAssertTrue(model.liveState().isCoherent)
-        XCTAssertEqual(model.recoveryGuidance(for: model.liveState()).reason, .notStopped)
+        let live = await model.liveState()
+        XCTAssertTrue(live.isCoherent)
+        XCTAssertEqual(model.recoveryGuidance(for: live).reason, .notStopped)
     }
 
     /// A caller that cannot stamp the reads gets `unknown`, not a trusted half-known world.
-    func test_anUnstampedReadIsIncoherent() {
+    func test_anUnstampedReadIsIncoherent() async {
         let model = VoiceSharingSettingsModel(
             queue: queue,
             isCollectionPermitted: { true },
             isAccountEnrolled: { true },
             isLocallyOptedIn: { true })  // no coherenceAccount / version
-        XCTAssertFalse(model.liveState().isCoherent)
-        XCTAssertEqual(model.recoveryGuidance(for: model.liveState()).reason, .unknown)
+        let live = await model.liveState()
+        XCTAssertFalse(live.isCoherent)
+        XCTAssertEqual(model.recoveryGuidance(for: live).reason, .unknown)
     }
 }
 
@@ -438,8 +448,10 @@ final class VoiceSharingPublishedStateTests: XCTestCase {
     }
 
     /// Both displayed halves come from ONE value, so they cannot describe different moments.
-    func test_bothHalvesComeFromTheSameSnapshot() {
-        let view = model().publishedViewState(for: model().liveState())
+    func test_bothHalvesComeFromTheSameSnapshot() async {
+        let subject = model()
+        let live = await subject.liveState()
+        let view = subject.publishedViewState(for: live)
         XCTAssertEqual(view.live.policyPermits, true)
         XCTAssertEqual(view.guidance.reason, .notStopped)
         XCTAssertEqual(view.storage, .knownReady(0))
@@ -449,28 +461,32 @@ final class VoiceSharingPublishedStateTests: XCTestCase {
     /// twice — which is what serializing the compare-and-commit under the observer lock buys.
     func test_concurrentRefreshesPublishAStateExactlyOnce() async {
         let settingsModel = model()
-        settingsModel.refreshLiveState()
+        await settingsModel.refreshLiveState()
         let counter = PublishCounter()
         let token = settingsModel.addStateObserver { _ in counter.increment() }
         defer { settingsModel.removeStateObserver(token) }
 
         await withTaskGroup(of: Void.self) { group in
             for _ in 0..<16 {
-                group.addTask { settingsModel.refreshLiveState() }
+                group.addTask { await settingsModel.refreshLiveState() }
             }
         }
         XCTAssertEqual(counter.value, 0, "no change means no publication, however many refreshes race")
     }
 
     /// A listener that re-enters the model must not deadlock: observers are called outside the lock.
-    func test_aReentrantObserverDoesNotDeadlock() {
+    func test_aReentrantObserverDoesNotDeadlock() async {
         let settingsModel = model()
-        settingsModel.refreshLiveState()
+        await settingsModel.refreshLiveState()
         let reentered = PublishCounter()
+        let holder = ObserverTokenHolder()
         let token = settingsModel.addStateObserver { _ in
             reentered.increment()
-            settingsModel.refreshLiveState() // would deadlock if called under the lock
+            // Re-entering the model from inside the callback is the deadlock this control is
+            // about. Removing an observer takes the same lock delivery does.
+            if let registered = holder.token { settingsModel.removeStateObserver(registered) }
         }
+        holder.token = token
         defer { settingsModel.removeStateObserver(token) }
         // Flip a read so a publication is due.
         let flipping = VoiceSharingSettingsModel(
@@ -479,10 +495,19 @@ final class VoiceSharingPublishedStateTests: XCTestCase {
             isAccountEnrolled: { true },
             isLocallyOptedIn: { true },
             coherenceAccount: { "account-a" })
-        flipping.refreshLiveState()
-        _ = flipping.publishedViewState(for: flipping.liveState())
-        XCTAssertEqual(reentered.value, 0, "no publication is due when nothing changed")
+        await flipping.refreshLiveState()
+        let flippingLive = await flipping.liveState()
+        _ = flipping.publishedViewState(for: flippingLive)
+        let live = await settingsModel.liveState()
+        let sent = VoiceSharingSettingsModel.SentLiveState(sequence: 1, state: live)
+        settingsModel.deliverForTesting(sent)
+        XCTAssertEqual(reentered.value, 1, "the listener re-entered the model without deadlocking")
     }
+}
+
+/// Holds an observer token so a listener can remove itself from inside its own callback.
+private final class ObserverTokenHolder: @unchecked Sendable {
+    var token: UUID?
 }
 
 private final class PublishCounter: @unchecked Sendable {
@@ -531,7 +556,7 @@ final class VoiceSharingWatermarkTests: XCTestCase {
     /// The exact sequence the reviewer named: initial X, an OLDER read Y held open, a NEWER read that
     /// finds X unchanged, then Y released. Y must never publish — otherwise the stale half-known
     /// world would overwrite the confirmed one.
-    func test_anOlderReadHeldOpenNeverPublishesBehindAnUnchangedNewerRead() {
+    func test_anOlderReadHeldOpenNeverPublishesBehindAnUnchangedNewerRead() async {
         var permits = true
         let model = VoiceSharingSettingsModel(queue: queue,
                                              isCollectionPermitted: { permits },
@@ -543,7 +568,7 @@ final class VoiceSharingWatermarkTests: XCTestCase {
         defer { model.removeStateObserver(token) }
 
         // initial X
-        model.refreshLiveState()
+        await model.refreshLiveState()
         XCTAssertEqual(deliveries.count, 1)
 
         // the OLDER read: performs its read with permits still true, then BLOCKS before committing
@@ -554,12 +579,12 @@ final class VoiceSharingWatermarkTests: XCTestCase {
             _ = gate.wait(timeout: .now() + 5)
         }
         let older = DispatchQueue(label: "older-refresh")
-        older.async { model.refreshLiveState() }
+        older.async { Task { await model.refreshLiveState() } }
         XCTAssertEqual(readDone.wait(timeout: .now() + 5), .success, "the older read must run first")
 
         // the NEWER read completes while the older one is parked; it finds X UNCHANGED
         model.afterReadBeforeCommitForTesting = nil
-        model.refreshLiveState()
+        await model.refreshLiveState()
         XCTAssertEqual(deliveries.count, 1, "no change means no delivery — but the watermark advances")
 
         // release the older read: its state (also X) must not deliver
@@ -589,30 +614,33 @@ final class VoiceSharingReadySetHookTests: XCTestCase {
 
     /// AGEING: an entry past the queue-age bound is no longer served. The count must stop counting
     /// it, because the displayed "waiting" number is derived from that same read.
-    func test_anAgedEntryLeavesTheServedCount() throws {
+    func test_anAgedEntryLeavesTheServedCount() async throws {
         // Seeded under the REAL clock: `created.at` is written with real time, so an installed
         // clock must start at real time too or the entry reads as future-dated (ineligible).
         var now = Foundation.Date()
         let queue = VoiceSharingQueue(root: root)
-        try VoiceSharingDeletionFixture.seed(in: queue)
+        try await VoiceSharingDeletionFixture.seed(in: queue)
         // Backdate the recorded instant so the entry is UNAMBIGUOUSLY inside the bound under the
         // injected clock, instead of racing wall time between the write and the read.
-        let seeded = try XCTUnwrap(queue.entries().first)
+        let seededEntries = await queue.entries()
+        let seeded = try XCTUnwrap(seededEntries.first)
         try VoiceSharingDeletionFixture.backdate(seeded, in: queue, by: 30)
-        let initial = countFromModel(queue)
-        XCTAssertEqual(initial, 1, "diagnostics: \("\(queue.count()) retained")")
+        let initial = await countFromModel(queue)
+        let retainedCount = await queue.count()
+        XCTAssertEqual(initial, 1, "diagnostics: \(retainedCount) retained")
         now = now.addingTimeInterval(VoiceSharingQueue.maxEntryAge + 60)
-        XCTAssertEqual(countFromModel(queue), 0,
+        let afterAging = await countFromModel(queue)
+        XCTAssertEqual(afterAging, 0,
                        "an aged entry is not served, so the displayed count must not include it")
     }
 
-    private func countFromModel(_ queue: VoiceSharingQueue) -> Int? {
+    private func countFromModel(_ queue: VoiceSharingQueue) async -> Int? {
         let model = VoiceSharingSettingsModel(queue: queue,
                                              isCollectionPermitted: { true },
                                              isAccountEnrolled: { true },
                                              isLocallyOptedIn: { true },
                                              coherenceAccount: { "account-a" })
-        return model.liveState().knownReadyCount
+        return await model.liveState().knownReadyCount
     }
 }
 
@@ -633,12 +661,13 @@ final class VoiceSharingTimeDrivenRefreshTests: XCTestCase {
 
     /// An IDLE rendered snapshot must update when an entry crosses the age bound, with NO mutation
     /// and NO further UI read to trigger it.
-    func test_anIdleSnapshotUpdatesWhenAnEntryAgesOut() {
+    func test_anIdleSnapshotUpdatesWhenAnEntryAgesOut() async {
         var now = Foundation.Date()
         let queue = VoiceSharingQueue(root: root)
-        try? VoiceSharingDeletionFixture.seed(in: queue)
-        if let seeded = queue.entries().first {
-            try? VoiceSharingDeletionFixture.backdate(seeded, in: queue, by: 30)
+        try? await VoiceSharingDeletionFixture.seed(in: queue)
+        let seededEntries = await queue.entries()
+        if let seeded = seededEntries.first {
+            try? await VoiceSharingDeletionFixture.backdate(seeded, in: queue, by: 30)
         }
 
         let model = VoiceSharingSettingsModel(queue: queue,
@@ -646,7 +675,9 @@ final class VoiceSharingTimeDrivenRefreshTests: XCTestCase {
                                              isAccountEnrolled: { true },
                                              isLocallyOptedIn: { true },
                                              coherenceAccount: { "account-a" })
-        model.nextAgeBoundarySeconds = { queue.secondsUntilNextAgeBoundary() }
+        // The model's hook is synchronous, so it reads a value refreshed just before.
+        let boundary = await queue.secondsUntilNextAgeBoundary()
+        model.nextAgeBoundarySeconds = { boundary }
         // The scheduler is driven manually so the test owns the clock.
         var scheduled: [(delay: TimeInterval, body: () -> Void)] = []
         model.scheduleTimeDrivenRefresh = { delay, body in scheduled.append((delay, body)) }
@@ -655,8 +686,9 @@ final class VoiceSharingTimeDrivenRefreshTests: XCTestCase {
         let token = model.addStateObserver { delivered.append($0.state.knownReadyCount) }
         defer { model.removeStateObserver(token) }
 
-        model.refreshLiveState()          // first render shows 1
-        XCTAssertEqual(delivered.last ?? nil, 1, "diagnostics: \("\(queue.count()) retained")")
+        await model.refreshLiveState()          // first render shows 1
+        let retainedCount = await queue.count()
+        XCTAssertEqual(delivered.last ?? nil, 1, "diagnostics: \(retainedCount) retained")
         model.armTimeDrivenRefresh()      // the view's onAppear hook
         let pending = try? XCTUnwrap(scheduled.last)
         XCTAssertNotNil(pending, "a time-driven refresh must be scheduled while something can age out")
@@ -671,23 +703,24 @@ final class VoiceSharingTimeDrivenRefreshTests: XCTestCase {
     }
 
     /// Nothing waiting on time ⇒ nothing scheduled, so the surface does not wake pointlessly.
-    func test_nothingScheduledWhenNoTransitionIsPending() {
+    func test_nothingScheduledWhenNoTransitionIsPending() async {
         let queue = VoiceSharingQueue(root: root)
         let model = VoiceSharingSettingsModel(queue: queue,
                                              isCollectionPermitted: { true },
                                              isAccountEnrolled: { true },
                                              isLocallyOptedIn: { true },
                                              coherenceAccount: { "account-a" })
-        model.nextAgeBoundarySeconds = { queue.secondsUntilNextAgeBoundary() }
+        let boundary = await queue.secondsUntilNextAgeBoundary()
+        model.nextAgeBoundarySeconds = { boundary }
         var scheduled = 0
         model.scheduleTimeDrivenRefresh = { _, _ in scheduled += 1 }
-        model.refreshLiveState()
+        await model.refreshLiveState()
         model.armTimeDrivenRefresh()
         XCTAssertEqual(scheduled, 0, "an empty queue has no age boundary to wait for")
     }
 
     /// A SUPERSEDED timer must not refresh: a newer arm owns the next wake-up.
-    func test_aSupersededTimerDoesNotRefresh() {
+    func test_aSupersededTimerDoesNotRefresh() async {
         var now = Date()
         let queue = VoiceSharingQueue(root: root)
         let model = VoiceSharingSettingsModel(queue: queue,
@@ -698,7 +731,7 @@ final class VoiceSharingTimeDrivenRefreshTests: XCTestCase {
         model.nextAgeBoundarySeconds = { 60 }
         var bodies: [() -> Void] = []
         model.scheduleTimeDrivenRefresh = { _, body in bodies.append(body) }
-        model.refreshLiveState()
+        await model.refreshLiveState()
         model.armTimeDrivenRefresh()
         model.armTimeDrivenRefresh()  // supersedes the first
         let publishedBefore = model.publicationSequence
@@ -726,44 +759,46 @@ final class VoiceSharingTimerLifecycleTests: XCTestCase {
     /// TWO entries of different ages: the schedule must follow the NEAREST expiry (the OLDEST
     /// entry), not the youngest one's — which would leave the oldest displayed almost a full extra
     /// retention period.
-    func test_theNearestExpiryIsScheduledForTwoEntriesOfDifferentAges() throws {
+    func test_theNearestExpiryIsScheduledForTwoEntriesOfDifferentAges() async throws {
         var now = Foundation.Date()
         let queue = VoiceSharingQueue(root: root)
-        try VoiceSharingDeletionFixture.seed(in: queue)
-        try VoiceSharingDeletionFixture.seed(in: queue)
-        let entries = queue.entries()
+        try await VoiceSharingDeletionFixture.seed(in: queue)
+        try await VoiceSharingDeletionFixture.seed(in: queue)
+        let entries = await queue.entries()
         XCTAssertEqual(entries.count, 2, "setup: two retained entries")
         // One is nearly expired, the other nearly fresh.
         try VoiceSharingDeletionFixture.backdate(entries[0], in: queue,
                                                  by: VoiceSharingQueue.maxEntryAge - 60)
-        let delay = try XCTUnwrap(queue.secondsUntilNextAgeBoundary())
+        let boundaryDelay = await queue.secondsUntilNextAgeBoundary()
+        let delay = try XCTUnwrap(boundaryDelay)
         XCTAssertLessThan(delay, 120,
                           "the schedule must follow the OLDEST entry (\(delay)s is the youngest's expiry)")
     }
 
     /// An EMPTY visible queue schedules nothing, but the entry added right after it must arm a
     /// timer — the assembly's queue observer calls refresh, which must re-arm.
-    func test_anEntryAddedAfterAnEmptyRenderArmsATimer() throws {
+    func test_anEntryAddedAfterAnEmptyRenderArmsATimer() async throws {
         let queue = VoiceSharingQueue(root: root)
         let model = VoiceSharingSettingsModel(queue: queue,
                                              isCollectionPermitted: { true },
                                              isAccountEnrolled: { true },
                                              isLocallyOptedIn: { true },
                                              coherenceAccount: { "account-a" })
-        model.nextAgeBoundarySeconds = { queue.secondsUntilNextAgeBoundary() }
+        let boundary = await queue.secondsUntilNextAgeBoundary()
+        model.nextAgeBoundarySeconds = { boundary }
         var scheduled: [TimeInterval] = []
         model.scheduleTimeDrivenRefresh = { delay, _ in scheduled.append(delay) }
-        model.refreshLiveState()
+        await model.refreshLiveState()
         XCTAssertTrue(scheduled.isEmpty, "nothing retained ⇒ nothing to wait for")
-        try VoiceSharingDeletionFixture.seed(in: queue)
-        model.refreshLiveState()   // what the production queue observer does
+        try await VoiceSharingDeletionFixture.seed(in: queue)
+        await model.refreshLiveState()   // what the production queue observer does
         XCTAssertEqual(scheduled.count, 1,
                        "an authoritative update must re-arm, or the new entry never gets a timer")
     }
 
     /// An EXPIRED lease must not re-arm forever. The refresh happens once; a past transition is not
     /// a reason to wake again.
-    func test_anExpiredLeaseRefreshesOnceWithoutARecurringTimer() {
+    func test_anExpiredLeaseRefreshesOnceWithoutARecurringTimer() async {
         let queue = VoiceSharingQueue(root: root)
         let model = VoiceSharingSettingsModel(queue: queue,
                                              isCollectionPermitted: { true },
@@ -774,7 +809,7 @@ final class VoiceSharingTimerLifecycleTests: XCTestCase {
         model.nextLeaseExpirySeconds = { leaseDelay }
         var bodies: [(TimeInterval, () -> Void)] = []
         model.scheduleTimeDrivenRefresh = { delay, body in bodies.append((delay, body)) }
-        model.refreshLiveState()
+        await model.refreshLiveState()
         XCTAssertEqual(bodies.count, 1, "a future deadline arms once")
         XCTAssertGreaterThan(bodies[0].0, 0, "and it is a real delay, not a 50 ms spin")
 
@@ -786,7 +821,7 @@ final class VoiceSharingTimerLifecycleTests: XCTestCase {
     }
 
     /// Arming again must invalidate a previously armed timer even when nothing is now due.
-    func test_rearmingWithNothingDueInvalidatesTheOldTimer() {
+    func test_rearmingWithNothingDueInvalidatesTheOldTimer() async {
         let queue = VoiceSharingQueue(root: root)
         let model = VoiceSharingSettingsModel(queue: queue,
                                              isCollectionPermitted: { true },
@@ -797,7 +832,7 @@ final class VoiceSharingTimerLifecycleTests: XCTestCase {
         model.nextAgeBoundarySeconds = { boundary }
         var bodies: [() -> Void] = []
         model.scheduleTimeDrivenRefresh = { _, body in bodies.append(body) }
-        model.refreshLiveState()
+        await model.refreshLiveState()
         XCTAssertEqual(bodies.count, 1)
         // The situation that armed it goes away (e.g. the entry was uploaded/removed).
         boundary = nil
@@ -827,7 +862,7 @@ final class VoiceSharingDeadlineMoveTests: XCTestCase {
     /// A SHORTENED lease changes no displayed field — permission, count and guidance are identical —
     /// yet the deadline moved. The timer must be re-armed anyway, or the old deadline owns the
     /// surface.
-    func test_aShortenedLeaseRearmsEvenThoughNothingDisplayedChanges() {
+    func test_aShortenedLeaseRearmsEvenThoughNothingDisplayedChanges() async {
         let queue = VoiceSharingQueue(root: root)
         let model = VoiceSharingSettingsModel(queue: queue,
                                              isCollectionPermitted: { true },
@@ -839,16 +874,17 @@ final class VoiceSharingDeadlineMoveTests: XCTestCase {
         var scheduled: [(delay: TimeInterval, body: () -> Void)] = []
         model.scheduleTimeDrivenRefresh = { delay, body in scheduled.append((delay, body)) }
 
-        model.refreshLiveState()
+        await model.refreshLiveState()
         XCTAssertEqual(scheduled.count, 1)
         let firstDelay = scheduled[0].delay
         XCTAssertGreaterThan(firstDelay, 900, "the first arm follows the long lease")
 
         // Renewal shortened the lease: nothing the user SEES changes.
-        let liveBefore = model.liveState()
+        let liveBefore = await model.liveState()
         leaseDelay = 60
-        model.refreshLiveState()
-        XCTAssertEqual(model.liveState(), liveBefore, "precondition: the displayed state is identical")
+        await model.refreshLiveState()
+        let liveAfter = await model.liveState()
+        XCTAssertEqual(liveAfter, liveBefore, "precondition: the displayed state is identical")
         XCTAssertEqual(scheduled.count, 2,
                        "an unchanged-state read with a MOVED deadline must still re-arm")
         XCTAssertLessThan(scheduled[1].delay, firstDelay,
@@ -857,7 +893,7 @@ final class VoiceSharingDeadlineMoveTests: XCTestCase {
 
     /// An obsolete (superseded) read must not re-arm either — only the newest accepted read owns
     /// scheduling.
-    func test_anObsoleteReadDoesNotRearm() {
+    func test_anObsoleteReadDoesNotRearm() async {
         let queue = VoiceSharingQueue(root: root)
         let model = VoiceSharingSettingsModel(queue: queue,
                                              isCollectionPermitted: { true },
@@ -875,10 +911,10 @@ final class VoiceSharingDeadlineMoveTests: XCTestCase {
             _ = gate.wait(timeout: .now() + 5)
         }
         let older = DispatchQueue(label: "older")
-        older.async { model.refreshLiveState() }
+        older.async { Task { await model.refreshLiveState() } }
         XCTAssertEqual(readDone.wait(timeout: .now() + 5), .success)
         model.afterReadBeforeCommitForTesting = nil
-        model.refreshLiveState()          // newer read completes first: it owns scheduling
+        await model.refreshLiveState()          // newer read completes first: it owns scheduling
         let afterNewer = scheduled
         gate.signal()
         older.sync {}
@@ -891,7 +927,7 @@ final class VoiceSharingDeadlineMoveTests: XCTestCase {
     /// deadline — then the older read would invalidate it. Here the older read is fully accepted
     /// first, pauses, the newer read completes and arms the short deadline, and only then does the
     /// older read arm. The newer deadline must survive.
-    func test_anAcceptedReadThatPausesBeforeArmingCannotClobberANewerTimer() {
+    func test_anAcceptedReadThatPausesBeforeArmingCannotClobberANewerTimer() async {
         let queue = VoiceSharingQueue(root: root)
         let model = VoiceSharingSettingsModel(queue: queue,
                                              isCollectionPermitted: { true },
@@ -904,13 +940,13 @@ final class VoiceSharingDeadlineMoveTests: XCTestCase {
         model.scheduleTimeDrivenRefresh = { delay, _ in scheduled.append(delay) }
 
         // The older read: it has been ACCEPTED (its sequence is committed) and now pauses.
-        model.refreshLiveState()
+        await model.refreshLiveState()
         XCTAssertEqual(scheduled.count, 1)
         let longDelay = scheduled[0]
 
         // The lease shortens; a NEWER read completes and arms the short deadline.
         deadline = 30
-        model.refreshLiveState()
+        await model.refreshLiveState()
         XCTAssertEqual(scheduled.count, 2)
         let shortDelay = scheduled[1]
         XCTAssertLessThan(shortDelay, longDelay, "the newer read armed the shorter deadline")
@@ -923,7 +959,7 @@ final class VoiceSharingDeadlineMoveTests: XCTestCase {
     }
 
     /// ONE arm per fire: the timer's refresh must not queue a second closure on top of its own.
-    func test_afireQueuesExactlyOneNextArm() {
+    func test_afireQueuesExactlyOneNextArm() async {
         let queue = VoiceSharingQueue(root: root)
         let model = VoiceSharingSettingsModel(queue: queue,
                                              isCollectionPermitted: { true },
@@ -934,7 +970,7 @@ final class VoiceSharingDeadlineMoveTests: XCTestCase {
         model.nextAgeBoundarySeconds = { boundary }
         var bodies: [(delay: TimeInterval, body: () -> Void)] = []
         model.scheduleTimeDrivenRefresh = { delay, body in bodies.append((delay, body)) }
-        model.refreshLiveState()
+        await model.refreshLiveState()
         XCTAssertEqual(bodies.count, 1)
         boundary = 240
         bodies[0].body()                  // the timer fires

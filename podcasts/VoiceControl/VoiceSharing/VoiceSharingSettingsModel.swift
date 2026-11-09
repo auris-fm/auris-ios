@@ -278,6 +278,17 @@ final class VoiceSharingSettingsModel {
 
     /// Registers a listener for state changes. The returned token must be removed on teardown.
     /// The delivery carries the sequence it was read at, so a consumer can reject an older one.
+    /// Delivers `state` to the registered listeners, outside the change lock.
+    ///
+    /// Exposed so a control can assert the re-entrancy property directly: a listener that calls back
+    /// into the model must not deadlock, which is only true if delivery happens off the lock.
+    func deliverForTesting(_ state: SentLiveState) {
+        changeLock.lock()
+        let bodies = Array(changeObservers.values)
+        changeLock.unlock()
+        for body in bodies { body(state) }
+    }
+
     func addStateObserver(_ body: @escaping (SentLiveState) -> Void) -> UUID {
         changeLock.lock(); defer { changeLock.unlock() }
         let id = UUID()
