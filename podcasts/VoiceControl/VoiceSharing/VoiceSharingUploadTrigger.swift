@@ -18,6 +18,8 @@ final class VoiceSharingUploadTrigger {
     private var running = false
     private var pending = false
     private var stopped = false
+    /// The one pending retry wake.
+    private var retryWake: Task<Void, Never>?
     /// Cancels whatever the transport has in flight, so `stop()` reaches the transfer itself.
     private let onStop: (() -> Void)?
 
@@ -53,6 +55,8 @@ final class VoiceSharingUploadTrigger {
         lock.lock()
         stopped = true
         pending = false
+        retryWake?.cancel()
+        retryWake = nil
         let cancel = onStop
         lock.unlock()
         cancel?()
@@ -70,6 +74,27 @@ final class VoiceSharingUploadTrigger {
         await uploader.drain()
     }
 
+    /// Arms the single wake that a retry needs. Called after a pass that left work behind: without
+    /// it a quiet app would keep a recording indefinitely, waiting for an unrelated event to happen.
+    /// Re-arming replaces the previous wake, so there is never more than one pending.
+    func armRetryWake() async {
+        guard surfaceEnabled() else { return }
+        retryWake?.cancel()
+        guard let delay = await uploader.secondsUntilNextRetry() else {
+            retryWake = nil
+            return
+        }
+        lock.lock()
+        let allowed = !stopped
+        lock.unlock()
+        guard allowed else { return }
+        retryWake = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            self?.trigger()
+        }
+    }
+
     private func finish() {
         lock.lock()
         running = false
@@ -77,5 +102,7 @@ final class VoiceSharingUploadTrigger {
         pending = false
         lock.unlock()
         if again { trigger() }
+        // A pass that left an entry inside its backoff window owes the app a wake when it is due.
+        Task { await armRetryWake() }
     }
 }

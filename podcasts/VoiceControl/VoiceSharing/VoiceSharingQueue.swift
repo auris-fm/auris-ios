@@ -128,6 +128,16 @@ actor VoiceSharingQueue {
         return max(0, VoiceSharingQueue.maximumAge + oldest.timeIntervalSince(now()))
     }
 
+    /// Seconds until the earliest entry leaves its backoff window, or nil when nothing is waiting.
+    /// The trigger arms ONE wake from this, so a retry happens when it is due rather than only when
+    /// some unrelated event happens to nudge the app.
+    func secondsUntilNextRetry() -> TimeInterval? {
+        let current = now()
+        let waiting = retryAfter.values.filter { $0 > current }
+        guard let earliest = waiting.min() else { return nil }
+        return max(0, earliest.timeIntervalSince(current))
+    }
+
     /// Entries the uploader may offer now: not expired, not inside a backoff window.
     ///
     /// Expired recordings are not returned because they are deleted, which is a different action from

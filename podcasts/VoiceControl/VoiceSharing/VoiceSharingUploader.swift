@@ -68,6 +68,11 @@ final class VoiceSharingUploader {
         self.log = log
     }
 
+    /// Seconds until the earliest recording leaves its backoff window, if any is waiting.
+    func secondsUntilNextRetry() async -> TimeInterval? {
+        await queue.secondsUntilNextRetry()
+    }
+
     /// One pass over the queue: sends every due recording until none remain.
     ///
     /// Returns the outcomes actually produced, so a caller (and a test) can see what happened rather

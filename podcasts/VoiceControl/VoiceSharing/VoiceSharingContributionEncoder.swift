@@ -163,6 +163,9 @@ enum VoiceSharingContributionEncoder {
         /// The collector's own ceiling bounds one capture; exceeding it is refused before wav
         /// capacity arithmetic and the UInt32 header sizes are computed.
         case sampleCountExceedsCeiling
+        /// The record JSON exceeded the part's ceiling: refused rather than written, so a malformed
+        /// observation cannot produce an unbounded upload.
+        case metadataExceedsCeiling
     }
 
     static func encode(
@@ -187,6 +190,10 @@ enum VoiceSharingContributionEncoder {
         // Plain JSON. Sorted keys only so a human reading a queue folder sees a stable file; the
         // server does not depend on the ordering or the bytes.
         let metadata = try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys])
+        // The ceiling is declared above; a constant nothing enforces is a comment, not a bound.
+        guard metadata.count <= maximumMetadataBytes else {
+            throw EncodeError.metadataExceedsCeiling
+        }
         return Encoded(metadata: metadata, wav: wav)
     }
 
