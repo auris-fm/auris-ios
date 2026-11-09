@@ -1468,6 +1468,41 @@ final class VoiceSharingUploaderTests: XCTestCase {
         XCTAssertTrue(unreadable.readyEntries().isEmpty, "held owners serve nothing")
     }
 
+    /// The retry classes the server's answer table names, each proving retention rather than
+    /// removal. A retry class is the counterpart of a delete code: the record is intact and the
+    /// server has not judged it, so removing it would discard a recording over a transient state.
+    func test_eachRetryClassRetainsTheEntry() async throws {
+        let retrying: [(Int, String?)] = [
+            // 401 is authentication, not a verdict: the credential is refreshed out of band and
+            // the SAME immutable entry is retried.
+            (401, "unauthorized"),
+            (429, "quota_exceeded"),
+            (503, "upload_pending"),
+            (503, "storage_unavailable"),
+            (500, "internal_error"),
+        ]
+        for (status, bodyCode) in retrying {
+            let entry = try makeReadyEntry()
+            let body = bodyCode.map { Data("{\"schema_version\":1,\"code\":\"\($0)\"}".utf8) }
+                ?? Data()
+            let uploader = makeUploader(transport: { _, _, _ in
+                .response(statusCode: status, body: body)
+            })
+            let outcome = await uploader.upload(entry)
+            guard case .retry = outcome else {
+                return XCTFail(
+                    "\(status) \(bodyCode ?? "-"): a retry class must retain the entry, got \(outcome)")
+            }
+            // Retention alone is not enough: the bytes must still be there, or the entry was kept
+            // in name only. `readyEntries()` is not the check — an entry inside its backoff window
+            // is correctly absent from it — so the directory is read directly.
+            let directory = root.appendingPathComponent(entry.name, isDirectory: true)
+            XCTAssertTrue(
+                FileManager.default.fileExists(atPath: directory.path),
+                "\(status) \(bodyCode ?? "-"): the entry must remain on disk")
+        }
+    }
+
     /// 410 carries either owning code: record_gone or enrollment_retired.
     func test_410AcceptsBothOwningCodes() async throws {
         for code in ["record_gone", "enrollment_retired"] {
