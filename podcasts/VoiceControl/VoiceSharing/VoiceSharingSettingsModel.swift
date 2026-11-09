@@ -168,7 +168,7 @@ final class VoiceSharingSettingsModel {
         return "Audio up to \(VoiceSharingUploadQueue.maxEntryAudioBytes / 1024) KB per contribution, "
             + "retained for at most \(days) \(days == 1 ? "day" : "days")."
     }
-    // MARK: - Recovery / stopped state 
+    // MARK: - Recovery / stopped state
 
     /// Live-state dependencies the surface cannot guess.
     ///
@@ -244,7 +244,7 @@ final class VoiceSharingSettingsModel {
         let action: String?
     }
 
-    // MARK: - The single published view state 
+    // MARK: - The single published view state
 
     /// Everything the surface displays, derived from ONE coherent snapshot. The two UI parts cannot
     /// disagree because they read the same value, and a listener cannot be called with values from
@@ -274,7 +274,7 @@ final class VoiceSharingSettingsModel {
         }
     }
 
-    // MARK: - Change subscription 
+    // MARK: - Change subscription
 
     private var changeObservers: [UUID: (SentLiveState) -> Void] = [:]
     private let changeLock = NSLock()
@@ -309,7 +309,7 @@ final class VoiceSharingSettingsModel {
     /// control can hold an older read open while a newer one completes.
     var afterReadBeforeCommitForTesting: (() -> Void)?
 
-    // MARK: - Time-driven freshness 
+    // MARK: - Time-driven freshness
 
     /// Schedules the call that refreshes when TIME (not a mutation) makes the displayed state
     /// stale: an entry crossing the queue-age bound, or a lease lapsing. Without this the surface

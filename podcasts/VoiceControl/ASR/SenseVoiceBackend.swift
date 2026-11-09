@@ -232,7 +232,7 @@ final class SenseVoiceBackend: AsrBackend {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private static let baseURL = "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-/resolve/main"
+    private static let baseURL = "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main"
     private static let modelFilename = "model.int8.onnx"
     private static let tokensFilename = "tokens.txt"
 
