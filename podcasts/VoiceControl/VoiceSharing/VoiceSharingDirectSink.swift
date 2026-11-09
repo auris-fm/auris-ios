@@ -30,7 +30,7 @@ final class VoiceSharingDirectSink {
         self.requestUploadDrain = requestUploadDrain
     }
 
-    func handle(_ event: VoiceSharingCollector.SegmentEvent) {
+    func handle(_ event: VoiceSharingCollector.SegmentEvent) async {
         guard isEnabled() else { return }
         do {
             // ENGINE-PRODUCED observations win: the event carries the stages the recogniser
@@ -39,7 +39,11 @@ final class VoiceSharingDirectSink {
             for (stage, observed) in event.reportedStages { claims[stage] = observed }
             let encoded = try VoiceSharingContributionEncoder.encode(
                 event: event, provenance: encoderProvenance(), observations: claims)
-            guard queue.publish(audio: encoded.wav, metadata: encoded.metadata) != nil else {
+            // Publication is the queue's, and the drain is requested only once the recording is
+            // actually on disk: asking first would have the uploader look at a queue that does not
+            // yet contain this segment.
+            let published = await queue.publish(audio: encoded.wav, metadata: encoded.metadata)
+            guard published != nil else {
                 return // the queue logs its own drop reason
             }
             requestUploadDrain()

@@ -166,7 +166,9 @@ class VoiceControlAssembly {
             log: { FileLog.shared.addMessage("[VoiceSharing] \($0)") })
         // Anything left under a temporary name at startup is deleted: a process that died mid-write
         // never published a valid recording.
-        contributionQueue.removeTemporaryEntries()
+        // Startup is the only place temp folders are swept: doing it on every write would let one
+        // publication delete another's staging folder.
+        Task { await contributionQueue.removeTemporaryEntries() }
 
         // PRODUCTION wire (spec 18:38Z): the real transport (bearer credential + the configured
         // endpoint, fail-closed on either) feeding the uploader feeding the serialized scheduler.
@@ -271,7 +273,9 @@ class VoiceControlAssembly {
             outcomeWaitLimit: VoiceSharingCollector.OutcomeWaitLimit(
                 milliseconds: 15_000, ceilingMilliseconds: 15_000),
             sink: { event in
-                contributionSink.handle(event)
+                // The collector hands segments over synchronously; publication is the queue
+                // actor's, so it is handed off rather than blocking the capture path.
+                Task { await contributionSink.handle(event) }
             }
         )
         asrEngine.contributionCollector = contributionCollector
@@ -479,10 +483,10 @@ class VoiceControlAssembly {
             baseURLProvider: baseURLProvider, tokenProvider: tokenProvider, session: session)
         let uploader = VoiceSharingUploader(
             queue: queue,
-            send: { entry in
-                // Consent is re-read as late as possible: after the credential is in hand, right
-                // before the bytes would leave the device.
-                await transport.send(entry: entry, stillPermitted: isAuthorized)
+            send: { entry, stillPermitted in
+                // Consent and identity are re-read as late as possible: after the credential is in
+                // hand, right before the bytes would leave the device.
+                await transport.send(entry: entry, stillPermitted: stillPermitted)
             },
             refreshSignIn: { await transport.refreshSignIn() },
             currentIdentity: currentIdentity,
@@ -490,7 +494,8 @@ class VoiceControlAssembly {
             now: clock,
             log: { FileLog.shared.addMessage("[VoiceSharing] \($0)") })
         return VoiceSharingUploadTrigger(
-            uploader: uploader, surfaceEnabled: surfaceEnabled, isAuthorized: isAuthorized)
+            uploader: uploader, surfaceEnabled: surfaceEnabled, isAuthorized: isAuthorized,
+            onStop: { transport.cancelInFlight() })
     }
 
 
@@ -528,11 +533,15 @@ class VoiceControlAssembly {
             // log lines. Silence is its own defect: every purge decision — keep OR clear — is
             // now logged with its cause and the reconciled counts. No audio, no credentials.
             if !sessionAlive() {
-                let removed = queue.deleteAll(reason: "session-gone")
-                log("[VoiceSharing] queue PURGE cause=session-gone removed: \(removed)")
+                Task {
+                    let removed = await queue.deleteAll(reason: "session-gone")
+                    log("[VoiceSharing] queue PURGE cause=session-gone removed: \(removed)")
+                }
             } else if consentGone() {
-                let removed = queue.deleteAll(reason: "consent-gone")
-                log("[VoiceSharing] queue PURGE cause=consent-gone removed: \(removed)")
+                Task {
+                    let removed = await queue.deleteAll(reason: "consent-gone")
+                    log("[VoiceSharing] queue PURGE cause=consent-gone removed: \(removed)")
+                }
             } else {
                 log("[VoiceSharing] gate lost (temporary) — durable queue RETAINED")
             }
@@ -642,7 +651,7 @@ final class VoiceSharingLifetime {
         self.enrollmentStore = enrollmentStore
         self.queue = queue
         enrollmentObserver = enrollmentStore.addObserver { [weak settingsModel] _ in
-            settingsModel?.refreshLiveState()
+            Task { await settingsModel?.refreshLiveState() }
         }
         queueObserver = UUID()
     }

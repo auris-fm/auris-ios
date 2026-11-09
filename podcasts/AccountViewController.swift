@@ -202,7 +202,7 @@ extension AccountViewController {
             // the init default was nil and the surface rendered `disclosureUnavailable` —
             // enrollment could never start. The token is the exact server-supported string.
             disclosureVersion: VoiceSharingDisclosure.productionVersion,
-            purgeLocal: local.map { model in { model.deletePendingRecordingsOnThisDevice() } })
+            purgeLocal: local.map { model in { await model.deletePendingRecordingsOnThisDevice() } })
         return VoiceSharingAccountController(accountModel: account, localModel: local, surfaceEnabled: surfaceEnabled)
     }
 }

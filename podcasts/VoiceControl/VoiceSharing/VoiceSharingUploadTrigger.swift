@@ -18,13 +18,17 @@ final class VoiceSharingUploadTrigger {
     private var running = false
     private var pending = false
     private var stopped = false
+    /// Cancels whatever the transport has in flight, so `stop()` reaches the transfer itself.
+    private let onStop: (() -> Void)?
 
     init(uploader: VoiceSharingUploader,
          surfaceEnabled: @escaping () -> Bool = { VoiceSharingSettingsModel.surfaceEnabled },
-         isAuthorized: @escaping () -> Bool) {
+         isAuthorized: @escaping () -> Bool,
+         onStop: (() -> Void)? = nil) {
         self.uploader = uploader
         self.surfaceEnabled = surfaceEnabled
         self.isAuthorized = isAuthorized
+        self.onStop = onStop
     }
 
     /// Asks for a pass. Returns immediately; the pass runs on its own task.
@@ -43,13 +47,15 @@ final class VoiceSharingUploadTrigger {
         Task { [weak self] in await self?.run() }
     }
 
-    /// Stops accepting work. An in-flight pass is not cancelled: a recording is never left in an
-    /// unknown state mid-request, and the pass ends on its own.
+    /// Stops the trigger AND cancels the request in flight. Setting a flag alone would leave a
+    /// recording already on the wire still travelling to the server after consent was withdrawn.
     func stop() {
         lock.lock()
         stopped = true
         pending = false
+        let cancel = onStop
         lock.unlock()
+        cancel?()
     }
 
     /// Test seam: whether a pass is currently running.

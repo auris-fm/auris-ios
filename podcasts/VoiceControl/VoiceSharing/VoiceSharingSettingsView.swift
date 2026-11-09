@@ -40,8 +40,8 @@ struct VoiceSharingSettingsView: View {
     private var subscription: some View {
         content
             .onAppear {
-                liveState = model.liveState()
-                published = model.publishedViewState(for: liveState!)
+                // The model publishes the first snapshot; the view never reads the queue inline,
+                // because a render must not await I/O.
                 stateObserver = model.addStateObserver { sent in
                     // Two independent protections: the main-actor hop for
                     // SwiftUI state, and a sequence check so a delivery that arrives LATE cannot
@@ -57,7 +57,7 @@ struct VoiceSharingSettingsView: View {
                 // ONE entry point: refreshLiveState publishes AND arms the time-driven refresh
                 // (an aged entry or a lapsing lease changes the display with no other event), so
                 // appearance does not need a second arm.
-                model.refreshLiveState()
+                Task { await model.refreshLiveState() }
             }
             .onDisappear {
                 if let stateObserver { model.removeStateObserver(stateObserver) }
@@ -83,7 +83,9 @@ struct VoiceSharingSettingsView: View {
             // this single LiveState, so the surface never mixes a cached permit with fresh reads
             // . The snapshot is refreshed by the model's subscription, so the
             // surface tracks real state changes instead of freezing the first read.
-            let view = published ?? model.publishedViewState(for: model.liveState())
+            // Render nothing until the model has published a coherent snapshot: guessing a state
+            // would show the user guidance about a situation nobody has measured.
+            if let view = published {
             let stopped = view.guidance
             if stopped.reason != .notStopped {
                 Section {
@@ -129,12 +131,12 @@ struct VoiceSharingSettingsView: View {
                                     isPresented: $showingDeleteConfirmation,
                                     titleVisibility: .visible) {
                     Button("Delete", role: .destructive) {
-                        lastDelete = model.deletePendingRecordingsOnThisDevice()
-                        // A purge moves the queue's hold generation: refresh so the surface shows
-                        // the post-purge truth rather than the pre-purge snapshot.
-                        model.refreshLiveState()
-                        liveState = model.liveState()
-                        published = model.publishedViewState(for: model.liveState())
+                        Task {
+                            lastDelete = await model.deletePendingRecordingsOnThisDevice()
+                            // A purge moves the queue's hold generation: refresh so the surface
+                            // shows the post-purge truth rather than the pre-purge snapshot.
+                            await model.refreshLiveState()
+                        }
                     }
                     Button("Cancel", role: .cancel) {}
                 }
@@ -155,6 +157,7 @@ struct VoiceSharingSettingsView: View {
                 Text(model.compiledBoundsDescription)
                     .font(.caption)
                     .foregroundColor(.secondary)
+            }
             }
         }
         .navigationTitle(L10n.voiceSharingSectionTitle)

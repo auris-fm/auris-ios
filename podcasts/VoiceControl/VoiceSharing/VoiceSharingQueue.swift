@@ -9,7 +9,12 @@ import Foundation
 ///
 /// The queue is deliberately small and boring: its job is to hold bytes that the uploader will offer,
 /// and to delete them on exactly the conditions the spec lists — never to decide questions of its own.
-final class VoiceSharingQueue {
+///
+/// It is an actor because three unrelated callers touch it: the collector publishes, the uploader
+/// drains and deletes, and Settings and the consent-loss handler purge. Without serialization two
+/// of them interleave inside a write or a listing — and a publish that removed temp folders as it
+/// went could delete another publish's staging folder mid-flight.
+actor VoiceSharingQueue {
 
     /// At most 32 recordings. The spec's only queue limit.
     static let capacity = 32
@@ -62,9 +67,8 @@ final class VoiceSharingQueue {
     @discardableResult
     func publish(audio: Data, metadata: Data, name: String = UUID().uuidString) -> String? {
         createRootIfNeeded()
-        removeTemporaryEntries()
 
-        guard count() < Self.capacity else {
+        guard entries().count < Self.capacity else {
             log("drop reason=queue-full name=\(name)")
             return nil
         }

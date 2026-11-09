@@ -184,7 +184,7 @@ struct VoiceSharingSectionHost: View {
             client: VoiceSharingAccountClient(tokenProvider: tokenProvider),
             disclosureVersion: VoiceSharingDisclosure.productionVersion,
             purgeLocal: localModel.map { model in
-                { model.deletePendingRecordingsOnThisDevice() }
+                { await model.deletePendingRecordingsOnThisDevice() }
             }))
     }
 

@@ -117,14 +117,14 @@ final class VoiceSharingSettingsModel {
 
     /// Read-only projection. "Could not determine" is reported as `.unknown`, never as a zero
     /// count — the reviewer's point that a held owner must not render "Stored contributions: 0".
-    func status() -> ContributionStatus {
+    func status() async -> ContributionStatus {
         // Folders are the only queue state, so the count is the count. The one distinction worth
         // keeping is readability: a folder we cannot list is unknown, never an empty device.
-        guard queue.isReadable else {
+        guard await queue.isReadable else {
             return ContributionStatus(storage: .unknown,
                                       collectionPermitted: isCollectionPermitted() ?? false)
         }
-        return ContributionStatus(storage: .knownReady(queue.count()),
+        return ContributionStatus(storage: .knownReady(await queue.count()),
                                   collectionPermitted: isCollectionPermitted() ?? false)
     }
 
@@ -133,15 +133,19 @@ final class VoiceSharingSettingsModel {
     /// LOCAL scope, stated in the name: this deletes recordings held ON THIS device. It is not
     /// account-wide deletion — accepted data on the server is a separate operation the client does
     /// not perform here (spec: local removal never stands for server completion).
-    func deletePendingRecordingsOnThisDevice() -> DeleteResult {
-        let before = queue.count()
-        queue.deleteAll(reason: "user-request")
+    func deletePendingRecordingsOnThisDevice() async -> DeleteResult {
+        let before = await queue.count()
+        await queue.deleteAll(reason: "user-request")
         // A delete can fail (a file system that refuses removal). Whatever survives is reported
         // rather than assumed gone: claiming removal we did not achieve would tell the user their
         // recordings are gone while they are still on disk.
-        let surviving = queue.count()
-        return DeleteResult(disposition: .reconciled(
+        let surviving = await queue.count()
+        let result = DeleteResult(disposition: .reconciled(
             removed: before - surviving, durablyDisqualified: surviving))
+        // Subscribers hold a snapshot taken before the purge; without this they would keep showing
+        // the pre-delete count and the user would see their deletion do nothing.
+        await refreshLiveState()
+        return result
     }
 
 
@@ -380,11 +384,11 @@ final class VoiceSharingSettingsModel {
             // `refreshLiveState` is the SINGLE owner of arming: it re-arms on
             // both the published and the unchanged path, so calling `armTimeDrivenRefresh` here as
             // well queued two closures per fire.
-            self.refreshLiveState()
+            Task { await self.refreshLiveState() }
         }
     }
 
-    func refreshLiveState() {
+    func refreshLiveState() async {
         // SERIALIZED: the comparison AND the commit of `lastPublishedState` happen under the same
         // lock as the observer list, so two concurrent refreshes cannot both decide to publish, and
         // an out-of-order snapshot cannot overwrite a newer one. Observers are
@@ -394,7 +398,7 @@ final class VoiceSharingSettingsModel {
         let sequence = readSequence
         changeLock.unlock()
 
-        let state = liveState()
+        let state = await liveState()
         afterReadBeforeCommitForTesting?()
 
         // LAST writer wins: a refresh whose read is OLDER than one already published is obsolete —
@@ -445,7 +449,7 @@ final class VoiceSharingSettingsModel {
     /// The model's ONE live snapshot: queue coverage plus whatever the two injected reads return.
     /// `nil` from a read is preserved as `unknown` — never coerced to `false`, which would accuse
     /// the user of opting out.
-    func liveState() -> LiveState {
+    func liveState() async -> LiveState {
         // Stamp before and after every read, INCLUDING the queue read: a hold transition or an
         // account/enrollment move between the queue coverage read and the first stamp used to be
         // invisible. No read happens outside the interval.
@@ -453,7 +457,7 @@ final class VoiceSharingSettingsModel {
         // Folders are the only state, so there is no "unknown coverage" to report: the count is a
         // direct read of the directory.
         let fault: StoppedReason.StorageFault = .none
-        let readyCount: Int? = queue.count()
+        let readyCount: Int? = await queue.count()
         let permits = isCollectionPermitted()
         let enrolled = isEnrolled()
         let optedIn = isOptedIn()
@@ -571,7 +575,7 @@ final class VoiceSharingAccountModel: ObservableObject {
     private let client: VoiceSharingAccountClient
     private let disclosureVersion: String?
     private let session: () -> String?
-    private let purgeLocal: (() -> VoiceSharingSettingsModel.DeleteResult)?
+    private let purgeLocal: (() async -> VoiceSharingSettingsModel.DeleteResult)?
     private var observer: UUID?
     private var account: String?
     private var serial = 0
@@ -588,7 +592,7 @@ final class VoiceSharingAccountModel: ObservableObject {
          client: VoiceSharingAccountClient,
          disclosureVersion: String? = nil,
          session: @escaping () -> String? = VoiceSharingEnrollmentStore.currentSessionOwner,
-         purgeLocal: (() -> VoiceSharingSettingsModel.DeleteResult)? = nil) {
+         purgeLocal: (() async -> VoiceSharingSettingsModel.DeleteResult)? = nil) {
         self.store = store
         self.client = client
         self.disclosureVersion = disclosureVersion.flatMap { $0.isEmpty ? nil : $0 }
@@ -697,22 +701,11 @@ final class VoiceSharingAccountModel: ObservableObject {
         guard disclosureConfirmed else { membershipStatus = .confirmationRequired; return }
         guard let disclosureVersion else { membershipStatus = .disclosureUnavailable; return }
         guard !busy else { membershipStatus = .unavailable; return }
-        // GET-before-PUT. `If-Match` is required, so an intent
-        // with no revision must READ first rather than refuse and leave the user's switch unexplained.
-        // The read runs under THIS intent's stamp, so an account transition or a competing intent that
-        // lands during it retires the read; if the read fails, nothing is sent and the switch stays off.
-        if store.currentAuthoritativeState?.membership.membershipRevision == nil {
-            guard await readProjectionForMutation() else { return }
-        }
-        guard let revision = store.currentAuthoritativeState?.membership.membershipRevision else {
-            membershipStatus = .unavailable
-            busy = false
-            return
-        }
+        // No read-before-write: the body is the desired state, and the server issues no revision to
+        // precondition on. One request takes the user from here to enrolled.
         store.setLocalOptIn(true)
         guard let sent = begin(), let operation = client.beginMembership(
-            enrolled: true, acceptedDisclosureVersion: disclosureVersion,
-            lastReadRevision: revision) else {
+            enrolled: true, acceptedDisclosureVersion: disclosureVersion) else {
             // Diagnostic: name WHY enrollment could not begin — the two guards above
             // are silent, and "unsupported_disclosure" from the server is indistinguishable from a
             // local precondition failure without this line.
@@ -739,7 +732,7 @@ final class VoiceSharingAccountModel: ObservableObject {
         withdrawing = true
         _ = store.withdrawLocally(acceptedServerProjectionAfterward: false)
         cleanupAttempted = true
-        localCleanup = purgeLocal?()
+        localCleanup = await purgeLocal?()
         updateMembership()
         membershipStatus = .withdrawalUnconfirmed
         guard let sent = begin() else { busy = false; return }
@@ -747,21 +740,8 @@ final class VoiceSharingAccountModel: ObservableObject {
         // above and is never undone by a failed read: collection has stopped and the pending bytes are
         // purged, so the user's privacy decision holds regardless of what the server says next. What a
         // failed read costs is only the CONFIRMATION, which the status already reports as unconfirmed.
-        var precondition = revision
-        if precondition == nil {
-            let read = await refreshProjection(under: sent)
-            guard current(sent) else { storeChanged(); return }
-            guard read == .success else {
-                // No revision to assert and none obtained: do not send. The withdrawal remains
-                // locally in force and visibly unconfirmed.
-                busy = false
-                membershipStatus = .withdrawalUnconfirmed
-                return
-            }
-            precondition = store.currentAuthoritativeState?.membership.membershipRevision
-        }
         guard let operation = client.beginMembership(
-            enrolled: false, acceptedDisclosureVersion: nil, lastReadRevision: precondition) else {
+            enrolled: false, acceptedDisclosureVersion: nil) else {
             busy = false
             membershipStatus = .withdrawalUnconfirmed
             return
@@ -802,7 +782,7 @@ final class VoiceSharingAccountModel: ObservableObject {
         }
     }
 
-    func retryLocalCleanup() { cleanupAttempted = true; localCleanup = purgeLocal?() }
+    func retryLocalCleanup() async { cleanupAttempted = true; localCleanup = await purgeLocal?() }
 
     private func performMutation(_ operation: VoiceSharingAccountClient.MutationOperation, under sent: Stamp) async {
         let result = await client.perform(operation)

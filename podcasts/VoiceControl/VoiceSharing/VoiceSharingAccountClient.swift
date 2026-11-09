@@ -152,10 +152,6 @@ final class VoiceSharingAccountClient {
         let path: String
         /// Body must never contain credential material; it carries only contract fields.
         let body: [String: Any]
-        /// Optimistic-concurrency precondition, sent as `If-Match`. always present: the contract requires
-        /// it, so a client with no revision must `GET` first rather than write without
-        /// a precondition. An empty value is not a precondition either, which is why `begin` refuses it.
-        let ifMatch: String
         /// Non-secret generation of the session that BEGAN this operation, retained across retries. A
         /// `perform` under a different current generation refuses before touching the transport, so account
         /// A's enrollment/withdrawal/deletion intent can never be sent while account B is signed in.
@@ -176,17 +172,15 @@ final class VoiceSharingAccountClient {
     /// user consented to belongs to the enrollment, and sending one on a withdrawal would record consent
     /// for a state the user is leaving.
     ///
-    /// `lastReadRevision` is the `membership_revision` from the newest projection this client applied. It is
-    /// REQUIRED: `If-Match` is mandatory, so a caller holding no revision must read the state with
-    /// `fetchProjection` first, and that read is what supplies the value. Refusing here keeps an
-    /// unpreconditioned write from ever being constructed, let alone sent.
-    func beginMembership(enrolled: Bool, acceptedDisclosureVersion: String?, lastReadRevision: String?) -> MutationOperation? {
+    /// The body states the DESIRED state and nothing about the previous one. There is no revision
+    /// precondition: the server no longer issues `membership_revision`, so requiring one would make
+    /// every mutation impossible, and a read-before-write to obtain it would be a round trip that
+    /// guarded nothing.
+    func beginMembership(enrolled: Bool, acceptedDisclosureVersion: String?) -> MutationOperation? {
         // Refuse locally rather than let the server report it: turning sharing ON without a consent
         // version would enroll a user under a disclosure they were never shown.
         if enrolled, (acceptedDisclosureVersion ?? "").isEmpty { return nil }
         if !enrolled, acceptedDisclosureVersion != nil { return nil }
-        // An empty revision is not a read: it would send `If-Match: ` and ask the server to check nothing.
-        guard let lastReadRevision, !lastReadRevision.isEmpty else { return nil }
         // Both fence halves are captured HERE, before any await, and travel with the operation forever.
         guard let issuedUnder = membershipStore.projectionToken() else { return nil }
         let generation = issuedUnder.lifecycleGeneration
@@ -201,7 +195,6 @@ final class VoiceSharingAccountClient {
             requestID: id,
             path: Self.membershipPath,
             body: body,
-            ifMatch: lastReadRevision,
             originatingGeneration: generation,
             issuedUnder: issuedUnder
         )
@@ -221,7 +214,6 @@ final class VoiceSharingAccountClient {
         return await mutate(
             path: operation.path,
             body: operation.body,
-            ifMatch: operation.ifMatch,
             originatingGeneration: operation.originatingGeneration,
             issuedUnder: operation.issuedUnder
         )
@@ -291,19 +283,16 @@ final class VoiceSharingAccountClient {
     private func mutate(
         path: String,
         body: [String: Any],
-        ifMatch: String,
         originatingGeneration: SessionIdentity,
         issuedUnder: VoiceSharingEnrollmentStore.ProjectionToken
     ) async -> VoiceSharingMutationOutcome {
         // The operation's own generation is the authority; `identityAtStart` is only the value observed right
         // now, and both must agree before anything is sent.
         guard sessionIdentity() == originatingGeneration else { return .refusedStaleSession }
-        // PUT, not POST (phase 2): the body is the desired state, so a resend IS the same request. The
-        // precondition rides on the header — omitted entirely when nothing was read.
+        // PUT, not POST: the body is the desired state, so a resend IS the same request.
         guard var request = await makeRequest(path: path, method: "PUT", body: body) else {
             return .unavailableBackend
         }
-        request.setValue(ifMatch, forHTTPHeaderField: Field.ifMatch)
         guard sessionIdentity() == originatingGeneration else { return .refusedStaleSession }
         // NOTE: `mutate` is entered only after makeRequest succeeded, which already required a non-nil
         // identity; callers capture it before the credential await and pass it in so every comparison uses
