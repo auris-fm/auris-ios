@@ -1,25 +1,5 @@
 import Foundation
 
-/// Holds a just-created transfer until its caller has published it for cancellation.
-private final class TransferGate: @unchecked Sendable {
-    private let lock = NSLock()
-    private var released = false
-
-    func waitUntilReleased() async {
-        while true {
-            lock.lock()
-            let isReleased = released
-            lock.unlock()
-            if isReleased { return }
-            await Task.yield()
-        }
-    }
-
-    func release() {
-        lock.lock(); released = true; lock.unlock()
-    }
-}
-
 /// Sends one recording as a single multipart request and reduces the answer to what the uploader
 /// decides on. There is no reservation, no second step and no receipt matching.
 final class VoiceSharingUploadTransport {
@@ -33,8 +13,9 @@ final class VoiceSharingUploadTransport {
     /// scheduling new work. Cancelling the task cancels the underlying request.
     private let inFlightLock = NSLock()
     /// Test seam for the withdrawal window: called under the registration lock, after permission is
-    /// answered and before the transfer is published. A caller that withdraws here proves the stop is
-    /// observed by the same critical section rather than slipping into a gap.
+    /// answered and before the transfer is published. A caller that withdraws here exercises the one
+    /// ordering that could strand a transfer, so a control can prove the denied path both sends
+    /// nothing and finishes.
     var afterPermissionBeforeRegistrationForTesting: (() -> Void)?
     private var inFlight: Task<(Data, URLResponse), any Error>?
 
@@ -103,44 +84,31 @@ final class VoiceSharingUploadTransport {
     ///
     /// No latch: a stop cancels the attempt in flight, and the next call starts a fresh one.
     ///
-    /// The permission check is INSIDE the same critical section that creates and publishes the task.
-    /// Asking before taking the lock leaves a window: a withdrawal landing after the answer but
-    /// before registration found nothing to cancel, and the transfer then started without ever
-    /// re-reading permission — a recording would reach the network after the user said stop. The
-    /// gate closes the remaining interval, so the task cannot send until it is reachable.
+    /// Permission is read ONCE, inside the same critical section that creates and publishes the task.
+    /// Asking before taking the lock left a window: a withdrawal landing after the answer but before
+    /// registration found nothing to cancel, and the transfer then started without ever re-reading
+    /// permission — a recording would reach the network after the user said stop. Reading it under the
+    /// lock closes that window without a second read: withdrawal sets sharing off FIRST and only then
+    /// calls `cancelInFlight()`, which takes this same lock. So either the check here sees the stop and
+    /// no transfer is created, or the transfer is already published and the cancel reaches it. There is
+    /// no interval in which a permitted-looking transfer exists and is unreachable.
     private func runInFlight(_ request: URLRequest, body: Data,
                              stillPermitted: () -> Bool) async throws -> (Data, URLResponse) {
-        let gate = TransferGate()
         inFlightLock.lock()
         guard stillPermitted() else {
             inFlightLock.unlock()
             throw CancellationError()
         }
-        // Test seam: runs the interleaving a real withdrawal could otherwise only reach by luck.
         afterPermissionBeforeRegistrationForTesting?()
         let task = Task { [session] in
-            await gate.waitUntilReleased()
-            return try await session.upload(for: request, from: body)
+            try await session.upload(for: request, from: body)
         }
         inFlight = task
-        // Asked AGAIN once the transfer is registered, still under the same lock: the answer above
-        // can be stale by now, and a withdrawal in between would otherwise let the bytes leave. A
-        // stop that ran in that window cancelled nothing (there was nothing to cancel yet), so this
-        // second reading is what makes the start atomic.
-        let permittedAfterRegistration = stillPermitted()
-        if !permittedAfterRegistration {
-            inFlight = nil
-            task.cancel()
-        }
         inFlightLock.unlock()
         defer { inFlightLock.lock(); inFlight = nil; inFlightLock.unlock() }
-        guard permittedAfterRegistration else { throw CancellationError() }
-        gate.release()
         return try await task.value
     }
 
-    /// Cancels the request in flight, if any. Called when consent is withdrawn: the recording must
-    /// not keep travelling to the server after the user said stop.
     func cancelInFlight() {
         inFlightLock.lock()
         let task = inFlight

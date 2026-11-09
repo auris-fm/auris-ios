@@ -73,14 +73,17 @@ final class VoiceSharingUploadRequestShapeControls: XCTestCase {
         XCTAssertNotNil(RecordingWire.shared.request, "the request reached the wire after the stop")
     }
 
-    /// WITHDRAWAL IN THE START WINDOW. Permission is answered and the transfer is registered inside ONE
-    /// critical section, so no stop can land between them: if one does, `cancelInFlight()` finds nothing
-    /// registered and the recording leaves without permission ever being re-read.
+    /// A STOP THAT HAS ALREADY HAPPENED. Permission is read inside the same critical section that
+    /// creates and publishes the transfer, and the transfer is created ONLY if that read permits it.
+    /// So a stop cannot be overtaken: it either makes this read refuse, in which case nothing is ever
+    /// created, or it arrives after publication, in which case `cancelInFlight()` reaches the task.
+    /// There is no third ordering in which a transfer exists and nothing can cancel it.
     ///
-    /// The seam runs at exactly that instant — after the answer, before registration — and withdraws.
-    /// With the check inside the section the withdrawal has already been recorded when the send would
-    /// begin, so nothing leaves; with the check hoisted above the lock the transfer starts anyway.
-    func test_aStopBetweenThePermissionAnswerAndRegistrationStillStopsTheUpload() async throws {
+    /// Two things must hold of the refused path, not one: nothing reaches the wire, AND the call
+    /// returns. Refusing without sending is the visible half; an attempt that never returned would
+    /// also pass a "no request" assertion while blocking its caller forever. The bounded wrapper
+    /// below turns that into a failure instead of a hung suite.
+    func test_aStopBeforeTheAttemptNeitherSendsNorStrandsTheAttempt() async throws {
         RecordingWire.shared.reset()
         let queue = VoiceSharingQueue(root: root, log: { _ in })
         _ = await queue.publish(audio: Data(repeating: 3, count: 512),
@@ -94,19 +97,61 @@ final class VoiceSharingUploadRequestShapeControls: XCTestCase {
             tokenProvider: RecordingTokens(),
             session: RecordingWire.session)
         let box = VoiceSharingPermissionBox()
-        transport.afterPermissionBeforeRegistrationForTesting = {
-            // The user withdraws in the gap the old code left open.
-            box.consentHeld = false
+        box.consentHeld = false   // the user withdrew before this attempt began
+        let answer = await Self.bounded(seconds: 5) {
+            await transport.send(entry: entry, stillPermitted: {
+                box.wasAsked = true
+                return box.consentHeld
+            })
         }
-        let answer = await transport.send(entry: entry, stillPermitted: {
-            box.wasAsked = true
-            return box.consentHeld
-        })
 
         XCTAssertNil(RecordingWire.shared.request,
-                     "a withdrawal in the start window must not let the recording reach the network")
-        XCTAssertNotEqual(answer, .response(status: 201), "a stopped attempt is not reported as a reply")
-        XCTAssertTrue(box.wasAsked, "the hook is consulted before anything is registered")
+                     "a withdrawal must not let the recording reach the network")
+        let settled = try XCTUnwrap(answer,
+                                    "the refused attempt must finish, not leave a transfer waiting")
+        XCTAssertNotEqual(settled, .response(status: 201), "a stopped attempt is not reported as a reply")
+        XCTAssertTrue(box.wasAsked, "permission is consulted before anything is registered")
+    }
+
+    /// A STOP THAT LANDS AFTER THE START. The transfer is already published, so the cancel reaches it:
+    /// it must not send, and it must finish. A gate that ignored cancellation would leave the transfer
+    /// yielding forever, which is why the second assertion is not optional.
+    func test_aStopAfterTheTransferIsPublishedEndsItWithoutSending() async throws {
+        RecordingWire.shared.reset()
+        let queue = VoiceSharingQueue(root: root, log: { _ in })
+        _ = await queue.publish(audio: Data(repeating: 4, count: 256),
+                          metadata: Data(#"{"enrollment_epoch":"epoch-1"}"#.utf8),
+                          name: "one")
+        let published = await queue.entries()
+        let entry = try XCTUnwrap(published.first)
+
+        let transport = VoiceSharingUploadTransport(
+            baseURLProvider: { "https://unit.test" },
+            tokenProvider: RecordingTokens(),
+            session: RecordingWire.session)
+        // Withdrawal order, reproduced: sharing goes off first, then the transport is asked to stop.
+        let box = VoiceSharingPermissionBox()
+        box.consentHeld = false
+        transport.cancelInFlight()
+
+        let answer = await Self.bounded(seconds: 5) {
+            await transport.send(entry: entry, stillPermitted: { box.consentHeld })
+        }
+        XCTAssertNil(RecordingWire.shared.request, "a stopped transport must not send")
+        XCTAssertNotNil(answer, "the refused attempt must finish")
+    }
+
+    /// Runs `work` but gives up after `seconds`, so a stranded transfer fails the control rather than
+    /// hanging the suite.
+    private static func bounded<T: Sendable>(seconds: Double,
+                                             _ work: @escaping @Sendable () async -> T) async -> T? {
+        await withTaskGroup(of: T?.self) { group in
+            group.addTask { await work() }
+            group.addTask { try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)); return nil }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
     }
 
     /// Both parts arrive, in the order the server reads them, with `metadata` carrying no filename:
