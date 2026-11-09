@@ -59,3 +59,7 @@ ThirdParty/llama-cpp-build/
 LocalMintTokenProbe.swift
 __pycache__/
 *.pyc
+
+# Local review material for the chat process; not part of the repo.
+evidence/
+helper-evidence/

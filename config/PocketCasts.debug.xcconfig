@@ -7,7 +7,7 @@ APP_DISPLAY_NAME = Auris Debug
 
 PRODUCT_BUNDLE_IDENTIFIER = $(PRODUCT_BUNDLE_IDENTIFIER_ROOT)
 
-// -D STAGING (review 4371027569): Debug IS the staging build, so it must carry the STAGING
+// -D STAGING: Debug IS the staging build, so it must carry the staging
 // semantics the retired StagingDebug configuration used to supply. Without it a Debug build
 // compiles ServerSyncManager.production() == true and syncs against the production Pocket Casts
 // hosts, and CrashLoggingDataProvider reports the wrong build type. (The separate
