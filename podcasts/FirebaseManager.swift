@@ -61,7 +61,7 @@ struct FirebaseManager {
                 // VoiceControl. Those targets stay on the fail-closed default (disabled), which is
                 // correct for surfaces that cannot capture voice.
                 #if os(iOS) && !APPCLIP
-                // SIMPLIFIED CONTRACT (spec 4afc6e43): the only sharing work left here is the
+                // Simplified contract: the only sharing work left here is the
                 // projection refresh — how a server-side withdrawal reaches the consent authority.
                 Task {
                     await sharingCoordinator.refreshProjectionFromServer()
