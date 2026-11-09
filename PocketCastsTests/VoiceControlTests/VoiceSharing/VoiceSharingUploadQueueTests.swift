@@ -2,20 +2,20 @@ import CryptoKit
 import XCTest
 @testable import podcasts
 
-/// Round 23 — reviewer 97166adb findings on 21df32a45:
-///   1. Recovery trusted marker presence alone: a directory containing ONLY ready.marker survived
-///      recovery and was returned as ready. Recovered/ready entries must be COMPLETE entries:
-///      regular non-empty metadata and audio files, marker present, and the metadata's declared
-///      audio digest/byte count must match the actual audio bytes. Malformed/partial entries are
-///      removed as abandoned, never returned.
-///   2. No finite limits: prepare accepted unbounded data/counts. prepare now enforces an entry
-///      count ceiling and an audio byte ceiling over preparation + ready work, cleaning up its own
-///      failed preparation; persistence is bounded, not deferred to uploader gating.
-///   3. Durability ordering: audio and metadata must be synchronized to storage BEFORE the ready
-///      marker is published. A sync seam records the order; the control pins marker publication
-///      strictly after audio+metadata synchronization.
-///   4. One serialized queue owner: mutations go through an internal serial queue; the public
-///      entry handle is opaque and validated against this queue's root before any file access.
+/// Round 23 — findings on 21df32a45:
+/// 1. Recovery trusted marker presence alone: a directory containing only ready.marker survived
+/// recovery and was returned as ready. Recovered/ready entries must be COMPLETE entries:
+/// regular non-empty metadata and audio files, marker present, and the metadata's declared
+/// audio digest/byte count must match the actual audio bytes. Malformed/partial entries are
+/// removed as abandoned, never returned.
+/// 2. No finite limits: prepare accepted unbounded data/counts. prepare now enforces an entry
+/// count ceiling and an audio byte ceiling over preparation + ready work, cleaning up its own
+/// failed preparation; persistence is bounded, not deferred to uploader gating.
+/// 3. Durability ordering: audio and metadata must be synchronized to storage before the ready
+/// marker is published. A sync seam records the order; the control pins marker publication
+/// strictly after audio+metadata synchronization.
+/// 4. One serialized queue owner: mutations go through an internal serial queue; the public
+/// entry handle is opaque and validated against this queue's root before any file access.
 final class VoiceSharingUploadQueueTests: XCTestCase {
 
     private var root: URL!
@@ -43,7 +43,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
             listDirectoryBounded: VoiceSharingUploadQueue.boundedLister(with: enumerationSource))
     }
 
-    /// Reproduces a state change BETWEEN classification and the cause read (reviewer 3dd6876c
+    /// Reproduces a state change BETWEEN classification and the cause read (
     /// item 1): the marker is deleted by the listing seam after the entry is classified
     /// `.disqualified`, so the serving sweep's second read finds nothing.
     private func makeQueueDeletingMarkerAfterListing(_ marker: URL) -> VoiceSharingUploadQueue {
@@ -86,7 +86,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     // MARK: Complete-entry validation (finding 1)
 
     func test_markerOnlyDirectoryIsRemovedByRecoveryAndNeverReturned() throws {
-        // Reproduce the reviewer's probe: a directory with ONLY ready.marker under the root.
+        // Reproduce the reviewer's probe: a directory with only ready.marker under the root.
         let bogus = root.appendingPathComponent("B0GUS-ENTRY", isDirectory: true)
         try FileManager.default.createDirectory(at: bogus, withIntermediateDirectories: true)
         try Data([0x01]).write(to: bogus.appendingPathComponent("ready.marker"))
@@ -108,7 +108,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
 
         q = makeQueue() // recovery
 
-        // AMENDED BY SPEC a4b417fc RULING 2: audio contradicting its declared digest is a DIGEST
+        // AMENDED by: audio contradicting its declared digest is a DIGEST
         // MISMATCH, which the ruling says must be sent so the server can refuse it for good.
         XCTAssertEqual(q.readyEntries().count, 1,
                        "a digest mismatch must become upload work, not a local deletion")
@@ -240,7 +240,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_syncFailureRefusesPublication() throws {
-        // Fail at each publication stage; in every case the entry must NOT become ready.
+        // Fail at each publication stage; in every case the entry must not become ready.
         // Stages in publication order: audio, metadata, marker, entry-dir (post-marker), root.
         for failureStage in 0..<5 {
             let stageRoot = FileManager.default.temporaryDirectory
@@ -345,17 +345,17 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         return data
     }
 
-    // MARK: Round 25 — immutable entry lifecycle instant (review 1f7dc05d)
+    // MARK: Round 25 — immutable entry lifecycle instant
 
     func test_queueAgeIsMeasuredFromCreationInstantAndNeverRefreshed() throws {
-        // A preparation created long ago and finalized now must NOT receive a fresh lifetime, and
+        // A preparation created long ago and finalized now must not receive a fresh lifetime, and
         // repeating finalize must not extend it.
         let clock = MutableClock(start: Date(timeIntervalSince1970: 1_000_000))
         var q = VoiceSharingUploadQueue(rootDirectory: root, clock: clock.now)
         let audio = wav()
         let prep = try q.prepare(metadata: validRecord(audio: audio), audio: audio)
 
-        // Past the retention bound (spec 05ff27d0: seven days from capture) the preparation is
+        // Past the retention bound the preparation is
         // finalized. Publication must be REFUSED — not accepted with a fresh lifetime.
         clock.advance(by: 7 * 24 * 60 * 60 + 60 * 60)
         XCTAssertThrowsError(try q.finalize(prep)) { error in
@@ -377,7 +377,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertEqual(q.readyEntries().count, 1)
 
         clock.advance(by: 6 * 24 * 60 * 60)
-        try q.finalize(prep) // repeated publication must NOT reset the clock
+        try q.finalize(prep) // repeated publication must not reset the clock
         clock.advance(by: 24 * 60 * 60 + 60 * 60) // now past the seven-day bound
 
         XCTAssertTrue(q.readyEntries().isEmpty,
@@ -386,9 +386,9 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertTrue(q.readyEntries().isEmpty, "recovery applies the same creation-instant age bound")
     }
 
-    // MARK: Round 25 — cleanup failure after publication (review 1f7dc05d)
+    // MARK: Round 25 — cleanup failure after publication
 
-    // MARK: Round 25 — record/WAV binding (review 1f7dc05d / spec direction)
+    // MARK: Round 25 — record/WAV binding
 
     func test_validBoundRecordWithRealWAVSurvivesRecovery() throws {
         var q = makeQueue()
@@ -416,7 +416,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         try Data([0x01]).write(to: try soleEntryDirectory().appendingPathComponent("ready.marker"))
 
         q = makeQueue() // recovery
-        // AMENDED BY SPEC a4b417fc RULING 2: a record edited after its digest was computed no longer
+        // AMENDED by: a record edited after its digest was computed no longer
         // BINDS, but it was never a local deletion either. It is sent, and the server's final
         // refusal is what removes it. (The client still refuses to reconstruct a transcript or any
         // other bound field from it — nothing here trusts the tampered values as facts.)
@@ -435,7 +435,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         try Data([0x01]).write(to: try soleEntryDirectory().appendingPathComponent("ready.marker"))
 
         q = makeQueue() // recovery
-        // AMENDED BY SPEC a4b417fc RULING 2: this used to assert the entry never becomes upload
+        // AMENDED by: this used to assert the entry never becomes upload
         // work. A record whose digest does not match is exactly what the ruling says must be SENT —
         // only the server may issue the final refusal that removes it. The local verdict decides how
         // the attempt is IDENTIFIED, not whether the audio is offered.
@@ -444,7 +444,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_oversizedCreationInstantIsReplacedWithoutBeingLoaded() throws {
-        // AMENDED BY SPEC 53452bc5. This control used to require the ENTRY to be refused because
+        // AMENDED by . This control used to require the ENTRY to be refused because
         // its instant could not be bounded. An age sidecar is no longer part of validity: the
         // oversized file is still never READ (the bound is checked from attributes), but it is now
         // REPLACED with a fresh instant and the recording serves. The bound still protects the
@@ -496,7 +496,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
             try bytes.write(to: entryDirectory.appendingPathComponent("audio.wav"))
             try Data([0x01]).write(to: entryDirectory.appendingPathComponent("ready.marker"))
             let reopened = VoiceSharingUploadQueue(rootDirectory: freshRoot, clock: Date.init)
-            // AMENDED BY REVIEWER 066e2a70 item 3: the record still BINDS (the digest is re-sealed
+            // AMENDED by: the record still BINDS (the digest is re-sealed
             // over the malformed audio), so this is a readable pair whose audio representation is
             // wrong. The server's `wav_validate.ts` is the authority that refuses it, and its final
             // refusal is what deletes the capture. The client may not hold it.
@@ -619,7 +619,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_unconfirmableReadyTransitionReportsUncertainRatherThanSuccessOrRejection() throws {
-        // THE FINAL TRANSITION. The marker exists; its directory sync cannot be confirmed. The spec
+        // THE final transition. The marker exists; its directory sync cannot be confirmed. The spec
         // requires an explicit UNCERTAIN outcome — a generic thrown error must not erase the
         // distinction between "may have committed" and "definitely did not".
         struct MarkerSyncFails: Error {}
@@ -682,7 +682,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_reconciliationSynchronizesAndWithholdsWhenDurabilityCannotBeConfirmed() throws {
-        // Reviewer db754d3d/1: presence is not confirmation. Inject sync failure DURING
+        // /1: presence is not confirmation. Inject sync failure DURING
         // reconciliation on a fresh queue: the structurally valid entry must stay withheld.
         struct SyncFails: Error {}
         let q = makeQueue()
@@ -700,7 +700,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_uncertaintyIsNotErasedInProcessAndFreshInstanceAgrees() throws {
-        // Reviewer db754d3d/2: the catch must not convert uncertainty into a definite answer, and a
+        // /2: the catch must not convert uncertainty into a definite answer, and a
         // fresh instance must not disagree with this one.
         struct SyncFails: Error {}
         // The fault is DURABLE-STATE-driven, not invocation-scoped: any sync of an entry directory
@@ -739,7 +739,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_createdInstantContentsAreDurableBeforeReadiness() throws {
-        // Reviewer db754d3d/3: created.at is recovery authority, so it must be in the barrier.
+        // /3: created.at is recovery authority, so it must be in the barrier.
         struct SyncFails: Error {}
         let q = VoiceSharingUploadQueue(
             rootDirectory: root,
@@ -753,7 +753,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_markerInstalledThenThrowingIsConfirmedBySameAndFreshInstanceAfterHealthyReconciliation() throws {
-        // Reviewer f4688811: an install-then-throw replacement is an AMBIGUOUS transition. It must
+        //: an install-then-throw replacement is an AMBIGUOUS transition. It must
         // route through the same uncertainty/reconciliation semantics as any other ambiguous path —
         // and once reconciliation is healthy, the IDENTICAL immutable entry must be confirmed both
         // by this instance and by a fresh one. Asserting only the thrown error is not enough.
@@ -813,12 +813,12 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertEqual(reopened.readyEntries().map(\.name), [prep.name])
     }
 
-    // MARK: Record-count admission (spec a3ef694f + 746aa9c2: 32 captures holding audio)
+    // MARK: Record-count admission
 
-    /// SPEC 746aa9c2: audio left behind by a FAILED DELETE still counts, because the rule is
+    ///: audio left behind by a FAILED delete still counts, because the rule is
     /// "capture IDs still holding audio". Without this a removal failure is the way to grow past
     /// the limit — and removal failures are what a full disk produces.
-    /// SPEC a4b417fc RULING 1: a queue that is OVER the record limit must still be readable AND
+    ///: a queue that is OVER the record limit must still be readable AND
     /// still reach the upload path. Android's Pixel held 104 records — the shape of an inherited
     /// over-cap queue — and any bound derived from the 32-record cap is exceeded by it, while such a
     /// queue cannot drain down to the cap unless it is first discovered. So: seed 104, restart, and
@@ -859,10 +859,10 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         let reopened = VoiceSharingUploadQueue(rootDirectory: root)
         XCTAssertEqual(reopened.readyEntries().count, overCap,
                        "an inherited over-cap queue is a legal queue: all 104 are served")
-        // THE POINT OF THE RULING: served is not enough — it must reach the upload path. Admission
+        // THE point of the ruling: served is not enough — it must reach the upload path. Admission
         // is the actual gate between the queue and the wire.
         let first = try XCTUnwrap(reopened.readyEntries().first)
-        // AND ACTUALLY REACH THE WIRE (reviewer 066e2a70). Admission is upstream of the request, so
+        // AND actually reach the wire. Admission is upstream of the request, so
         // an `admitAttempt` assertion alone could pass while no bytes ever left — which is what the
         // original line proved and no more. This drains through the REAL uploader to a transport
         // that records what it was handed. (Admission is not asserted separately any more: doing
@@ -889,13 +889,13 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                        "an inherited over-cap queue must reach the wire (outcome=\(wireOutcome))")
     }
 
-    /// REVIEWER 1af78cf5 / 066e2a70 item 1 — the destructive regression I introduced. The first
+    /// / 066e2a70 item 1 — the destructive regression I introduced. The first
     /// version of the deferred-sweep change LOGGED "sweep deferred" and then swept the truncated
     /// listing anyway. `liveEntries` was therefore built from the prefix, so a retry sidecar whose
     /// recording directory fell beyond the bound looked ORPHANED and was deleted — losing live retry
     /// state on a partial view. A deferred sweep must delete nothing at all.
     func test_anOverflowingStraySweepDeletesNoLiveRetryState() throws {
-        // REVIEWER 508baa51's correction to this control: an EMPTY UUID directory can be swept as
+        // 's correction to this control: an EMPTY uuid directory can be swept as
         // incomplete by recovery before the stray sweep ever runs, so the original version proved
         // "an orphan survived the overflow skip" rather than "LIVE retry state survived". So this
         // seeds a REAL published capture through the production writer, and places its retry
@@ -915,15 +915,15 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         let obligation = VoiceSharingUploadQueue.obligationPrefix + entry.name
         try Data("{\"notBefore\": \(past)}".utf8)
             .write(to: root.appendingPathComponent(obligation))
-        // Filler that sorts BEFORE both sidecars, so they land in the prefix while the entry
+        // Filler that sorts before both sidecars, so they land in the prefix while the entry
         // directory does not. Non-UUID regular files: neither entries nor retry state.
         for index in 0..<(bound + 16) {
             try Data([0x01]).write(
                 to: root.appendingPathComponent(String(format: "aaa-filler-%04d", index)))
         }
-        // A DETERMINISTIC bounded listing (reviewer 508baa51): `maxSweptEntries` is derived from
+        // A DETERMINISTIC bounded listing: `maxSweptEntries` is derived from
         // the cap, so a realistic overflow would need thousands of files. Injecting the lister
-        // makes the partial view exact and cheap: it reports overflow and hands back ONLY the
+        // makes the partial view exact and cheap: it reports overflow and hands back only the
         // sidecars, so the live directory is beyond the prefix by construction.
         let trapPrefix = [stamp, obligation]
         let rootPath = root.path
@@ -965,7 +965,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         }
     }
 
-    /// REVIEWER 07a7bb51 (a): the limit counts CAPTURES HOLDING AUDIO, not directories. Thirty-two
+    /// (a): the limit counts CAPTURES holding audio, not directories. Thirty-two
     /// empty or metadata-only directories are debris, not recordings, and must not refuse a real
     /// capture. RED before the fix: `entriesStrictLocked().count` counted every directory, so these
     /// 32 wedged the queue with nothing in it at all.
@@ -987,7 +987,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
             "32 debris directories hold no audio, so they occupy no slot")
     }
 
-    /// REVIEWER 07a7bb51 (b): the other side of the same rule — 32 entries that DO hold audio fill
+    /// (b): the other side of the same rule — 32 entries that DO hold audio fill
     /// the queue and must refuse the next capture. Without this half, "count nothing" would pass.
     func test_thirtyTwoAudioHoldingEntriesRefuseTheNextCapture() throws {
         let q = VoiceSharingUploadQueue(rootDirectory: root)
@@ -1004,8 +1004,8 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         }
     }
 
-    /// The other half of the same rule: a SIDECAR-ONLY leftover holds no audio, so it must never
-    /// count against the limit. Sidecars are bookkeeping, not recordings.    /// The other half of the same rule: a SIDECAR-ONLY leftover holds no audio, so it must never
+    /// The other half of the same rule: a SIDECAR-only leftover holds no audio, so it must never
+    /// count against the limit. Sidecars are bookkeeping, not recordings. /// The other half of the same rule: a SIDECAR-only leftover holds no audio, so it must never
     /// count against the limit. Sidecars are bookkeeping, not recordings.
     func test_sidecarOnlyLeftoversNeverCountTowardTheLimit() throws {
         let seeder = VoiceSharingUploadQueue(rootDirectory: root)
@@ -1085,7 +1085,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         }
     }
 
-    /// SPEC a3ef694f: the count does not care about bytes or debris. A huge entry, or unknown files
+    ///: the count does not care about bytes or debris. A huge entry, or unknown files
     /// beside it, cannot stop admission the way the byte budget could — the budget needed a
     /// measurement that could fail, and these were the measurements that failed.
     func test_bytesAndDebrisDoNotGateAdmission() throws {
@@ -1099,7 +1099,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_strandedTemporaryMarkerIsCleanedAndDoesNotBlockAdmission() throws {
-        // Reviewer 7ebb7887/3: ready.marker.tmp-UUID was outside knownEntryNames, so a failed
+        // /3: ready.marker.tmp-UUID was outside knownEntryNames, so a failed
         // replacement could strand it and permanently block admission.
         let q = VoiceSharingUploadQueue(
             rootDirectory: root,
@@ -1121,7 +1121,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                        "both finalized entries survive; only the stranded temp is removed")
     }
 
-    /// SPEC a3ef694f inverts this control. A directory holding a name outside the owned format used
+    /// inverts this control. A directory holding a name outside the owned format used
     /// to refuse admission, because the byte accounting could not price it. There is no price to
     /// compute any more: such an entry counts as ONE record and the queue admits. Refusing here was
     /// a way for debris to stop recording forever.
@@ -1168,7 +1168,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_repeatedFinalizeGrowthIsChargedAndCannotBreakTheCap() throws {
-        // Reviewer 7b897fbb: repeated finalize with the marker already present can still add
+        //: repeated finalize with the marker already present can still add
         // temporaries, so growth must be inside the budget contract rather than assumed impossible.
         let record = validRecord(captureID: UUID().uuidString, audio: audioA)
         let q = VoiceSharingUploadQueue(
@@ -1177,7 +1177,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         let prep = try q.prepare(metadata: record, audio: audioA)
         try q.finalize(prep)
 
-        // Repeated finalize attempts with a replacement that always fails AFTER writing its
+        // Repeated finalize attempts with a replacement that always fails after writing its
         // temporary: each leaves a temporary behind, so the entry grows per attempt.
         let failing = VoiceSharingUploadQueue(
             rootDirectory: root,
@@ -1190,7 +1190,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
             _ = try? failing.finalize(prep)
         }
         let entryDirectory = try soleEntryDirectory()
-        // The fully-qualified name is what recovery recognises as OURS (reviewer 7ebb7887/3): a
+        // The fully-qualified name is what recovery recognises as OURS: a
         // bare `ready.marker.tmp-` prefix also matches the `.tmp-not-a-uuid` debris case.
         func strandedTemporaries() throws -> [String] {
             try FileManager.default.contentsOfDirectory(atPath: entryDirectory.path)
@@ -1215,7 +1215,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_midEnumerationFailureIsThrownRatherThanReportedAsComplete() throws {
-        // Reviewer 4fd0a113: the previous control accepted `(urls: [], overflowed: false)` — the exact
+        //: the previous control accepted `(urls: [], overflowed: false)` — the exact
         // fail-open result at issue. This control delivers one URL and THEN an error through the
         // production helper (`boundedListing(over:limit:)`) and requires the error to propagate.
         struct Boom: Error {}
@@ -1254,7 +1254,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_recoveryStrayScanIsBoundedAndDoesNotEagerlyMaterialiseTheRoot() throws {
-        // Reviewer 02cd9c53/1: recoverLocked used contentsOfDirectory directly for strays, so
+        // /1: recoverLocked used contentsOfDirectory directly for strays, so
         // CONSTRUCTION eagerly materialised an oversized root.
         final class ListingCounter { var calls = 0; var maxLimitSeen = 0 }
         let counter = ListingCounter()
@@ -1270,7 +1270,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         // Construction performed recovery, so every root scan must have gone through the bounded
         // lister with a finite cap.
         XCTAssertGreaterThan(counter.calls, 0, "recovery must scan the root during construction")
-        // AMENDED BY SPEC a4b417fc RULING 1: the "recovery must never request an unbounded
+        // AMENDED by: the "recovery must never request an unbounded
         // listing" half is exactly the bug. Discovery is now unbounded by rule, because a bound
         // derived from the cap is exceeded by any inherited over-cap queue — and such a queue cannot
         // drain without first being discovered. What survives is the OTHER half this control was
@@ -1285,7 +1285,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
             "no root listing may be bounded ABOVE the sweep bound")
     }
 
-    /// Spec a3ef694f: there is no byte budget any more, so finalize has NO capacity check to do.
+    ///: there is no byte budget any more, so finalize has NO capacity check to do.
     /// This control pins the replacement contract explicitly — a queue holding entries whose bytes
     /// far exceed any old budget still finalizes, because only the record count bounds the queue.
     /// (The old `queueBytesExceeded` refusal here was the fail-closed half of a limit the spec
@@ -1312,7 +1312,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         let prep = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
         try q.finalize(prep)
 
-        // PRE: the entry must be a complete, bindable entry BEFORE we touch attempts. If it is not,
+        // PRE: the entry must be a complete, bindable entry before we touch attempts. If it is not,
         // the reopen failure below is about the fixture, not about attempt durability.
         XCTAssertEqual(q.readyEntries().count, 1,
                        "PRE: the finalized entry must be ready before any attempt is recorded")
@@ -1375,9 +1375,9 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                                audio: audioA)
     }
 
-    /// UNREADABLE OWNERSHIP HOLDS THE WHOLE OWNER (reviewer e8dd9c35): an owner file that exists
+    /// UNREADABLE ownership holds the whole owner: an owner file that exists
     /// but cannot be read is unknown coverage, not a per-entry skip. A second, perfectly healthy
-    /// entry must NOT be admitted or served — one corrupted entry must not coexist with a working
+    /// entry must not be admitted or served — one corrupted entry must not coexist with a working
     /// queue behind it.
     func test_unreadableOwnershipBlocksAdmissionAndServingForTheWholeQueue() throws {
         let box = IdentityBox(account: "acct-A", "epoch-1")
@@ -1392,7 +1392,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         try FileManager.default.removeItem(at: ownerURL)
         try FileManager.default.createDirectory(at: ownerURL, withIntermediateDirectories: true)
 
-        // SUPERSEDES the owner-wide rule (reviewer e8dd9c35), per reviewer 307d0bde item 3 and spec
+        // SUPERSEDES the owner-wide rule, per and spec
         // d720ab6c: an unknown fact about ONE entry affects only that entry. `broken` is excluded;
         // `healthy` keeps serving and keeps its attempt. Holding the whole queue here meant one
         // corrupt owner file stranded every other recording the user had made.
@@ -1416,7 +1416,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                         "an unreadable sibling's ownership must not strand a healthy entry")
     }
 
-    /// ACCOUNT SCOPE IS PART OF THE IDENTITY (reviewer 2b121320): an entry owned by account A must
+    /// ACCOUNT scope is part of the identity: an entry owned by account A must
     /// not be admitted when the live identity is account B carrying the SAME epoch string — epochs
     /// are opaque and can collide across accounts. Epoch-only comparison passes this by accident.
     func test_equalEpochUnderADifferentAccountDoesNotAdmitTheEntry() throws {
@@ -1432,15 +1432,15 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertNotNil(try q.admitAttempt(entry), "the owning account is admitted")
     }
 
-    /// STARTUP BEFORE PROJECTION (reviewer fd6b8036): a BOUND queue whose identity cannot be
+    /// STARTUP before projection: a BOUND queue whose identity cannot be
     /// established yet (signed out, epoch not loaded) must refuse every entry.
     func test_boundQueueRefusesEntriesUntilTheIdentityIsKnown() throws {
-        // ACCOUNT, not epoch, is the binding (spec 4afc6e43): the failure this control models is
+        // ACCOUNT, not epoch, is the binding: the failure this control models is
         // "no account is established yet", so the box holds no identity at all.
         let box = IdentityBox(account: "acct-A", nil)
         box.current = nil
         let q = VoiceSharingUploadQueue(rootDirectory: root, currentIdentity: { box.current })
-        // Prepared while sign-in has NOT landed, so the entry records no owner: that is the real
+        // Prepared while sign-in has not landed, so the entry records no owner: that is the real
         // startup order, and it is why the entry must be refused until ownership is known.
         let entry = try makeCompleteEntry(q, epoch: "epoch-1")
 
@@ -1459,7 +1459,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                         "an entry prepared under a known identity is admitted")
     }
 
-    /// RE-ENROLLMENT IS NOT A CHANGE OF OWNER (spec 4afc6e43): a re-enrollment moves the server's
+    /// RE-ENROLLMENT is not A CHANGE of owner: a re-enrollment moves the server's
     /// opaque epoch for the SAME account, so an entry captured before it is still that account's to
     /// send — the epoch in its metadata is provenance, not a fence. This is the inverse of the
     /// previous expectation and it is deliberate: refusing it would strand audio the user consented
@@ -1468,7 +1468,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         let box = IdentityBox(account: "acct-A", "epoch-1")
         let q = VoiceSharingUploadQueue(rootDirectory: root, currentIdentity: { box.current })
         let oldEntry = try makeCompleteEntry(q, epoch: "epoch-1")
-        // Admit AND SETTLE it, so the lease is released: otherwise the second admission would be
+        // Admit AND settle it, so the lease is released: otherwise the second admission would be
         // refused merely because the first lease is still held.
         let firstAdmission = try XCTUnwrap(try q.admitAttempt(oldEntry), "the entry is admitted under A")
         try q.applyAttemptResult(oldEntry, lease: firstAdmission.lease, outcome: .retryableFailure)
@@ -1480,7 +1480,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertNotNil(try q.admitAttempt(newEntry), "a new entry stamped under the new epoch is admitted")
     }
 
-    /// RESTART WITH A SURVIVING ENTRY (spec 4afc6e43): a FRESH queue over the same durable root
+    /// RESTART with A SURVIVING entry: a FRESH queue over the same durable root
     /// admits a surviving entry while the SAME account is signed in, even though the server's epoch
     /// moved after the entry was captured. What a fresh process must still refuse is an entry owned
     /// by a DIFFERENT account.
@@ -1524,7 +1524,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         let leftover = try FileManager.default.contentsOfDirectory(atPath: root.path)
             .filter { !$0.hasPrefix(".") }
         // The entry directory must be gone. Root lease locks legitimately survive their entry (the
-        // inode must stay stable while any holder exists), but ONLY well-formed owned ones.
+        // inode must stay stable while any holder exists), but only well-formed owned ones.
         let locks = leftover.filter { name in
             guard name.hasPrefix("attempt.lock.") else { return false }
             return Int(name.dropFirst("attempt.lock.".count)).map { $0 >= 0 } == true
@@ -1590,10 +1590,10 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
             "the attempt record must fit inside the per-entry protocol reserve")
     }
 
-    // MARK: Attempt record integrity (reviewer 6f2dd161)
+    // MARK: Attempt record integrity
 
     func test_malformedAttemptRecordIsRefusedNotTreatedAsZero() throws {
-        // Only CONFIRMED ABSENCE means zero. A corrupt record must not reset the retry budget.
+        // Only CONFIRMED absence means zero. A corrupt record must not reset the retry budget.
         let q = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         let prep = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
         try q.finalize(prep)
@@ -1687,7 +1687,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_enumerationFailureControlRunsThroughTheRealPath() throws {
-        // Reviewer 6f2dd161: a control over a PARALLEL implementation proves nothing. `boundedLister`
+        //: a control over a PARALLEL implementation proves nothing. `boundedLister`
         // with no injected source must run the real enumerator through the SAME step processing, so
         // the injected-failure control exercises identical code.
         struct Boom: Error {}
@@ -1709,7 +1709,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_realStepsSurfacesErrorHandlerFailures() throws {
-        // Reviewer 988cf96c: FileManager delivers errors to `errorHandler`; `nextObject()` never
+        //: FileManager delivers errors to `errorHandler`; `nextObject()` never
         // yields an Error. A synthetic `.failure` step cannot prove the adapter propagates an error
         // the ENUMERATOR reported. This exercises `realSteps` itself: the error handler is invoked
         // with a real error and the sequence must yield `.failure`, not silently end.
@@ -1745,7 +1745,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_unreadableAttemptRecordPathIsNotTreatedAsAbsent() throws {
-        // Reviewer 988cf96c: `fileExists(false)` is not confirmed absence. Only ENOENT may mean zero;
+        //: `fileExists(false)` is not confirmed absence. Only ENOENT may mean zero;
         // an unreadable path must refuse so the retry budget cannot be reset by a permission fault.
         XCTAssertEqual(VoiceSharingUploadQueue.statKind(of: URL(fileURLWithPath: "/definitely/not/here")),
                        .absent, "a genuinely missing path is absent")
@@ -1766,7 +1766,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         try q.finalize(prep)
         // attempts.json does not exist until the first attempt, so create the obstruction directly.
         let record = root.appendingPathComponent(prep.name).appendingPathComponent("attempts.json")
-        // Make the ENTRY DIRECTORY unsearchable: lstat of a child then fails with EACCES, which is
+        // Make the ENTRY directory unsearchable: lstat of a child then fails with EACCES, which is
         // the `.failure` case (a non-ENOENT errno). This is the only route that reaches it, since
         // ENOTDIR cannot occur (attempts.json's parent is always a real directory).
         let entryDir = root.appendingPathComponent(prep.name)
@@ -1779,7 +1779,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_beginAttemptRequiresACompleteReadyEntry() throws {
-        // Reviewer 988cf96c: attempt ownership must not be granted for an entry that is still being
+        //: attempt ownership must not be granted for an entry that is still being
         // prepared, disqualified, or otherwise not ready.
         let q = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         let record = validRecord(captureID: UUID().uuidString, audio: audioA)
@@ -1802,7 +1802,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                        "a disqualified entry is not attemptable")
     }
 
-    // MARK: Cross-instance attempt ownership (reviewer 6886455c)
+    // MARK: Cross-instance attempt ownership
 
     func test_twoQueueInstancesCannotBothOwnAnAttempt() throws {
         // A per-instance serial queue does not serialize a shared attempts.json, so two instances
@@ -1844,7 +1844,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                        "reclaiming spends a new attempt")
     }
 
-    // MARK: Atomic claim and fencing (reviewer 3ab75638)
+    // MARK: Atomic claim and fencing
 
     func test_simultaneousAcquisitionAdmitsExactlyOneOwner() throws {
         // A sequential test cannot prove mutual exclusion: stat->write lets both instances observe
@@ -1885,7 +1885,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_staleOwnerCannotReleaseItsSuccessorsLease() throws {
-        // Reviewer 3ab75638/2: elapsed time does not prove the old writer died. After expiry a
+        // /2: elapsed time does not prove the old writer died. After expiry a
         // successor acquires; the old owner's endAttempt must not delete the successor's lease.
         let first = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         let prep = try first.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
@@ -1921,14 +1921,14 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_refusedAttemptLeavesNoLeaseBehind() throws {
-        // Reviewer 3ab75638/3: a refusal after claiming must settle the lease.
+        // /3: a refusal after claiming must settle the lease.
         let q = VoiceSharingUploadQueue(
             rootDirectory: root, clock: Date.init,
             aggregateLimits: VoiceSharingUploadQueue.AggregateLimits(maxRecords: 32),
             attemptLimits: VoiceSharingUploadQueue.AttemptLimits(optionalCap: 1))
         let prep = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
         try q.finalize(prep)
-        // A NOT-READY entry is refused AFTER the lease is claimed, and this refusal does NOT delete
+        // A not-READY entry is refused after the lease is claimed, and this refusal does not delete
         // the entry — so only explicit settlement can clear the lease. (The exhausted path removes
         // the whole directory, which would make this control unable to distinguish anything.)
         let notReady = try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
@@ -1943,7 +1943,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
             "a refused attempt must not leave a lease behind")
     }
 
-    // MARK: Lease transition serialization (reviewer 08baa9f0)
+    // MARK: Lease transition serialization
 
     func test_simultaneousExpiredReclaimAdmitsExactlyOneSuccessor() throws {
         // Two reclaimers over the same expired lease must not both read the old generation, both
@@ -1983,7 +1983,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_endAttemptFromAnInstanceThatNeverAcquiredRemovesNothing() throws {
-        // Reviewer 08baa9f0: releaseLeaseLocked(owner: nil) unconditionally removed whatever lease
+        //: releaseLeaseLocked(owner: nil) unconditionally removed whatever lease
         // existed, so a bystander's endAttempt could delete another owner's lease.
         let owner = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         let prep = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
@@ -1998,7 +1998,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_leaseLockActuallyExcludesAcrossInstances() throws {
-        // Reviewer 08baa9f0: a comparison alone is not conditional unlink; the flock must genuinely
+        //: a comparison alone is not conditional unlink; the flock must genuinely
         // serialize. Hold the lock from one instance and verify another instance cannot run its
         // critical section until it is released.
         let dir = temporaryRoot()
@@ -2032,7 +2032,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         _ = lockB
     }
 
-    // MARK: LeaseLock lifecycle (reviewer 8f964e8c)
+    // MARK: LeaseLock lifecycle
 
     func test_leaseLockCloseIsIdempotent() throws {
         // A non-idempotent close closes the descriptor twice; if the number was reused in between,
@@ -2066,7 +2066,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_leaseLockSurvivesRecoveryAndEntryRemoval() throws {
-        // Reviewer 8f964e8c: the lock file lived inside the entry directory, which recovery and
+        //: the lock file lived inside the entry directory, which recovery and
         // exhaustion remove whole — destroying the inode live holders rely on. It must now live at
         // the root, be skipped by the stray scan, and survive entry removal.
         let q = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
@@ -2099,7 +2099,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_lifetimeEntriesDoNotAccumulateRootLockFiles() throws {
-        // Reviewer 17c4310f: UUID-per-entry locks accumulated forever, and past the root's bounded
+        //: UUID-per-entry locks accumulated forever, and past the root's bounded
         // discovery limit admission was permanently disabled even with an empty queue. The fixed
         // lock pool must bound root artifacts across repeated acquire/exhaust/remove cycles.
         let limits = VoiceSharingUploadQueue.AggregateLimits(maxRecords: 32)
@@ -2145,7 +2145,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_concurrentAttemptRecordingLosesNoCounts() throws {
-        // Reviewer da806c31 follow-through: attempts.json read-increment-write was a lost-update
+        // follow-through: attempts.json read-increment-write was a lost-update
         // race across instances. N concurrent recorders must yield exactly N.
         let setup = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         let prep = try setup.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
@@ -2176,7 +2176,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertTrue(failures.value.isEmpty, "unexpected failures: \(failures.value)")
     }
 
-    // MARK: Atomic result application (reviewer d3972319)
+    // MARK: Atomic result application
 
     func test_resultApplicationIsRefusedAfterLeaseReclaim() throws {
         // An intervening expiry/reclaim means the old owner's result is STALE: it must not delete
@@ -2230,7 +2230,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_settlementFailureIsNotReportedAsSuccess() throws {
-        // Reviewer d258d06a: a lock serializes transitions; it does not make failed filesystem
+        //: a lock serializes transitions; it does not make failed filesystem
         // operations succeed. Removal failure must surface as uncertain, and ownership must be
         // RETAINED so the caller can settle again.
         final class RemovingFailingFileManager: FileManager {
@@ -2286,7 +2286,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertFalse(owner.isAttemptInFlight(prep))
     }
 
-    // MARK: Reconciliation across repeated settlement (reviewer 64629ed5)
+    // MARK: Reconciliation across repeated settlement
 
     func test_persistentRootSyncFailureStaysUncertainAcrossTwoSettlements() throws {
         // Retry is a REPEAT of the durability barrier, not a shortcut around it: while the root
@@ -2361,7 +2361,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertThrowsError(try owner.applyAttemptResult(prep, lease: foreign, outcome: .retryableFailure)) { error in
             XCTAssertEqual(error as? VoiceSharingUploadQueue.PrepareError, .resultStale)
         }
-        // Round 50: reconciliation is bound to a DURABLY RECORDED intent. A lease removed by
+        // Round 50: reconciliation is bound to a DURABLY recorded intent. A lease removed by
         // another path — no settlement record exists — is refused even for the recorded owner:
         // absence without intent is not settled success. Ownership is retained; the live-lease
         // path (fresh settlement) remains available for a genuine completion.
@@ -2373,7 +2373,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         try Data("{}".utf8).write(to: entryDir.appendingPathComponent("attempt.lease"))
     }
 
-    // MARK: Recorded settlement intent (reviewer 4b02a457)
+    // MARK: Recorded settlement intent
 
     func test_contradictoryRetryIsRejected() throws {
         // retryable lease removal -> sync failure -> DELIVERED retry: the pending record says
@@ -2409,7 +2409,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_leaseRemovedByAnotherPathIsNotMistakenForSettlement() throws {
-        // No intent recorded + lease gone (removed externally): absence must NOT be read as
+        // No intent recorded + lease gone (removed externally): absence must not be read as
         // settled success, even for the recorded in-flight owner.
         let owner = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         let prep = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
@@ -2429,8 +2429,8 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         // Removal landed, confirmation failed: the intent record is still on disk. A FRESH
         // instance (crashed original gone) retries the SAME outcome and reconciles exactly that
         // transition.
-        // Reviewer 3aa2b731: the recovery must be proven AFTER the entry removal, not at the
-        // intent write. Fail only root syncs AFTER the first (the intent write's own barrier).
+        //: the recovery must be proven after the entry removal, not at the
+        // intent write. Fail only root syncs after the first (the intent write's own barrier).
         let rootPath = root.path
         var armed = false
         var armedRootSyncs = 0
@@ -2483,7 +2483,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_confirmedPhaseSurvivesFinalClearBarrierFailure() throws {
-        // Reviewer 737cba7c (3): arm relative to a captured BASELINE, and assert WHICH barrier
+        // (3): arm relative to a captured BASELINE, and assert WHICH barrier
         // failed and what phase is on disk — an absolute sync count can fail the intent barrier
         // instead of the confirmed-phase one.
         let rootPath = root.path
@@ -2518,7 +2518,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         let onDisk = try String(contentsOf: settlementURL, encoding: .utf8)
         XCTAssertTrue(onDisk.contains("\"phase\":\"confirmed\""),
                       "the confirmed rewrite is visible for recovery, got \(onDisk)")
-        // RESTORED RETRY: the confirmed record is visibly present and phase-marked (recovery
+        // RESTORED retry: the confirmed record is visibly present and phase-marked (recovery
         // state), so the retry reconciles it
         // (verify state, retire record) and succeeds without re-removing anything.
         armAt = nil
@@ -2533,7 +2533,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_malformedIntentRefusesSettlementInsteadOfOverwriting() throws {
-        // Reviewer 3aa2b731 (3): an unreadable/malformed/oversized intent is UNKNOWN pending
+        // (3): an unreadable/malformed/oversized intent is UNKNOWN pending
         // state — refuse (accountingUnavailable); never overwrite as a fresh transition.
         let owner = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         let prep = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
@@ -2559,7 +2559,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_confirmedRecordRejectsForeignGenerationAndContradictoryOutcome() throws {
-        // Reviewer 737cba7c (1): a SURVIVING confirmed record must not let a foreign token or a
+        // (1): a SURVIVING confirmed record must not let a foreign token or a
         // contradictory outcome claim success.
         let rootPath = root.path
         var armed = false
@@ -2604,7 +2604,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_recoveryRetiresOnlyConfirmedRecordsAndNeverPending() throws {
-        // Reviewer 737cba7c (2): recovery must not touch a PENDING record (its owner/successor
+        // (2): recovery must not touch a PENDING record (its owner/successor
         // needs it) and must retire a CONFIRMED one whose state verifies.
         let owner = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         let pendingEntry = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
@@ -2632,7 +2632,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_confirmedRewriteFileBarrierFailureRefusesSuccessAndKeepsRecoveryState() throws {
-        // Reviewer d28594ef: every journal rewrite must synchronize FILE then root. A
+        //: every journal rewrite must synchronize FILE then root. A
         // FILE-barrier failure on the confirmed rewrite must refuse success and leave a
         // recoverable record — not let the root barrier publish non-durable content.
         let rootPath = root.path
@@ -2693,14 +2693,14 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         return total
     }
 
-    // MARK: Shared-queue coverage clarification 7e9606b (spec 0b5841c2)
+    // MARK: Shared-queue coverage clarification 7e9606b
 
     func test_unknownCoverageHoldsServingUntilSuccessfulScan() throws {
         var failListing = false
         let rootPath = root.path
         let q = VoiceSharingUploadQueue(
             rootDirectory: root, clock: Date.init,
-            // The fault goes on the UNBOUNDED lister: discovery reads it (spec 2741a0ca ruling 1),
+            // The fault goes on the UNBOUNDED lister: discovery reads it,
             // so injecting into the bounded one left the scan succeeding and the control passing
             // for the wrong reason. The property under test is unchanged: a failed scan must HOLD
             // serving, never read as an empty queue.
@@ -2723,11 +2723,11 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         guard case .unknownCoverage = q.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("unknown coverage must hold serving, not report an empty queue")
         }
-        // ADMISSION, however, is NOT held (spec a3ef694f): an unreadable root must never stop new
+        // ADMISSION, however, is not held: an unreadable root must never stop new
         // recordings. Serving and admitting are different promises — serving an entry we cannot
         // verify would publish bytes we cannot vouch for; admitting one loses nothing, because the
         // record is on disk and will be served once the root is readable again.
-        // ADMISSION refuses while the count is unknown (spec 2741a0ca ruling): the gate is "fewer
+        // ADMISSION refuses while the count is unknown: the gate is "fewer
         // than 32 records on disk", which an unknown count cannot satisfy. Neither refusal is
         // sticky: the restored scan below reopens serving, and the next admission re-counts.
         XCTAssertThrowsError(try q.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioB), audio: audioB))
@@ -2741,7 +2741,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_disposalIntentsAreDiscoveredChargedAndRetained() throws {
-        // SPEC 1a0d3ffb (supersedes the retention doctrine this control used to pin): a durable
+        // (supersedes the retention doctrine this control used to pin): a durable
         // publication.failed intent is a PERMANENT refusal, so the next serving pass deletes the
         // entry — the refusal never consumes capacity again. A LIVE entry is never touched.
         let owner = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
@@ -2749,7 +2749,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         try owner.finalize(livePrep)
         let failedPrep = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioB), audio: audioB)
         try owner.finalize(failedPrep)
-        // THE MARKER MUST SAY WHY (spec, old-cap resume). A legacy bare `0x01` no longer authorises
+        // THE marker must say why (spec, old-cap resume). A legacy bare `0x01` no longer authorises
         // deletion — it is indistinguishable from an old cap quarantine, and deleting on it is
         // exactly how entry 8E946B60 was lost. This control pins the DELETION rule, so it records
         // the cause that rule applies to.
@@ -2782,13 +2782,13 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_attemptsWithHeldHandlesHoldUnderUnknownCoverage() throws {
-        // Spec c988cb1b: attempt paths honor unknown coverage even for already-held entry
+        //: attempt paths honor unknown coverage even for already-held entry
         // handles. A failed bounded scan HOLDS the attempt; a successful scan admits it.
         var failListing = false
         let rootPath = root.path
         let owner = VoiceSharingUploadQueue(
             rootDirectory: root, clock: Date.init,
-            // Discovery reads the UNBOUNDED lister (spec 2741a0ca ruling 1); injecting into the
+            // Discovery reads the UNBOUNDED lister; injecting into the
             // bounded one made the scan succeed and the control prove nothing.
             listDirectory: { url, keys in
                 if failListing, url.path == rootPath {
@@ -2801,7 +2801,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         try owner.finalize(prep)
 
         failListing = true
-        // AMENDED BY SPEC d720ab6c: an unreadable ROOT may refuse only NEW ADMISSIONS. This entry's
+        // AMENDED by: an unreadable ROOT may refuse only NEW admissions. This entry's
         // own directory and audio are readable, so its attempt is due — an unknown fact about the
         // whole root must not spend a due recording's turn.
         XCTAssertTrue(try owner.beginAttempt(prep),
@@ -2814,9 +2814,9 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_inaccessibleRequiredFileHoldsOnlyThatEntry() throws {
-        // SUPERSEDES reviewer c4d5ecb4's owner-wide rule, per reviewer 307d0bde item 3 and spec
+        // SUPERSEDES 's owner-wide rule, per and spec
         // d720ab6c: "an unknown fact about one entry affects only that entry", and an unknown fact
-        // about the whole root or owner may refuse only NEW ADMISSIONS, never serving or an
+        // about the whole root or owner may refuse only NEW admissions, never serving or an
         // attempt. Holding the entire owner let one unreadable directory stop every other
         // recording from being served — the wedge this audit exists to remove.
         let owner = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
@@ -2847,7 +2847,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertEqual(ready.count, 2, "restored: both entries are valid and served")
     }
 
-    /// AMENDED BY SPEC 53452bc5 (f2d68c23 retained for everything EXCEPT the age sidecar). An
+    /// AMENDED by (f2d68c23 retained for everything EXCEPT the age sidecar). An
     /// oversized or non-regular `created.at` used to hold coverage for the whole owner. It no longer
     /// does: an age sidecar is not part of a recording's validity or of owner coverage, it is never
     /// read, and it is REPLACED with a fresh instant — the recording serves and the owner is not
@@ -2873,7 +2873,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                 try FileManager.default.createDirectory(at: createdURL,
                                                         withIntermediateDirectories: true)
             }
-            // COVERAGE IS KNOWN: the owner is never held for an age sidecar.
+            // COVERAGE is known: the owner is never held for an age sidecar.
             guard case .known(let ready) = owner.readyEntriesReportingUnknownCoverage() else {
                 return XCTFail("\(shape): an age sidecar must not hold coverage for the owner")
             }
@@ -2889,7 +2889,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_attemptGateSharesTheStrictOwnerWideCoverageAuthority() throws {
-        // Reviewer f2d68c23 (2): beginAttempt must establish STRICT owner-wide coverage, not just
+        // (2): beginAttempt must establish STRICT owner-wide coverage, not just
         // its own entry's. Entry B's unknown coverage holds entry A's attempt.
         let owner = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         let a = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioA), audio: audioA)
@@ -2901,8 +2901,8 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: bDir.path)
         defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bDir.path) }
 
-        // AMENDED BY SPEC d720ab6c: "an unknown fact about the whole root or owner may refuse only
-        // NEW ADMISSIONS, never an attempt." B is unreadable; A is due. B's problem is not evidence
+        // AMENDED by: "an unknown fact about the whole root or owner may refuse only
+        // NEW admissions, never an attempt." B is unreadable; A is due. B's problem is not evidence
         // about A, so A's attempt is admitted and only B is held.
         XCTAssertTrue(try owner.beginAttempt(a),
                       "an unreadable sibling must not spend A's turn; unknown means due now")
@@ -2917,10 +2917,10 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     }
 
     func test_createdAtReadFailureIsRepairedAndReadyGateConfirmsHoldAttempts() throws {
-        // (a) AMENDED BY SPEC 53452bc5: a present, bounded created-at whose READ fails used to hold
-        // UNKNOWN coverage for the owner (reviewer 72e9362d). An age sidecar is no longer part of
+        // (a) AMENDED by: a present, bounded created-at whose READ fails used to hold
+        // UNKNOWN coverage for the owner. An age sidecar is no longer part of
         // validity or coverage — it is repaired and the recording serves.
-        // (b) AMENDED BY SPEC d720ab6c / reviewer 307d0bde item 3: B's durability-confirmation
+        // (b) AMENDED by /: B's durability-confirmation
         // failure used to hold A's attempt through an owner-wide authority. An unknown fact about
         // ONE entry affects only that entry, and for upload unknown means due now. So B is skipped
         // and A still serves and is still attemptable.
@@ -2930,7 +2930,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         let broken = try owner.prepare(metadata: validRecord(captureID: UUID().uuidString, audio: audioB), audio: audioB)
         try owner.finalize(broken)
 
-        // (a) An unreadable created.at is REPAIRED (spec 53452bc5), not held: the recording still
+        // (a) An unreadable created.at is REPAIRED, not held: the recording still
         // serves and the owner's coverage stays known. Both entries are valid recordings.
         let createdURL = root.appendingPathComponent(broken.name).appendingPathComponent("created.at")
         try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: createdURL.path)
@@ -2996,7 +2996,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
             XCTAssertEqual(dirs.count, 1, "PRE: one prepared entry")
             try Data([0x01]).write(to: dirs[0].appendingPathComponent("ready.marker"))
             q = VoiceSharingUploadQueue(rootDirectory: bagRoot) // recovery
-            // AMENDED BY REVIEWER 066e2a70 item 3 / spec a4b417fc ruling 2: retained-but-never-sent
+            // AMENDED by /: retained-but-never-sent
             // is still a hold. A READABLE pair whose audio is not the documented representation is
             // a capture the SERVER must judge and finally refuse; the client may not decide. So it
             // is served. (The client still never CLAIMS it is the documented representation — that
@@ -3031,7 +3031,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     func test_recoveryReEnforcesEntryLimitsAndRemovesExpiredEntries() throws {
         var q = makeQueue()
         _ = try prepareAndFinalize(q, metadata: validRecord(audio: audioA), audio: audioA)
-        // Simulate an aged entry by backdating its ADMISSION INSTANT beyond maxEntryAge. Age is
+        // Simulate an aged entry by backdating its ADMISSION instant beyond maxEntryAge. Age is
         // measured from the immutable `created.at` (one age rule for the whole type), so moving the
         // marker's mtime no longer ages anything.
         let entryDir = try soleEntryDirectory()
@@ -3044,7 +3044,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertTrue(q.readyEntries().isEmpty, "entries past the queue-age bound must not survive recovery")
     }
 
-    /// SPEC 05ff27d0: a recording NOT ACCEPTED within seven days of capture is deleted. The bound
+    ///: a recording not accepted within seven days of capture is deleted. The bound
     /// is 7 days of CAPTURE age, not 48 hours, and the deletion is the ordinary recovery age rule
     /// (one age authority for the whole type) — not a new mechanism.
     func test_aRecordingNotAcceptedWithinSevenDaysOfCaptureIsDeleted() throws {
@@ -3052,7 +3052,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                        "retention is seven days from capture (spec 05ff27d0)")
         var q = makeQueue()
         _ = try prepareAndFinalize(q, metadata: validRecord(audio: audioA), audio: audioA)
-        // JUST INSIDE the seven-day bound: it must survive, so the control cannot pass by deleting
+        // JUST inside the seven-day bound: it must survive, so the control cannot pass by deleting
         // everything.
         let insideDir = try soleEntryDirectory()
         let justInside = Date().timeIntervalSince1970 - (7 * 24 * 60 * 60) + 60
@@ -3071,7 +3071,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                       "a recording not accepted within seven days of capture is deleted")
     }
 
-    /// SPEC 05ff27d0: there is NO fixed attempt cap. An entry that has already failed far more
+    ///: there is NO fixed attempt cap. An entry that has already failed far more
     /// times than the old five-attempt budget stays attemptable — the policy's exponential backoff
     /// is what spaces the retries, and its ceiling is one hour. RED before the change, where the
     /// sixth admission returned `attempts-exhausted` and the entry was disqualified/deleted.
@@ -3096,7 +3096,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
             "no attempts-exhausted quarantine exists once the cap is retired")
     }
 
-    /// REVIEWER 34aae0fa item 2: crossing the SATURATION point is not a cliff. The counter stops
+    ///: crossing the SATURATION point is not a cliff. The counter stops
     /// growing (so the record's number stays representable) and the attempt PROCEEDS; nothing is
     /// refused or disqualified for a large count. RED on f3f5f70ec, where the 1,001st admission
     /// threw `attempts-exhausted` and the entry could be deleted for it.
@@ -3129,7 +3129,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                       "nothing may be deleted for having failed many times")
     }
 
-    /// REVIEWER 34aae0fa item 3 + 43f457ab finding 2: retention DELETES in the running process, and
+    /// + 43f457ab finding 2: retention DELETES in the running process, and
     /// the boundary is EXACT. A FIXED injected clock makes the edge observable instead of rounded
     /// away by wall time — the previous control subtracted an extra second, so it tested seven days
     /// plus one second and could not see whether the boundary itself expired.
@@ -3139,7 +3139,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         _ = try prepareAndFinalize(q, metadata: validRecord(audio: audioA), audio: audioA)
         let entryDir = try soleEntryDirectory()
         let createdURL = entryDir.appendingPathComponent("created.at")
-        // JUST BEFORE the bound: one second inside, it must SURVIVE — so the control cannot pass by
+        // JUST before the bound: one second inside, it must SURVIVE — so the control cannot pass by
         // deleting everything.
         try String(String(fixedNow.timeIntervalSince1970 - VoiceSharingUploadQueue.maxEntryAge + 1))
             .write(to: createdURL, atomically: true, encoding: .utf8)
@@ -3159,7 +3159,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
             "the deletion intent is retired with a root barrier, not left dangling")
     }
 
-    /// REVIEWER 43f457ab finding 1: destructive expiry needs PROVEN absence. An unreadable stage or
+    /// finding 1: destructive expiry needs PROVEN absence. An unreadable stage or
     /// disqualifier must not be read as "not present" — that deletes a recording whose retained
     /// state merely could not be read. The entry is left alone for a later pass, like every other
     /// unknown state in this queue.
@@ -3170,7 +3170,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         try String(String(Date().timeIntervalSince1970 - VoiceSharingUploadQueue.maxEntryAge - 60))
             .write(to: entryDir.appendingPathComponent("created.at"),
                    atomically: true, encoding: .utf8)
-        // A PUBLICATION PLANE THAT CANNOT BE READ: a directory where the stage file belongs is
+        // A PUBLICATION plane that cannot be read: a directory where the stage file belongs is
         // present-but-not-decodable, so its absence is not proven.
         let stage = entryDir.appendingPathComponent("stage.publishing")
         try FileManager.default.createDirectory(at: stage, withIntermediateDirectories: false)
@@ -3226,7 +3226,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertEqual(q.readyEntries().count, 1, "the recording is SERVED after the reset")
     }
 
-    /// REVIEWER 23901ee6 finding 1: RECONSTRUCTION ITSELF must repair, not delete. Recovery used to
+    /// finding 1: RECONSTRUCTION itself must repair, not delete. Recovery used to
     /// classify a complete recording with a bad instant as incomplete and remove the directory —
     /// before any repair could run. Each case below reconstructs DIRECTLY over the poisoned
     /// fixture, with no live sweep first, because a control that repairs on the old instance first
@@ -3268,14 +3268,14 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         default:
             try "not-a-number".write(to: createdURL, atomically: true, encoding: .utf8)
         }
-        // A FRESH INSTANCE performs recovery: this is the path under test.
+        // A FRESH instance performs recovery: this is the path under test.
         let fresh = makeQueue()
         _ = fresh.readyEntries()
         XCTAssertEqual(fresh.ageResetCountForTesting, 1, "recovery counts the \(reason) reset")
         return (entryDir, fresh)
     }
 
-    /// REVIEWER 23901ee6 finding 2: a FAILED persistence keeps ONE in-memory instant, used for both
+    /// finding 2: a FAILED persistence keeps ONE in-memory instant, used for both
     /// serving and ageing. Without it `markerAgeLocked` recomputed a fresh zero from the invalid disk
     /// value on every call, so the served set excluded the entry the repair accepted and its
     /// retention clock never advanced. RED before the fallback existed.
@@ -3296,7 +3296,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
             rootDirectory: root,
             clock: { fixedNow },
             failureRecordWriter: { url, data in
-                // Fail ONLY the instant repair; everything else must keep working.
+                // Fail only the instant repair; everything else must keep working.
                 if url.lastPathComponent == "created.at" { throw CocoaError(.fileWriteUnknown) }
                 try data.write(to: url, options: .atomic)
             },
@@ -3309,7 +3309,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         seededInstant = try String(contentsOf: createdURL, encoding: .utf8)
         XCTAssertEqual(seededInstant, poisoned,
                        "the disk value is untouched, so recovery still knows to retry")
-        // AGE FROM THE SAME INSTANT: repeated reads must not restart the clock at zero.
+        // AGE from the same instant: repeated reads must not restart the clock at zero.
         XCTAssertEqual(faulting.readyEntries().count, 1)
         XCTAssertEqual(faulting.readyEntries().count, 1)
         XCTAssertEqual(faulting.secondsUntilNextAgeBoundary(),
@@ -3317,7 +3317,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                        "the in-memory instant starts the retention clock exactly once")
     }
 
-    /// REVIEWER (second round on 444cde13f): the fallback must cover EVERY untrusted age, not just
+    /// REVIEWER: the fallback must cover every untrusted age, not just
     /// a future one, and must survive a FAULTED writer — classification used to require the disk
     /// instant, so a failed repair still deleted or refused the recording. For each of missing,
     /// empty and unreadable: with the writer faulted the recording is SERVED, ageing from one chosen
@@ -3360,12 +3360,12 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                            "\(defect): a recording is SERVED even though its age could not be persisted "
                            + "diag=\(q.lastDiscoveryDiagnostic)")
             XCTAssertEqual(q.ageResetCountForTesting, 1, "\(defect): counted once (AGE_RESET)")
-            // AGES FROM THAT INSTANT: a later clock read must show elapsed time, not a fresh zero.
+            // AGES from that instant: a later clock read must show elapsed time, not a fresh zero.
             now = fixedNow.addingTimeInterval(3_600)
             XCTAssertEqual(q.secondsUntilNextAgeBoundary(),
                            VoiceSharingUploadQueue.maxEntryAge - 3_600,
                            "\(defect): retention counts from the chosen instant, not from now")
-            // LIFT THE FAULT: recovery on the SAME instance persists it.
+            // LIFT the fault: recovery on the SAME instance persists it.
             faulted = false
             _ = q.readyEntries()
             guard let persisted = try? String(contentsOf: createdURL, encoding: .utf8) else {
@@ -3380,7 +3380,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         }
     }
 
-    /// REVIEWER (second round on 444cde13f): an OversizedOrCorrupt instant is not repairable, but it
+    /// REVIEWER: an OversizedOrCorrupt instant is not repairable, but it
     /// must not cost the RECORDING either. Structural validation is independent of the sidecar, so
     /// the entry still counts as a valid recording while the age rule refuses to serve it.
     func test_aCorruptAgeSidecarNeverCostsTheRecording() throws {
@@ -3397,7 +3397,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertEqual(fresh.expireAgedOutEntries(), 0, "and retention cannot act on an unknown age")
     }
 
-    /// A PURGE NEEDS A DECIDED, RECORDING-SPECIFIC REJECTION RECORDED IN ITS MARKER (spec afc64eb2).
+    /// A PURGE needs A DECIDED, RECORDING-SPECIFIC rejection recorded in its marker.
     /// Markers used to carry a bare byte with no cause, so a quarantine became deletable by
     /// accident. Now the cause is the marker's content and only a decided rejection authorises
     /// deletion. Its counterpart is `test_aLegacyMarkerNeverAuthorisesDeletion` below.
@@ -3415,7 +3415,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                        "and it is deleted, exactly as before")
     }
 
-    /// THE LEGACY MARKER: a bare `0x01` records no cause, so it can never authorise deletion. This is
+    /// THE legacy marker: a bare `0x01` records no cause, so it can never authorise deletion. This is
     /// the exact shape that deleted entry 8E946B60. RED before this change — such an entry was
     /// purged on the next serving pass and is retained here.
     func test_aLegacyMarkerNeverAuthorisesDeletion() throws {
@@ -3430,16 +3430,16 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                       "but an unknown cause must NOT authorise deleting the recording")
     }
 
-    /// SPEC a3ef694f: an unmeasurable queue must not refuse admission. RED before this change — the
+    ///: an unmeasurable queue must not refuse admission. RED before this change — the
     /// allowance query returned false whenever the root could not be counted, which is the wedge.
     func test_anUnmeasurableQueueStillAllowsAdmission() throws {
-        // SPEC 2741a0ca RULING: an uncountable root REFUSES a new admission, because the admit gate
+        // RULING: an uncountable root REFUSES a new admission, because the admit gate
         // is "fewer than 32 records ON DISK" and a count that was not taken cannot satisfy it. The
-        // refusal must be LOGGED and NOT STICKY: the moment the listing reads again, the next
+        // refusal must be LOGGED and not sticky: the moment the listing reads again, the next
         // segment is admitted. It must never touch drain, upload or delete.
         var failing = false
         // The fault goes on the UNBOUNDED lister, because that is what discovery actually uses
-        // (spec 2741a0ca ruling 1). Injecting into the bounded seam left the count reading fine and
+        //. Injecting into the bounded seam left the count reading fine and
         // the control passing for the wrong reason.
         let queue = VoiceSharingUploadQueue(
             rootDirectory: root,
@@ -3455,14 +3455,14 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertFalse(queue.hasAdmissionAllowance(),
                        "an unknown count cannot satisfy the admit gate")
         XCTAssertTrue(queue.lastCountWasUnknown, "and the failure is recorded, not silent")
-        // NOT STICKY: a readable listing admits again with no other action.
+        // not sticky: a readable listing admits again with no other action.
         failing = false
         XCTAssertTrue(queue.hasAdmissionAllowance(),
                       "the refusal must lift as soon as the disk reads again")
         XCTAssertFalse(queue.lastCountWasUnknown)
     }
 
-    /// RULING 2: an unreadable metadata file must NOT become a local verdict. The capture holds
+    /// RULING 2: an unreadable metadata file must not become a local verdict. The capture holds
     /// audio, so it counts toward the limit and stays on disk for the uploader and the 7-day expiry.
     func test_aCaptureWithUnreadableMetadataIsRetainedNotDeleted() throws {
         let seeder = makeQueue()
@@ -3475,7 +3475,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         _ = fresh.readyEntriesReportingUnknownCoverage()
         XCTAssertTrue(FileManager.default.fileExists(atPath: dir.path),
                       "a local parse verdict must never delete a recording")
-        // CORRECTED (reviewer 307d0bde item 1): it IS served. Excluding it from serving was a hold
+        // CORRECTED: it IS served. Excluding it from serving was a hold
         // with a log line attached; the server must get the bytes and own the verdict.
         XCTAssertEqual(fresh.readyEntries().count, 1,
                        "a capture the client cannot bind is still offered to the server; diag=\(fresh.lastDiscoveryDiagnostic)")
@@ -3518,7 +3518,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                          "a due entry is still admitted on a measurable queue")
     }
 
-    /// REVIEWER 3dd6876c item 1: a cause that VANISHES between classification and the cause read
+    ///: a cause that VANISHES between classification and the cause read
     /// must never authorise a deletion. The marker is removed by an injected seam after the entry
     /// is classified `.disqualified`, so the two reads disagree.
     func test_aCauseReadThatFailsAfterClassificationNeverDeletes() throws {
@@ -3529,14 +3529,14 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         try "decidedRejection".write(to: marker, atomically: true, encoding: .utf8)
 
         // The marker disappears after classification: an unreadable/absent cause on a disqualified
-        // entry is a state change we cannot adjudicate, so it must NOT be purged.
+        // entry is a state change we cannot adjudicate, so it must not be purged.
         let queue = makeQueueDeletingMarkerAfterListing(marker)
         _ = queue.readyEntriesReportingUnknownCoverage()
         XCTAssertTrue(FileManager.default.fileExists(atPath: entryDir.path),
                       "an unprovable cause never deletes a recording")
     }
 
-    /// REVIEWER 3dd6876c item 2: a LIVE entry whose directory kind cannot be read keeps its retry
+    ///: a LIVE entry whose directory kind cannot be read keeps its retry
     /// state, and a lowercase entry directory keeps its sidecars too.
     func test_unreadableEntryFactsAndLowercaseEntriesKeepTheirSidecars() throws {
         let seeded = makeQueue()
@@ -3570,7 +3570,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                        "the true orphan is still swept")
     }
 
-    /// REVIEWER 3dd6876c item 3: only SUCCESSFUL removals are counted; failures are reported
+    ///: only SUCCESSFUL removals are counted; failures are reported
     /// separately, so "removed=N" can never describe a file that is still there.
     func test_onlySuccessfulOrphanRemovalsAreCounted() throws {
         let seeder = makeQueue()
@@ -3621,7 +3621,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertEqual(fresh.removedOrphanSidecars, 2, "and the sweep is counted")
     }
 
-    /// THE REPAIR WRITES ONLY TO PUBLISHED WORK. An INCOMPLETE entry with an untrusted instant must
+    /// THE repair writes only to published work. An INCOMPLETE entry with an untrusted instant must
     /// keep its instant untouched: recovery owns partial work, and a reset routine is not a licence
     /// to write into state the caller never validated. RED when the completeness guard lived only in
     /// the comment — the served-set age reader reached the repair without one.
@@ -3673,7 +3673,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                       "a recording with an untrusted age is reset, never deleted")
     }
 
-    /// SPEC 05ff27d0: the backoff ceiling is ONE HOUR — retries must still be retries (bounded,
+    ///: the backoff ceiling is ONE hour — retries must still be retries (bounded,
     /// not hot), and must reach the full hour before flattening.
     func test_theRetryCeilingIsOneHour() {
         XCTAssertEqual(VoiceSharingRetryPolicy.compiledMaximumDelaySeconds, 3600,
@@ -3724,7 +3724,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
         XCTAssertThrowsError(try q.audio(of: foreign))
     }
 
-    // MARK: Round-22 controls, preserved and updated for the opaque entry type
+    // MARK: controls, preserved and updated for the opaque entry type
 
     func test_preparedEntryIsNotReadyUntilFinalized() throws {
         let queue = makeQueue()
@@ -3805,7 +3805,7 @@ private final class UploadQueueLockedBox<T> {
     }
 }
 
-// MARK: - Revocation-intent restart hold (spec 62d39f8f: durable purge coverage)
+// MARK: - Revocation-intent restart hold
 
 /// A purge that could not prove every barrier must survive a RESTART: the intent marker left on
 /// disk keeps the owner held so an unmarked survivor can never be served by a fresh process. The
@@ -3925,10 +3925,10 @@ final class VoiceSharingRevocationRestartTests: XCTestCase {
     }
 }
 
-// MARK: - Revocation origin re-derivation (reviewer e40508a1)
+// MARK: - Revocation origin re-derivation
 
 extension VoiceSharingRevocationRestartTests {
-    /// `revocationOriginUnknownLocked` must be re-derived at EVERY hold transition: an instance
+    /// `revocationOriginUnknownLocked` must be re-derived at every hold transition: an instance
     /// that first held because a READ failed must not label a later GENUINE failed revocation as
     /// unknown coverage (and vice versa).
     func test_unknownOriginIsRederviedByALaterKnownHold() throws {
@@ -3953,7 +3953,7 @@ extension VoiceSharingRevocationRestartTests {
             return XCTFail("setup: expected a refused purge")
         }
         // 3. The same owner, freshly constructed, must now report a KNOWN revocation hold,
-        //    not "unknown coverage".
+        // not "unknown coverage".
         let fresh = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         guard case .revocationHeld = fresh.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("a KNOWN failed revocation must not be re-labelled as unknown coverage")
@@ -3987,19 +3987,19 @@ extension VoiceSharingRevocationRestartTests {
 }
 
 
-// MARK: - The exact two-clock ordering behind the epoch failure (spec 4ae8c740)
+// MARK: - The exact two-clock ordering behind the epoch failure
 
-/// SPEC-REQUESTED REGRESSION, reproducing the ORIGINAL ordering deterministically.
+/// SPEC-REQUESTED regression, reproducing the ORIGINAL ordering deterministically.
 ///
 /// The two clock sources in the failing path:
-///   1. the WRITER's queue clock, used once at `prepare` to stamp `created.at`
-///      (`String(clock().timeIntervalSince1970)`), and
-///   2. the READER's queue clock, used at eligibility (`clock().timeIntervalSince(created)`).
+/// 1. the WRITER's queue clock, used once at `prepare` to stamp `created.at`
+/// (`String(clock().timeIntervalSince1970)`), and
+/// 2. the READER's queue clock, used at eligibility (`clock().timeIntervalSince(created)`).
 ///
 /// When the reader's clock is EARLIER than the writer's by any amount, the age is negative and the
 /// entry was excluded from `readyEntriesReportingUnknownCoverage` (and from the count) while
 /// `readyEntries()` still reported it. This control pins that ordering exactly — writer ahead by
-/// 0.5s, reader behind — and asserts the CURRENT rule: a future-dated instant is NOT fresh. It fails
+/// 0.5s, reader behind — and asserts the CURRENT rule: a future-dated instant is not fresh. It fails
 /// against any tolerance that quietly makes such an entry servable.
 final class VoiceSharingClockOrderingRegressionTests: XCTestCase {
     private var root: URL!
@@ -4032,7 +4032,7 @@ final class VoiceSharingClockOrderingRegressionTests: XCTestCase {
         return entry
     }
 
-    /// THE ORIGINAL FAILING ORDERING, DETERMINISTIC: the entry is read in the SAME tick that wrote
+    /// THE original failing ordering, DETERMINISTIC: the entry is read in the SAME tick that wrote
     /// it under a PINNED clock. The 1970-epoch round trip (`String(timeIntervalSince1970)` then
     /// `Date(timeIntervalSince1970:)`) used to reconstruct the instant a fraction of a microsecond
     /// ahead of the reading clock, so age came back as -0s and the entry vanished from the served
@@ -4040,7 +4040,7 @@ final class VoiceSharingClockOrderingRegressionTests: XCTestCase {
     /// reconstructed `Date`) fails this control.
     func test_anEntryReadInTheSameTickItWasWrittenIsServed() throws {
         // A PROVEN mis-rounding instant: for this 2001-reference reading R, the write path
-        // `String(R + 978307200)` read back through `Date(timeIntervalSince1970:)` reconstructs an
+        // `String` read back through `Date(timeIntervalSince1970:)` reconstructs an
         // internal instant 2^-22s AHEAD of R (verified against IEEE-754 double arithmetic), so the
         // old subtraction in reference space returned a negative age. Pinned so the control is
         // deterministic, not luck-of-the-clock.
@@ -4057,8 +4057,8 @@ final class VoiceSharingClockOrderingRegressionTests: XCTestCase {
         XCTAssertEqual(queue.readyCountLocked(), 1, "and the count agrees with both")
     }
 
-    /// WRITER AHEAD OF READER by half a second — the original ordering. The entry is written under a
-    /// clock the reader lags, so its age is negative: the strict rule says NOT FRESH, and this control
+    /// WRITER ahead of reader by half a second — the original ordering. The entry is written under a
+    /// clock the reader lags, so its age is negative: the strict rule says not fresh, and this control
     /// documents that as the intended behaviour rather than excusing it.
     func test_aWriterClockAheadOfTheReaderDoesNotMakeAnEntryFresh() throws {
         let base = Date()
@@ -4078,7 +4078,7 @@ final class VoiceSharingClockOrderingRegressionTests: XCTestCase {
                        "and the legacy path must agree — the disagreement WAS the defect")
     }
 
-    /// NEAR-ZERO SKEW, reader AHEAD: the ordinary case must still serve, so the strict rule does not
+    /// NEAR-ZERO skew, reader AHEAD: the ordinary case must still serve, so the strict rule does not
     /// regress freshness for a coherent clock.
     func test_aReaderAheadOfTheWriterServesNormally() throws {
         let base = Date()
@@ -4093,7 +4093,7 @@ final class VoiceSharingClockOrderingRegressionTests: XCTestCase {
         XCTAssertEqual(reader.readyEntries().count, 1, "and both paths agree")
     }
 
-    /// GENUINELY FUTURE: an hour ahead is not fresh either, and expiry semantics are untouched.
+    /// GENUINELY future: an hour ahead is not fresh either, and expiry semantics are untouched.
     func test_anHourInTheFutureIsNotFresh() throws {
         let base = Date()
         let writer = VoiceSharingUploadQueue(rootDirectory: root, clock: { base })
@@ -4221,7 +4221,7 @@ final class VoiceSharingBackupPolicyTests: XCTestCase {
     }
 }
 
-// MARK: - Spec 1a0d3ffb: a permanently refused recording is deleted from the queue, not kept
+// MARK: -: a permanently refused recording is deleted from the queue, not kept
 
 /// Two legs, one rule: a recording the SERVER refuses permanently (the durable
 /// `publication.failed` intent without an active stage) or that the CLIENT's own record check
@@ -4315,9 +4315,9 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
         return entry
     }
 
-    /// MARKS AN ENTRY AS SERVER-REJECTED, as the production machinery does when a final refusal
+    /// MARKS an entry as server-REJECTED, as the production machinery does when a final refusal
     /// settles: `publication.failed` carrying the `decidedRejection` cause. This is the durable
-    /// artefact the purge/barrier/crash controls need. It is NOT a local verdict — the client never
+    /// artefact the purge/barrier/crash controls need. It is not a local verdict — the client never
     /// writes this cause on its own (see `test_localCorruptionAloneDoesNotCreateADecidedRejection`),
     /// and the string is the same one `DisqualificationCause.decidedRejection` writes.
     private func markServerRejected(_ entry: VoiceSharingUploadQueue.Entry) throws {
@@ -4326,7 +4326,7 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
                 .appendingPathComponent("publication.failed"))
     }
 
-    /// A GENUINE FINAL REFUSAL (reviewer c0303918 / spec 84f7065a).    /// A GENUINE FINAL REFUSAL (reviewer c0303918 / spec 84f7065a). Local corruption no longer
+    /// A GENUINE final refusal. /// A GENUINE final refusal. Local corruption no longer
     /// produces a decided-rejection marker — the client has no invalid verdict — so a control that
     /// needs a REFUSED recording to exist must drive the real path: entry → uploader → owning
     /// `422`/`415` → `publication.failed` + deletion intent. Returns the queue that produced it.
@@ -4350,7 +4350,7 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
                     #"{"schema_version":1,"code":"\#(code)"}"#.utf8))
             })
         let outcome = await uploader.upload(entry)
-        // NEVER SKIP: a skip here would report green while proving nothing about the refusal.
+        // never skip: a skip here would report green while proving nothing about the refusal.
         guard case .abandoned = outcome else {
             throw NSError(domain: "driveServerRefusal", code: 1, userInfo: [
                 NSLocalizedDescriptionKey:
@@ -4363,12 +4363,12 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
             .filter { $0 != "attempt.lock" && !$0.hasPrefix(".") }
     }
 
-    /// THE CLIENT LEG: a complete entry whose bytes fail the record check is deleted by the
+    /// THE client leg: a complete entry whose bytes fail the record check is deleted by the
     /// legacy serving path, and capacity is freed for a fresh recording.
     func test_aRecordCheckRejectionIsDeletedAtOnceByServing() async throws {
         let queue = makeQueue()
         let entry = try seed(queue)
-        // THE REFUSAL IS THE SERVER'S (spec 84f7065a, reviewer c0303918). Corrupting the audio
+        // THE refusal is the server'S. Corrupting the audio
         // locally no longer means anything: the client has no invalid verdict, so such a record is
         // served and sent. The decided-rejection marker comes only from a real final refusal.
         try await driveServerRefusal(of: entry, on: queue)
@@ -4378,12 +4378,12 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
             "spec 1a0d3ffb: the rejected entry is deleted, not kept")
         XCTAssertTrue(makeQueue().readyEntries().isEmpty, "the refused capture never serves")
 
-        // CAPACITY FREED: the queue admits a fresh recording afterwards.
+        // CAPACITY freed: the queue admits a fresh recording afterwards.
         XCTAssertNoThrow(try seed(makeQueue(), frames: 1_650),
                          "after deletion the queue admits new recordings")
     }
 
-    /// THE OTHER HALF (reviewer c0303918): local corruption alone must NOT create a decided-
+    /// THE other half: local corruption alone must not create a decided-
     /// rejection marker. Nothing the client decides locally may delete or hold a recording.
     func test_localCorruptionAloneDoesNotCreateADecidedRejection() throws {
         let queue = makeQueue()
@@ -4406,7 +4406,7 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
     func test_strictDiscoveryDeletesARefusedRecordCheckAndCoverageStaysKnown() async throws {
         let queue = makeQueue()
         let entry = try seed(queue)
-        // A REAL final refusal (spec 84f7065a): only the server can decide a record invalid.
+        // A REAL final refusal: only the server can decide a record invalid.
         try await driveServerRefusal(of: entry, on: queue)
 
         guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
@@ -4417,7 +4417,7 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
             atPath: entryRoot.appendingPathComponent(entry.name).path))
     }
 
-    /// An entry still being prepared (no ready marker) is NOT a refusal — it must survive.
+    /// An entry still being prepared (no ready marker) is not a refusal — it must survive.
     func test_anEntryStillBeingPreparedIsNeverPurged() throws {
         let queue = makeQueue()
         let samples: [Float] = Array(repeating: 0.25, count: 4)
@@ -4433,21 +4433,21 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
         let encoded = try VoiceSharingContributionEncoder.encode(
             event: event, provenance: provenance, observations: [:])
         let prep = try queue.prepare(metadata: encoded.metadataEnvelope, audio: encoded.wav)
-        // Deliberately NOT finalized.
+        // Deliberately not finalized.
         _ = queue.readyEntries()
         XCTAssertTrue(FileManager.default.fileExists(
             atPath: entryRoot.appendingPathComponent(prep.name).path),
             "an in-preparation entry is not a refusal and must never be deleted")
     }
 
-    /// Age policy is NOT the refusal leg: an aged-out entry is excluded from serving but is
+    /// Age policy is not the refusal leg: an aged-out entry is excluded from serving but is
     /// not deleted by this rule.
     func test_anAgedOutEntryIsNotDeletedByTheRefusalSweep() throws {
         let queue = makeQueue()
         let entry = try seed(queue)
         let directory = entryRoot.appendingPathComponent(entry.name)
         // Backdate the immutable creation instant past the lifetime bound. The bound is now seven
-        // days (spec 05ff27d0), so 72 hours is INSIDE it and would prove nothing: age it past the
+        // days, so 72 hours is INSIDE it and would prove nothing: age it past the
         // constant itself.
         let stale = String(
             Date(timeIntervalSinceNow: -VoiceSharingUploadQueue.maxEntryAge - 3600).timeIntervalSince1970)
@@ -4458,13 +4458,13 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
                       "age exclusion is not a refusal: the entry stays")
     }
 
-    /// THE SERVER LEG: a durable `publication.failed` intent (quarantined refusal, or a purge
+    /// THE server leg: a durable `publication.failed` intent (quarantined refusal, or a purge
     /// whose removal never completed) is completed by deletion — while an ACTIVE publication
     /// stage is never touched.
     func test_aDurableServerRefusalIsDeletedButAnActiveStageNeverIs() throws {
         let queue = makeQueue()
         let refused = try seed(queue)
-        // The durable refusal intent: publication.failed present WITH ITS CAUSE (a bare legacy
+        // The durable refusal intent: publication.failed present WITH its cause (a bare legacy
         // byte no longer authorises deletion), no active stage, bytes retained.
         try "decidedRejection".write(to: entryRoot.appendingPathComponent(refused.name)
             .appendingPathComponent("publication.failed"), atomically: true, encoding: .utf8)
@@ -4507,7 +4507,7 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
             atPath: entryRoot.appendingPathComponent(name).path))
     }
 
-    // MARK: Reviewer e71b9524 — bound-only gate, proven stage absence, reconciled purge
+    // MARK: — bound-only gate, proven stage absence, reconciled purge
 
     /// ITEM 1, strict path: a prepared-but-unfinalized entry never serves and is retained.
     func test_anUnfinalizedEntryNeverServesOnTheStrictPath() throws {
@@ -4525,7 +4525,7 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
         let encoded = try VoiceSharingContributionEncoder.encode(
             event: event, provenance: provenance, observations: [:])
         let prep = try queue.prepare(metadata: encoded.metadataEnvelope, audio: encoded.wav)
-        // Deliberately NOT finalized, with a fresh created.at — the case that previously
+        // Deliberately not finalized, with a fresh created.at — the case that previously
         // slipped past the bound-only gate.
         guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("coverage stays known")
@@ -4584,7 +4584,7 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
         // leaves behind, so the purge path under test is identical.
         try markServerRejected(entry)
 
-        // The serving pass must hold ONLY the refused entry (per-entry hold, spec 1bfba50f):
+        // The serving pass must hold only the refused entry:
         // it never serves, the hold is not owner-wide, and the intent stays durable.
         guard case .known(let readyDuringHold) = blocked.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("a refusal hold is per-entry, never unknown coverage")
@@ -4608,9 +4608,9 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
             "the deletion intent is retired after reconciliation")
     }
 
-    /// ITEM 3, barrier failure BEFORE any mutation: nothing is deleted, coverage holds closed,
+    /// ITEM 3, barrier failure before any mutation: nothing is deleted, coverage holds closed,
     /// and reconstruction (clean barriers) completes the purge.
-    /// The faulted queue is constructed BEFORE seeding: instance init runs recovery, and
+    /// The faulted queue is constructed before seeding: instance init runs recovery, and
     /// recovery deletes an entry whose audio no longer matches its bound digest — constructing
     /// it after seeding would destroy the fixture before discovery ever ran.
     func test_aBarrierFailureBeforeThePurgeMutationFailsClosed() async throws {
@@ -4634,7 +4634,7 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
         let queue = makeQueue()
         let entry = try seed(queue)
         faultedEntryName = entry.name
-        // REAL refusal through the barrier-faulted instance (spec 84f7065a).
+        // REAL refusal through the barrier-faulted instance.
         try markServerRejected(entry)
 
         guard case .known(let heldOut) = faulted.readyEntriesReportingUnknownCoverage() else {
@@ -4664,13 +4664,13 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
     func test_anOrphanDeletionIntentRetiresWithoutResurrectingAnything() throws {
         let queue = makeQueue()
         let entry = try seed(queue)
-        // SERVER-REJECTED, the way production records it (spec 84f7065a). A locally corrupted
+        // SERVER-REJECTED, the way production records it. A locally corrupted
         // record is served and sent now, so it could never stand in for a decided rejection.
         try markServerRejected(entry)
         let firstPass = makeQueue()
         XCTAssertTrue(firstPass.readyEntries().isEmpty, "the first pass deletes the refused entry")
 
-        // Simulate a crash AFTER the removal, BEFORE the intent retirement.
+        // Simulate a crash after the removal, before the intent retirement.
         try Data([0x01]).write(to: entryRoot.appendingPathComponent(
             "deletion.intent." + entry.name), options: .atomic)
 
@@ -4690,9 +4690,9 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
 
     // MARK: Spec redirect 1bfba50f — scoped reconciled purge, per-entry hold
 
-    /// PURGE FAILURE: only the refused entry is held; a neighbouring valid entry still serves,
+    /// PURGE failure: only the refused entry is held; a neighbouring valid entry still serves,
     /// byte-for-byte. Reconstruction completes the deletion and retires the intent.
-    /// The faulted queue is constructed BEFORE seeding (instance init runs recovery, which
+    /// The faulted queue is constructed before seeding (instance init runs recovery, which
     /// removes entries whose audio no longer matches their binding).
     private final class RefusingEntryRemover: FileManager {
         var blockedName: String?
@@ -4708,7 +4708,7 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
         let queue = makeQueue()
         let refused = try seed(queue)
         let valid = try seed(queue, frames: 1_650)
-        // SERVER-REJECTED, then the removal is faulted (reviewer c0303918): the purge fails, and
+        // SERVER-REJECTED, then the removal is faulted: the purge fails, and
         // the durable intent is what recovery must honour. The refusal is not DRIVEN here because a
         // faulted remover never lets it settle — see the sibling control for that half.
         remover.blockedName = refused.name
@@ -4746,7 +4746,7 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
             "the deletion intent is retired after reconciliation")
     }
 
-    /// CRASH WINDOW: intent durable, removal never ran => the next pass resumes the scoped
+    /// CRASH window: intent durable, removal never ran => the next pass resumes the scoped
     /// purge and finishes it.
     func test_aCrashAfterTheIntentBeforeRemovalResumesOnTheNextPass() async throws {
         let rootPath = entryRoot.path
@@ -4766,7 +4766,7 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
         let queue = makeQueue()
         let entry = try seed(queue)
         armed = entry.name
-        // REAL refusal through the crash-window-faulted instance (spec 84f7065a): the intent is
+        // REAL refusal through the crash-window-faulted instance: the intent is
         // written and the removal never runs.
         try markServerRejected(entry)
 
@@ -4792,7 +4792,7 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
     }
 
     /// A durable deletion intent on a still-BINDABLE survivor (marker loss after a partial
-    /// removal) must NEVER let it serve: the hold applies before classification, and the
+    /// removal) must never let it serve: the hold applies before classification, and the
     /// authorized deletion finishes.
     func test_aSurvivorWithADeletionIntentNeverServesEvenIfBindable() throws {
         let queue = makeQueue()
@@ -4812,13 +4812,13 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
             "the intent is retired")
     }
 
-    /// REGRESSION GUARD: a default-path refusal purge removes ONLY the refused entry; a valid
+    /// REGRESSION guard: a default-path refusal purge removes only the refused entry; a valid
     /// neighbour keeps serving with its bytes intact.
     func test_aNeighbouringValidEntryIsUntouchedByARefusalPurge() async throws {
         let queue = makeQueue()
         let refused = try seed(queue)
         let valid = try seed(queue, frames: 1_650)
-        // A REAL final refusal of ONE entry (spec 84f7065a). Local corruption can no longer
+        // A REAL final refusal of ONE entry. Local corruption can no longer
         // produce a refused record, so the purge must be driven by the server's own decision.
         try await driveServerRefusal(of: refused, on: queue)
         let validAudio = try Data(contentsOf: entryRoot.appendingPathComponent(valid.name)
@@ -4836,7 +4836,7 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
             atPath: entryRoot.appendingPathComponent("deletion.intent." + refused.name).path))
     }
 
-    // MARK: Reviewer 4bb7841c — recovery preservation, legacy hold, stage protection on retries
+    // MARK: — recovery preservation, legacy hold, stage protection on retries
 
     /// ITEM 1, two reconstructions: while the held survivor's intent cannot be confirmed
     /// (so no purge may run and the entry can never serve), the deletion intent must SURVIVE
@@ -4884,7 +4884,7 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
                        "the intent is retired after reconciliation")
     }
 
-    /// ITEM 1, retirement-barrier containment (reviewer 243ef92d): a root-barrier fault AFTER
+    /// ITEM 1, retirement-barrier containment: a root-barrier fault after
     /// the retirement removal is contained, absence alone never releases the hold — the barrier
     /// is RETRIED on the next pass while it stays faulted — and once the fault lifts, the
     /// retirement is confirmed (barrier succeeds, hold released).

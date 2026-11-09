@@ -1933,8 +1933,8 @@ class PlaybackManager: ServerPlaybackDelegate {
     }
 
     /// - Parameter forceFullRebuild: when `true`, rebuilds the whole now playing payload instead of
-    ///   only refreshing progress. Needed when a value like the media type changes for the same
-    ///   episode (e.g. an HLS stream promoted to video), which the progress-only path won't pick up.
+    /// only refreshing progress. Needed when a value like the media type changes for the same
+    /// episode (e.g. an HLS stream promoted to video), which the progress-only path won't pick up.
     private func refreshNowPlayingInfo(forceFullRebuild: Bool) {
         #if os(watchOS) || APPCLIP || os(tvOS)
             let connectedToExternalDevice = false

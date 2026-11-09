@@ -1756,7 +1756,7 @@ final class VoiceSharingUploadQueue {
                 try recordAttemptLocked(entry)
             } catch {
                 // A DIAGNOSTIC count-WRITE failure must not stop the upload ( ruling,
-                //  item 2). The count exists to space retries and to report; a
+                // item 2). The count exists to space retries and to report; a
                 // disk that cannot be written is exactly when an upload matters most. Keep the
                 // count in memory, log it, and let the attempt proceed — the lease stays held.
                 attemptCountMemoryOverride[entry] = (attemptCountMemoryOverride[entry] ?? 0) + 1
@@ -2239,7 +2239,7 @@ final class VoiceSharingUploadQueue {
             case .present:
                 break
             }
-            //  (2): read and validate the CURRENT record UNDER the entry lock,
+            // (2): read and validate the CURRENT record UNDER the entry lock,
             // with the same bounded/regular-file reader the apply path uses. A pre-lock read can
             // be stale: another owner may retire the old record and publish a new settlement
             // before this lock is obtained, and acting on the stale record could delete it.
@@ -2348,7 +2348,7 @@ final class VoiceSharingUploadQueue {
                 Self.settlementRecordName(for: entry.name))
 
             enum IntentRead { case record(SettlementRecord); case absent; case unknown }
-            //  (3): oversized, nonregular, unreadable or malformed intent is
+            // (3): oversized, nonregular, unreadable or malformed intent is
             // UNKNOWN pending state — refuse, never treat as absent or overwrite as fresh.
             func readSettlement() throws -> IntentRead {
                 switch Self.statKind(of: settlementURL) {
@@ -2357,7 +2357,7 @@ final class VoiceSharingUploadQueue {
                 case .failure:
                     return .unknown
                 case .present:
-                    //  (2): the reader checks the REGULAR-FILE kind too, not
+                    // (2): the reader checks the REGULAR-FILE kind too, not
                     // only the size bound.
                     guard let size = fileSizeIfRegularLocked(at: settlementURL),
                         size.isRegular, size.bytes > 0,
@@ -2371,7 +2371,7 @@ final class VoiceSharingUploadQueue {
                     return .record(record)
                 }
             }
-            //  (1): the intent file ITSELF is barrier-confirmed (file, then its
+            // (1): the intent file ITSELF is barrier-confirmed (file, then its
             // naming directory), not just the root.
             func writeSettlement(_ record: SettlementRecord) throws {
                 let data = try record.encoded()
@@ -2425,7 +2425,7 @@ final class VoiceSharingUploadQueue {
                 // Unknown pending state: refuse rather than guess or overwrite.
                 throw PrepareError.accountingUnavailable
             case .record(let prior):
-                //  (1): identity and outcome are checked before the phase
+                // (1): identity and outcome are checked before the phase
                 // dispatch — a surviving confirmed record must not let a foreign token or a
                 // contradictory outcome claim success.
                 guard prior.generation == lease.generation else {
@@ -2443,7 +2443,7 @@ final class VoiceSharingUploadQueue {
                     inFlightAttempts.removeValue(forKey: entry)
                     return
                 }
-                //  (1): an UNCONFIRMED record must not authorize deletion until
+                // (1): an UNCONFIRMED record must not authorize deletion until
                 // its own durability is re-established under this lock.
                 // an UNCONFIRMED record must not authorize deletion. The
                 // barrier failure surfaces raw here (uncertain outcome) — an already-CONFIRMED
@@ -2770,7 +2770,7 @@ final class VoiceSharingUploadQueue {
         // thousand times is exactly as attemptable as a fresh one; retention removes unaccepted
         // recordings, and the backoff schedule spaces the retries.
         // ATTEMPTABILITY is "CONTAINS A CAPTURE", not "BINDS locally" ( ruling 2,
-        //  item 1). Requiring a successful binding here was the second local gate:
+        // item 1). Requiring a successful binding here was the second local gate:
         // the first was admission's identity read, and together they meant a capture the client
         // could not parse was never offered to the server. An entry holding audio is attemptable.
         // A DECIDED rejection still blocks the attempt. That is not a local verdict: the marker is
@@ -3285,7 +3285,7 @@ final class VoiceSharingUploadQueue {
                     // THE only case that may fall through to the age check and ready.append.
                     break
                 case .unready:
-                    // , corrected item 1: a capture the
+                    //, corrected item 1: a capture the
                     // client cannot bind is STILL served. "Retained but never sent" is a hold with
                     // extra steps — the first version of this branch excluded it here and only
                     // logged `send-unbound`, which established no upload path at all. The server
@@ -3296,7 +3296,7 @@ final class VoiceSharingUploadQueue {
                     // only A DECIDED rejection may delete (spec, old-cap resume). The marker now
                     // records WHY; the marker used to say only "revoked", so this branch deleted a
                     // cap-quarantined recording on update exactly as it deletes a server-refused
-                    // one (entry 8E946B60). A cause that does not authorise deletion is never
+                    // one. A cause that does not authorise deletion is never
                     // purged here: it is excluded and left intact.
                     // ABSENCE or an unreadable marker is not A DECIDED rejection (reviewer
                     // 3dd6876c item 1). The entry was classified `.disqualified` a moment ago, so
@@ -3313,7 +3313,7 @@ final class VoiceSharingUploadQueue {
                     }
                     // A durable publication.failed intent WITHOUT an active publication stage
                     // is a PERMANENT server refusal (or a purge whose removal never completed):
-                    //  deletes it.: entryStateLocked
+                    // deletes it.: entryStateLocked
                     // returns.disqualified on the failed marker before checking the stage, so
                     // the stage absence must be PROVEN here — an entry carrying both markers
                     // (failed intent + still-active stage) is never deleted, and a stage stat
@@ -3407,7 +3407,7 @@ final class VoiceSharingUploadQueue {
             // purge failures leave the entry on disk, excluded from the served list.
             do {
                 for entry in try entriesStrictLocked() {
-                    //  2+3: intent stat failure => fail closed (serve
+                    // 2+3: intent stat failure => fail closed (serve
                     // nothing); active/unknown stage under an intent => never deleted.
                     let heldIntentKind = intentDiscovery(deletionIntentPathLocked(entry.name))
                     if refusedIntentNamesLocked.contains(entry.name) || heldIntentKind != .absent {
@@ -4176,7 +4176,7 @@ final class VoiceSharingUploadQueue {
         switch boundFailureLocked(at: entry) {
         case .digestMismatch, .audioDigestMismatch, .malformedJSON, .duplicateKey,
              .nonFiniteNumber, .missingField, .unknownField, .invalidField,
-             // , ruling a4b417fc ruling 2: a READABLE pair whose audio is
+             //, ruling a4b417fc ruling 2: a READABLE pair whose audio is
              // malformed, wrongly sized or not the representation claimed is still a capture the
              // server must judge. The first version of this split excluded these, which was a local
              // invalid verdict — the exact class of gate the ruling removes. Server's final refusal

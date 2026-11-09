@@ -166,7 +166,7 @@ final class CloudAudioPlayerStopIdentityTests: XCTestCase {
             try await Task.sleep(nanoseconds: 20_000_000)
             confirmedOnce = await MainActor.run { player.confirmedStopEpoch() }
         }
-        // Identity 3 was never stopped (2 and 3 unperformed). A short bounded wait must NOT
+        // Identity 3 was never stopped (2 and 3 unperformed). A short bounded wait must not
         // be satisfied by the confirmed 1 — confirmation is identity-exact upward.
         let start = Date()
         let satisfied = await player.awaitActualStop(after: 3, timeout: 0.3)
@@ -239,10 +239,10 @@ final class CloudAudioPlayerStopIdentityTests: XCTestCase {
             done.signal()
             return r
         }
-        // ASSERT the park: registration must NOT have run when we cancel.
+        // ASSERT the park: registration must not have run when we cancel.
         let parked = latch.wait(timeout: .now() + 2)
         XCTAssertEqual(parked, .success, "the waiter is parked in the latch BEFORE the cancel")
-        waiter.cancel()  // the cancellation handler runs BEFORE registration
+        waiter.cancel()  // the cancellation handler runs before registration
         try await Task.sleep(nanoseconds: 100_000_000)
         release.signal()  // release INTO registration
         // BOUNDED completion probe: fail PROMPTLY instead of hanging, then rescue.
@@ -340,7 +340,7 @@ final class DeliveryBox: @unchecked Sendable {
     func store(_ d: @escaping () -> Void) {
         lock.lock(); deliveries.append(d); lock.unlock()
     }
-    /// Delivers ONLY the OLDEST withheld stop (the earliest identity still pending).
+    /// Delivers only the OLDEST withheld stop (the earliest identity still pending).
     func deliverOldest() {
         lock.lock(); let d = deliveries.isEmpty ? nil : deliveries.removeFirst(); lock.unlock()
         d?()

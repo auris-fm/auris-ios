@@ -129,7 +129,7 @@ class VoiceAsrEngine {
     /// TEST-only: fires between the filter-path observation and the filter call. See call site.
     var echoObservationTakenForTesting: (() -> Void)?
 
-    /// TEST seam (r4357901593): the offset arithmetic applied to a CALLER-SUPPLIED observation,
+    /// TEST seam: the offset arithmetic applied to a CALLER-SUPPLIED observation,
     /// so a control can prove the filter uses the observation it took rather than a fresh
     /// (post-append, displaced) read.
     func engineOffsetFromObservationForTesting(
@@ -668,12 +668,12 @@ class VoiceAsrEngine {
         FileLog.shared.addMessage("[VoicePipeline] utterance admitted id=\(utteranceId)")
 
         if echoFilterRoute.appliesCorrelationWindow {
-            // ONE consistent observation (PR50 review r4357901593): samples, offset and anchor
+            // ONE consistent observation: samples, offset and anchor
             // come from a single lock acquisition, so the offset always describes exactly the
             // samples the mic segment is correlated against — an append landing between two
             // separate reads can no longer shift the window out from under the offset.
             let observation = echoReference?.consistentObservation()
-            // TEST-only boundary hook (r4366062986 disposition): fires after the observation is
+            // TEST-only boundary hook: fires after the observation is
             // taken and before the filter call, so a control can force an append/anchor advance
             // into the exact window a split-read regression would read across — deterministically,
             // no timing. Nil in production.

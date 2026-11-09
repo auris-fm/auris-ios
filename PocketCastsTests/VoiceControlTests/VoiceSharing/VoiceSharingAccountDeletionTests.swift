@@ -7,15 +7,15 @@ import Security
 
 /// Account deletion and Voice Sharing.
 ///
-/// Deletion reaches Voice Sharing ONLY through the sign-out it triggers on success
+/// Deletion reaches Voice Sharing only through the sign-out it triggers on success
 /// (`deleteAccountTapped` → success ⇒ `SignOutHelper.signout()` → `.serverUserWillBeSignedOut`
 /// ⇒ coordinator purge + fence). These controls pin the two behaviours that follow from that:
 ///
-///  * **callback loss** — the server deletes the account but the completion never runs (app killed,
-///    request abandoned). Nothing locally signs out, so nothing purges in that process; the durable
-///    queue and its revocation intent are the only guarantees a later launch has, and they hold.
-///  * **restart** — a fresh process with no authoritative session must not SERVE what it still
-///    holds. Queue coverage alone does not prove that, so this is reported, not assumed.
+/// * **callback loss** — the server deletes the account but the completion never runs (app killed,
+/// request abandoned). Nothing locally signs out, so nothing purges in that process; the durable
+/// queue and its revocation intent are the only guarantees a later launch has, and they hold.
+/// * **restart** — a fresh process with no authoritative session must not SERVE what it still
+/// holds. Queue coverage alone does not prove that, so this is reported, not assumed.
 final class VoiceSharingAccountDeletionTests: XCTestCase {
     private var root: URL!
     private var defaults: UserDefaults!
@@ -58,7 +58,7 @@ final class VoiceSharingAccountDeletionTests: XCTestCase {
                        "after the sign-out purge nothing survives a restart")
     }
 
-    /// Without an authoritative projection, enrollment is NOT claimed: a restarted process that
+    /// Without an authoritative projection, enrollment is not claimed: a restarted process that
     /// never reached the server reports not-enrolled, so the gate is closed regardless of what is
     /// on disk.
     func test_aRestartedProcessWithoutAServerReplyIsNotEnrolled() throws {
@@ -193,7 +193,7 @@ final class VoiceSharingSignOutCompositionTests: XCTestCase {
     }
 }
 
-// MARK: - The REAL sign-out registration and callback (spec e3db4e30 / d718c160)
+// MARK: - The REAL sign-out registration and callback
 
 /// A test notification center that satisfies the same protocol production uses, so these controls
 /// drive `installIdentityInvalidation` itself — the actual observer the app registers — rather than
@@ -202,7 +202,7 @@ final class VoiceSharingSignOutCompositionTests: XCTestCase {
 /// drive `installIdentityInvalidation` itself — the actual observer the app registers — rather than
 /// calling the registry or the coordinator's handler directly.
 final class RecordingNotificationCenter: VoiceSharingCoordinator.NotificationRegistering {
-    /// REAL TOKEN-BASED REMOVAL (reviewer 5a4738ca): the earlier version only incremented a counter,
+    /// REAL token-BASED removal: the earlier version only incremented a counter,
     /// so a "removed" block still delivered — posting after reinstall fired BOTH registrations and
     /// the test proved nothing. A token identifies its own entry and removal deletes it.
     private final class Token: NSObject {
@@ -299,7 +299,7 @@ final class VoiceSharingSignOutNotificationTests: XCTestCase {
     }
 
     /// Re-activation must replace the previous registration, so ONE sign-out fires ONE invalidation.
-    /// This asserts DELIVERY COUNTS, not removal calls: with token-based removal, a post after
+    /// This asserts DELIVERY counts, not removal calls: with token-based removal, a post after
     /// reinstall must reach exactly one live observer.
     func test_reinstallingLeavesExactlyOneLiveDelivery() {
         let store = VoiceSharingEnrollmentStore(defaults: defaults, accountScopeProvider: { "account-a" })
@@ -314,7 +314,7 @@ final class VoiceSharingSignOutNotificationTests: XCTestCase {
                        "ONE sign-out must reach exactly ONE registration")
     }
 
-    /// SWITCHING CENTERS: installing against a second center must also drop the registration on the
+    /// SWITCHING centers: installing against a second center must also drop the registration on the
     /// FIRST one, or the old center keeps a live observer pointing at this coordinator.
     func test_switchingCentersDropsTheOldRegistration() {
         let store = VoiceSharingEnrollmentStore(defaults: defaults, accountScopeProvider: { "account-a" })
@@ -331,9 +331,9 @@ final class VoiceSharingSignOutNotificationTests: XCTestCase {
                        "and the new center delivers exactly once")
     }
 
-    /// LOST CALLBACK, SCOPE STATED EXACTLY (reviewer 5a4738ca): this control performs NO deletion.
+    /// LOST callback, SCOPE stated exactly: this control performs NO deletion.
     /// It establishes only what the absence of the notification does to an otherwise valid,
-    /// enrolled, servable set — that nothing is revoked and the entry stays on disk. It is NOT
+    /// enrolled, servable set — that nothing is revoked and the entry stays on disk. It is not
     /// evidence about the delete call, the completion handler, `SyncManager`, or a real restart.
     /// Nothing is revoked in that process — and the audio is still THERE afterwards. That residue,
     /// not a clean "not enrolled" label, is the real cost of a lost callback.
@@ -354,9 +354,9 @@ final class VoiceSharingSignOutNotificationTests: XCTestCase {
         // NO post: the callback never ran.
         XCTAssertEqual(queue.readyEntries().count, 1, "nothing was revoked, because nothing was told")
 
-        // MEASURED WHILE STILL ENROLLED. (Driving `transitionToAccount` here instead would drop the
+        // MEASURED while still enrolled. (Driving `transitionToAccount` here instead would drop the
         // reading to zero for a reason that has nothing to do with removal — sign-out clears the
-        // account scope the queue reads its identity from — so this control observes the residue at
+        // account scope the queue reads its identity from so this control observes the residue at
         // the only moment it is observable: before that transition.)
         XCTAssertEqual(queue.readyEntries().count, 1,
                        "the recording survives, un-revoked, under the still-live lease")
@@ -365,7 +365,7 @@ final class VoiceSharingSignOutNotificationTests: XCTestCase {
         XCTAssertTrue(files.contains { UUID(uuidString: $0.lastPathComponent) != nil },
                       "and it is durable: the entry directory is still on disk afterwards")
 
-        // WHAT THE LOST CALLBACK COSTS: the files remain, so they persist past the process and past
+        // WHAT the lost callback costs: the files remain, so they persist past the process and past
         // the sign-out that would have purged them. Nothing here claims they are still SERVED after
         // a later sign-out — only that the revocation never happened, so nothing removed them.
     }
@@ -513,7 +513,7 @@ final class VoiceSharingDeletionCallbackCompositionTests: XCTestCase {
         let suite = "deletion-callback-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
-        // The fixture's own store MUST be the one the pipeline and observers use: it carries the
+        // The fixture's own store must be the one the pipeline and observers use: it carries the
         // session lifecycle the projection fence needs, and the coordinator's fan-out reads it.
         // The store the PRODUCTION fan-out reads — `.standard` defaults and the live account scope — so
         // sign-out's identity transition reaches the consent decision these assertions are about.
@@ -524,7 +524,7 @@ final class VoiceSharingDeletionCallbackCompositionTests: XCTestCase {
         let retained = try XCTUnwrap(queue.readyEntries().first)
         let retainedDirectory = root.appendingPathComponent(retained.name, isDirectory: true)
         XCTAssertTrue(FileManager.default.fileExists(atPath: retainedDirectory.path))
-        // THE PIPELINE OWNER's gate-loss handler, exactly as the production registrar installs it:
+        // THE pipeline owner's gate-loss handler, exactly as the production registrar installs it:
         // a gate loss clears retained recordings only when consent is gone for purge (explicit opt-out
         // or a server withdrawal). A rejected deletion is neither, so it must retain them.
         let coordinator = VoiceSharingCoordinator(enrollmentStore: store)
@@ -586,7 +586,7 @@ final class VoiceSharingDeletionCallbackCompositionTests: XCTestCase {
         XCTAssertEqual(navigated, signsOut ? 1 : 0)
         XCTAssertEqual(rejected, !success && !dropCompletion ? 1 : 0)
         XCTAssertEqual(SyncManager.isUserLoggedIn(), !signsOut)
-        // RECORDINGS (spec 4afc6e43 + e1529db9): a REJECTED deletion leaves the account signed in, so
+        // RECORDINGS: a REJECTED deletion leaves the account signed in, so
         // nothing may be cleared. A deleted account is a different question — the queue is keyed to the
         // signed-out identity and is no longer servable, which the count assertion below pins.
         if !signsOut {

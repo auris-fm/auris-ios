@@ -218,7 +218,7 @@ final class VoiceSharingCaptureAllowanceProvisionerTests: XCTestCase {
         XCTAssertNil(p.currentAuthorization())
         XCTAssertTrue(Self.logs.contains { $0.contains("skipped") }, "missing inputs must be surfaced: \(Self.logs)")
     }
-    // MARK: - Allocation reuse across restarts (spec a6d71a42)
+    // MARK: - Allocation reuse across restarts
 
     /// The request identity is persisted, so a RESTART replays it instead of minting a new one, and the
     /// stub answers `replayed` — the disposition the real server returns for a stored request id — so

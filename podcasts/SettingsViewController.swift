@@ -178,7 +178,7 @@ class SettingsViewController: PCViewController, UITableViewDataSource, UITableVi
             navigationController?.pushViewController(StorageAndDataUseViewController(), animated: true)
         case .voiceControl:
             // ONE destination for Voice Control: the FULL screen (enable, models, status, sharing),
-            // not the sharing-only account controller (reviewer on 4b2f60468). Ordinary Voice
+            // not the sharing-only account controller. Ordinary Voice
             // Control settings must open while signed out — only sharing participation inside the
             // screen requires an account, and that section is optional in the view.
             guard let service = VoiceControlService.shared else {

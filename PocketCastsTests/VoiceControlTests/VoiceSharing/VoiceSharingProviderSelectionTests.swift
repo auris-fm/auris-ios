@@ -3,7 +3,7 @@ import XCTest
 @testable import PocketCastsServer
 @testable import PocketCastsUtils
 
-/// SPEC RULING 2026-11-03: Voice Sharing uses the existing Auris token provider on every build where
+/// SPEC ruling: Voice Sharing uses the existing Auris token provider on every build where
 /// sharing is enabled, selecting it independently of the assistant's `cloudEdgeTokens` flag and of the
 /// gateway-CUTOVER switch. Missing configuration must refuse sharing rather than fall back to the static
 /// identity, whose `token()` is a bare `user_<uuid>` — not a JWS, so the account route cannot verify it.

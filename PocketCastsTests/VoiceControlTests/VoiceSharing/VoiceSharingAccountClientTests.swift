@@ -162,7 +162,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         )
     }
 
-    /// SIMPLIFIED CONTRACT (spec 4afc6e43): the coordinator's only server operation is the projection
+    /// SIMPLIFIED contract: the coordinator's only server operation is the projection
     /// refresh, so these controls drive that instead of the deleted activation/lookup exchange.
     private func projectionCoordinator(store: VoiceSharingEnrollmentStore) -> VoiceSharingCoordinator {
         VoiceSharingCoordinator(enrollmentStore: store)
@@ -191,7 +191,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
     /// hold a committed credential for these fixtures, so the owner is named here instead of being
     /// faked into one: what the controls assert about is the SEQUENCE (a login settles, a sign-out
     /// ends it), not the owner's own digest.
-    /// Names the account the credential owner reports. It deliberately does NOT go nil on sign-out:
+    /// Names the account the credential owner reports. It deliberately does not go nil on sign-out:
     /// in production the owner reports nothing once the credential is invalidated, and these
     /// controls drive sign-out through `SignOutHelper` without invalidating credentials — so binding
     /// presence to the legacy `userId` would test the fixture's bookkeeping instead of the sequence.
@@ -201,7 +201,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
     /// `userId` alone cannot see sign-out followed by signing back into the SAME account. The session half of
     /// the identity does, so a reply from the previous session must drop rather than apply membership.
     /// The operation's originating generation is captured at BEGIN and retained across retries. If the
-    /// current session no longer matches, perform must refuse BEFORE transport — otherwise account A's
+    /// current session no longer matches, perform must refuse before transport — otherwise account A's
     /// opt-in intent would be sent under account B's credential, and the server could not tell.
     func test_operationBegunUnderSessionA_refusesToRunUnderSessionB_beforeTransport() async {
         VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
@@ -211,7 +211,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
             return XCTFail("no session to begin under")
         }
         XCTAssertEqual(op.originatingGeneration, identity, "the operation records the session it was begun under")
-        // Transition lands AFTER begin, before perform.
+        // Transition lands after begin, before perform.
         identity = "gen-B"
         let outcome = await client.perform(op)
         XCTAssertEqual(outcome, .refusedStaleSession, "an operation begun under a superseded session must not run")
@@ -234,7 +234,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty, "must refuse before transport")
     }
 
-    /// Deletion previously read identity only AFTER awaiting the bearer inside request building — a real
+    /// Deletion previously read identity only after awaiting the bearer inside request building — a real
     /// suspension point. The originating generation must be checked before that await too.
     func test_deletionBegunUnderSessionA_refusesToRunUnderSessionB() async {
         VoiceSharingStubProtocol.replies["DELETE /api/v1/account/voice-sharing/data"] =
@@ -264,7 +264,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         XCTAssertFalse(VoiceSharingStubProtocol.seenRequests.isEmpty, "this path DID send, unlike the pre-transport refusal")
     }
 
-    /// ONE-REFRESH COMPOSITION (spec 175260b2): same account, same enrollment epoch, NEW login.
+    /// ONE-REFRESH composition: same account, same enrollment epoch, NEW login.
     /// A re-login is not an enrollment change: the epoch must survive the one refresh that the new
     /// login performs, and the stale session's in-flight read must never install.
     func test_sameAccountSameEpochNewLogin_refreshesOnceAndKeepsTheEpoch() async throws {
@@ -349,7 +349,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
     // MARK: - Review round 8: 401 ordering, secret hygiene, refresh-vs-logout, exact numeric schema
 
     /// A 401 that arrives for account A's request must not invalidate account B's credential. The captured
-    /// generation is validated BEFORE the side effect, so the provider is never called once the session moved.
+    /// generation is validated before the side effect, so the provider is never called once the session moved.
     func test_401_fromStaleSession_doesNotInvalidateCurrentCredential() async {
         VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] = Reply(status: 401, body: [:])
         guard let op = clientForTest.beginMembership(enrolled: true, acceptedDisclosureVersion: "2026-09", lastReadRevision: "r7") else {
@@ -388,10 +388,10 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         }
     }
 
-    /// Operation identity is a lifecycle label, never credential material. Two properties @spec asked for:
+    /// Operation identity is a lifecycle label, never credential material. Two properties asked for:
     /// the label carries nothing recoverable about the account, and no operation body can contain a bearer.
     func test_operationIdentity_isOpaqueAndCarriesNoCredentialMaterial() async {
-        // ORDINARY ACCOUNT OWNERSHIP (spec 4afc6e43) is the operation identity now: a server-side account
+        // ORDINARY account ownership is the operation identity now: a server-side account
         // id, which says nothing about credentials.
         guard let label = VoiceSharingEnrollmentStore.currentSessionOwner() ?? Optional("account-a") as String? else {
             return XCTFail("no session")
@@ -468,7 +468,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
 
     // MARK: - Enrollment
 
-    /// PHASE 2: the body is the DESIRED STATE and the precondition is the `If-Match` header. There is no
+    /// PHASE 2: the body is the DESIRED state and the precondition is the `If-Match` header. There is no
     /// `request_id` member any more — a PUT's identity IS its body, so repeating it is the same request.
     func test_enroll_carriesDesiredState_andPreconditionHeader() async {
         VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
@@ -485,7 +485,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         XCTAssertEqual(request.value(forHTTPHeaderField: "If-Match"), "r7")
     }
 
-    /// Spec rule: a 409 conflict returns the current projection and MUST NOT be auto-replayed against the
+    /// Spec rule: a 409 conflict returns the current projection and must not be auto-replayed against the
     /// newer revision — renewed opt-in requires fresh user intent. Assert exactly one request was made.
     func test_conflict_returnsCurrentProjection_andNeverAutoReplays() async {
         VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
@@ -515,10 +515,10 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         }
     }
 
-    /// Round 9 (spec 3de3957f): 403 and 422 previously returned account-specific refusals with NO
+    /// Round 9: 403 and 422 previously returned account-specific refusals with NO
     /// post-transport generation check, so account A's "ineligible" could be shown as account B's state.
     /// The guard now sits before every status branch, so both codes refuse on a superseded session.
-    /// Round 9 (spec 3de3957f): 403 previously returned an account-specific refusal with NO post-transport
+    /// Round 9: 403 previously returned an account-specific refusal with NO post-transport
     /// generation check, so account A's "ineligible" could be shown as account B's state.
     func test_staleSession_403refusal_isNotSurfaced() async {
         await assertStaleRefusalIsDropped(status: 403, error: "ineligible_plan")
@@ -586,7 +586,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         XCTAssertEqual(m.withdrawalState, .withdrawn)
     }
 
-    /// Identical request_id retried AFTER a later transition returns the original result without changing
+    /// Identical request_id retried after a later transition returns the original result without changing
     /// state. The client must surface the returned projection verbatim and make no additional mutation.
     func test_identicalRequestId_retry_afterLaterTransition_returnsOriginalResult_withoutChangingState() async {
         var issued: [String] = []
@@ -610,7 +610,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         XCTAssertEqual(issued.count, 1, "begin… runs once; perform… must not mint a new request_id")
         let bodies = VoiceSharingStubProtocol.seenRequests.compactMap(requestBodyDictionary(of:))
         XCTAssertEqual(bodies.count, 2, "two PUTs were made")
-        // Under a desired-state PUT, the immutable thing that must survive a retry is the BODY BYTES:
+        // Under a desired-state PUT, the immutable thing that must survive a retry is the BODY bytes:
         // identical bytes are what make a repeat a repeat instead of new intent.
         // URLSession gives a body-driven request an httpBodySTREAM, so the bytes are read from whichever
         // carrier the request actually carries.
@@ -691,7 +691,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         XCTAssertEqual(request.httpMethod, "DELETE")
         guard let body = requestBodyDictionary(of: request) else { return XCTFail("request carried no readable body") }
         XCTAssertNotNil(body["request_id"], "deletion carries its own request identity")
-        // It must NOT be sent to the enrollment/withdrawal routes.
+        // It must not be sent to the enrollment/withdrawal routes.
         XCTAssertFalse(request.url!.path.contains("enrollment"))
         XCTAssertFalse(request.url!.path.contains("withdrawal"))
     }
@@ -712,9 +712,9 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         let outcome = await clientForTest.perform(op)
         XCTAssertEqual(outcome, .unavailableBackend)
     }
-    // MARK: - Delayed read applying through the real store (reviewer 4599fb63 / 7897cd94)
+    // MARK: - Delayed read applying through the real store
 
-    /// A GET issued BEFORE a withdrawal whose reply arrives AFTER it. The response is well-formed and says
+    /// A GET issued before a withdrawal whose reply arrives after it. The response is well-formed and says
     /// "enrolled"; only the fence stops it. This drives the whole production path — client stamps the token,
     /// store refuses application — so nothing here depends on how `membership_revision` is spelled.
     func test_delayedGETReply_cannotReEnableThroughTheStore() async {
@@ -737,7 +737,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
                        "a projection issued before the withdrawal must not be applied")
         XCTAssertFalse(testStore.currentEffectiveEnrolled, "and it must not re-enable collection")
 
-        // A read issued AFTER the withdrawal is still usable, so this is staleness, not a dead store.
+        // A read issued after the withdrawal is still usable, so this is staleness, not a dead store.
         VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] =
             Reply(status: 200, body: projection("opaque-token-ZZZ", enrolled: true, epoch: "e9", withdrawal: "active"))
         let fresh = await client.fetchProjection()!
@@ -755,7 +755,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
             Reply(status: 200, body: projection("r1", enrolled: true, epoch: "e1", withdrawal: "active"))
         VoiceSharingStubProtocol.responseDelay = 0.05
         let client = makeClient()
-        // Token taken BEFORE the request, as every caller must.
+        // Token taken before the request, as every caller must.
         let stale = testStore.projectionToken()!
         XCTAssertEqual(stale.lifecycleGeneration, "gen-A")
 
@@ -778,9 +778,9 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         try! JSONSerialization.data(withJSONObject: projection(revision, enrolled: enrolled, epoch: epoch, withdrawal: withdrawal))
     }
 
-    // MARK: - Mutation outcomes carry their issuing fence (reviewer 79427fe7)
+    // MARK: - Mutation outcomes carry their issuing fence
 
-    /// A GET is not the only projection-bearing reply. An enrollment POST issued BEFORE a withdrawal can
+    /// A GET is not the only projection-bearing reply. An enrollment POST issued before a withdrawal can
     /// SUCCEED afterwards — the server has not moved yet, so nothing about its answer marks it stale. If the
     /// outcome carried only a bare projection, a caller could apply it under a token taken after the reply
     /// and re-enable a user who just opted out. The operation carries the store fence from BEGIN, and the
@@ -819,7 +819,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
                       "control: the projection is well-formed and acceptable NOW — only its origin disqualifies it")
     }
 
-    /// A 409 conflict also bears a projection, and reconciling it must go through a NEW GET rather than
+    /// A 409 conflict also bears a projection, and reconciling it must go through a NEW get rather than
     /// adopting the conflict payload under a token minted after the reply.
     func test_delayedConflict_afterNewIntent_isRefusedAndNeverAutoReplayed() async {
         VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
@@ -885,7 +885,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         XCTAssertFalse(testStore.apply(authoritative: projection, readUnder: issued),
                        "the withdrawal answer belongs to an earlier instant than the new opt-in")
     }
-    /// GET-BEFORE-PUT through the REAL model (reviewer 67ecb11e item 2; spec e3cfc8ae). An intent holding no
+    /// GET-before-PUT through the REAL model. An intent holding no
     /// revision must READ first and then PUT with the revision that read produced. The view's on-open refresh
     /// is not a guarantee — this drives `enroll` with no prior read, which is the case that used to refuse.
     ///
@@ -933,7 +933,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         XCTAssertFalse(harness.store.currentEffectiveEnrolled, "a failed read never turns sharing on")
     }
 
-    /// WITHDRAWAL reads before PUTting when it holds no revision, and the LOCAL STOP happens first and stands
+    /// WITHDRAWAL reads before PUTting when it holds no revision, and the LOCAL stop happens first and stands
     /// regardless of the read: privacy is the local decision, only its confirmation depends on the server.
     @MainActor
     func test_withdrawStopsLocallyFirstThenReadsBeforePutting() async throws {
@@ -1125,7 +1125,7 @@ final class VoiceSharingAccountModelTests: XCTestCase {
         XCTAssertEqual(harness.store.currentState.membership.plan, .pro)
     }
 
-    /// GET-BEFORE-PUT through the REAL model (reviewer 67ecb11e item 2; spec e3cfc8ae). An intent with no
+    /// GET-before-PUT through the REAL model. An intent with no
     /// revision held must READ first and then send its PUT with the revision that read produced. The view's
     /// on-open refresh is not a guarantee — this drives `enroll` directly with no prior read, which is the
     /// case the old code answered by refusing.
@@ -1173,7 +1173,7 @@ final class VoiceSharingAccountModelTests: XCTestCase {
         XCTAssertFalse(harness.store.currentEffectiveEnrolled, "a failed read never turns sharing on")
     }
 
-    /// An ACCOUNT CHANGE during the preparatory read retires it: the reply belongs to a session that no
+    /// An ACCOUNT change during the preparatory read retires it: the reply belongs to a session that no
     /// longer exists, so the intent is abandoned rather than completed under the new account.
     @MainActor
     func test_enrollSendsNoPutWhenTheAccountChangesDuringTheRead() async throws {
@@ -1198,7 +1198,7 @@ final class VoiceSharingAccountModelTests: XCTestCase {
         XCTAssertFalse(harness.store.currentEffectiveEnrolled)
     }
 
-    /// WITHDRAWAL reads before PUTting when it holds no revision, and the LOCAL STOP happens first and is
+    /// WITHDRAWAL reads before PUTting when it holds no revision, and the LOCAL stop happens first and is
     /// never undone by what the read finds. Order is asserted on the recorded requests; the local stop is
     /// asserted by the consent state immediately after the call.
     @MainActor

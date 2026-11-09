@@ -10,7 +10,7 @@ final class VoiceSharingRetryPolicyTests: XCTestCase {
         VoiceSharingRetryPolicy(retryBaseDelay: base, retryMaximumDelay: maximum, random: random)
     }
 
-    // MARK: Production parameters (reviewer 7c4c9cff)
+    // MARK: Production parameters
 
     /// The flip-a-test-random-to-1 change does not prove PRODUCTION delays are usable: it only
     /// proves the formula honors its input. This control pins the real assembly parameters and the
@@ -35,7 +35,7 @@ final class VoiceSharingRetryPolicyTests: XCTestCase {
         }
         XCTAssertGreaterThan(highest - lowest, 0.9, "the sampled range must span the open interval")
         // Attempt 1 is the smallest ceiling production can produce (2 s). Any sample strictly
-        // inside the range therefore yields a strictly positive delay; the ONLY way to reach zero
+        // inside the range therefore yields a strictly positive delay; the only way to reach zero
         // is an exact 0.0 draw, and that sample is refused by the trigger's own progress rule
         // (a due boundary is attempted immediately rather than slept on). Pin the boundary.
         let atLowest = VoiceSharingRetryPolicy(

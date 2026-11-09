@@ -15,7 +15,7 @@ struct FirebaseManager {
             Constants.RemoteParams.addMissingEpisodes: NSNumber(value: Constants.RemoteParams.addMissingEpisodesDefault),
             Constants.RemoteParams.errorLogoutHandling: NSNumber(value: Constants.RemoteParams.errorLogoutHandlingDefault),
             Constants.RemoteParams.slumberStudiosPromoCode: NSString(string: Constants.RemoteParams.slumberStudiosPromoCodeDefault),
-            // Voice Sharing: default false. Registration here is NOT an enable path —
+            // Voice Sharing: default false. Registration here is not an enable path —
             // the policy snapshot ignores defaults entirely and requires a valid value
             // read after activate completes (see VoiceSharingPolicy).
             Constants.RemoteParams.voiceSharingEnabled: NSNumber(value: Constants.RemoteParams.voiceSharingEnabledDefault)
@@ -41,7 +41,7 @@ struct FirebaseManager {
         #endif
         remoteConfig.fetch(withExpirationDuration: expirationDuration) { status, error in
             guard status == .success, error == nil else {
-                // A failed fetch — including cached/no-network outcomes — must NOT renew the
+                // A failed fetch — including cached/no-network outcomes — must not renew the
                 // lease. Nothing was activated, so whatever snapshot is installed keeps its
                 // existing expiry and simply stops permitting once it lapses.
                 completion?(status)
@@ -53,7 +53,7 @@ struct FirebaseManager {
                 // activate returns, never after fetch alone, so values cannot come from mixed
                 // template generations.
                 //
-                // Condition is `os(iOS) && !APPCLIP`, NOT `!APPCLIP` alone: this file is compiled
+                // Condition is `os(iOS) && !APPCLIP`, not `!APPCLIP` alone: this file is compiled
                 // into podcasts, Pocket Casts App Clip and Pocket Casts TV App, and the TV target's
                 // configurations define no APPCLIP flag at all (only Debug sets
                 // SWIFT_ACTIVE_COMPILATION_CONDITIONS there), so `!APPCLIP` would reference the

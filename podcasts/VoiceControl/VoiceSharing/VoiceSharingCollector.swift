@@ -817,13 +817,13 @@ return }
     func gateLost() {
         lock.lock()
         // WITHDRAWAL disposal. Every retained byte dies here, synchronously:
-        //   * queued events (each holds a full audio copy) — purged;
-        //   * the open partial — terminal, ring-remembered for identity only, audio emptied;
-        //   * terminal-ring history — audio emptied (no retained speech survives a withdrawal);
-        //   * the cancellation record itself is CONTENT-FREE: it states that consent ended (identity,
-        //     counts, truncation metadata) and carries NO audio. GATE-control events still bypass the
-        //     live dequeue check — their whole point is to report the loss — but they cannot carry old
-        //     speech, so the bypass cannot deliver withdrawn audio.
+        // * queued events (each holds a full audio copy) — purged;
+        // * the open partial — terminal, ring-remembered for identity only, audio emptied;
+        // * terminal-ring history — audio emptied (no retained speech survives a withdrawal);
+        // * the cancellation record itself is CONTENT-FREE: it states that consent ended (identity,
+        // counts, truncation metadata) and carries NO audio. GATE-control events still bypass the
+        // live dequeue check — their whole point is to report the loss — but they cannot carry old
+        // speech, so the bypass cannot deliver withdrawn audio.
         for i in pending.indices { aggregateAudioSamples -= pending[i].audio.count }
         pending.removeAll()
         disposeRingAudio()
@@ -1173,7 +1173,7 @@ return }
         guard stillValid else {
             lock.lock()
             aggregateAudioSamples -= event.audio.count
-            //  (4): this drop used to be SILENT. It names its bound so the two
+            // (4): this drop used to be SILENT. It names its bound so the two
             // cases are separable: the account/session moved, or consent closed behind the event.
             let why = event.authorizationSession == sessionIdentity()
                 ? "consent-not-permitted" : "session-moved"
@@ -1192,7 +1192,7 @@ return }
     private func deliverUnderSinkOwnership(_ event: SegmentEvent) {
         let n = event.audio.count
         lock.lock()
-        //  (4) + 43f457ab finding 3: count CONTRIBUTIONS, not events. The sink
+        // (4) + 43f457ab finding 3: count CONTRIBUTIONS, not events. The sink
         // ignores `.started`, so counting every non-gate-control event counted one segment twice
         // (start then completion) before a single contribution existed. A COMPLETED segment and a
         // REJECTED one (wake or bleed) both reach the sink as a contribution record — a rejected

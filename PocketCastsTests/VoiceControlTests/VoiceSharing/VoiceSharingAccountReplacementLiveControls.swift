@@ -4,7 +4,7 @@ import XCTest
 @testable import PocketCastsUtils
 @testable import podcasts
 
-/// ACCOUNT REPLACEMENT, LIVE (reviewer 2ba0220e finding 4).
+/// ACCOUNT replacement, LIVE.
 ///
 /// The earlier "contrast" built an unrelated `acct-2` store and re-read account 1's queue — it
 /// could not have failed if account 2 could actually send account 1's recordings. This control
@@ -177,12 +177,12 @@ final class VoiceSharingAccountReplacementLiveControls: XCTestCase {
                 withdrawalState: .active),
             readUnder: try XCTUnwrap(store.projectionToken())))
 
-        // A COHERENT INJECTED CLOCK (spec 4babcc7d): the positive upload below answers 503, which
+        // A COHERENT injected clock: the positive upload below answers 503, which
         // records a retry deadline. With `Date.init` the negative drain would be refused as
         // not-yet-due before reaching ownership — so the control could never have exercised the
         // fence it claims to test. Advancing one clock past that deadline makes the entry DUE.
         let clock = LocalClock(start: Date(timeIntervalSince1970: 1_700_000_000))
-        // A BOUND QUEUE (reviewer 4dacabfa): without `currentIdentity` the queue writes and enforces
+        // A BOUND queue: without `currentIdentity` the queue writes and enforces
         // no `owner.account`, so the ownership check under test cannot run at all. Same reader as
         // the trigger, so queue and transport agree on who is signed in.
         let queue = VoiceSharingUploadQueue(
@@ -204,7 +204,7 @@ final class VoiceSharingAccountReplacementLiveControls: XCTestCase {
             baseURLProvider: { "https://unit.test" },
             tokenProvider: LiveAccountTokens(account: { liveAccount }),
             session: makeSession(),
-            // THE SAME CLOCK (reviewer 4dacabfa): with the default `Date.init` the 503 wrote a
+            // THE same clock: with the default `Date.init` the 503 wrote a
             // real-time retry deadline while the queue sat at its injected time, so advancing the
             // queue clock could never make this entry due.
             clock: { clock.now() })
@@ -221,7 +221,7 @@ final class VoiceSharingAccountReplacementLiveControls: XCTestCase {
         defer { uninstall() }
         await coordinator.settleObservedWork()
 
-        // THE SWITCH: the live session becomes account 2, and the app posts the real notification.
+        // THE switch: the live session becomes account 2, and the app posts the real notification.
         Wire.reset()
         liveAccount = "acct-2"
         ServerSettings.userId = "acct-2"
@@ -231,7 +231,7 @@ final class VoiceSharingAccountReplacementLiveControls: XCTestCase {
         await coordinator.settleObservedWork()
 
         // ---------------------------------------------------------------------------------
-        // POSITIVE CONTROL FIRST (reviewer fa9db8e9): the SAME observation must be able to SEE an
+        // POSITIVE control first: the SAME observation must be able to SEE an
         // owning-account send. Without this, "no upload route observed" proves nothing — a filter
         // matching the wrong path would pass the negative assertion too.
         // ---------------------------------------------------------------------------------
@@ -244,7 +244,7 @@ final class VoiceSharingAccountReplacementLiveControls: XCTestCase {
 
         Wire.reset()
         trigger.triggerDrainIfPermitted()
-        // AWAIT THE ACTUAL DRAIN (reviewer b4d5eb71) instead of yielding at it.
+        // AWAIT the actual drain instead of yielding at it.
         await trigger.awaitDrainCompletionForTesting()
         let owningSend = Wire.recorded().filter { $0.path == VoiceSharingUploadTransport.uploadPath }
         XCTAssertEqual(owningSend.count, 1,
@@ -253,7 +253,7 @@ final class VoiceSharingAccountReplacementLiveControls: XCTestCase {
                        "sent under the owning account's own credential")
 
         // ---------------------------------------------------------------------------------
-        // THE NEGATIVE, now that the same observation is proven able to fail.
+        // THE negative, now that the same observation is proven able to fail.
         // ---------------------------------------------------------------------------------
         liveAccount = "acct-2"
         ServerSettings.userId = "acct-2"
@@ -261,7 +261,7 @@ final class VoiceSharingAccountReplacementLiveControls: XCTestCase {
         XCTAssertTrue(center.post(name: .userLoginDidChange) > 0)
         await coordinator.settleObservedWork()
 
-        // THE INHERITANCE PROPERTY IS ASSERTED BEFORE account 2 makes its own choice: switching
+        // THE inheritance property is asserted before account 2 makes its own choice: switching
         // accounts must not carry account 1's consent across. Asserting it afterwards would only
         // restate the choice this control is about to set.
         XCTAssertFalse(store.consentAllowsCollection,
@@ -272,7 +272,7 @@ final class VoiceSharingAccountReplacementLiveControls: XCTestCase {
         XCTAssertFalse(inheritedCheck.currentState.localOptIn,
                        "account 2 does not inherit account 1's recorded choice")
 
-        // ACCOUNT 2 IS INDEPENDENTLY ELIGIBLE (reviewer b4d5eb71): it now makes its OWN sharing
+        // ACCOUNT 2 IS INDEPENDENTLY eligible: it now makes its OWN sharing
         // choice, so the drain below passes authorization and is stopped by OWNERSHIP — otherwise
         // the negative assertion would only prove the authorization gate, not account isolation.
         store.transitionToAccount(signedIn: true)
@@ -280,7 +280,7 @@ final class VoiceSharingAccountReplacementLiveControls: XCTestCase {
         XCTAssertTrue(store.consentAllowsCollection,
                       "account 2 is eligible on its own terms — the drain must reach the ownership check")
 
-        // THE ENTRY MUST BE DUE (spec 4babcc7d): the positive 503 recorded a retry deadline, so the
+        // THE entry must be due: the positive 503 recorded a retry deadline, so the
         // clock is advanced past it. Otherwise the negative drain is refused for backoff and would
         // pass while proving nothing about ownership.
         clock.advance(by: 3600)
@@ -296,7 +296,7 @@ final class VoiceSharingAccountReplacementLiveControls: XCTestCase {
         let uploads = afterSwitch.filter { $0.path == VoiceSharingUploadTransport.uploadPath }
         XCTAssertTrue(uploads.isEmpty,
                       "account 2 must not attempt account 1's recording: \(uploads.map { "\($0.method) \($0.path) \($0.bearer ?? "-")" })")
-        // 3. The queue's OWN OWNERSHIP CHECK refuses the attempt, and the recording is retained
+        // 3. The queue's OWN ownership check refuses the attempt, and the recording is retained
         // rather than moved or destroyed by the switch. This is the refusal itself, asked of the
         // real admission path under account 2 — not merely "no request was seen", which an
         // authorization gate or a backoff could also produce.

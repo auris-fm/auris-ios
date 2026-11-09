@@ -32,7 +32,7 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
         openGate(enrolled: true)
     }
 
-    /// SIMPLIFIED CONTRACT (spec 4afc6e43): the collector's admission decision is the shared consent
+    /// SIMPLIFIED contract: the collector's admission decision is the shared consent
     /// closure, not a policy/lease object. The store state these controls set is PROVENANCE stamped on
     /// the emitted record, so it is still established here exactly as before.
     private func openGate(enrolled: Bool) -> Void {
@@ -93,9 +93,9 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
     }
 
     /// THE scheduling control for the synchronous freeze: utterance A's Task is created but its body is
-    /// HELD BACK by a gate; while it is parked, A closes and B opens. When A's body finally runs it must
+    /// HELD back by a gate; while it is parked, A closes and B opens. When A's body finally runs it must
     /// complete under A's frozen identity — attributed to A, never refused as foreign and never adopted
-    /// by B. The freeze happens in `beginUtteranceProcessing` BEFORE Task creation, so holding the body
+    /// by B. The freeze happens in `beginUtteranceProcessing` before Task creation, so holding the body
     /// back cannot change what A carries; a mutant that moves the read inside the body deterministically
     /// picks up B instead.
     func test_queuedUtteranceBodyRunningLate_completesUnderItsOwnFrozenContext() async {
@@ -204,7 +204,7 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
 
     /// Closed capture admission must preserve the borrowed slice across the actual engine callback.
     /// Comparing addresses kills Array(newSamples), even when the collector subsequently retains zero.
-    /// Spec c74d7e30 ("Actual upload usage"): there is NO capture allowance anymore. The
+    /// ("Actual upload usage"): there is NO capture allowance anymore. The
     /// former "missing allowance" test asserted refusal; its replacement asserts the NEW
     /// contract — with no allowance authority composed at all, the consented capture IS
     /// admitted (samples retained, capture live) while the engine still hands the segmenter
@@ -253,7 +253,7 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
             "no allowance exists to refuse admission: a capture is live")
     }
 
-    /// Spec c74d7e30 removed the allowance ledger, so there is no storage barrier that can
+    /// removed the allowance ledger, so there is no storage barrier that can
     /// hold capture writes. The property worth pinning now is its successor: a LIVE consented
     /// capture (samples retained) does not stall the segmenter — recognition completes while
     /// the capture is being retained.
@@ -319,7 +319,7 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
         XCTAssertEqual(collector.retainedSampleCountForTesting, 0, "released means the buffer is actually gone")
     }
 
-    /// An idle stop (no speech was ever open) must NOT be reported as a discarded example.
+    /// An idle stop (no speech was ever open) must not be reported as a discarded example.
     func test_idleStop_producesNoCancellationEvent() {
         openGate(enrolled: true)
         let collector = makeCollector()
@@ -411,7 +411,7 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
 
     /// Handoff must not run contribution work on the audio thread. A sink that blocks is exactly what a slow
     /// uploader or a stalled queue looks like in production, so this control drives the collector from a
-    /// dedicated thread and asserts delivery happened SOMEWHERE ELSE. Without it, an implementation that calls
+    /// dedicated thread and asserts delivery happened SOMEWHERE else. Without it, an implementation that calls
     /// the sink inline would pass every timing-based check while freezing capture callbacks whenever the
     /// consumer stalls.
     func test_sinkRunsOnADifferentThreadThanTheProducer() {
@@ -476,12 +476,12 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
         recordLock.lock(); events.append(e); recordLock.unlock()
     }
 
-    /// SPEC 05ff27d0 / incident 2026-11-07: a REFUSED segment must name its reason. The simulator
+    /// / incident: a REFUSED segment must name its reason. The simulator
     /// stopped producing captures at 10:00:21Z and the log said nothing — the decision had to be
     /// inferred from absence, which is not evidence anyone can act on. This control drives the
     /// production refusal and requires its fixed reason line, AND requires the collector's own
     /// counters to show the segment was SEEN but not EMITTED.
-    /// REVIEWER 43f457ab finding 3: `capturesEmittedCount` counts each CONTRIBUTION once — a
+    /// finding 3: `capturesEmittedCount` counts each CONTRIBUTION once — a
     /// completed segment and a REJECTED one (wake or bleed) are both recorded contributions that
     /// reach the sink, so both count; `.started` and a cancellation are not contributions and must
     /// not move the counter. Red on a7c500657, which counted `.completed` only and silently
@@ -503,12 +503,12 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
         collector.speechCancelled()
         XCTAssertEqual(collector.capturesEmittedCount, 0, "a cancellation is not a contribution")
 
-        // A WAKE REJECTION is recorded: exactly one contribution.
+        // A WAKE rejection is recorded: exactly one contribution.
         let wake = try XCTUnwrap(collector.speechStarted(confirmationFrameSamples: 1600))
         collector.segmentRejected(kind: .rejectedWake, samples: 1600, context: wake)
         XCTAssertEqual(collector.capturesEmittedCount, 1, "a wake rejection is one contribution")
 
-        // A BLEED REJECTION likewise.
+        // A BLEED rejection likewise.
         let bleed = try XCTUnwrap(collector.speechStarted(confirmationFrameSamples: 1600))
         collector.segmentRejected(kind: .rejectedBleed, samples: 1600, context: bleed)
         XCTAssertEqual(collector.capturesEmittedCount, 2, "a bleed rejection is one contribution")
@@ -562,13 +562,13 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
 
 /// Backend stand-in that also gives the test a handle on the engine's capture callback and the bleed verdict,
 /// neither of which is otherwise reachable without a real audio session or playback tap.
-/// The FULL production chain, at the boundary it actually covers (review 9cf20d7a): real
+/// The FULL production chain, at the boundary it actually covers: real
 /// `VoiceAsrEngine` → real segmenter → real collector → the REAL `VoiceSharingContributionSink` → the
 /// REAL durable queue. `VoiceSharingCollectorEngineTests` stops at the collector's event callback;
 /// `VoiceSharingContributionSinkTests` starts at a hand-built event. This joins them with bounded
 /// fixtures instead of microphone capture.
 ///
-/// WHAT THIS DOES NOT PROVE: the stage observation (wake/bleed/asr/…) is supplied by the sink's
+/// WHAT this does not prove: the stage observation (wake/bleed/asr/…) is supplied by the sink's
 /// `observations` closure, i.e. by the TEST — the engine does not produce these claims, so these
 /// controls say nothing about observation PROVENANCE from live recognition. They prove the transport
 /// from a real engine-produced capture event to a durable record, and that a record the validator
@@ -645,7 +645,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         return engine
     }
 
-    /// A LATE FINALIZE MAY NOT RESURRECT A DISQUALIFIED CAPTURE (review 859dac4c). Finalize promotes a
+    /// A LATE finalize may not resurrect A DISQUALIFIED capture. Finalize promotes a
     /// terminal capture into a completed record, so it must refuse everything the normal late-outcome path
     /// refuses: a capture whose epoch/session no longer match, and one that can never contribute.
     func test_aLateFinalizeCannotPublishADisqualifiedOrForeignCapture() async throws {
@@ -678,7 +678,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                       "a capture whose session moved on must not become a completed record on late finalize")
     }
 
-    /// A NAMED CANCELLATION FOR A STALE CAPTURE MUST CONSUME NOTHING (review bb404153). Capture A is
+    /// A NAMED cancellation for A STALE capture must consume nothing. Capture A is
     /// cancelled and its deferred entry consumed; capture B is deferred and live. A second cancellation
     /// still naming A describes a capture that no longer exists — falling back to "most recent" would
     /// consume B, which nobody cancelled.
@@ -721,7 +721,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                        "B was never cancelled; cancelled=\(cancelledIDs)")
     }
 
-    /// A-DEFERRED / B-OPEN (review d3c39ae5). A completed with deferred emission, then B started. A
+    /// A-DEFERRED / B-OPEN. A completed with deferred emission, then B started. A
     /// cancellation now belongs to B — it is the capture that is still open. Consuming A instead would
     /// discard a finished capture that was never cancelled and leave B live and filable.
     func test_aCancellationWhileASuccessorIsOpenConsumesTheSuccessorNotTheDeferredPredecessor() async throws {
@@ -764,12 +764,12 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                        "the OPEN capture is the owner of the cancellation; cancelled=\(cancelledIDs)")
     }
 
-    /// CANCELLATION MUST BIND THE INTENDED CAPTURE, NEVER DICTIONARY ORDER (review 15900665). The ring is
+    /// CANCELLATION must bind the intended capture, never dictionary order. The ring is
     /// UUID-keyed, so a hash-order lookup satisfies any SINGLE arrangement by luck — proved by mutation,
     /// where the same control passed 3 runs in 5. The binding is therefore asserted from both sides in one
     /// run: the named capture must be consumed AND every other deferred capture must remain publishable.
     func test_aNamedCancelBindsItsOwnCaptureAndLeavesTheOthersPublishable() async throws {
-        // DETERMINISTIC BY CONSTRUCTION, not by repetition (spec 85cec5b7, reviewer 15900665). The old
+        // DETERMINISTIC by construction, not by repetition. The old
         // version ran 12 independent trials because a hash-ordered implementation could pass one
         // arrangement by luck. Repeating a scenario whose ORDER is fixed only lowers the odds — it does
         // not remove the randomness. So this control instead fixes the arrangement that EXPOSES binding:
@@ -825,7 +825,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         }
     }
 
-    /// A CANCELLED CAPTURE CANNOT BE REVIVED BY A LATE FINALIZE (review 859dac4c). The capture is deferred
+    /// A CANCELLED capture cannot be revived by A LATE finalize. The capture is deferred
     /// first, so it is genuinely ring-resident, and the cancel arrives while the engine still owes its
     /// finalize. The entry must be consumed, not promoted to a completed record.
     func test_aCancelledDeferredCaptureCannotBeRevivedByFinalize() async throws {
@@ -890,7 +890,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         ]
     }
 
-    /// ENGINE DETECTOR ERROR → DURABLE RECORD (spec 9578b16, reviewer 6c3fed9b). The detector reports a
+    /// ENGINE detector error → DURABLE record. The detector reports a
     /// real failure; that outcome must reach a READY durable record as the exact wake+failed/detector_error
     /// pairing. Before the pairing rule existed the binding refused this and the record never existed —
     /// a real engine failure was silently unpublishable.
@@ -925,7 +925,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         XCTAssertTrue(carried, "no durable record carried the detector's failure")
     }
 
-    /// NORMAL ASR → DURABLE RECORD (review 6fe6d773). A SUCCESSFUL recognition must be publishable: the
+    /// NORMAL ASR → DURABLE record. A SUCCESSFUL recognition must be publishable: the
     /// stored record must carry the transcript the recogniser actually returned. Reporting `completed`
     /// with no text made the sink overwrite the caller's text and the binding refuse it, so a successful
     /// capture produced no record at all.
@@ -959,7 +959,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                           + "entries: \(entries.count))")
     }
 
-    /// THE EMITTED BYTES, not the builder (spec c6f3bdf7): an empty recognition must reach the durable
+    /// THE emitted bytes, not the builder: an empty recognition must reach the durable
     /// record as asr/completed/empty_result with neither text nor router_input present.
     func test_anEmptyRecognitionReachesTheDurableRecordAsCompletedEmptyResult() async throws {
         let claims: [String: VoiceSharingContributionEncoder.StageOutcome] = claims
@@ -993,7 +993,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         XCTAssertTrue(sawEmptyResult, "the emitted record must carry the asr stage")
     }
 
-    /// PRODUCER BINDING (spec 78480a17): asr `source_language` and `router_input` are stated by the
+    /// PRODUCER binding: asr `source_language` and `router_input` are stated by the
     /// RECOGNISER at its own report site — the language it detected, and the exact text handed onward
     /// as the command input. Asserted on the DURABLE record through the real engine path.
     func test_theRecogniserStatesItsLanguageAndRouterInputOnTheDurableRecord() async throws {
@@ -1033,9 +1033,9 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                        "router_input is the exact text handed onward as the command input")
     }
 
-    /// REVIEW 5f42fb0c: same-stage re-reports must NOT carry a generic merge across state changes —
+    ///: same-stage re-reports must not carry a generic merge across state changes —
     /// a completed report must not inherit a previous reason, an empty_result must not inherit
-    /// previous text/router_input, and ONLY routing's classification facts survive to settlement.
+    /// previous text/router_input, and only routing's classification facts survive to settlement.
     /// Each case binds the ENCODED record, so a contradiction is a schema refusal, not just a
     /// dictionary mismatch.
     func test_sameStageReReportsCarryOnlyIntendedFactsAcrossTransitions() throws {
@@ -1077,7 +1077,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             return ((envelope!["record"] as! [String: Any])["observations"] as! [String: Any])
         }
 
-        do { // failed → completed: the failure reason must NOT leak into the success.
+        do { // failed → completed: the failure reason must not leak into the success.
             let ctx = makeCase()
             collector.engineReported(stage: "asr",
                 outcome: .init(state: "failed", reason: "provider_error"), context: ctx)
@@ -1090,7 +1090,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         }
         collectedEvents.removeAll()
 
-        do { // completed-with-text → empty_result: text/router_input must NOT leak (the binding
+        do { // completed-with-text → empty_result: text/router_input must not leak (the binding
              // refuses a carrying empty_result, which is exactly why inheritance is dangerous).
             let ctx = makeCase()
             collector.engineReported(stage: "asr",
@@ -1108,7 +1108,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         }
         collectedEvents.removeAll()
 
-        do { // classification → settlement: ONLY the classification facts survive, and the
+        do { // classification → settlement: only the classification facts survive, and the
              // disposition reaches its terminal value.
             let ctx = makeCase()
             collector.engineReported(stage: "routing",
@@ -1164,7 +1164,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         }
     }
 
-    /// THE THREE TRANSLATION SKIPS ARE DISTINCT FACTS (spec delta 4d10275f). Collapsing them into
+    /// THE three translation skips are distinct facts. Collapsing them into
     /// `observation_unavailable` threw away what the engine actually knew. Each must reach the durable
     /// record under its own reason, and none may borrow `source_language_target_language`.
     func test_eachTranslationSkipReachesTheDurableRecordUnderItsOwnReason() async throws {
@@ -1215,11 +1215,11 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         }
     }
 
-    /// ROUTING AND EXECUTION OBSERVATIONS BIND AND ATTRIBUTE (the two stages that were caller-supplied).
+    /// ROUTING and execution observations bind and attribute (the two stages that were caller-supplied).
     ///
-    /// SCOPE, STATED PLAINLY: this drives the COLLECTOR with the same StageOutcome payloads the service now
+    /// SCOPE, STATED plainly: this drives the COLLECTOR with the same StageOutcome payloads the service now
     /// reports from its decision sites, and asserts they reach the durable record and displace a caller's
-    /// unknown claim. It does NOT prove `handleRoutingInput` reaches each branch — that path needs the LFM
+    /// unknown claim. It does not prove `handleRoutingInput` reaches each branch — that path needs the LFM
     /// router model, which this suite does not load. Do not read it as branch coverage.
     func test_routingAndExecutionObservationsBindAndAttributeToTheirCapture() async throws {
         let cases: [(label: String, routing: VoiceSharingContributionEncoder.StageOutcome)] = [
@@ -1247,7 +1247,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                                   claims: { unknownClaims })
             chain.engine.listeningMode = .continuous
             // Stand where the SERVICE stands. The engine hands the frozen context to the routing
-            // consumer and does NOT finalize; the consumer reports routing, then finalizes — so the
+            // consumer and does not finalize; the consumer reports routing, then finalizes — so the
             // record still exists when the observation arrives. The consumer runs on the engine's own
             // task, so the test records the context there and finalizes through the same collector.
             var decisionContext: VoiceSharingCollector.CaptureContext?
@@ -1302,7 +1302,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         }
     }
 
-    /// THE ACTUAL PRODUCER BYTE MATRIX (clean-3dd disposition). SCOPE, stated exactly: the five
+    /// THE actual producer byte matrix (clean-3dd disposition). SCOPE, stated exactly: the five
     /// f8 branch cases are driven through the REAL engine pipeline (DetectorWake, stub backend,
     /// the engine's own observation sites, and routing through the same consumer seam the service
     /// uses), so the exported metadata bytes are PRODUCER output — not the test-supplied
@@ -1435,7 +1435,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         }
     }
 
-    /// COLLECTOR-LEVEL PROBE: an engine report made while the capture is open must ride the event that
+    /// COLLECTOR-LEVEL probe: an engine report made while the capture is open must ride the event that
     /// the DEFERRED finalize emits. This isolates the merge from the engine and the sink.
     func test_anEngineReportMadeWhileOpenRidesTheDeferredCompletionEvent() async {
         openGate(enrolled: true)
@@ -1462,7 +1462,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         XCTAssertNil(wake?.reason, "a completed stage carries no reason")
     }
 
-    /// AN OBSERVED NEGATIVE WAKE MUST NOT BE LOST (spec 94073918). Sink merge must not let a caller's
+    /// AN OBSERVED negative wake must not be lost. Sink merge must not let a caller's
     /// unknown claim displace the engine's real `completed` wake, and validation must not relabel the
     /// observed no-wake decision — the negative stays in the decision field while the reason is omitted.
     func test_anObservedNegativeWakeReachesTheDurableRecordAsCompletedWithItsDecision() async throws {
@@ -1512,7 +1512,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                      "a completed stage carries no reason; the negative lives in decision")
     }
 
-    /// DISPOSABLE NEGATIVE-RECORD SERVER-SCHEMA FIXTURE (spec 444ead48): the CORRECTED
+    /// DISPOSABLE negative-RECORD server-SCHEMA fixture: the CORRECTED
     /// engine-to-durable pipeline produces a real synthetic record whose completion states
     /// wake decision="rejected" (asserted PRESENT before export), then the REAL production
     /// makeRequest builds the exact wire body + SAFE headers for Cloud's existing local rig.
@@ -1596,7 +1596,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         print("FIXTURE_BODY_BYTES: \(body.count)")
     }
 
-    /// THE PERSISTED ENVELOPE, WITH A RECOMPUTED DIGEST (review 2f8e5d90). Validating an observations
+    /// THE persisted envelope, WITH A RECOMPUTED digest. Validating an observations
     /// dictionary proves the observation rule; it does not prove a REAL record carrying the contradiction
     /// is refused when it comes back through `bind`. Each envelope is re-sealed with the PRODUCTION
     /// canonicalizer, so the refusal cannot be a stale-digest artifact.
@@ -1739,7 +1739,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         }
     }
 
-    /// SUPERSEDED CONTROL (spec: structured executor verdicts). The response classifier this
+    /// SUPERSEDED control (spec: structured executor verdicts). The response classifier this
     /// control pinned (`executionOutcome(for:)`) is retired: the executor now reports its OWN
     /// structured verdict at its decision site (`VoiceIntentExecutor.executeWithVerdict`), and
     /// the successor controls live in VoiceIntentExecutorTests. The superseded mapping treated
@@ -1755,7 +1755,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                        "an unobserved turn cannot claim a terminal disposition")
     }
 
-    /// SERVER SCHEMA (GO review, reviewer 39ac0771): the execution stage's wire outcome is the
+    /// SERVER schema: the execution stage's wire outcome is the
     /// schema's OWN enum — {success, failure, refused, cancelled} — reached by a mapping DISTINCT
     /// from settledDisposition's routing tokens. An unobserved execution (unknown/not_run) states
     /// NO outcome at all rather than asserting a conclusion nothing observed.
@@ -1768,7 +1768,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         XCTAssertEqual(wire("completed"), "success")
         XCTAssertEqual(wire("failed"), "failure")
         XCTAssertEqual(wire("cancelled"), "cancelled")
-        // SPEC ALIGNMENT 553ec4a6 (same rule Android gets): a REFUSAL is state `failed` with
+        // SPEC alignment 553ec4a6 (same rule Android gets): a REFUSAL is state `failed` with
         // `client_refused` — the wire's `refused` — not a not_run.
         XCTAssertEqual(wire("failed", reason: "client_refused"), "refused")
         XCTAssertNil(wire("unknown"), "unobserved execution must not assert an outcome")
@@ -1781,10 +1781,10 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                           "routing disposition and wire outcome are different vocabularies")
     }
 
-    /// REVIEWER 40e69257 #2: the collector's AUTOMATIC execution-outcome mapping, measured on
-    /// DURABLE BYTES through the production collector/sink/queue. The producer supplies NO outcome
+    /// #2: the collector's AUTOMATIC execution-outcome mapping, measured on
+    /// DURABLE bytes through the production collector/sink/queue. The producer supplies NO outcome
     /// member at all — so deleting the collector's mapping makes this control fail. Covers the
-    /// fixed mapping (spec 21b5d822 + alignment 553ec4a6): completed/success, failed/failure,
+    /// fixed mapping: completed/success, failed/failure,
     /// failed+client_refused/refused, cancelled/cancelled, and unknown with NO outcome member.
     func test_theCollectorMapsExecutionOutcomeOntoDurableBytesForEveryObservedState() async throws {
         let cases: [(label: String, state: String, reason: String?, expected: String?)] = [
@@ -1800,7 +1800,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             chain.engine.listeningMode = .wakeWord
             var released = false
             chain.engine.onRoutingInputWithContext = { _, context in
-                // THE PRODUCER STATES NO OUTCOME: the mapping must come from the collector.
+                // THE producer states no outcome: the mapping must come from the collector.
                 chain.engine.contributionCollector?.engineReported(
                     stage: "execution",
                     outcome: .init(state: state, reason: reason),
@@ -1833,7 +1833,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         }
     }
 
-    /// REVIEW 59841fbc #1: an explicit `reason: null` on a completed stage is still a carded reason. The
+    /// #1: an explicit `reason: null` on a completed stage is still a carded reason. The
     /// first f8 implementation tested the VALUE (`!(reason is NSNull)`) and let exactly the payload f8
     /// forbids through — the same null-is-not-absence mistake made once before on asr.text.
     func test_aCompletedStageCarryingAnExplicitNullReasonIsStillRefused() throws {
@@ -1861,8 +1861,8 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         }
     }
 
-    /// A TRANSLATION SKIP REASON IS A DECISION NOT TO RUN (spec 4d10275f, review b5fb69ef). Each of the
-    /// three is valid ONLY on translation/not_run; on any other stage, or with failed/cancelled/unknown/
+    /// A TRANSLATION skip reason is A DECISION not to run. Each of the
+    /// three is valid only on translation/not_run; on any other stage, or with failed/cancelled/unknown/
     /// completed, it would claim a skip and a non-skip at once.
     func test_translationSkipReasonsAreValidOnlyWithTranslationNotRun() throws {
         let skipReasons = ["source_language_unavailable", "backend_handles_translation",
@@ -1878,7 +1878,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             all[stage] = block
             return all
         }
-        // ACCEPTED FIRST: the one legal combination must bind, or the refusals below prove nothing.
+        // ACCEPTED first: the one legal combination must bind, or the refusals below prove nothing.
         for reason in skipReasons {
             XCTAssertNoThrow(
                 try VoiceSharingRecordBinding.validateObservationsForTesting(
@@ -1917,7 +1917,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                 }
             }
         }
-        // RE-SEALED PERSISTED ENVELOPE: translation/failed carrying a skip reason.
+        // RE-SEALED persisted envelope: translation/failed carrying a skip reason.
         let record = try encodedRecordWithEmptyResult()
         var mutated = record
         var all = try XCTUnwrap(mutated["observations"] as? [String: Any])
@@ -1935,7 +1935,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         }
     }
 
-    /// PRODUCTION CHAIN for spec 1e79e5b4 (review: a control must exercise the real path, not a hand-built
+    /// PRODUCTION chain for (review: a control must exercise the real path, not a hand-built
     /// event). Real engine bleed branch → real collector → REAL sink → REAL encoder → queue entry → read
     /// back from the persisted record. The ASR stage states the observed skip, the bleed stage keeps its own
     /// observed decision, no transcript is invented, and no recognition ran (the stub counts transcribe calls).
@@ -1979,7 +1979,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         let bleed = try XCTUnwrap(observations["bleed"] as? [String: Any])
         XCTAssertEqual(bleed["decision"] as? String, "overlap",
                        "the bleed stage keeps its own observed decision")
-        // THE DETECTOR RAN, SO THE STAGE IS COMPLETED (reviewer 7f83f874). Reporting
+        // THE detector ran, SO THE stage is completed. Reporting
         // `unknown`/`no_playback_reference` would satisfy the schema's membership check while
         // asserting that no reference existed — the opposite of the overlap verdict observed here.
         XCTAssertEqual(bleed["state"] as? String, "completed",
@@ -1990,7 +1990,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         engine.stop()
     }
 
-    /// SPEC 1e79e5b4: `rejected_by_bleed` states ONE thing — an observed bleed decision skipped ASR.
+    ///: `rejected_by_bleed` states ONE thing — an observed bleed decision skipped ASR.
     /// The positive must be accepted (or the negatives prove nothing), and every pairing that would
     /// claim a different fact is refused: another stage, a state that says ASR ran or failed, or a
     /// completed stage where the transcript is the result. Asserted on the raw observations AND on a
@@ -2033,7 +2033,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         let persisted = try XCTUnwrap(valid["bleed"] as? [String: Any])
         XCTAssertEqual(persisted["decision"] as? String, "overlap")
 
-        // RE-SEALED PERSISTED ENVELOPE: the same contradiction coming back through `bind`.
+        // RE-SEALED persisted envelope: the same contradiction coming back through `bind`.
         for (label, block) in [("completed", ["state": "completed", "reason": "rejected_by_bleed", "text": "hi"]),
                                ("failed", ["state": "failed", "reason": "rejected_by_bleed"])] {
             let record = try encodedRecordWithEmptyResult()
@@ -2053,7 +2053,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         }
     }
 
-    /// SPEC DELTA f8 ON EVERY STAGE (review b5fb69ef): a completed stage carries NO reason. Only exact
+    /// SPEC delta f8 ON every stage: a completed stage carries NO reason. Only exact
     /// asr/completed/empty_result may, where the reason IS the result. Asserted on the raw observations
     /// AND on a re-sealed persisted envelope, so the rule is proven where records actually come back.
     func test_aCompletedStageCarriesNoReasonOnEveryStage() throws {
@@ -2093,7 +2093,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                               "\(stage): refusal must state the rule, got \(message)")
             }
         }
-        // RE-SEALED PERSISTED ENVELOPE: the same contradiction coming back through `bind`.
+        // RE-SEALED persisted envelope: the same contradiction coming back through `bind`.
         let record = try encodedRecordWithEmptyResult()
         var mutated = record
         var all = try XCTUnwrap(mutated["observations"] as? [String: Any])
@@ -2114,7 +2114,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         }
     }
 
-    /// `empty_result` DESCRIBES ONE THING ONLY (spec delta c6f3bdf7): a recognition that succeeded and
+    /// `empty_result` DESCRIBES one thing only: a recognition that succeeded and
     /// produced nothing usable. Every contradictory combination is refused, because each one asserts
     /// something the capture cannot have done — a text alongside "no text", a router input from a command
     /// that could not exist, a failure dressed as a success.
@@ -2141,7 +2141,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         let refused: [(String, [String: Any], String)] = [
             ("text present", stage(["text": "hello"]), "text"),
             ("router_input present", stage(["router_input": ["intent": "track.play"]]), "router_input"),
-            // ABSENT IS NOT NULL (review 2f8e5d90): an explicit null states the key exists and is empty,
+            // ABSENT is not null: an explicit null states the key exists and is empty,
             // which is not what empty_result declares.
             ("text null", stage(["text": NSNull()]), "text"),
             ("router_input null", stage(["router_input": NSNull()]), "router_input"),
@@ -2157,7 +2157,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         }
     }
 
-    /// Proves the REFUSAL IS ABOUT `empty_result`, not about the arrangement in general: the same payload
+    /// Proves the REFUSAL is about `empty_result`, not about the arrangement in general: the same payload
     /// with the reason removed (or replaced) must be refused or accepted for a DIFFERENT stated cause, so a
     /// control here cannot pass merely because the harness rejects this shape regardless.
     private func assertRefused(_ label: String, _ observations: [String: Any],
@@ -2173,7 +2173,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         }
     }
 
-    /// WAKE-ONLY IS A SUCCESSFUL RECOGNITION (spec 406c247e, review 859dac4c pt1). The recogniser returns
+    /// WAKE-only is A SUCCESSFUL recognition. The recogniser returns
     /// just the wake phrase; after the wake window is removed the command text is empty. The ASR STAGE must
     /// still report the recogniser's own transcript as completed — stripping the wake phrase is the command
     /// input's job, and calling this a wake rejection or a provider error is a fabrication.
@@ -2263,7 +2263,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                           + "\(claimedAsNotRun)")
     }
 
-    /// NO-WAKE FORWARDING (reviewer 7c6e628e): in grace/continuous the gate FORWARDS a negative segment
+    /// NO-WAKE forwarding: in grace/continuous the gate FORWARDS a negative segment
     /// instead of dropping it. The detector still ran and still reported no wake, so the record must carry
     /// `no_wake_detected` — the two gate decisions must not disagree about the same observation.
     func test_aForwardedNegativeSegmentStillReportsNoWakeDetected() async throws {
@@ -2278,7 +2278,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         guard case .known(let entries) = queue.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("coverage known")
         }
-        // The negative verdict lives in `decision`, not `reason` (spec 94073918): a completed stage
+        // The negative verdict lives in `decision`, not `reason`: a completed stage
         // carries no reason, so a reason-shaped assertion here would be asserting a refused payload.
         var decisions: [String?] = []
         for entry in entries {
@@ -2297,7 +2297,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                       "a forwarded negative segment observed no wake (schema value rejected); got \(decisions)")
     }
 
-    /// OBSERVATION ASSOCIATION, STALE CONTEXT (reviewer 7c6e628e): a report that belongs to capture A must
+    /// OBSERVATION association, STALE context: a report that belongs to capture A must
     /// never be attached to B, even though "current" is B at the moment it arrives. The collector keys the
     /// report by the CONTEXT it carries, and a context whose capture is already emitted is refused, so a
     /// late report can neither adopt a successor nor amend a record that has left.
@@ -2356,8 +2356,8 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                       "an emitted record is immutable; A's late report must be dropped, not merged")
     }
 
-    /// OBSERVATION ASSOCIATION, POST-SEGMENTATION RING (reviewer 7c6e628e): the engine's decision can land
-    /// AFTER the segmenter closed the capture but BEFORE the completion event is emitted. The report must
+    /// OBSERVATION association, POST-SEGMENTATION ring: the engine's decision can land
+    /// after the segmenter closed the capture but before the completion event is emitted. The report must
     /// ride that event. This drives the two collector calls in that exact order, so the ring carrier — not
     /// the open-capture carrier — is what is exercised.
     func test_aReportLandingAfterSegmentationRidesTheEmittedEvent() async {
@@ -2383,7 +2383,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                 state: "failed", reason: "detector_error"),
             context: ctx)
         // A segment the engine closed has downstream stages still to run, so it is RELEASED by
-        // finalization rather than by a second `speechCompleted` (spec 2dcf8c5b).
+        // finalization rather than by a second `speechCompleted`.
         collector.finalizeDeferredCompletion(context: ctx)
 
         let completed = snapshot().first { (event: VoiceSharingCollector.SegmentEvent) in
@@ -2423,7 +2423,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             wakeThreshold: wakeThreshold, translationStage: nil)
         engine.contributionCollector = collector
         backend.engine = engine
-        // PRODUCTION WIRING: the service hands the capture to its routing consumer as part of the turn
+        // PRODUCTION wiring: the service hands the capture to its routing consumer as part of the turn
         // (the real consumer reports and finalizes). A chain with no consumer would leave every capture
         // deferred forever — which no real path does.
         engine.onRoutingInputWithContext = { [weak collector] _, context in
@@ -2485,7 +2485,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     /// entry, and the record inside it carries the unknown/observation_unavailable pair.
     func test_theRealEnginePipelineReachesTheDurableQueueWithTheUnobservedPair() async throws {
         openGate(enrolled: true)
-        // The caller claims wake was NOT run. The engine, however, delivers real speech frames for this
+        // The caller claims wake was not run. The engine, however, delivers real speech frames for this
         // capture and reports so — the record must carry the ENGINE's observation, not the caller's claim.
         // This is the provenance control: a claim cannot overwrite a real observation.
         let chain = makeChain(claims: { [self] in
@@ -2532,7 +2532,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                        "an empty recognition is a result, not an absence of observation")
         XCTAssertEqual(asr?["reason"] as? String, "empty_result")
         XCTAssertNil(asr?["text"], "an empty result carries no transcript")
-        // PROVENANCE (review c48461e6): the caller said wake=not_run; the engine delivered frames for this
+        // PROVENANCE: the caller said wake=not_run; the engine delivered frames for this
         // capture, so the stored record must say completed. If the sink ignored `reportedStages`, this
         // would read not_run and the assertion would fail.
         let wake = observations["wake"] as? [String: Any]
@@ -2547,13 +2547,13 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         openGate(enrolled: true)
         let chain = makeChain(claims: { [self] in
             var broken = self.claims
-            // Break a stage the ENGINE DOES NOT report, so the caller's claim is what reaches the sink and
+            // Break a stage the ENGINE does not report, so the caller's claim is what reaches the sink and
             // the pairing rule is genuinely the thing refusing it (the engine now reports asr itself).
             broken["translation"] = .init(state: "failed", reason: "observation_unavailable")
             return broken
         })
         chain.engine.listeningMode = .continuous
-        // ANTI-VACUITY (review 9cf20d7a): a marker the SINK itself sets when its worker actually runs
+        // ANTI-VACUITY: a marker the SINK itself sets when its worker actually runs
         // on the event. Waiting a fixed interval would pass even if nothing was ever processed.
         let processed = XCTestExpectation(description: "the sink worker processed the event")
         chain.sink.testingWorkerGate = { processed.fulfill() }
@@ -2567,7 +2567,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         XCTAssertEqual(ready.count, 0,
                        "a record the validator refuses must never become ready, even from the real engine")
     }
-    // MARK: - PHASE 2 DURABLE OUTPUT (reviewer 9be75bf0 item 3)
+    // MARK: - PHASE 2 DURABLE output
     //
     // The controls above in `VoiceSharingProductionPathControls` stop at the emitted event. These do not:
     // every one drives the REAL engine's capture callback into the PRODUCTION sink, and then reads the
@@ -2604,7 +2604,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         return records
     }
 
-    /// Durable records that appeared AFTER this control started looking.
+    /// Durable records that appeared after this control started looking.
     ///
     /// Identity is the only safe filter here. Other controls in this class publish synthetic records
     /// through the same queue, and several reuse ONE fixed capture UUID — so selecting "the record with
@@ -2640,7 +2640,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         return mine
     }
 
-    /// WAKE REQUIRED, ON DISK. Wake-word mode with no grace: the speech that began needed a wake word, and
+    /// WAKE required, ON DISK. Wake-word mode with no grace: the speech that began needed a wake word, and
     /// the durable record says so at the root. The detector's measured score and threshold are asserted by
     /// VALUE (not merely present), so a swapped or scale-broken measurement fails here.
     func test_durableRecordSaysWakeRequiredWhenSpeechBeganWithoutGrace() async throws {
@@ -2659,7 +2659,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         XCTAssertEqual(record["wake_required"] as? Bool, true,
                        "wake-word mode without grace: the speech needed a wake word")
         let wake = try XCTUnwrap((record["observations"] as? [String: Any])?["wake"] as? [String: Any])
-        // SERVER SCHEMA (GO review): the REAL producer states its wake decision on every completed
+        // SERVER schema (GO review): the REAL producer states its wake decision on every completed
         // wake stage — not only the hand-built fixtures. A detected wake says "detected".
         XCTAssertEqual(wake["decision"] as? String, "detected",
                        "the engine's own completed wake stage must carry its decision")
@@ -2695,7 +2695,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                        "a forwarded negative wake is a rejected decision, stated by the real producer")
     }
 
-    /// THE COMBINED UTTERANCE, ON DISK: "Auris, <command>" in one breath. The wake word is part of the
+    /// THE combined utterance, ON DISK: "Auris, <command>" in one breath. The wake word is part of the
     /// utterance, so the record must carry both the wake the detector measured AND the transcript the
     /// recogniser produced — the two facts a server needs to tell a command from a false trigger.
     func test_durableRecordCarriesBothTheWakeAndTheCommandFromOneUtterance() async throws {
@@ -2725,7 +2725,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         XCTAssertEqual(asr["source_language"] as? String, "en")
     }
 
-    /// GENUINELY EMPTY, ON DISK. The recogniser heard speech and returned nothing but DID report a language.
+    /// GENUINELY empty, ON DISK. The recogniser heard speech and returned nothing but DID report a language.
     /// The durable record must be `completed`/`empty_result` with NO text, and must KEEP the language — the
     /// producer defect the reviewer found, asserted at the far end of the pipeline instead of at its source.
     func test_durableRecordForAnEmptyResultKeepsTheRecognizerLanguageAndNoText() async throws {
@@ -2747,7 +2747,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                        "the language the recogniser reported survives an empty transcript, on disk")
     }
 
-    /// NON-CONTENT OUTPUT, ON DISK. The recogniser returns punctuation only. That is not a command, so no
+    /// NON-CONTENT output, ON DISK. The recogniser returns punctuation only. That is not a command, so no
     /// router input may be recorded, but it IS a completed recognition and its language and text belong in
     /// the record. The server's contract for a non-content result is what is checked here, in bytes.
     func test_durableRecordForNonContentOutputRecordsNoCommandInput() async throws {

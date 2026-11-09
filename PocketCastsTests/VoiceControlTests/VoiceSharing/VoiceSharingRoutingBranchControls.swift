@@ -5,11 +5,11 @@ import XCTest
 @testable import podcasts
 
 /// Drives `VoiceControlService.handleRoutingInput` with an INJECTED classifier and executor, so the REAL
-/// routing and execution branches run without the LFM model (spec 85cec5b7). The collector is the real
+/// routing and execution branches run without the LFM model. The collector is the real
 /// one and every assertion reads what the collector actually published for that capture.
 ///
 /// Established here: which branch ran, what it reported, and how the executor's returned response was
-/// interpreted. NOT established here: how the real model classifies — that needs the model, and these
+/// interpreted. not established here: how the real model classifies — that needs the model, and these
 /// controls do not stand in for it.
 final class VoiceSharingRoutingBranchControls: XCTestCase {
 
@@ -55,7 +55,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         return state
     }()
 
-    /// SIMPLIFIED CONTRACT (spec 4afc6e43): the ONE consent decision is the shared closure. `state` stays
+    /// SIMPLIFIED contract: the ONE consent decision is the shared closure. `state` stays
     /// as PROVENANCE (epoch / session stamped into emitted records), which is what it is here now.
     private var gateOpen = true
     private func isCollectionPermitted() -> Bool { gateOpen }
@@ -215,7 +215,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         XCTAssertNotNil(weakModel)
         XCTAssertNotNil(weakTrigger)
         XCTAssertNotNil(weakLifetime)
-        // The surface flag follows the BUILD CONDITION (spec 7dcb3a53, reviewer 02d45284) — a
+        // The surface flag follows the BUILD condition — a
         // STAGING build compiles it ON. Asserting one fixed value here contradicted the staging
         // configuration this suite runs under; the lifecycle claims below do not depend on the
         // surface either way, so the premise only pins the compilation condition.
@@ -549,10 +549,10 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
             let executionReason: String?
         }
         let cases: [Case] = [
-            // RESTORED after a withdrawn first cut (spec 6a033773): my intermediate version
+            // RESTORED after a withdrawn first cut: my intermediate version
             // reported a success tone as completed — but a success-shaped presentation cannot
             // prove action completion, so the honest verdict stays unknown until sinks report
-            // structured facts from their action results. SPEC 012b19dd stands: only the
+            // structured facts from their action results. stands: only the
             // executor's own error verdict concludes anything today.
             Case(label: "intent succeeded, result unobserved", result: .intent(PlaybackIntent.pause),
                  response: .earcon(.success), routingDisposition: "pending",
@@ -614,7 +614,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
                            "\(testCase.label): wrong execution state")
             XCTAssertEqual(execution.reason, testCase.executionReason,
                            "\(testCase.label): wrong execution reason")
-            // PRODUCER BINDINGS (spec 78480a17): the classification names come from the SAME
+            // PRODUCER bindings: the classification names come from the SAME
             // canonical mapping analytics records, and the execution verdict states what execution
             // concluded. The router-declined case classified nothing, so it must name nothing.
             if testCase.routingDisposition != "not_run" {
@@ -660,7 +660,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         XCTAssertNotNil(stages["routing"], "routing must be on the record")
     }
 
-    /// REVIEW 59841fbc #2: the debounce skip must settle the capture with an ENUMERATED reason. The
+    /// #2: the debounce skip must settle the capture with an ENUMERATED reason. The
     /// first version invented `nothing_to_do`, which payload validation refuses — so the record would
     /// have been dropped rather than recorded.
     func test_theDebounceSkipSettlesWithAnEnumeratedReason() async {
@@ -682,7 +682,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         finishCapture(harness, first)
         let firstStages = publishedStages(for: first.id)
         // RESTORED premise: the first turn's verdict is the executor's, and a non-error
-        // presentation is still unobserved (spec 6a033773) — completed was withdrawn.
+        // presentation is still unobserved — completed was withdrawn.
         XCTAssertEqual(firstStages["execution"]?.state, "unknown",
                        "premise: the first turn ran and its result is unobserved")
         XCTAssertEqual(executor.executed.count, 1, "premise: the first turn reached the executor")
@@ -705,7 +705,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
                        "the settle reason must be one the schema enumerates")
     }
 
-    /// A blank or wake-only transcript is a session start, not a failed question: routing is NOT run and
+    /// A blank or wake-only transcript is a session start, not a failed question: routing is not run and
     /// the executor sees nothing. The record still publishes with both stages settled.
     func test_aSilentSessionStartIsNotRoutedAndStillPublishes() async {
         collected = []

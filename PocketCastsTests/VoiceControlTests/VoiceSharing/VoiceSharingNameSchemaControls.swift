@@ -2,14 +2,14 @@ import CryptoKit
 import XCTest
 @testable import podcasts
 
-/// PHASE 2 of the recording-upload spec (core 0264051b, name schema v1): the record states the wake
+/// PHASE 2 of the recording-upload spec: the record states the wake
 /// requirement that was IN FORCE when the speech began, the detector's MEASURED score and threshold,
 /// and the recogniser's source language — including on empty and non-content results.
 ///
-/// EXECUTION BOUNDARY (reviewer 67ecb11e item 3). Every control here runs the PRODUCTION ENCODER and the
-/// PRODUCTION BINDING on canonically-encoded bytes, and asserts on the canonical JSON they produce. That is
-/// the serialization contract in full. It is NOT a file, an engine run, or a sink finalization: the
-/// `SegmentEvent` and the `observations` are CONSTRUCTED HERE, so a control in this file cannot show that
+/// EXECUTION boundary. Every control here runs the PRODUCTION encoder and the
+/// PRODUCTION binding on canonically-encoded bytes, and asserts on the canonical JSON they produce. That is
+/// the serialization contract in full. It is not a file, an engine run, or a sink finalization: the
+/// `SegmentEvent` and the `observations` are CONSTRUCTED here, so a control in this file cannot show that
 /// the engine or collector produces these values — only that the record format carries them.
 ///
 /// The producer half is covered by `VoiceSharingProductionPathControls` (real engine → collector → emitted
@@ -126,7 +126,7 @@ final class VoiceSharingNameSchemaControls: XCTestCase {
     /// verdict amendment is not a second observation.
     func test_restatingTheDecisionKeepsTheMeasuredValues() throws {
         var observations = wakePositiveObservations
-        // SERVER SCHEMA (GO review): the decision enum is {detected, rejected}, so the amendment
+        // SERVER schema (GO review): the decision enum is {detected, rejected}, so the amendment
         // restates with a schema token, not an invented one.
         observations["wake"] = observations["wake"]?.withDecision("rejected")
         let encoded = try VoiceSharingContributionEncoder.encode(
@@ -175,7 +175,7 @@ final class VoiceSharingNameSchemaControls: XCTestCase {
 
     // MARK: - the required field cannot be silently omitted
 
-    /// RED CONTROL: a record without `wake_required` must be REFUSED by the production binding. Without this
+    /// RED control: a record without `wake_required` must be REFUSED by the production binding. Without this
     /// rule an encoder regression could drop the member and the server would accept a record whose mode is
     /// unknowable.
     func test_recordWithoutWakeRequiredIsRefusedByTheBinding() throws {
