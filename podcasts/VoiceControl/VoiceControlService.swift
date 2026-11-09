@@ -252,6 +252,13 @@ class VoiceControlService: ObservableObject {
     private var transcriptEpoch: UInt64 = 0
     private var isStopping = false
 
+    /// True once a cue has been played for the session the user is currently in, so a capture that
+    /// resumes on its own does not cue again. The cue marks the START of a session; an interruption
+    /// that clears is the same session continuing, and sounding it again would tell the user they
+    /// opened something new when they did not. Cleared by an explicit user stop, which ends the
+    /// session, so the next start cues again as it should.
+    private var sessionCuePlayed = false
+
     // Command debounce: skip intents of the same type within 2 seconds
     private var lastIntentType: String?
     private var lastExecutionTime: Date?
@@ -843,7 +850,10 @@ class VoiceControlService: ObservableObject {
         }
         isListening = true
         listeningMode = mode
-        if mode == .wakeWord {
+        // Only the start of a session cues. Continuous listening never does: it is the window a
+        // committed command opened, not a session the user just started.
+        if mode == .wakeWord, !sessionCuePlayed {
+            sessionCuePlayed = true
             audioRenderer.playEarcon(.listeningStart)
         }
     }
@@ -852,6 +862,8 @@ class VoiceControlService: ObservableObject {
         guard !isStopping else { return }
         isStopping = true
         defer { isStopping = false }
+        // An explicit stop ends the session, so the next start is a new one and cues again.
+        sessionCuePlayed = false
         cancelAcquisition()
         stopCapture()
     }
