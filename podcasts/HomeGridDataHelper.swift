@@ -5,60 +5,34 @@ import PocketCastsUtils
 
 class HomeGridDataHelper {
     var numberOfPodcasts: Int {
-        DataManager.sharedManager.allPodcasts(includeUnsubscribed: false).count
+        DataManager.shared.allPodcasts(includeUnsubscribed: false).count
     }
 
     var numberOfFolders: Int {
-        DataManager.sharedManager.allFolders().count
-    }
-
-    class func gridListItemsForSearchTerm(_ searchTerm: String) -> [HomeGridItem] {
-        let allPodcasts = DataManager.sharedManager.allPodcasts(includeUnsubscribed: false)
-
-        var filteredItems = [HomeGridItem]()
-        for podcast in allPodcasts {
-            guard let title = podcast.title else { continue }
-
-            if title.localizedCaseInsensitiveContains(searchTerm) {
-                filteredItems.append(HomeGridItem(podcast: podcast))
-            } else if let author = podcast.author, author.localizedCaseInsensitiveContains(searchTerm) {
-                filteredItems.append(HomeGridItem(podcast: podcast))
-            }
-        }
-
-        if SubscriptionHelper.hasActiveSubscription() {
-            let allFolders = DataManager.sharedManager.allFolders()
-            for folder in allFolders {
-                if folder.name.localizedCaseInsensitiveContains(searchTerm) {
-                    filteredItems.append(HomeGridItem(folder: folder))
-                }
-            }
-        }
-
-        filteredItems.sort { item1, item2 in
-            titleSort(item1: item1, item2: item2)
-        }
-
-        return filteredItems
+        DataManager.shared.allFolders().count
     }
 
     #if !os(watchOS)
-        class func gridListItems(orderedBy: LibrarySort, badgeType: BadgeType) -> [HomeGridListItem] {
-            let allPodcasts: [Podcast]
+        class func gridListItems(orderedBy: LibrarySort, badgeType: BadgeType, hiddenPodcastUuids: Set<String> = []) -> [HomeGridListItem] {
+            var allPodcasts: [Podcast]
             switch orderedBy {
             case .episodeDateNewestToOldest:
                 allPodcasts = PodcastManager.shared.allPodcastsSorted(in: .episodeDateNewestToOldest)
             case .recentlyPlayed:
                 allPodcasts = PodcastManager.shared.allPodcastsSorted(in: .recentlyPlayed)
             default:
-                allPodcasts = DataManager.sharedManager.allPodcasts(includeUnsubscribed: false)
+                allPodcasts = DataManager.shared.allPodcasts(includeUnsubscribed: false)
             }
 
-            let gridItems: [HomeGridListItem] = gridItems(orderedBy: orderedBy, sortedPodcasts: allPodcasts).map { HomeGridListItem(gridItem: $0, badgeType: badgeType, theme: Theme.sharedTheme.activeTheme) }
+            if !hiddenPodcastUuids.isEmpty {
+                allPodcasts.removeAll { hiddenPodcastUuids.contains($0.uuid) }
+            }
+
+            let gridItems: [HomeGridListItem] = gridItems(orderedBy: orderedBy, sortedPodcasts: allPodcasts).map { HomeGridListItem(gridItem: $0, badgeType: badgeType, theme: Theme.shared.activeTheme) }
 
             // load the required badge information if the supplied badge type needs it
             if badgeType == .allUnplayed {
-                let podcastCounts = DataManager.sharedManager.podcastUnfinishedCounts()
+                let podcastCounts = DataManager.shared.podcastUnfinishedCounts()
                 for gridItem in gridItems {
                     if let podcast = gridItem.podcast {
                         podcast.cachedUnreadCount = Int(podcastCounts[podcast.uuid] ?? 0)
@@ -76,7 +50,7 @@ class HomeGridDataHelper {
             } else if badgeType == .latestEpisode {
                 for gridItem in gridItems {
                     if let podcast = gridItem.podcast {
-                        if let latestEpisode = DataManager.sharedManager.findLatestEpisode(podcast: podcast) {
+                        if let latestEpisode = DataManager.shared.findLatestEpisode(podcast: podcast) {
                             podcast.cachedUnreadCount = latestEpisode.unplayed() && !latestEpisode.archived ? 1 : 0
                         } else {
                             podcast.cachedUnreadCount = 0
@@ -87,7 +61,7 @@ class HomeGridDataHelper {
                         let allPodcastsInFolder = allPodcasts.filter { $0.folderUuid == folder.uuid }
                         var shouldShowUnplayedBadge = false
                         for podcast in allPodcastsInFolder {
-                            if let latestEpisode = DataManager.sharedManager.findLatestEpisode(podcast: podcast), latestEpisode.unplayed(), !latestEpisode.archived {
+                            if let latestEpisode = DataManager.shared.findLatestEpisode(podcast: podcast), latestEpisode.unplayed(), !latestEpisode.archived {
                                 shouldShowUnplayedBadge = true
                                 break
                             }
@@ -110,17 +84,31 @@ class HomeGridDataHelper {
         case .recentlyPlayed:
             allPodcasts = PodcastManager.shared.allPodcastsSorted(in: .recentlyPlayed)
         default:
-            allPodcasts = DataManager.sharedManager.allPodcasts(includeUnsubscribed: false)
+            allPodcasts = DataManager.shared.allPodcasts(includeUnsubscribed: false)
         }
 
         return gridItems(orderedBy: orderedBy, sortedPodcasts: allPodcasts)
+    }
+
+    /// Puts the reordered visible items back into `allItems`, keeping hidden items in their current slots.
+    class func merge<Item, ID: Hashable>(reorderedVisibleItems: [Item], into allItems: [Item], id: (Item) -> ID) -> [Item] {
+        let visibleIds = Set(reorderedVisibleItems.map(id))
+        var remainingVisibleItems = reorderedVisibleItems.makeIterator()
+        var merged = allItems.map { item in
+            guard visibleIds.contains(id(item)), let visibleItem = remainingVisibleItems.next() else { return item }
+            return visibleItem
+        }
+        while let visibleItem = remainingVisibleItems.next() {
+            merged.append(visibleItem)
+        }
+        return merged
     }
 
     private class func gridItems(orderedBy: LibrarySort, sortedPodcasts: [Podcast]) -> [HomeGridItem] {
         // When a user doesn't have Pocket Casts Plus, all their podcasts will be loaded into the main grid, regardless of if they are in a folder or not
         var gridItems: [HomeGridItem] = []
         if SubscriptionHelper.hasActiveSubscription() {
-            let allFolders = DataManager.sharedManager.allFolders()
+            let allFolders = DataManager.shared.allFolders()
 
             gridItems += sortedPodcasts.compactMap { podcast in
                 allFolders.contains { $0.uuid == podcast.folderUuid } ? nil : HomeGridItem(podcast: podcast)

@@ -134,7 +134,7 @@ class SettingsViewController: PCViewController, UITableViewDataSource, UITableVi
 
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = tableView.dequeueReusableCell(withIdentifier: settingsCellId, for: indexPath) as! TopLevelSettingsCell
-        cell.plusIndicator.isHidden = true
+        cell.showsPlusIndicator = false
 
         let tableRow = tableData[indexPath.section][indexPath.row]
         cell.settingsLabel.text = tableRow.display.text
@@ -143,7 +143,7 @@ class SettingsViewController: PCViewController, UITableViewDataSource, UITableVi
 
         switch tableRow {
         case .appearance, .customFiles, .watch:
-            cell.plusIndicator.isHidden = SubscriptionHelper.hasActiveSubscription()
+            cell.showsPlusIndicator = !SubscriptionHelper.hasActiveSubscription()
         default:
             break
         }
@@ -183,7 +183,7 @@ class SettingsViewController: PCViewController, UITableViewDataSource, UITableVi
             Analytics.track(.settingsAboutShown)
 
             let aboutView = AboutView()
-                .environmentObject(Theme.sharedTheme)
+                .environmentObject(Theme.shared)
             let hostingController = PCHostingController(rootView: aboutView)
 
             navigationController?.present(hostingController, animated: true, completion: nil)
@@ -194,11 +194,12 @@ class SettingsViewController: PCViewController, UITableViewDataSource, UITableVi
         case .watch:
             navigationController?.pushViewController(WatchSettingsViewController(), animated: true)
         case .pocketCastsPlus:
-                navigationController?.present(OnboardingFlow.shared.begin(flow: .plusUpsell, source: .settings), animated: true)
+                navigationController?.present(OnboardingFlow.shared.begin(flow: .plusUpsell, source: .settings, traitCollection: traitCollection), animated: true)
         case .privacy:
             navigationController?.pushViewController(PrivacySettingsViewController(), animated: true)
         case .developer:
             let hostingController = UIHostingController(rootView: DeveloperMenu().setupDefaultEnvironment())
+            hostingController.title = "Developer"
             navigationController?.pushViewController(hostingController, animated: true)
         case .beta:
             let hostingController = UIHostingController(rootView: BetaMenu().setupDefaultEnvironment())

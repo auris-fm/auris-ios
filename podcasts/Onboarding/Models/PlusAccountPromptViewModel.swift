@@ -36,6 +36,7 @@ class PlusAccountPromptViewModel: PlusPricingInfoModel {
         }
     }
 
+    @MainActor
     func upgradeTapped(with product: PlusProductPricingInfo? = nil) {
         loadPrices {
             switch self.priceAvailability {
@@ -49,48 +50,18 @@ class PlusAccountPromptViewModel: PlusPricingInfoModel {
         }
     }
 
-    /// Returns the label that should be displayed on an upgrade button
-    func upgradeLabel(for product: PlusProductPricingInfo) -> String {
-        let plan = product.identifier.plan
-        let expiringPlus = subscription?.isExpiring(.plus) == true
-
-        switch plan {
-        case .patron:
-            return {
-                // Show the renew your sub title
-                if subscription?.isExpiring(.patron) == true {
-                    return L10n.renewSubscription
-                }
-
-                // If the user has an expiring plus subscription show the 'Upgrade Account' title
-                return expiringPlus ? L10n.upgradeAccount : L10n.patronSubscribeTo
-            }()
-
-        case .plus:
-            // Show 'Renew Sub' title if it's expiring
-            return {
-                if expiringPlus {
-                    return L10n.renewSubscription
-                }
-                if product.offer?.type == .freeTrial {
-                    return L10n.startFreeTrial
-                }
-                return L10n.plusSubscribeTo
-            }()
-        }
-    }
-
+    @MainActor
     func showModal(for product: PlusProductPricingInfo? = nil) {
         guard let parentController, let product else { return }
 
         let context: OnboardingFlow.Context? = ["product": ProductInfo(plan: product.identifier.plan, frequency: .yearly)]
-        let controller = OnboardingFlow.shared.begin(flow: .plusAccountUpgrade, in: parentController, source: source, context: context)
+        let controller = OnboardingFlow.shared.begin(flow: .plusAccountUpgrade, in: parentController, source: source, context: context, traitCollection: parentController.traitCollection)
         let sizeCategory = UIApplication.shared.preferredContentSizeCategory
         let isAccessibility = sizeCategory.isAccessibilityCategory
 
         if let sheetPresentationController = controller.sheetPresentationController {
             sheetPresentationController.prefersGrabberVisible = true
-            sheetPresentationController.detents = isAccessibility ? [.large()] : UIScreen.isSmallScreen ? [.large()] : [.medium()]
+            sheetPresentationController.detents = isAccessibility ? [.large()] : parentController.view.bounds.height <= 667 ? [.large()] : [.medium()]
         }
         parentController.presentFromRootController(controller, animated: true)
     }

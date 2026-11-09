@@ -11,7 +11,7 @@ import PocketCastsUtils
 import Sentry
 
 class AppDelegate: UIResponder, UIApplicationDelegate {
-    private static let initialRefreshDelay = 2.seconds
+    private static let initialRefreshDelay = 1.second
     private static let minTimeBetweenRefreshes = 5.minutes
 
     private let shortcutManager = ShortcutManager()
@@ -24,7 +24,6 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     var progressDialog: ShiftyLoadingAlert?
     var modalController: UINavigationController?
 
-    lazy var lenticularFilter: LenticularFilter = .init()
     lazy var appLifecycleAnalytics = AppLifecycleAnalytics()
 
     private var backgroundSignOutListener: BackgroundSignOutListener?
@@ -78,6 +77,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
                 // Anchor the EAC cadence on fresh install so the modal waits a full interval before
                 // its first show (existing users updating leave it nil and see it immediately).
                 Settings.encourageAccountCreationReferenceDate = Date()
+                WhatsNewManager.shared.startFeed()
             case .sameVersion:
                 break
             }
@@ -90,10 +90,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         if uniqueId?.count ?? 0 < 1 {
             let uuid = UUID().uuidString
             defaults.set(uuid, forKey: Constants.UserDefaults.appId)
-            defaults.synchronize()
         }
 
-        GoogleCastManager.sharedManager.setup()
+        GoogleCastManager.shared.setup()
 
         setupRoutes()
         PocketCastsAppShortcutsProvider.updateAppShortcutParameters()
@@ -127,7 +126,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             postLaunchSetup()
             checkIfRestoreCleanupRequired()
 
-            ImageManager.sharedManager.updatePodcastImagesIfRequired()
+            ImageManager.shared.updatePodcastImagesIfRequired()
             WidgetHelper.shared.cleanupAppGroupImages()
             SiriShortcutsManager.shared.setup()
 
@@ -294,7 +293,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
     func applicationWillTerminate(_ application: UIApplication) {
-        GoogleCastManager.sharedManager.teardown()
+        GoogleCastManager.shared.teardown()
         RefreshManager.shared.cancelAllRefreshes()
 
         badgeHelper.teardown()
@@ -305,17 +304,17 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
     @objc func miniPlayer() -> MiniPlayerViewController? {
-        NavigationManager.sharedManager.miniPlayer
+        NavigationManager.shared.miniPlayer
     }
 
     func openEpisode(_ episodeUuid: String, from podcast: Podcast, timestamp: TimeInterval? = nil) {
         DispatchQueue.main.async {
             self.hideProgressDialog()
 
-            guard let episode = DataManager.sharedManager.findEpisode(uuid: episodeUuid) else {
+            guard let episode = DataManager.shared.findEpisode(uuid: episodeUuid) else {
                 // for some reason we can't find this episode, so open the podcast instead
                 FileLog.shared.addMessage("Unable to find episode with uuid \(episodeUuid), opening podcast `\(podcast.title ?? "")` instead")
-                NavigationManager.sharedManager.navigateTo(NavigationManager.podcastPageKey, data: [NavigationManager.podcastKey: podcast])
+                NavigationManager.shared.navigateTo(NavigationManager.podcastPageKey, data: [NavigationManager.podcastKey: podcast])
 
                 return
             }
@@ -324,7 +323,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
                 data[NavigationManager.episodeTimestamp] = timestamp
             }
 
-            NavigationManager.sharedManager.navigateTo(NavigationManager.episodePageKey, data: data as NSDictionary)
+            NavigationManager.shared.navigateTo(NavigationManager.episodePageKey, data: data as NSDictionary)
         }
     }
 
@@ -373,11 +372,13 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     private func handleAppRefresh(task: BGTask) {
         scheduleNextBackgroundRefresh()
 
+        let startDate = Date()
         task.expirationHandler = {
-            FileLog.shared.addMessage("Background refresh timed out")
+            FileLog.shared.addMessage("Background refresh timed out after \(startDate.elapsedTimeDescription)")
         }
 
         RefreshManager.shared.refreshPodcasts(completion: { refreshFetchResult in
+            FileLog.shared.addMessage("Background refresh finished in \(startDate.elapsedTimeDescription) with result \(refreshFetchResult)")
             task.setTaskCompleted(success: refreshFetchResult != .failed)
         })
         badgeHelper.updateBadge()
@@ -453,7 +454,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
     private func checkIfRestoreCleanupRequired() {
-        let dataManager = DataManager.sharedManager
+        let dataManager = DataManager.shared
 
         // find the oldest episode in our database listed as being downloaded
         let query = "episodeStatus = \(DownloadStatus.downloaded.rawValue) ORDER BY publishedDate ASC, addedDate ASC LIMIT 1"
@@ -536,7 +537,7 @@ struct SentryLogger: ErrorLogger {
         }
 
     #if os(iOS)
-    CrashLoggingAdapter.sharedManager?.crashLogging?.logError(error, tags: context ?? [:], level: .warning)
+    CrashLoggingAdapter.shared?.crashLogging?.logError(error, tags: context ?? [:], level: .warning)
     #endif
     }
 }

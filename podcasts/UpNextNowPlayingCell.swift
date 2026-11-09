@@ -55,6 +55,28 @@ class UpNextNowPlayingCell: ThemeableCell {
 
     @IBOutlet var progressViewWidthConstraint: NSLayoutConstraint!
 
+    @IBOutlet private var dateLeadingToArtworkConstraint: NSLayoutConstraint!
+    @IBOutlet private var dateTopToBackgroundConstraint: NSLayoutConstraint!
+    @IBOutlet private var artworkCenterYConstraint: NSLayoutConstraint!
+    @IBOutlet private var animationLeadingToTitleConstraint: NSLayoutConstraint!
+    @IBOutlet private var disclosureCenterYConstraint: NSLayoutConstraint!
+
+    private lazy var stackedConstraints: [NSLayoutConstraint] = [
+        dateLabel.leadingAnchor.constraint(equalTo: roundedBackgroundView.leadingAnchor, constant: 12),
+        dateLabel.trailingAnchor.constraint(equalTo: roundedBackgroundView.trailingAnchor, constant: -12),
+        dateLabel.topAnchor.constraint(equalTo: podcastImage.bottomAnchor, constant: 8),
+        podcastImage.topAnchor.constraint(equalTo: roundedBackgroundView.topAnchor, constant: 10),
+        disclosureImageView.centerYAnchor.constraint(equalTo: podcastImage.centerYAnchor)
+    ]
+
+    private lazy var sideBySideConstraints: [NSLayoutConstraint] = [
+        dateLeadingToArtworkConstraint,
+        dateTopToBackgroundConstraint,
+        artworkCenterYConstraint,
+        animationLeadingToTitleConstraint,
+        disclosureCenterYConstraint
+    ]
+
     private var episode: BaseEpisode? = nil
 
     override func awakeFromNib() {
@@ -66,6 +88,7 @@ class UpNextNowPlayingCell: ThemeableCell {
         }
 
         NotificationCenter.default.addObserver(self, selector: #selector(progressUpdated), name: Constants.Notifications.playbackProgress, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(progressUpdated), name: Constants.Notifications.chapterSelectionChanged, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(updatePlayingAnimation), name: Constants.Notifications.playbackPaused, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(updatePlayingAnimation), name: Constants.Notifications.playbackStarted, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(updateCellForDownloadProgressChange), name: Constants.Notifications.downloadProgress, object: nil)
@@ -80,7 +103,7 @@ class UpNextNowPlayingCell: ThemeableCell {
     }
 
     func populateFrom(episode: BaseEpisode) {
-        self.episode = DataManager.sharedManager.findBaseEpisode(uuid: episode.uuid) // this is a bit hacky, but we're likely to be passed the cached version here from the player, so reload it from the database to get the latest version with the correct download stats
+        self.episode = DataManager.shared.findBaseEpisode(uuid: episode.uuid) // this is a bit hacky, but we're likely to be passed the cached version here from the player, so reload it from the database to get the latest version with the correct download stats
 
         episodeTitle.text = episode.displayableTitle()
 
@@ -107,7 +130,7 @@ class UpNextNowPlayingCell: ThemeableCell {
 
         if let episode {
             duration = episode.duration
-            currentTime = PlaybackManager.shared.currentTime()
+            currentTime = PlaybackManager.shared.currentTime
         }
         else {
             duration = 1
@@ -116,7 +139,7 @@ class UpNextNowPlayingCell: ThemeableCell {
 
         guard duration > 0, currentTime.isFinite else { return }
 
-        let remaining = duration - currentTime
+        let remaining = max(0, duration - currentTime - PlaybackManager.shared.deselectedChapterDuration(after: currentTime))
         timeRemainingLabel.text = L10n.queueTimeRemaining(TimeFormatter.shared.multipleUnitFormattedShortTime(time: remaining))
 
         let percentageLapsed = CGFloat(currentTime / duration)
@@ -145,7 +168,7 @@ class UpNextNowPlayingCell: ThemeableCell {
     override func handleThemeDidChange() {
         super.handleThemeDidChange()
 
-        let activeTheme = themeOverride ?? Theme.sharedTheme.activeTheme
+        let activeTheme = themeOverride ?? Theme.shared.activeTheme
 
         // Rounded background
         if activeTheme.isDark {
@@ -218,10 +241,10 @@ class UpNextNowPlayingCell: ThemeableCell {
     }
 
     @objc private func updateCellForDownloadProgressChange() {
-        guard let ourEpisode = episode, let _ = DownloadManager.shared.progressManager.progressForEpisode(ourEpisode.uuid) else { return }
+        guard let ourEpisode = episode, let _ = DownloadManager.shared.progressManager.progress(forEpisodeUuid: ourEpisode.uuid) else { return }
 
         if !ourEpisode.downloading() {
-            episode = DataManager.sharedManager.findBaseEpisode(uuid: ourEpisode.uuid)
+            episode = DataManager.shared.findBaseEpisode(uuid: ourEpisode.uuid)
         }
 
         updateDownloadStatus()
@@ -232,7 +255,7 @@ class UpNextNowPlayingCell: ThemeableCell {
         guard let ourEpisode = episode, let uuid = notification.object as? String, ourEpisode.uuid == uuid else { return }
 
         // if it is, reload our episode so we get the latest status for it
-        episode = DataManager.sharedManager.findBaseEpisode(uuid: ourEpisode.uuid)
+        episode = DataManager.shared.findBaseEpisode(uuid: ourEpisode.uuid)
 
         updateDownloadStatus()
     }
@@ -258,5 +281,20 @@ class UpNextNowPlayingCell: ThemeableCell {
 
         episodeTitle.updateNumberOfLines(regular: 1, accessibility: 3)
         dateLabel.updateNumberOfLines(regular: 1, accessibility: 2)
+
+        updateLayout()
+    }
+
+    private func updateLayout() {
+        let stacked = traitCollection.preferredContentSizeCategory.isAccessibilityCategory
+        guard stackedConstraints.first?.isActive != stacked else { return }
+
+        if stacked {
+            NSLayoutConstraint.deactivate(sideBySideConstraints)
+            NSLayoutConstraint.activate(stackedConstraints)
+        } else {
+            NSLayoutConstraint.deactivate(stackedConstraints)
+            NSLayoutConstraint.activate(sideBySideConstraints)
+        }
     }
 }

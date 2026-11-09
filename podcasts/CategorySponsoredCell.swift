@@ -57,16 +57,17 @@ class CategorySponsoredCell: ThemeableCell {
         self.discoverPromotion = discoverPromotion
 
         podcastTitle.text = discoverPromotion.title
+        subscribeButton.setFollowAccessibilityLabels(podcastTitle: discoverPromotion.title)
         descriptionLabel.text = discoverPromotion.description
         descriptionLabel.setLineSpacing(lineSpacing: 1, lineHeightMultiple: 1.2)
         descriptionLabel.sizeToFit()
 
         if let uuid = discoverPromotion.podcast_uuid {
-            if let _ = DataManager.sharedManager.findPodcast(uuid: uuid) {
+            if let _ = DataManager.shared.findPodcast(uuid: uuid) {
                 subscribeButton.currentlyOn = true
             }
             let imageUrl = DiscoverServerHandler.thumbnailUrlString(forPodcast: uuid, size: 140)
-            ImageManager.sharedManager.loadSearchImage(imageUrl: imageUrl, imageView: podcastImage, placeholderSize: .list)
+            ImageManager.shared.loadSearchImage(imageUrl: imageUrl, imageView: podcastImage, placeholderSize: .list)
         }
         subscribeButton.currentlyOn = isSubscribed
         subscribeButton.shouldAnimate = true
@@ -74,7 +75,7 @@ class CategorySponsoredCell: ThemeableCell {
 
     @objc private func podcastWasAdded() {
         if let podcastUuid = discoverPromotion?.podcast_uuid {
-            if let _ = DataManager.sharedManager.findPodcast(uuid: podcastUuid) {
+            if let _ = DataManager.shared.findPodcast(uuid: podcastUuid) {
                 if !subscribeButton.currentlyOn { subscribeButton.currentlyOn = true }
             } else {
                 if subscribeButton.currentlyOn { subscribeButton.currentlyOn = false }
@@ -99,7 +100,7 @@ class CategorySponsoredCell: ThemeableCell {
     override func prepareForReuse() {
         super.prepareForReuse()
 
-        ImageManager.sharedManager.cancelLoad(podcastImage)
+        ImageManager.shared.cancelLoad(podcastImage)
 
         subscribeButton.shouldAnimate = false
         discoverPromotion = nil

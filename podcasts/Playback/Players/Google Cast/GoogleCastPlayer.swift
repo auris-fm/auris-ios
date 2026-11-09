@@ -3,7 +3,7 @@ import Foundation
 import PocketCastsDataModel
 
 class GoogleCastPlayer: PlaybackProtocol {
-    private lazy var castManager: GoogleCastManager = .sharedManager
+    private lazy var castManager: GoogleCastManager = .shared
 
     private var shouldKeepPlaying = false
 
@@ -22,20 +22,20 @@ class GoogleCastPlayer: PlaybackProtocol {
         castManager.playSingleEpisode(episode)
     }
 
-    func isReadyToPlay() -> Bool {
+    var isReadyToPlay: Bool {
         castManager.hasCastSession()
     }
 
-    func playing() -> Bool {
+    var isPlaying: Bool {
         castManager.playing()
     }
 
-    func buffering() -> Bool {
+    var isBuffering: Bool {
         castManager.buffering()
     }
 
-    func futureBufferAvailable() -> TimeInterval {
-        duration() - currentTime()
+    var futureBufferAvailable: TimeInterval {
+        duration - currentTime
     }
 
     func play(completion: (() -> Void)?) {
@@ -51,8 +51,8 @@ class GoogleCastPlayer: PlaybackProtocol {
         castManager.pause()
     }
 
-    func playbackRate() -> Double {
-        playing() ? 1.0 : 0
+    var playbackRate: Double {
+        isPlaying ? 1.0 : 0
     }
 
     func setPlaybackRate(_ rate: Double) {
@@ -65,7 +65,7 @@ class GoogleCastPlayer: PlaybackProtocol {
         completion?()
     }
 
-    func currentTime() -> TimeInterval {
+    var currentTime: TimeInterval {
         if castManager.connectedOrConnectingToDevice() {
             return castManager.streamPosition()
         }
@@ -74,7 +74,7 @@ class GoogleCastPlayer: PlaybackProtocol {
         return -1
     }
 
-    func duration() -> TimeInterval {
+    var duration: TimeInterval {
         castManager.streamDuration()
     }
 
@@ -86,31 +86,15 @@ class GoogleCastPlayer: PlaybackProtocol {
     }
 
     func effectsDidChange() {
-        let speed = Float(PlaybackManager.shared.effects().playbackSpeed)
+        let speed = Float(PlaybackManager.shared.effects.playbackSpeed)
         castManager.changePlaybackSpeed(speed)
     }
 
-    func supportsSilenceRemoval() -> Bool {
-        false
-    }
-
-    func supportsVolumeBoost() -> Bool {
-        false
-    }
-
-    func supportsGoogleCast() -> Bool {
+    var supportsGoogleCast: Bool {
         true
     }
 
-    func supportsStreaming() -> Bool {
-        true
-    }
-
-    func supportsAirplay2() -> Bool {
-        false
-    }
-
-    func shouldBePlaying() -> Bool {
+    var shouldBePlaying: Bool {
         shouldKeepPlaying
     }
 
@@ -122,7 +106,7 @@ class GoogleCastPlayer: PlaybackProtocol {
         // we're playing external, so we don't really care
     }
 
-    func internalPlayerForVideoPlayback() -> AVPlayer? {
+    var internalPlayerForVideoPlayback: AVPlayer? {
         nil
     }
 

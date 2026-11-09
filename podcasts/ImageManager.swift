@@ -4,12 +4,16 @@ import Kingfisher
 import PocketCastsDataModel
 import PocketCastsServer
 import PocketCastsUtils
+import SJUtils
 
 class ImageManager {
-    static let sharedManager = ImageManager()
+    static let shared = ImageManager()
 
-    // cache for network images
-    private var networkImageCache = ImageCache(name: "networkImageCache")
+    private static let originalDataSerializer: DefaultCacheSerializer = {
+        var serializer = DefaultCacheSerializer()
+        serializer.preferCacheOriginalData = true
+        return serializer
+    }()
 
     // search image cache, we limit this to 10MBs
     private var searchImageCache = ImageCache(name: "generalImageCache")
@@ -29,6 +33,7 @@ class ImageManager {
         subscribedPodcastsCache.diskStorage.config.sizeLimit = UInt(400.megabytes)
         #endif
         subscribedPodcastsCache.diskStorage.config.expiration = .days(365) // cache artwork for a full year, so that users don't have their artwork disappeared
+        subscribedPodcastsCache.memoryStorage.config.totalCostLimit = 100.megabytes
         return subscribedPodcastsCache
     }()
 
@@ -43,6 +48,7 @@ class ImageManager {
         let cache = ImageCache(name: "discoverVideoThumbnailCache")
         cache.diskStorage.config.expiration = .days(10)
         cache.diskStorage.config.sizeLimit = UInt(50.megabytes)
+        cache.memoryStorage.config.totalCostLimit = 25.megabytes
         return cache
     }()
 
@@ -56,15 +62,18 @@ class ImageManager {
     private var failedEmbeddedLookups = [] as [String]
 
     init() {
-        networkImageCache.diskStorage.config.expiration = .days(56) // 8 weeks
-
         searchImageCache.diskStorage.config.sizeLimit = UInt(10.megabytes)
+        searchImageCache.memoryStorage.config.totalCostLimit = 15.megabytes
 
         userEpisodeCache.diskStorage.config.sizeLimit = UInt(10.megabytes)
         userEpisodeCache.diskStorage.config.expiration = .days(365)
+        userEpisodeCache.memoryStorage.config.totalCostLimit = 15.megabytes
 
         discoverCache.diskStorage.config.expiration = .days(10)
         discoverCache.diskStorage.config.sizeLimit = UInt(50.megabytes)
+        discoverCache.memoryStorage.config.totalCostLimit = 40.megabytes
+
+        KingfisherManager.shared.cache.memoryStorage.config.totalCostLimit = 50.megabytes
 
         NotificationCenter.default.addObserver(self, selector: #selector(podcastAddedNotification(notification:)), name: Constants.Notifications.podcastAdded, object: nil)
     }
@@ -105,13 +114,8 @@ class ImageManager {
 
     func storeDiscoverVideoThumbnail(for imageUrl: String, image: UIImage) async -> Bool {
         await withCheckedContinuation { continuation in
-            self.discoverVideoThumbnailCache.store(image, forKey: imageUrl) { result in
-                switch result.diskCacheResult {
-                case .success:
-                    continuation.resume(returning: true)
-                case .failure:
-                    continuation.resume(returning: false)
-                }
+            self.store(image, forKey: imageUrl, in: self.discoverVideoThumbnailCache) { didStoreToDisk in
+                continuation.resume(returning: didStoreToDisk)
             }
         }
     }
@@ -214,8 +218,12 @@ class ImageManager {
 
         do {
             let data = try Data(contentsOf: cache.diskStorage.cacheFileURL(forKey: key))
-            let image = UIImage(data: data)
+            guard let image = UIImage(data: data) else {
+                try? cache.diskStorage.remove(forKey: key)
+                return nil
+            }
 
+            cache.store(image, forKey: key, toDisk: false)
             return image
         } catch {
             FileLog.shared.addMessage("retrieveImageFromCache, exception caught while loading cached image from disk")
@@ -224,15 +232,15 @@ class ImageManager {
         return nil
     }
 
-    func imageForEpisode(_ episode: BaseEpisode, size: PodcastThumbnailSize) async -> UIImage? {
+    func image(for episode: BaseEpisode, size: PodcastThumbnailSize) async -> UIImage? {
         await withCheckedContinuation { continuation in
-            imageForEpisode(episode, size: size) { image in
+            image(for: episode, size: size) { image in
                 continuation.resume(returning: image)
             }
         }
     }
 
-    func imageForEpisode(_ episode: BaseEpisode, size: PodcastThumbnailSize, completionHandler: @escaping ((UIImage?) -> Void)) {
+    func image(for episode: BaseEpisode, size: PodcastThumbnailSize, completionHandler: @escaping ((UIImage?) -> Void)) {
         if loadEmbeddedImageIfRequired(in: episode, completion: { image in
             completionHandler(image)
         }) {
@@ -258,9 +266,21 @@ class ImageManager {
         }
     }
 
-    func save(_ image: UIImage, for episodeUuid: String) {
-        subscribedPodcastsCache.store(image, forKey: episodeUuid) { _ in
+    func save(_ image: UIImage, original: Data? = nil, for episodeUuid: String) {
+        store(image, original: original, forKey: episodeUuid, in: subscribedPodcastsCache) { _ in
             NotificationCenter.postOnMainThread(notification: .episodeEmbeddedArtworkLoaded)
+        }
+    }
+
+    func store(_ image: UIImage, original: Data? = nil, forKey key: String, in cache: ImageCache, completion: ((Bool) -> Void)? = nil) {
+        guard let data = original ?? image.dataForImageCache else {
+            cache.store(image, forKey: key, toDisk: false)
+            completion?(false)
+            return
+        }
+
+        cache.store(image, original: data, forKey: key, cacheSerializer: Self.originalDataSerializer) { result in
+            completion?((try? result.diskCacheResult.get()) != nil)
         }
     }
 
@@ -307,9 +327,9 @@ class ImageManager {
     func loadUserEpisodeImage(uuid: String, imageView: UIImageView, size: PodcastThumbnailSize, completionHandler: ((Bool) -> Void)?) {
         imageView.image = nil
 
-        let userEpisode = DataManager.sharedManager.findUserEpisode(uuid: uuid)
+        let userEpisode = DataManager.shared.findUserEpisode(uuid: uuid)
         let imageSize = size == .page ? 960 : 280
-        let url = userEpisode?.urlForImage(size: imageSize) ?? ServerHelper.userEpisodeDefaultImageUrl(isDark: Theme.isDarkTheme(), color: 1, size: imageSize)
+        let url = userEpisode?.urlForImage(size: imageSize) ?? ServerHelper.userEpisodeDefaultImageUrl(isDark: Theme.isDarkTheme, color: 1, size: imageSize)
         if url.isFileURL {
             let provider = LocalFileImageDataProvider(fileURL: url)
             imageView.kf.setImage(with: provider, placeholder: placeHolderImage(size), options: [.targetCache(userEpisodeCache), .transition(.fade(Constants.Animation.defaultAnimationTime))], completionHandler: { result in
@@ -335,7 +355,7 @@ class ImageManager {
     func imageForUserEpisodeColor(color: Int, imageView: UIImageView, size: PodcastThumbnailSize, completionHandler: ((Bool) -> Void)?) {
         imageView.image = nil
         let imageSize = size == .page ? 960 : 280
-        let url = ServerHelper.userEpisodeDefaultImageUrl(isDark: Theme.isDarkTheme(), color: color, size: imageSize)
+        let url = ServerHelper.userEpisodeDefaultImageUrl(isDark: Theme.isDarkTheme, color: color, size: imageSize)
 
         imageView.backgroundColor = AppTheme.userEpisodeColor(number: color)
         imageView.kf.setImage(with: url, placeholder: nil, options: [.targetCache(userEpisodeCache), .transition(.fade(Constants.Animation.defaultAnimationTime))], completionHandler: { result in
@@ -383,7 +403,7 @@ class ImageManager {
 
         UserDefaults.standard.set(Date(), forKey: Constants.UserDefaults.lastImageRefreshTime)
 
-        DataManager.sharedManager.setAllPodcastImageVersions(to: 0)
+        DataManager.shared.setAllPodcastImageVersions(to: 0)
         let prefetcher = ImagePrefetcher(resources: allPodcastUrls(), options: [.targetCache(subscribedPodcastsCache), .forceRefresh])
         prefetcher.start()
     }
@@ -395,21 +415,12 @@ class ImageManager {
 
     private func allPodcastUrls() -> [URL] {
         var urls = [URL]()
-        for podcast in DataManager.sharedManager.allPodcasts(includeUnsubscribed: false) {
+        for podcast in DataManager.shared.allPodcasts(includeUnsubscribed: false) {
             let urlsForPodcast = allUrlsFor(podcastUuid: podcast.uuid)
             urls.append(contentsOf: urlsForPodcast)
         }
 
         return urls
-    }
-
-    private func radioactiveProcessor() -> ImageProcessor {
-        let processor =
-            BlendImageProcessor(blendMode: .color, alpha: 1, backgroundColor: UIColor(hex: "#808080").withAlphaComponent(0.5)) |>
-            ColorControlsProcessor(brightness: 0.1, contrast: 1.3, saturation: 0, inputEV: 0.5) |>
-            BlendImageProcessor(blendMode: .plusDarker, alpha: 1, backgroundColor: UIColor(hex: "#70E84E"))
-
-        return processor
     }
 
     private func allUrlsFor(podcastUuid: String) -> [URL] {
@@ -425,7 +436,7 @@ class ImageManager {
 
     /// Clears every image cache, memory and disk. Used by tvOS logout.
     func clearAllImageCaches() {
-        let caches = [networkImageCache, searchImageCache, subscribedPodcastsCache, userEpisodeCache, discoverCache, discoverVideoThumbnailCache]
+        let caches = [searchImageCache, subscribedPodcastsCache, userEpisodeCache, discoverCache, discoverVideoThumbnailCache]
         for cache in caches {
             cache.clearMemoryCache()
             cache.clearDiskCache()
@@ -434,7 +445,7 @@ class ImageManager {
 
     func clearPodcastCache(recacheWhenDone: Bool) {
         // clear out all the saved colors, since they might change when the images do
-        DataManager.sharedManager.setAllPodcastImageVersions(to: 0)
+        DataManager.shared.setAllPodcastImageVersions(to: 0)
 
         subscribedPodcastsCache.clearMemoryCache()
         subscribedPodcastsCache.clearDiskCache { [weak self] in
@@ -450,7 +461,7 @@ class ImageManager {
 
     func clearCache(podcastUuid: String, recacheWhenDone: Bool) {
         // reset the podcast color version, so it re-downloads that when re-caching the image if required
-        DataManager.sharedManager.setPodcastImageVersion(podcastUuid: podcastUuid, version: 0)
+        DataManager.shared.setPodcastImageVersion(podcastUuid: podcastUuid, version: 0)
         NotificationCenter.default.post(name: Constants.Notifications.podcastUpdated, object: podcastUuid)
 
         // list and card are the same image, so card is not in the list below
@@ -529,7 +540,7 @@ class ImageManager {
     private var placeholderImageCache: [PlaceholderKey: UIImage] = [:]
 
     func placeHolderImage(_ size: PodcastThumbnailSize) -> UIImage? {
-        let key = PlaceholderKey(size: size, isDark: Theme.isDarkTheme())
+        let key = PlaceholderKey(size: size, isDark: Theme.isDarkTheme)
         if let cached = placeholderImageCache[key] {
             return cached
         }
@@ -571,6 +582,10 @@ class ImageManager {
         // but that's about 8x slower, which sucks because this gets called a lot in table views, oh well
     }
 
+    // TODO: Modernization - These sizes read UIScreen.main, which assumes one display. The URLs they pick are
+    // also the cache keys that cacheAllPodcastImages() and clearCache(podcastUuid:recacheWhenDone:) rebuild with
+    // no view in scope, so sizing from each caller's traitCollection.displayScale and width would split the
+    // offline cache. Decide how cached sizes are keyed first, then take the trait collection from the caller.
     class func sizeFor(imageSize: PodcastThumbnailSize) -> Int {
         switch imageSize {
         case .list:
@@ -583,6 +598,17 @@ class ImageManager {
             return Int(round(shortestSide * UIScreen.main.scale / 3.0))
         case .page, .detail:
             return Int(320.0 * UIScreen.main.scale)
+        }
+    }
+}
+
+private extension UIImage {
+    var dataForImageCache: Data? {
+        switch cgImage?.alphaInfo {
+        case .some(.none), .some(.noneSkipFirst), .some(.noneSkipLast):
+            return jpegData(compressionQuality: 0.9)
+        default:
+            return pngData()
         }
     }
 }

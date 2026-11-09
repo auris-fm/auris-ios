@@ -8,6 +8,7 @@ extension NowPlayingPlayerItemViewController {
     func addObservers() {
         addCustomObserver(Constants.Notifications.playbackProgress, selector: #selector(progressUpdated))
         addCustomObserver(Constants.Notifications.episodeDurationChanged, selector: #selector(progressUpdated))
+        addCustomObserver(Constants.Notifications.chapterSelectionChanged, selector: #selector(progressUpdated))
         addCustomObserver(Constants.Notifications.playbackStarted, selector: #selector(update(notification:)))
         addCustomObserver(Constants.Notifications.playbackPaused, selector: #selector(update(notification:)))
         addCustomObserver(Constants.Notifications.playbackTrackChanged, selector: #selector(playbackTrackChanged))
@@ -38,7 +39,7 @@ extension NowPlayingPlayerItemViewController {
     @objc private func videoPlaybackEngineSwitched() {
         // Video may have been detected at runtime (e.g. an HLS stream) or toggled via the shelf,
         // so refresh to reveal or hide the view accordingly.
-        if PlaybackManager.shared.shouldRenderVideo() {
+        if PlaybackManager.shared.shouldRenderVideo {
             floatingVideoView.player = PlaybackManager.shared.internalPlayerForVideoPlayback()
         }
         update(notification: nil)
@@ -47,7 +48,7 @@ extension NowPlayingPlayerItemViewController {
     @objc func update(notification: NSNotification?) {
         guard let playingEpisode = PlaybackManager.shared.currentEpisode else { return }
 
-        if PlaybackManager.shared.shouldRenderVideo() {
+        if PlaybackManager.shared.shouldRenderVideo {
             if floatingVideoView.isHidden {
                 floatingVideoView.isHidden = false
                 floatingVideoView.player = PlaybackManager.shared.internalPlayerForVideoPlayback()
@@ -78,7 +79,7 @@ extension NowPlayingPlayerItemViewController {
         skipFwdBtn.skipAmount = skipFwdAmount
 
         updatePlayPauseButton(isPlaying: PlaybackManager.shared.isPlaying)
-        updateUpTo(upTo: PlaybackManager.shared.currentTime(), duration: PlaybackManager.shared.duration(), moveSlider: true)
+        updateUpTo(upTo: PlaybackManager.shared.currentTime, duration: PlaybackManager.shared.duration, moveSlider: true)
         reloadShelfActions()
         updateChaptersControls()
         updateChapterInfo()
@@ -89,13 +90,13 @@ extension NowPlayingPlayerItemViewController {
             updateError()
         }
         if !showingCustomImage {
-            ImageManager.sharedManager.loadImage(episode: playingEpisode, imageView: artworkImageView, size: .page)
+            ImageManager.shared.loadImage(episode: playingEpisode, imageView: artworkImageView, size: .page)
         }
     }
 
     private func updateColors() {
         let backgroundColor = PlayerColorHelper.playerBackgroundColor01()
-        view.backgroundColor = backgroundColor
+        view.backgroundColor = usesLargeScreenStyle ? .clear : backgroundColor
         playPauseBtn.playButtonColor = backgroundColor
 
         let buttonColor = ThemeColor.playerContrast01()
@@ -112,7 +113,7 @@ extension NowPlayingPlayerItemViewController {
         timeSlider.popupTextColor = ThemeColor.playerContrast01()
 
         #if !APPCLIP
-        chromecastBtn.activeTintColor = highlightColor
+        chromecastBtn.activeTintColor = activeShelfButtonTintColor
         #endif
     }
 
@@ -121,11 +122,7 @@ extension NowPlayingPlayerItemViewController {
     }
 
     @objc func updateChapterInfo() {
-        updateChapterInfoWithChapters(PlaybackManager.shared.currentChapters())
-    }
-
-    private func updateChapterInfoForTime(_ time: TimeInterval) {
-        updateChapterInfoWithChapters(PlaybackManager.shared.chaptersForTime(time: time))
+        updateChapterInfoWithChapters(PlaybackManager.shared.currentChapters)
     }
 
     private func updateChapterInfoWithChapters(_ chapters: Chapters) {
@@ -146,7 +143,7 @@ extension NowPlayingPlayerItemViewController {
                 artworkImageView.accessibilityLabel = L10n.playerArtwork(chapterName.text ?? "")
             } else if showingCustomImage {
                 showingCustomImage = false
-                ImageManager.sharedManager.loadImage(episode: playingEpisode, imageView: artworkImageView, size: .page)
+                ImageManager.shared.loadImage(episode: playingEpisode, imageView: artworkImageView, size: .page)
                 artworkImageView.accessibilityLabel = L10n.playerArtwork(playingEpisode.title ?? "")
             }
             chapterLink.isHidden = chapters.url == nil
@@ -176,7 +173,7 @@ extension NowPlayingPlayerItemViewController {
     }
 
     func updateChapterProgress() {
-        updateChapterProgress(for: PlaybackManager.shared.currentChapters().visibleChapter, playheadPosition: PlaybackManager.shared.currentTime())
+        updateChapterProgress(for: PlaybackManager.shared.currentChapters.visibleChapter, playheadPosition: PlaybackManager.shared.currentTime)
     }
 
     private func updateTimeLabels(upTo: TimeInterval, remaining: TimeInterval) {
@@ -185,7 +182,7 @@ extension NowPlayingPlayerItemViewController {
     }
 
     func updateUpTo(upTo: TimeInterval, duration: TimeInterval, moveSlider: Bool) {
-        let remaining = max(0, duration - upTo)
+        let remaining = max(0, duration - upTo - PlaybackManager.shared.deselectedChapterDuration(after: upTo))
         updateTimeLabels(upTo: upTo, remaining: remaining)
         updateChapterInfoWithChapters(PlaybackManager.shared.chaptersForTime(time: upTo))
 
@@ -300,7 +297,7 @@ extension NowPlayingPlayerItemViewController {
     @objc func progressUpdated() {
         if timeSlider.isScrubbing() || PlaybackManager.shared.isSeeking { return }
 
-        updateUpTo(upTo: PlaybackManager.shared.currentTime(), duration: PlaybackManager.shared.duration(), moveSlider: true)
+        updateUpTo(upTo: PlaybackManager.shared.currentTime, duration: PlaybackManager.shared.duration, moveSlider: true)
 
         if !chapterSkipFwdBtn.isHidden {
             updateChapterProgress()

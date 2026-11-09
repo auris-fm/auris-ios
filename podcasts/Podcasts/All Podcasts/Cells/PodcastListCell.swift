@@ -35,19 +35,21 @@ class PodcastListCell: ThemeableCollectionCell {
         }
     }
 
-    func populateFrom(_ podcast: Podcast, badgeType: BadgeType) {
+    func populateFrom(_ podcast: Podcast, badgeType: BadgeType, isPlayed: Bool = false) {
         self.badgeType = badgeType
         podcastImage.setPodcast(uuid: podcast.uuid, size: .list)
         podcastTitle.text = podcast.title
         podcastInfo.text = podcast.author
 
         accessibilityLabel = podcast.title
+        accessibilityValue = isPlayed ? L10n.statusPlayed : nil
+        contentView.alpha = isPlayed ? PodcastGridCell.playedAlpha : 1
 
         if badgeType == .allUnplayed {
             unplayedHeight.constant = 28
 
             unplayedBadge.showsNumber = true
-            unplayedBadge.unplayedCount = podcast.cachedUnreadCount > 99 ? 99 : podcast.cachedUnreadCount
+            unplayedBadge.unplayedCount = podcast.cachedUnreadCount
             unplayedBadge.isHidden = podcast.cachedUnreadCount == 0
         } else if badgeType == .latestEpisode {
             unplayedHeight.constant = 12

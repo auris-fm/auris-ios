@@ -70,6 +70,7 @@ class SmallListCell: ThemeableCollectionCell {
         if let uuid = discoverPodcast.uuid {
             podcastImage.setPodcast(uuid: uuid, size: .grid)
         }
+        subscribeButton.setFollowAccessibilityLabels(podcastTitle: discoverPodcast.title?.localized)
         subscribeButton.currentlyOn = isSubscribed
 
         subscribeButton.shouldAnimate = true
@@ -88,8 +89,9 @@ class SmallListCell: ThemeableCollectionCell {
     func populateFrom(_ info: DiscoverPodcast) {
         discoverPodcast = info
         podcastImage.accessibilityLabel = discoverPodcast?.title?.localized
+        subscribeButton.setFollowAccessibilityLabels(podcastTitle: info.title?.localized)
         if let headerUuid = info.uuid {
-            if let _ = DataManager.sharedManager.findPodcast(uuid: headerUuid) {
+            if let _ = DataManager.shared.findPodcast(uuid: headerUuid) {
                 subscribeButton.currentlyOn = true
             } else {
                 subscribeButton.currentlyOn = false
@@ -113,8 +115,10 @@ class SmallListCell: ThemeableCollectionCell {
         let isExplicit = discoverPodcast.isExplicit ?? false
         if isExplicit {
             podcastTitle.attributedText = ExplicitBadgeHelper.attributedTitle(title, font: podcastTitle.font)
+            podcastTitle.accessibilityLabel = ExplicitBadgeHelper.accessibilityTitle(title)
         } else {
             podcastTitle.text = title
+            podcastTitle.accessibilityLabel = nil
         }
     }
 
