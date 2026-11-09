@@ -32,6 +32,10 @@ final class VoiceSharingDirectSink {
 
     func handle(_ event: VoiceSharingCollector.SegmentEvent) async {
         guard isEnabled() else { return }
+        // A STARTED event marks the moment a segment opened; it carries no audio and no stages yet.
+        // Publishing it wrote a record whose observations were whatever the fallback claims said,
+        // which then competed with the real completed record for the same capture.
+        guard event.kind != .started else { return }
         do {
             // ENGINE-PRODUCED observations win: the event carries the stages the recogniser
             // actually reported, and they override any caller claim for the same stage.

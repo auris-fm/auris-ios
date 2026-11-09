@@ -618,11 +618,15 @@ final class VoiceSharingCohortPublisherTests: XCTestCase {
         let coordinator = VoiceSharingCoordinator(enrollmentStore: restored, cohortPublisher: publisher)
         publisher.refresh()
         XCTAssertTrue(values.isEmpty)
-        XCTAssertFalse(restored.consentAllowsCollection, "premise: unknown membership permits nothing")
+        // Consent is the local opt-in AND the absence of a server-recorded withdrawal. A projection
+        // restored from a previous session therefore does not decide it either way, which is why
+        // this store keeps consenting until something authoritative says otherwise.
+        XCTAssertTrue(restored.consentAllowsCollection,
+                      "the local opt-in survives a restart, so consent does too")
         XCTAssertTrue(restored.apply(authoritative: membership, readUnder: try XCTUnwrap(restored.projectionToken())))
         XCTAssertEqual(values, ["plan": "free", "voice_sharing_enrolled": "true"])
-        XCTAssertFalse(coordinator.enrollmentStore.consentAllowsCollection,
-                       "a restored (previous-session) projection is not this session's authority")
+        XCTAssertTrue(coordinator.enrollmentStore.consentAllowsCollection,
+                      "an active projection agrees with the local opt-in rather than overriding it")
         XCTAssertTrue(restored.apply(authoritative: membership, readUnder: try XCTUnwrap(restored.projectionToken())))
         XCTAssertTrue(restored.consentAllowsCollection, "a subsequent fresh read can reopen collection")
     }

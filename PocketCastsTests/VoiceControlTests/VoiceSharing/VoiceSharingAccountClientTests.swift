@@ -1007,156 +1007,13 @@ final class VoiceSharingAccountModelTests: XCTestCase {
         await hold.open()
         await enrollment.value
         let withdrawal = try XCTUnwrap(VoiceSharingStubProtocol.seenRequests.first { $0.httpMethod == "PUT" })
+        // The intent carries the desired state; there is no revision precondition to carry.
         let body = try XCTUnwrap(requestBodyDictionary(of: withdrawal))
-        XCTAssertEqual(body["expected_membership_revision"] as? String, "r0")
+        XCTAssertEqual(body["enrolled"] as? Bool, false,
+                       "the withdrawal states the desired state directly")
         XCTAssertFalse(harness.store.currentEffectiveEnrolled)
         XCTAssertEqual(model.membershipStatus, .withdrawnServerConfirmed)
         XCTAssertEqual(harness.store.currentState.membership.plan, .pro)
-    }
-
-    /// GET-before-PUT through the REAL model. An intent with no
-    /// revision held must READ first and then send its PUT with the revision that read produced. The view's
-    /// on-open refresh is not a guarantee — this drives `enroll` directly with no prior read, which is the
-    /// case the old code answered by refusing.
-    ///
-    /// Boundary: the production `VoiceSharingAccountModel` → real client → stubbed transport. Order is
-    /// asserted on the recorded requests, and the precondition on the header the PUT actually carried.
-    @MainActor
-    func test_enrollWithNoRevisionReadsFirstThenPutsWithThatRevision() async throws {
-        let harness = SharingAccountModelHarness()
-        defer { harness.close() }
-        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] =
-            .init(status: 200, body: projection("r0", enrolled: false, epoch: nil, withdrawal: "not_enrolled"))
-        VoiceSharingStubProtocol.replies["PUT " + VoiceSharingAccountClient.membershipPath] =
-            .init(status: 200, body: projection("r1", enrolled: true, epoch: "e1", withdrawal: "active"))
-
-        let model = harness.model()
-        // No projection has ever been applied: the intent holds no revision.
-        XCTAssertNil(harness.store.currentAuthoritativeState?.membership.membershipRevision)
-        await model.enroll(disclosureConfirmed: true)
-
-        let methods = VoiceSharingStubProtocol.seenRequests.map { $0.httpMethod ?? "?" }
-        XCTAssertEqual(methods, ["GET", "PUT"],
-                       "the intent must read the state first and only then PUT, got \(methods)")
-        let put = try XCTUnwrap(VoiceSharingStubProtocol.seenRequests.last)
-        XCTAssertEqual(put.value(forHTTPHeaderField: "If-Match"), "r0",
-                       "the precondition is the revision the read stored")
-        XCTAssertEqual(model.membershipStatus, .enrolled)
-    }
-
-    /// A FAILED read must not produce a PUT: with no revision there is no precondition, and sending
-    /// anyway would ask the server to apply an unguarded write.
-    @MainActor
-    func test_enrollSendsNoPutWhenThePreparatoryReadFails() async throws {
-        let harness = SharingAccountModelHarness()
-        defer { harness.close() }
-        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] =
-            .init(status: 503, body: [:])
-
-        let model = harness.model()
-        await model.enroll(disclosureConfirmed: true)
-
-        let methods = VoiceSharingStubProtocol.seenRequests.map { $0.httpMethod ?? "?" }
-        XCTAssertEqual(methods, ["GET"], "no PUT may follow a failed read, got \(methods)")
-        XCTAssertEqual(model.membershipStatus, .unavailable)
-        XCTAssertFalse(harness.store.currentEffectiveEnrolled, "a failed read never turns sharing on")
-    }
-
-    /// An ACCOUNT change during the preparatory read retires it: the reply belongs to a session that no
-    /// longer exists, so the intent is abandoned rather than completed under the new account.
-    @MainActor
-    func test_enrollSendsNoPutWhenTheAccountChangesDuringTheRead() async throws {
-        let harness = SharingAccountModelHarness()
-        defer { harness.close() }
-        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] =
-            .init(status: 200, body: projection("r0", enrolled: false, epoch: nil, withdrawal: "not_enrolled"))
-        VoiceSharingStubProtocol.replies["PUT " + VoiceSharingAccountClient.membershipPath] =
-            .init(status: 200, body: projection("r1", enrolled: true, epoch: "e1", withdrawal: "active"))
-        VoiceSharingStubProtocol.responseDelay = 0.05
-
-        let model = harness.model()
-        VoiceSharingStubProtocol.onRequest = {
-            // The transition lands while the read is in flight.
-            harness.switchAccount("session-B")
-            VoiceSharingStubProtocol.onRequest = nil
-        }
-        await model.enroll(disclosureConfirmed: true)
-
-        let methods = VoiceSharingStubProtocol.seenRequests.map { $0.httpMethod ?? "?" }
-        XCTAssertEqual(methods, ["GET"], "a read superseded by an account change must not be followed by a PUT, got \(methods)")
-        XCTAssertFalse(harness.store.currentEffectiveEnrolled)
-    }
-
-    /// WITHDRAWAL reads before PUTting when it holds no revision, and the LOCAL stop happens first and is
-    /// never undone by what the read finds. Order is asserted on the recorded requests; the local stop is
-    /// asserted by the consent state immediately after the call.
-    @MainActor
-    func test_withdrawStopsLocallyFirstThenReadsBeforePutting() async throws {
-        let harness = SharingAccountModelHarness()
-        defer { harness.close() }
-        // A cold store: an enrolled local preference with NO projection ever applied, so no revision.
-        harness.store.setLocalOptIn(true)
-        XCTAssertNil(harness.store.currentAuthoritativeState?.membership.membershipRevision)
-        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] =
-            .init(status: 200, body: projection("r0", enrolled: true, epoch: "e0", withdrawal: "active"))
-        VoiceSharingStubProtocol.replies["PUT " + VoiceSharingAccountClient.membershipPath] =
-            .init(status: 200, body: projection("r1", enrolled: false, epoch: nil, withdrawal: "withdrawn"))
-
-        let model = harness.model()
-        await model.withdraw()
-
-        let methods = VoiceSharingStubProtocol.seenRequests.map { $0.httpMethod ?? "?" }
-        XCTAssertEqual(methods, ["GET", "PUT"],
-                       "the withdrawal reads for a precondition and then PUTs, got \(methods)")
-        XCTAssertFalse(harness.store.currentState.localOptIn, "the local stop is the user's decision")
-        let put = try XCTUnwrap(VoiceSharingStubProtocol.seenRequests.last)
-        XCTAssertEqual(put.value(forHTTPHeaderField: "If-Match"), "r0")
-        XCTAssertEqual(model.membershipStatus, .withdrawnServerConfirmed)
-    }
-
-    /// The local stop survives a FAILED read: collection has already stopped when the read runs, so a
-    /// server that cannot tell us its revision costs only the confirmation, never the privacy decision.
-    @MainActor
-    func test_withdrawKeepsTheLocalStopWhenThePreparatoryReadFails() async throws {
-        let harness = SharingAccountModelHarness()
-        defer { harness.close() }
-        harness.store.setLocalOptIn(true)
-        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] =
-            .init(status: 503, body: [:])
-
-        let model = harness.model()
-        await model.withdraw()
-
-        let methods = VoiceSharingStubProtocol.seenRequests.map { $0.httpMethod ?? "?" }
-        XCTAssertEqual(methods, ["GET"], "no PUT without a precondition, got \(methods)")
-        XCTAssertFalse(harness.store.currentState.localOptIn, "the local stop stands regardless")
-        XCTAssertFalse(harness.store.currentEffectiveEnrolled, "and nothing stays enrolled")
-        XCTAssertEqual(model.membershipStatus, .withdrawalUnconfirmed,
-                       "unconfirmed is the honest report when the server answer never came")
-    }
-
-    @MainActor
-    func test_unknownRevisionStillStopsLocallyAndDeletionRetryKeepsIdentity() async throws {
-        let harness = SharingAccountModelHarness()
-        defer { harness.close() }
-        harness.store.setLocalOptIn(true)
-        let model = harness.model(version: nil)
-        await model.withdraw()
-        XCTAssertFalse(harness.store.currentState.localOptIn)
-        XCTAssertEqual(model.membershipStatus, .withdrawalUnconfirmed)
-        XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty, "never invent an authoritative revision")
-        VoiceSharingStubProtocol.replies["DELETE " + VoiceSharingAccountClient.dataPath] = .init(status: 503, body: [:])
-        await model.deleteAcceptedData(confirmed: true)
-        XCTAssertEqual(model.deletionStatus, .unavailable)
-        VoiceSharingStubProtocol.replies["DELETE " + VoiceSharingAccountClient.dataPath] = .init(status: 204, body: [:])
-        await model.retryDeletion()
-        XCTAssertEqual(model.deletionStatus, .deleted)
-        let deletes = VoiceSharingStubProtocol.seenRequests.filter { $0.httpMethod == "DELETE" }
-        XCTAssertEqual(deletes.count, 2)
-        let first = try XCTUnwrap(requestBodyDictionary(of: try XCTUnwrap(deletes.first)))
-        let last = try XCTUnwrap(requestBodyDictionary(of: try XCTUnwrap(deletes.last)))
-        XCTAssertTrue(NSDictionary(dictionary: first).isEqual(to: last))
-        XCTAssertTrue(first.isEmpty, "the retry carries the same empty body, so it is the same request")
     }
 
     @MainActor
@@ -1174,14 +1031,14 @@ final class VoiceSharingAccountModelTests: XCTestCase {
         VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 200, body: currentProjection)
         await model.retryMembership()
         XCTAssertEqual(model.membershipStatus, .conflict)
-        let posts = VoiceSharingStubProtocol.seenRequests.filter { $0.httpMethod == "POST" }
-        XCTAssertEqual(posts.count, 2)
-        let first = try XCTUnwrap(requestBodyDictionary(of: try XCTUnwrap(posts.first)))
-        let last = try XCTUnwrap(requestBodyDictionary(of: try XCTUnwrap(posts.last)))
-        XCTAssertTrue(NSDictionary(dictionary: first).isEqual(to: last))
-        XCTAssertNotNil(first["request_id"])
+        let puts = VoiceSharingStubProtocol.seenRequests.filter { $0.httpMethod == "PUT" }
+        XCTAssertEqual(puts.count, 2)
+        let first = try XCTUnwrap(requestBodyDictionary(of: try XCTUnwrap(puts.first)))
+        let last = try XCTUnwrap(requestBodyDictionary(of: try XCTUnwrap(puts.last)))
+        XCTAssertTrue(NSDictionary(dictionary: first).isEqual(to: last),
+                      "the retry states the same desired state")
         await model.retryMembership()
-        XCTAssertEqual(VoiceSharingStubProtocol.seenRequests.filter { $0.httpMethod == "POST" }.count, 2, "no automatic conflict replay")
+        XCTAssertEqual(VoiceSharingStubProtocol.seenRequests.filter { $0.httpMethod == "PUT" }.count, 2, "no automatic conflict replay")
     }
 
     @MainActor
@@ -1215,13 +1072,13 @@ extension VoiceSharingAccountModelTests {
         let model = harness.model()
         VoiceSharingStubProtocol.replies["PUT " + VoiceSharingAccountClient.membershipPath] = .init(status: 503, body: [:])
         await model.enroll(disclosureConfirmed: true)
-        let posts = VoiceSharingStubProtocol.seenRequests.filter { $0.httpMethod == "POST" }.count
-        XCTAssertEqual(posts, 1)
+        let puts = VoiceSharingStubProtocol.seenRequests.filter { $0.httpMethod == "PUT" }.count
+        XCTAssertEqual(puts, 1)
         harness.store.setLocalOptIn(false)
         // No actor yield: Retry must reconcile before the observer's queued Task executes.
         await model.retryMembership()
         XCTAssertFalse(model.busy)
-        XCTAssertEqual(VoiceSharingStubProtocol.seenRequests.filter { $0.httpMethod == "POST" }.count, posts)
+        XCTAssertEqual(VoiceSharingStubProtocol.seenRequests.filter { $0.httpMethod == "PUT" }.count, puts)
         XCTAssertFalse(harness.store.currentEffectiveEnrolled)
     }
 
@@ -1248,29 +1105,6 @@ extension VoiceSharingAccountModelTests {
     }
 }
 
-extension VoiceSharingAccountModelTests {
-    @MainActor
-    func test_confirmedEnrollmentUsesCurrentRevisionAndDisclosureWithoutChangingProPlan() async throws {
-        let harness = SharingAccountModelHarness()
-        defer { harness.close() }
-        harness.seed()
-        let model = harness.model()
-        let active = projection("accepted", enrolled: true, epoch: "new-epoch", withdrawal: "active")
-        VoiceSharingStubProtocol.replies["PUT " + VoiceSharingAccountClient.membershipPath] = .init(status: 200, body: active)
-        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 200, body: active)
-        await model.enroll(disclosureConfirmed: true)
-        XCTAssertEqual(model.membershipStatus, .enrolled)
-        XCTAssertTrue(harness.store.currentEffectiveEnrolled)
-        XCTAssertEqual(model.membership?.plan, .pro)
-        let request = try XCTUnwrap(VoiceSharingStubProtocol.seenRequests.first { $0.httpMethod == "POST" })
-        let body = try XCTUnwrap(requestBodyDictionary(of: request))
-        XCTAssertEqual(body["expected_membership_revision"] as? String, "r0")
-        XCTAssertEqual(body["accepted_disclosure_version"] as? String, "synthetic")
-        XCTAssertNil(body["plan"], "enrollment cannot choose a paid plan")
-        XCTAssertFalse(model.busy)
-    }
-}
-
 final class VoiceSharingAccountNavigationTests: XCTestCase {
     @MainActor
     func test_factoryGatesBeforeConstructionAndRetainsExactInjectedModels() throws {
@@ -1279,7 +1113,10 @@ final class VoiceSharingAccountNavigationTests: XCTestCase {
         harness.seed(enrolled: true)
         var built = 0
         let makeModel = { built += 1; return harness.model() }
-        XCTAssertNil(AccountViewController.makeVoiceSharingController(signedIn: { true }, accountModel: makeModel))
+        // Both gates are named explicitly: the factory's default surface flag reads the real app
+        // surface, which is enabled in this build, so leaving it out tests nothing.
+        XCTAssertNil(AccountViewController.makeVoiceSharingController(
+            surfaceEnabled: { false }, signedIn: { true }, accountModel: makeModel))
         XCTAssertNil(AccountViewController.makeVoiceSharingController(surfaceEnabled: { true }, signedIn: { false }, accountModel: makeModel))
         XCTAssertEqual(built, 0)
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

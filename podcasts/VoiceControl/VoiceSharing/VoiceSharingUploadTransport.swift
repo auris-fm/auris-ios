@@ -33,8 +33,6 @@ final class VoiceSharingUploadTransport {
     /// scheduling new work. Cancelling the task cancels the underlying request.
     private let inFlightLock = NSLock()
     private var inFlight: Task<(Data, URLResponse), any Error>?
-    /// Latched by cancellation, so a transfer that has not yet started never sends.
-    private var stopped = false
 
     init(baseURLProvider: @escaping () -> String,
          tokenProvider: CloudTokenProviding,
@@ -95,16 +93,14 @@ final class VoiceSharingUploadTransport {
     }
 
     /// Runs one transfer, publishing it so `cancelInFlight()` can reach it.
+    ///
+    /// No latch: a stop cancels the attempt in flight, and the next call starts a fresh one. The
+    /// gate, not a flag, is what makes registration atomic — the task is created and published under
+    /// the same lock `cancelInFlight()` takes, and is only released once it is reachable, so a stop
+    /// arriving mid-start either cancels it or finds it already gone.
     private func runInFlight(_ request: URLRequest, body: Data) async throws -> (Data, URLResponse) {
-        // The task is created INSIDE the lock that `cancelInFlight()` takes, and is published before
-        // it is allowed to run: a stop arriving between creation and registration would otherwise
-        // find nothing to cancel and the upload would proceed anyway.
         let gate = TransferGate()
         inFlightLock.lock()
-        if stopped {
-            inFlightLock.unlock()
-            throw URLError(.cancelled)
-        }
         let task = Task { [session] in
             await gate.waitUntilReleased()
             return try await session.upload(for: request, from: body)
@@ -120,7 +116,6 @@ final class VoiceSharingUploadTransport {
     /// not keep travelling to the server after the user said stop.
     func cancelInFlight() {
         inFlightLock.lock()
-        stopped = true
         let task = inFlight
         inFlight = nil
         inFlightLock.unlock()

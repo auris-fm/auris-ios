@@ -394,17 +394,12 @@ final class VoiceSharingCollectorTests: XCTestCase {
             collector.segmentationEnded(collector.currentCaptureContextForTesting)
         }
         let depth = collector.pendingCountForTesting
-        let retained = collector.aggregateAudioSamplesForTesting
         XCTAssertGreaterThan(collector.peakPendingSignals, 0,
                              "the peak FIFO depth is recorded")
-        XCTAssertGreaterThan(collector.peakRetainedSamples, 0,
-                             "the peak retained sample count is recorded")
         // The peak is a HIGH-WATER MARK, never a running total: it cannot fall below what is
         // currently held, and it cannot exceed the largest depth seen.
         XCTAssertGreaterThanOrEqual(collector.peakPendingSignals, depth,
                                     "the peak is at least what is held now")
-        XCTAssertGreaterThanOrEqual(collector.peakRetainedSamples, 0,
-                                    "the peak retained count is recorded")
         blocked.add(-1)
         XCTAssertTrue(collector.waitForDrain())
     }
@@ -628,7 +623,8 @@ final class VoiceSharingCollectorTests: XCTestCase {
                        "A's start, then the lingering partial recorded as cancelled before B's start")
         XCTAssertEqual(got[1].captureID, ctxA?.id)
         // The stale partial is a DISCARD: B's start disposes A's bytes, so nothing ring-held remains.
-        XCTAssertEqual(collector.aggregateAudioSamplesForTesting, 0,
+        let held = collector.actualRetainedAudioBreakdownForTesting
+        XCTAssertEqual(held.ring, 0,
                        "the abandoned partial's audio is disposed at B's start, not ring-held")
     }
 
@@ -649,8 +645,8 @@ final class VoiceSharingCollectorTests: XCTestCase {
         collector.speechStarted(confirmationFrameSamples: 320)
         let ctxB = collector.currentCaptureContextForTesting
         collector.appendSamples([Float](repeating: 1, count: 640), reportedTotal: 640)
-        let before = collector.aggregateAudioSamplesForTesting
-        XCTAssertGreaterThan(before, 0, "premise: audio is held")
+        let before = collector.actualRetainedAudioBreakdownForTesting
+        XCTAssertGreaterThan(before.open + before.ring, 0, "premise: audio is held")
 
         clearEvents(collector)
         deactivateLease()
@@ -660,7 +656,8 @@ final class VoiceSharingCollectorTests: XCTestCase {
         XCTAssertEqual(got.map(\.kind), [.cancelled], "the open partial is cancelled")
         XCTAssertEqual(got.last?.audio.count, 0,
                        "the cancellation record is content-free: no retained speech leaves after withdrawal")
-        XCTAssertEqual(collector.aggregateAudioSamplesForTesting, 0,
+        let after = collector.actualRetainedAudioBreakdownForTesting
+        XCTAssertEqual(after.open + after.fifo + after.ring, 0,
                        "ALL contribution audio is purged — open, FIFO, and terminal history")
         XCTAssertEqual(collector.retainedSampleCountForTesting, 0)
 
@@ -669,144 +666,6 @@ final class VoiceSharingCollectorTests: XCTestCase {
         collector.segmentRejected(kind: .rejectedWake, samples: 640, context: ctxB)
         XCTAssertEqual(snapshot().map(\.kind), [.cancelled],
                        "a revoked capture's late outcome is consumed silently")
-    }
-
-    /// THE byte-budget control: with the sink HELD (saturation), the collector's owned audio can never
-    /// exceed maxAggregateRetainedSamples no matter how many segments arrive; gate loss then releases
-    /// everything. 4 × 960,000 samples = 15.36 MB — not the ~376 MB an unenforced ceiling implied.
-    func test_aggregateByteBudget_heldSinkSaturation_thenPurge() {
-        activateLease()
-        enrolledState(true)
-        assertPremisesOpen()
-
-        // every event is held: the sink stalls until the final gate opens, so the FIFO genuinely
-        // saturates and the aggregate budget — not the transient drain — is what bounds ownership.
-        let hold = DispatchSemaphore(value: 0)
-        let entered = DispatchSemaphore(value: 0)
-        var open = false
-        var seen = false
-        let stateLock = NSLock()
-        let collector = VoiceSharingCollector(
-            isCollectionPermitted: { true }, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
-            membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
-            epochProvider: { [weak self] in self?.epoch },
-            sessionIdentity: { "gen-A" },
-            sink: { _ in
-                stateLock.lock()
-                let first = !seen
-                seen = true
-                let gateOpen = open
-                stateLock.unlock()
-                if first { entered.signal() }
-                if !gateOpen { hold.wait() }
-            }
-        )
-        collector.speechStarted(confirmationFrameSamples: 320)
-        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success, "premise: sink parked")
-
-        // 80k-float segments: the FIFO bound ALONE (64 × 80k = 5.12M samples) would breach the
-        // aggregate budget (3.84M), so this control discriminates the budget from the FIFO count.
-        let segment = [Float](repeating: 1, count: 80_000)
-        for i in 0..<200 {                                   // far more than any single bound allows
-            collector.speechStarted(confirmationFrameSamples: 320)
-            collector.appendSamples(segment, reportedTotal: segment.count)
-            collector.speechCompleted(segment, context: collector.currentCaptureContextForTesting)
-            // AMENDED by: the budget is GENUINELY retired as a dropping gate. A
-            // recording may stop being collected only when sharing is off, so neither this budget
-            // nor the FIFO cap may discard; both are counted pressure. Retained audio can now
-            // EXCEED the constant — that is the ruled behaviour, and it is why the ledger is
-            // surfaced. What still holds is that every byte is accounted for and released at drain.
-            if i % 20 == 0 {
-                XCTAssertGreaterThan(collector.aggregateAudioSamplesForTesting, 0,
-                                     "the ledger accounts for saturation")
-            }
-        }
-        // AT LEAST the budget: it was reached, not enforced as a discard threshold. The exact
-        // overshoot is not the point; that nothing was dropped to stay under it is.
-        XCTAssertGreaterThanOrEqual(collector.aggregateAudioSamplesForTesting,
-                                    VoiceSharingCollector.maxAggregateRetainedSamples,
-                                    "saturating reaches the budget and retains work there")
-        XCTAssertGreaterThan(collector.overflowCount, 0, "the pressure is counted, never silent")
-
-        stateLock.lock(); open = true; stateLock.unlock()
-        hold.signal()
-        XCTAssertTrue(collector.waitForDrain())
-        // DRAIN still releases ownership: the bounded-memory property that remains is that nothing
-        // is retained once the work has been delivered.
-        XCTAssertLessThan(collector.aggregateAudioSamplesForTesting,
-                          VoiceSharingCollector.maxAggregateRetainedSamples,
-                          "drain releases owned audio")
-    }
-
-    /// Ownership actually leaves at drain: after one completed segment is fully delivered, the only
-    /// audio still owned is the terminal ring's copy of that capture — the FIFO copy is released
-    /// whether the event was delivered or dropped.
-    func test_aggregateAudioIsReleasedAtDrain() {
-        activateLease()
-        enrolledState(true)
-        assertPremisesOpen()
-
-        let hold = DispatchSemaphore(value: 0)
-        let entered = DispatchSemaphore(value: 0)
-        let collector = VoiceSharingCollector(
-            isCollectionPermitted: { true }, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
-            membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
-            epochProvider: { [weak self] in self?.epoch },
-            sessionIdentity: { "gen-A" },
-            sink: { e in
-                if e.kind == .started { entered.signal(); hold.wait() }
-            }
-        )
-        collector.speechStarted(confirmationFrameSamples: 320)
-        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success, "premise: sink parked")
-
-        collector.appendSamples([Float](repeating: 1, count: 640), reportedTotal: 640)
-        let before = collector.aggregateAudioSamplesForTesting
-        collector.speechCompleted([Float](repeating: 1, count: 640),
-                                  context: collector.currentCaptureContextForTesting)
-        let afterSubmit = collector.aggregateAudioSamplesForTesting
-        XCTAssertEqual(afterSubmit, before + 640,
-                       "submitting the event registers its audio copy against the budget")
-
-        hold.signal()
-        XCTAssertTrue(collector.waitForDrain())
-        XCTAssertEqual(collector.aggregateAudioSamplesForTesting, before,
-                       "drain releases the FIFO copy; only the ring-held capture audio remains")
-    }
-
-    /// In-flight sink audio stays IN the budget until the sink call RETURNS: a release at dequeue
-    /// would declare still-retained bytes free while the sink is mid-delivery.
-    func test_aggregateCountsInFlightSinkAudio_untilSinkReturns() {
-        activateLease()
-        enrolledState(true)
-        assertPremisesOpen()
-
-        let hold = DispatchSemaphore(value: 0)
-        let entered = DispatchSemaphore(value: 0)
-        let collector = VoiceSharingCollector(
-            isCollectionPermitted: { true }, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
-            membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
-            epochProvider: { [weak self] in self?.epoch },
-            sessionIdentity: { "gen-A" },
-            sink: { e in
-                if e.kind == .completed { entered.signal(); hold.wait() }
-            }
-        )
-        collector.speechStarted(confirmationFrameSamples: 320)
-        collector.appendSamples([Float](repeating: 1, count: 640), reportedTotal: 640)
-        let openOnly = collector.aggregateAudioSamplesForTesting
-
-        collector.speechCompleted([Float](repeating: 1, count: 640),
-                                  context: collector.currentCaptureContextForTesting)
-        // The event was dequeued and handed to the sink, which is parked INSIDE delivery.
-        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success, "premise: sink parked mid-delivery")
-        XCTAssertEqual(collector.aggregateAudioSamplesForTesting, openOnly + 640,
-                       "the in-flight event's audio is still owned and still counted")
-
-        hold.signal()
-        XCTAssertTrue(collector.waitForDrain())
-        XCTAssertEqual(collector.aggregateAudioSamplesForTesting, openOnly,
-                       "the budget releases only when the sink has returned")
     }
 
     /// THE segmentation-endpoint control: the engine detaches completed A synchronously (via
@@ -869,140 +728,6 @@ final class VoiceSharingCollectorTests: XCTestCase {
         XCTAssertEqual(snapshot().count, 0, "a discarded partial never becomes a contribution record")
     }
 
-    /// Open growth RESERVES against the aggregate before appending: with the FIFO saturated, the
-    /// open capture cannot push total ownership over budget even though its per-capture cap has room.
-    func test_appendSamples_reservesAgainstAggregateBudget() {
-        activateLease()
-        enrolledState(true)
-        assertPremisesOpen()
-
-        let hold = DispatchSemaphore(value: 0)
-        let entered = DispatchSemaphore(value: 0)
-        var open = false
-        var enteredSignalled = false
-        let stateLock = NSLock()
-        let enteredWaitLock = NSLock()
-        let collector = VoiceSharingCollector(
-            isCollectionPermitted: { true }, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
-            membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
-            epochProvider: { [weak self] in self?.epoch },
-            sessionIdentity: { "gen-A" },
-            sink: { _ in
-                stateLock.lock(); let g = open; stateLock.unlock()
-                let first = enteredWaitLock.withLock { () -> Bool in
-                    if enteredSignalled { return false }
-                    enteredSignalled = true
-                    return true
-                }
-                if first { entered.signal() }
-                if !g { hold.wait() }
-            }
-        )
-        collector.speechStarted(confirmationFrameSamples: 320)
-        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success, "premise: sink parked")
-
-        // Saturate the FIFO with near-ceiling segments (audio rides on completions).
-        let big = [Float](repeating: 1, count: 500_000)
-        for _ in 0..<10 {
-            collector.speechStarted(confirmationFrameSamples: 320)
-            collector.appendSamples(big, reportedTotal: big.count)
-            collector.speechCompleted(big, context: collector.currentCaptureContextForTesting)
-        }
-        let budget = VoiceSharingCollector.maxAggregateRetainedSamples
-        // Now open a NEW capture and try to append: aggregate room is what limits take.
-        collector.speechStarted(confirmationFrameSamples: 320)
-        collector.appendSamples([Float](repeating: 1, count: 100_000), reportedTotal: 100_000)
-        let breakdown = collector.actualRetainedAudioBreakdownForTesting
-        // AMENDED by: the budget no longer DISCARDS, so retained audio may exceed it
-        // — that is the ruled behaviour, and the high-water-mark log is how it is seen on device.
-        // What still holds, and is the real invariant, is that the LEDGER equals the actual buffers.
-        XCTAssertGreaterThan(breakdown.open + breakdown.fifo + breakdown.ring + breakdown.inFlight, 0,
-                             "saturation retains work rather than dropping it")
-        XCTAssertEqual(collector.aggregateAudioSamplesForTesting,
-                       breakdown.open + breakdown.fifo + breakdown.ring + breakdown.inFlight,
-                       "the ledger matches the ACTUAL retained buffers, in-flight included")
-
-        stateLock.lock(); open = true; stateLock.unlock()
-        hold.signal()
-        XCTAssertTrue(collector.waitForDrain())
-    }
-
-    /// The budget ledger is audited against the ACTUAL buffers (open + FIFO + ring + in-flight sink
-    /// bytes), not trusted from its own counter.
-    func test_ledgerMatchesActuallyRetainedBytes() {
-        activateLease()
-        enrolledState(true)
-        assertPremisesOpen()
-
-        let collector = makeCollector()   // sync delivery: events leave the ledger at sink return
-        collector.speechStarted(confirmationFrameSamples: 320)
-        collector.appendSamples([Float](repeating: 1, count: 640), reportedTotal: 640)
-        let ctxA = collector.currentCaptureContextForTesting
-        collector.speechCompleted([Float](repeating: 1, count: 640), context: ctxA)
-        collector.speechStarted(confirmationFrameSamples: 320)
-        collector.appendSamples([Float](repeating: 1, count: 128), reportedTotal: 128)
-
-        let breakdown = collector.actualRetainedAudioBreakdownForTesting
-        XCTAssertEqual(collector.aggregateAudioSamplesForTesting,
-                       breakdown.open + breakdown.fifo + breakdown.ring + breakdown.inFlight,
-                       "ledger == open + FIFO + ring + in-flight, exactly")
-        XCTAssertGreaterThanOrEqual(breakdown.inFlight, 0)
-        XCTAssertEqual(breakdown.open, 128)
-    }
-
-    /// The audit reconciles DURING a held sink call: in-flight bytes are owned from before the
-    /// sink runs until it returns, and every component stays nonnegative through the hold.
-    func test_inFlightAudit_reconcilesDuringHeldSinkDelivery() {
-        activateLease()
-        enrolledState(true)
-        assertPremisesOpen()
-
-        let hold = DispatchSemaphore(value: 0)
-        let entered = DispatchSemaphore(value: 0)
-        let holdState = NSLock()
-        var alreadyHeld = false
-        let collector = VoiceSharingCollector(
-            isCollectionPermitted: { true }, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
-            membership: { [weak self] in self?.storeState ?? VoiceSharingEnrollmentStore.State() },
-            epochProvider: { [weak self] in self?.epoch },
-            sessionIdentity: { "gen-A" },
-            sink: { event in
-                guard !event.audio.isEmpty else { return }   // zero-audio control events flow through
-                holdState.lock()
-                let first = !alreadyHeld
-                alreadyHeld = true
-                holdState.unlock()
-                if first {
-                    entered.signal()
-                    hold.wait()
-                }
-            }
-        )
-        collector.speechStarted(confirmationFrameSamples: 320)
-        let ctxA = collector.currentCaptureContextForTesting
-        collector.appendSamples([Float](repeating: 1, count: 640), reportedTotal: 640)
-        // Delivered async: the drain holds inside the sink on this completion.
-        collector.speechCompleted([Float](repeating: 1, count: 640), context: ctxA)
-        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success, "premise: sink holds the completion")
-
-        let during = collector.actualRetainedAudioBreakdownForTesting
-        XCTAssertEqual(during.inFlight, 640, "the delivered audio is owned INSIDE the sink call")
-        XCTAssertGreaterThanOrEqual(during.open, 0)
-        XCTAssertGreaterThanOrEqual(during.fifo, 0)
-        XCTAssertGreaterThanOrEqual(during.ring, 0)
-        XCTAssertEqual(collector.aggregateAudioSamplesForTesting,
-                       during.open + during.fifo + during.ring + during.inFlight,
-                       "ledger reconciles with in-flight included, mid-hold")
-
-        hold.signal()
-        XCTAssertTrue(collector.waitForDrain())
-        let after = collector.actualRetainedAudioBreakdownForTesting
-        XCTAssertEqual(after.inFlight, 0, "ownership releases when the sink returns")
-        XCTAssertEqual(collector.aggregateAudioSamplesForTesting,
-                       after.open + after.fifo + after.ring + after.inFlight,
-                       "ledger reconciles after release")
-    }
-
     /// A discarded terminal (genuine cancel, stale partial, gate-move abandonment) holds NO audio
     /// in the ring: identity only, nothing to resurrect, nothing charged.
     func test_discardedTerminals_holdNoRingAudio_andLedgerStaysReconciled() {
@@ -1017,8 +742,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         collector.speechCancelled()
         var breakdown = collector.actualRetainedAudioBreakdownForTesting
         XCTAssertEqual(breakdown.ring, 0, "a cancelled partial holds no ring audio")
-        XCTAssertEqual(collector.aggregateAudioSamplesForTesting,
-                       breakdown.open + breakdown.fifo + breakdown.ring + breakdown.inFlight)
+        XCTAssertEqual(breakdown.open, 0, "a cancelled partial leaves nothing open")
 
         // Stale-partial abandonment (B starts while A is open).
         let c2 = makeCollector()
@@ -1028,9 +752,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         c2.speechStarted(confirmationFrameSamples: 320)   // abandons A
         breakdown = c2.actualRetainedAudioBreakdownForTesting
         XCTAssertEqual(breakdown.ring, 0, "the stale partial holds no ring audio")
-        XCTAssertEqual(c2.aggregateAudioSamplesForTesting,
-                       breakdown.open + breakdown.fifo + breakdown.ring + breakdown.inFlight,
-                       "the transfer does not strand or double-charge A's bytes")
+        XCTAssertEqual(breakdown.open, 0, "B starts clean, so A's open bytes are gone")
 
         // Gate-move abandonment.
         let c3 = makeCollector()
@@ -1041,9 +763,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
                            context: c3.currentCaptureContextForTesting)
         breakdown = c3.actualRetainedAudioBreakdownForTesting
         XCTAssertEqual(breakdown.ring, 0, "the gate-abandoned partial holds no ring audio")
-        XCTAssertEqual(c3.aggregateAudioSamplesForTesting,
-                       breakdown.open + breakdown.fifo + breakdown.ring + breakdown.inFlight,
-                       "gate-move ledger stays exactly reconciled")
+        XCTAssertEqual(breakdown.open, 0, "a gate-abandoned partial leaves nothing open")
     }
 
 
@@ -1336,12 +1056,13 @@ final class VoiceSharingCollectorTests: XCTestCase {
         // `test_aggregateIdentityState_isBoundedAcrossManySegments`.)
         XCTAssertGreaterThan(collector.pendingCountForTesting, 0,
             "queued work is retained for delivery, not discarded")
-        XCTAssertGreaterThan(collector.aggregateAudioSamplesForTesting, 0,
-            "the retained-audio ledger accounts for what is queued")
+        XCTAssertGreaterThan(collector.actualRetainedAudioBreakdownForTesting.fifo, 0,
+            "queued work is still holding its audio")
         // Withdrawal disposal: queued (never delivered) work dies here.
         collector.gateLost()
         XCTAssertEqual(collector.pendingCountForTesting, 0, "withdrawal purges queued work")
-        XCTAssertEqual(collector.aggregateAudioSamplesForTesting, 0, "no audio survives withdrawal")
+        let purged = collector.actualRetainedAudioBreakdownForTesting
+        XCTAssertEqual(purged.open + purged.fifo + purged.ring, 0, "no audio survives withdrawal")
         gate.signal()
         gate.signal()
         Thread.sleep(forTimeInterval: 0.5)

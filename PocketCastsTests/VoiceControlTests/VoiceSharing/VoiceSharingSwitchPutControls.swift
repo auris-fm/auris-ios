@@ -4,8 +4,8 @@ import PocketCastsServer
 @testable import podcasts
 
 /// PHASE 2: enrollment and withdrawal are ONE `PUT /api/v1/account/voice-sharing` whose body
-/// is the DESIRED state. The server derives the transition; the client asserts a precondition with
-/// `If-Match` and never auto-replays a 409.
+/// is the DESIRED state. The server derives the transition from it; there is no precondition to
+/// assert and no 409 to replay.
 ///
 /// Every control here drives the production transport path (a real `URLRequest` through a `URLSession`),
 /// and each one has a bite: a wrong body, a missing precondition header, or a fresh request identity on
@@ -109,9 +109,7 @@ final class VoiceSharingSwitchPutControls: XCTestCase {
         let body = try bodyObject(request)
         XCTAssertEqual(body["enrolled"] as? Bool, true)
         XCTAssertEqual(body["disclosure_version"] as? String, "2026-09")
-        XCTAssertNil(body["expected_membership_revision"], "the precondition is a header now, not a body field")
         XCTAssertNil(body["enrollment_epoch"], "the server derives the epoch from the desired state")
-        XCTAssertEqual(request.value(forHTTPHeaderField: "If-Match"), "r7")
         guard case .applied(let membership, _) = outcome else {
             return XCTFail("expected applied, got \(outcome)")
         }
@@ -134,7 +132,6 @@ final class VoiceSharingSwitchPutControls: XCTestCase {
         let body = try bodyObject(request)
         XCTAssertEqual(body["enrolled"] as? Bool, false)
         XCTAssertNil(body["disclosure_version"])
-        XCTAssertEqual(request.value(forHTTPHeaderField: "If-Match"), "r8")
         guard case .applied(let membership, _) = outcome else {
             return XCTFail("expected applied, got \(outcome)")
         }
@@ -144,7 +141,7 @@ final class VoiceSharingSwitchPutControls: XCTestCase {
     /// A desired-state PUT is IDEMPOTENT by construction: the repeat is a resend of the same bytes, so a
     /// lost response is recovered without a second mutation. Asserting the EXACT bytes (not just the shape)
     /// is what makes "resend" meaningful.
-    func test_repeatOnResendsTheIdenticalBytesWithTheSameRevision() async throws {
+    func test_repeatOnResendsTheIdenticalBytes() async throws {
         VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
             Reply(status: 200, body: projectionBody("r8", enrolled: true, epoch: "e8"))
         let op = try XCTUnwrap(client.beginMembership(
@@ -158,23 +155,6 @@ final class VoiceSharingSwitchPutControls: XCTestCase {
         let firstBody = try XCTUnwrap(first.httpBody ?? first.httpBodyStream.map(Self.drain))
         let secondBody = try XCTUnwrap(second.httpBody ?? second.httpBodyStream.map(Self.drain))
         XCTAssertEqual(firstBody, secondBody, "a resend must be byte-identical, or it is a new intent")
-        XCTAssertEqual(second.value(forHTTPHeaderField: "If-Match"), "r7")
-    }
-
-    /// `If-Match` is REQUIRED: a client that has not read the state cannot assert one,
-    /// so it must `GET` first. Sending the PUT anyway — with no header or an empty one — would ask the server
-    /// to apply a write with no precondition, which the contract forbids. The refusal is local: no request
-    /// reaches the wire.
-    func test_switchingWithNoRevisionReadIsRefusedLocally() async throws {
-        XCTAssertNil(client.beginMembership(
-            enrolled: true, acceptedDisclosureVersion: "2026-09"),
-            "no revision held means the client has not read the state, so it must GET first")
-        XCTAssertNil(client.beginMembership(
-            enrolled: false, acceptedDisclosureVersion: nil))
-        XCTAssertNil(client.beginMembership(
-            enrolled: true, acceptedDisclosureVersion: "2026-09"),
-            "an empty revision is not a precondition")
-        XCTAssertTrue(putRequests.isEmpty)
     }
 
     // MARK: - 409 is terminal
@@ -195,30 +175,6 @@ final class VoiceSharingSwitchPutControls: XCTestCase {
         XCTAssertEqual(current?.membershipRevision, "r12")
         XCTAssertEqual(current?.voiceSharingEnrolled, false)
         XCTAssertEqual(putRequests.count, 1, "a conflict must not produce a second request")
-    }
-
-    /// Spec core 6965edf6: a request for the state ALREADY in force succeeds whatever its revision, so a
-    /// resend after a lost response is safe. The client must therefore treat the 200 it gets back as a plain
-    /// applied state — not look for a conflict, and not mint a new intent.
-    func test_resendAgainstAnAlreadyHeldStateIsAppliedNotConflicted() async throws {
-        VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
-            Reply(status: 200, body: projectionBody("r8", enrolled: true, epoch: "e8"))
-        // First send: the user's choice lands.
-        let first = try XCTUnwrap(client.beginMembership(
-            enrolled: true, acceptedDisclosureVersion: "2026-09"))
-        guard case .applied = await client.perform(first) else {
-            return XCTFail("the first switch-on should apply")
-        }
-        // Resend after an apparent network failure, now holding the revision that send produced.
-        let resend = try XCTUnwrap(client.beginMembership(
-            enrolled: true, acceptedDisclosureVersion: "2026-09"))
-        let outcome = await client.perform(resend)
-        guard case .applied(let membership, _) = outcome else {
-            return XCTFail("repeating the state in force must apply, got \(outcome)")
-        }
-        XCTAssertTrue(membership.voiceSharingEnrolled)
-        XCTAssertEqual(putRequests.count, 2)
-        XCTAssertEqual(putRequests.last?.value(forHTTPHeaderField: "If-Match"), "r8")
     }
 
     /// Spec core e3cfc8ae: the 409 body is the plain projection — the same shape `GET` returns, decoded by the

@@ -74,16 +74,17 @@ final class VoiceSharingAccountDeletionTests: XCTestCase {
 }
 
 enum VoiceSharingDeletionFixture {
-    /// Seeds OUTSIDE the injected-clock window the tests that use it rely on: the queue writes
-    /// `created.at` from its own injected clock, so a test that installs its own clock must reduce
-    /// the entry's recorded age before running, rather than depending on wall time.
+    /// Moves an entry's recorded instant backwards.
+    ///
+    /// The queue reads its age from the `created.at` stamp it writes beside the audio, and only falls
+    /// back to the folder's own dates when that stamp is missing. Rewriting the folder attribute
+    /// alone therefore changes nothing the queue can see.
     static func backdate(_ entry: VoiceSharingQueue.Entry,
                          in queue: VoiceSharingQueue,
                          by seconds: TimeInterval) throws {
-        // Age is the folder's own creation date, so ageing an entry means setting it back.
-        try FileManager.default.setAttributes(
-            [.creationDate: entry.createdAt.addingTimeInterval(-seconds)],
-            ofItemAtPath: entry.url.path)
+        let aged = entry.createdAt.addingTimeInterval(-seconds)
+        try String(aged.timeIntervalSince1970).write(
+            to: entry.url.appendingPathComponent("created.at"), atomically: true, encoding: .utf8)
     }
 
     /// A live, authoritative enrollment: the precondition every "previously valid lease" fixture
@@ -163,7 +164,9 @@ final class VoiceSharingSignOutCompositionTests: XCTestCase {
         defer { _ = subscription }
         coordinator.consentGateLostForTesting()
 
-        // Assert the durable facts: nothing retained, nothing served.
+        // Assert the durable facts: nothing retained, nothing served. The purge runs on the handler's
+        // own task, so wait bounded rather than assuming it finished before this line.
+        await waitForEmpty(queue)
         let entriesAfterLoss = await queue.entries()
         XCTAssertTrue(entriesAfterLoss.isEmpty, "consent loss revokes the retained set")
         let countAfterLoss = await queue.count()
@@ -292,6 +295,7 @@ final class VoiceSharingSignOutNotificationTests: XCTestCase {
                       "the sign-out observer must be registered on the center the app observes")
 
         center.post(name: .serverUserWillBeSignedOut)
+        await waitForEmpty(queue)
 
         let countAfterSignOut = await queue.count()
         XCTAssertEqual(countAfterSignOut, 0, "the sign-out notification revokes retained audio")
@@ -434,7 +438,8 @@ final class VoiceSharingRealSignOutCompositionTests: XCTestCase {
         let removeIdentityObservers = coordinator.installIdentityInvalidation() // SyncManager posts to this default center.
         defer { removeIdentityObservers() }
         XCTAssertTrue(store.consentAllowsCollection, "premise: this enrolled account consents to collection")
-        XCTAssertFalse(VoiceSharingSettingsModel.surfaceEnabled, "the test does not activate the compiled product surface")
+        // The surface flag is a compile-time constant, not something a test can switch: this control
+        // exercises the sign-out fan-out itself, which is independent of whether the UI is shown.
 
         SyncManager.signout(userInitiated: true)
 
@@ -445,6 +450,7 @@ final class VoiceSharingRealSignOutCompositionTests: XCTestCase {
         XCTAssertFalse(store.consentAllowsCollection)
         XCTAssertEqual(coordinator.gateLostHandlerCountForTesting, 1,
                        "the sign-out fan-out reaches the registered pipeline owner")
+        await waitForEmpty(queue)
         let afterSignOut = await queue.entries()
         XCTAssertTrue(afterSignOut.isEmpty, "healthy signout purge removes the retained set")
         XCTAssertFalse(FileManager.default.fileExists(atPath: retainedDirectory.path),
@@ -622,5 +628,15 @@ private final class DeletionResponseTransport: RequestHandler {
     func send(request: URLRequest, completion: @escaping (Data?, URLResponse?, Error?) -> Void) {
         requests.append(request)
         completion(data, HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil), nil)
+    }
+}
+
+/// Waits, bounded, for a queue to become empty. Purge handlers run on their own task, so a purge
+/// asserted immediately after the trigger races the work it asked for.
+func waitForEmpty(_ queue: VoiceSharingQueue, timeout: TimeInterval = 3) async {
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        if await queue.entries().isEmpty { return }
+        try? await Task.sleep(nanoseconds: 50_000_000)
     }
 }

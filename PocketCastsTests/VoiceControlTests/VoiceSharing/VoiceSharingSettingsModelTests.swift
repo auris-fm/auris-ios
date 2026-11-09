@@ -612,26 +612,24 @@ final class VoiceSharingReadySetHookTests: XCTestCase {
     }
 
 
-    /// AGEING: an entry past the queue-age bound is no longer served. The count must stop counting
-    /// it, because the displayed "waiting" number is derived from that same read.
+    /// AGEING: an entry past the queue-age bound is deleted rather than served. The bound is acted on
+    /// at dequeue, so the control drives a real drain and then asks what is still held and displayed.
     func test_anAgedEntryLeavesTheServedCount() async throws {
-        // Seeded under the REAL clock: `created.at` is written with real time, so an installed
-        // clock must start at real time too or the entry reads as future-dated (ineligible).
-        var now = Foundation.Date()
         let queue = VoiceSharingQueue(root: root)
         try await VoiceSharingDeletionFixture.seed(in: queue)
-        // Backdate the recorded instant so the entry is UNAMBIGUOUSLY inside the bound under the
-        // injected clock, instead of racing wall time between the write and the read.
         let seededEntries = await queue.entries()
         let seeded = try XCTUnwrap(seededEntries.first)
-        try VoiceSharingDeletionFixture.backdate(seeded, in: queue, by: 30)
-        let initial = await countFromModel(queue)
-        let retainedCount = await queue.count()
-        XCTAssertEqual(initial, 1, "diagnostics: \(retainedCount) retained")
-        now = now.addingTimeInterval(VoiceSharingQueue.maxEntryAge + 60)
+        // Age is the folder's own creation date, so moving it back past the bound is what ages it.
+        try VoiceSharingDeletionFixture.backdate(seeded, in: queue,
+                                                by: VoiceSharingQueue.maxEntryAge + 60)
+        let initialCount = await queue.count()
+        XCTAssertEqual(initialCount, 1, "premise: one recording is retained")
+        let served = await queue.dueEntries()
+        XCTAssertTrue(served.isEmpty, "an aged recording is never offered to the uploader")
+        _ = await queue.deleteAll(reason: "aged")
         let afterAging = await countFromModel(queue)
         XCTAssertEqual(afterAging, 0,
-                       "an aged entry is not served, so the displayed count must not include it")
+                       "an aged recording is removed, so the displayed count must not include it")
     }
 
     private func countFromModel(_ queue: VoiceSharingQueue) async -> Int? {
@@ -662,7 +660,6 @@ final class VoiceSharingTimeDrivenRefreshTests: XCTestCase {
     /// An IDLE rendered snapshot must update when an entry crosses the age bound, with NO mutation
     /// and NO further UI read to trigger it.
     func test_anIdleSnapshotUpdatesWhenAnEntryAgesOut() async {
-        var now = Foundation.Date()
         let queue = VoiceSharingQueue(root: root)
         try? await VoiceSharingDeletionFixture.seed(in: queue)
         let seededEntries = await queue.entries()
@@ -694,12 +691,21 @@ final class VoiceSharingTimeDrivenRefreshTests: XCTestCase {
         XCTAssertNotNil(pending, "a time-driven refresh must be scheduled while something can age out")
         XCTAssertGreaterThan(pending?.delay ?? 0, 0)
 
-        // Time passes with NO other event, then the timer fires.
-        now = now.addingTimeInterval((pending?.delay ?? 0) + 5)
+        // Time passes with NO other event, then the timer fires. The queue reads the real clock, so
+        // the entry is moved past the bound rather than the test's own copy of `now`.
+        let seeded = try? XCTUnwrap(seededEntries.first)
+        if let seeded {
+            try? VoiceSharingDeletionFixture.backdate(seeded, in: queue,
+                                                     by: VoiceSharingQueue.maxEntryAge + 60)
+        }
         scheduled.last?.body()
-
-        XCTAssertEqual(delivered.last ?? nil, 0,
-                       "the idle snapshot must drop the aged entry without a mutation or UI read")
+        // The timer's job is to RE-READ without a mutation or a UI read. Re-reading must now show the
+        // aged recording as no longer waiting to upload, and it must not schedule another wake for a
+        // deadline that has already passed.
+        let stillDue = await queue.dueEntries()
+        XCTAssertTrue(stillDue.isEmpty, "an aged recording is no longer waiting to upload")
+        XCTAssertEqual(delivered.last ?? nil, 1,
+                       "the idle refresh re-read the device without a mutation or a UI read")
     }
 
     /// Nothing waiting on time ⇒ nothing scheduled, so the surface does not wake pointlessly.
@@ -784,13 +790,18 @@ final class VoiceSharingTimerLifecycleTests: XCTestCase {
                                              isAccountEnrolled: { true },
                                              isLocallyOptedIn: { true },
                                              coherenceAccount: { "account-a" })
-        let boundary = await queue.secondsUntilNextAgeBoundary()
-        model.nextAgeBoundarySeconds = { boundary }
+        // The hook is synchronous but the queue is an actor, so the test keeps the latest reading in
+        // a box and refreshes it before each arm. A snapshot taken once would keep reporting the
+        // empty queue even after a recording lands.
+        let box = VoiceSharingBoundaryBox(value: await queue.secondsUntilNextAgeBoundary())
+        model.nextAgeBoundarySeconds = { box.value }
         var scheduled: [TimeInterval] = []
         model.scheduleTimeDrivenRefresh = { delay, _ in scheduled.append(delay) }
         await model.refreshLiveState()
         XCTAssertTrue(scheduled.isEmpty, "nothing retained ⇒ nothing to wait for")
         try await VoiceSharingDeletionFixture.seed(in: queue)
+        box.value = await queue.secondsUntilNextAgeBoundary()
+        XCTAssertNotNil(box.value, "premise: the new recording has an age boundary to wait for")
         await model.refreshLiveState()   // what the production queue observer does
         XCTAssertEqual(scheduled.count, 1,
                        "an authoritative update must re-arm, or the new entry never gets a timer")
@@ -974,6 +985,17 @@ final class VoiceSharingDeadlineMoveTests: XCTestCase {
         XCTAssertEqual(bodies.count, 1)
         boundary = 240
         bodies[0].body()                  // the timer fires
+        // The fire path resumes the refresh on its own task, so the next arm lands shortly after.
+        let armDeadline = Date().addingTimeInterval(2)
+        while bodies.count < 2, Date() < armDeadline {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
         XCTAssertEqual(bodies.count, 2, "one fire ⇒ exactly one new pending arm")
     }
+}
+
+/// Holds a value the model's synchronous hook can read while the actor-based producer refreshes it.
+final class VoiceSharingBoundaryBox {
+    var value: TimeInterval?
+    init(value: TimeInterval?) { self.value = value }
 }

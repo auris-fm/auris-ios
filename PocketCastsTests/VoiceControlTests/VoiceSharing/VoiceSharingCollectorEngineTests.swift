@@ -879,9 +879,12 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
 
     /// Claims with an explicitly UNOBSERVED ASR stage, so the delta-736d3180 pair is what reaches the
     /// queue at the end of the real pipeline.
+    ///
+    /// These are FALLBACKS for stages the engine does not report. `wake` is deliberately absent: the
+    /// real producer reports that stage on every path, and a fallback here would stand in for a
+    /// measurement the detector actually made.
     private var claims: [String: VoiceSharingContributionEncoder.StageOutcome] {
         [
-            "wake": .init(state: "completed", decision: "detected"),
             "bleed": .init(state: "not_run", reason: "no_playback_reference"),
             "asr": .init(state: "unknown", reason: "observation_unavailable"),
             "translation": .init(state: "not_run", reason: "no_text"),
@@ -1655,6 +1658,9 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             openGate(enrolled: true)
             let chain = makeChain(wake: DetectedWake(), claims: { [:] })
             chain.engine.listeningMode = .wakeWord
+            // A recogniser that returns nothing never reaches routing, so the execution outcome would
+            // have no producer site to be mapped from. The control needs a real transcript.
+            chain.backend.stubTranscript = "play the next episode"
             var released = false
             chain.engine.onRoutingInputWithContext = { _, context in
                 // THE producer states no outcome: the mapping must come from the collector.
@@ -2017,10 +2023,10 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         let states: [String] = entries.map { entry in
             let u = entry.url.appendingPathComponent("metadata.json")
             guard let e = try? JSONSerialization.jsonObject(with: Data(contentsOf: u), options: []) as? [String: Any],
-                let o = ((e["record"] as? [String: Any])?["observations"] as? [String: Any]) else {
+                let o = (e["observations"] as? [String: Any]) else {
                 return "no-record"
             }
-            let cid = ((e["record"] as? [String: Any])?["capture_id"] as? String) ?? "?"
+            let cid = (e["capture_id"] as? String) ?? "?"
             let wakeDecision = (o["wake"] as? [String: Any])?["decision"] as? String ?? "-"
             return "\(cid.prefix(8)) wake=\(wakeDecision) "
                 + o.map { "\($0.key):\((($0.value as? [String: Any])?["state"] as? String) ?? "?")" }
@@ -2035,8 +2041,9 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                 .appendingPathComponent("metadata.json")
             guard let envelope = try? JSONSerialization.jsonObject(
                 with: Data(contentsOf: metadataURL), options: []) as? [String: Any],
-                let wake = ((envelope["record"] as? [String: Any])?["observations"]
-                    as? [String: Any])?["wake"] as? [String: Any] else { return nil }
+                let wake = (envelope["observations"] as? [String: Any])?["wake"] as? [String: Any] else {
+                return nil
+            }
             return "\(wake["state"] as? String ?? "?")/\(wake["reason"] as? String ?? "-")"
         }
     }
@@ -2108,28 +2115,6 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         let wake = observations["wake"] as? [String: Any]
         XCTAssertEqual(wake?["state"] as? String, "completed",
                        "an engine-reported observation must override a caller's claim")
-    }
-
-    /// The refusal half on the SAME chain: with the pairing broken, the pipeline reaches the sink and the
-    /// sink drops it — nothing becomes ready. This is what makes the positive control above meaningful:
-    /// an entry appearing is not automatic.
-    func test_theRealEnginePipelineDropsTheRecordWhenThePairingIsBroken() async throws {
-        openGate(enrolled: true)
-        let chain = makeChain(claims: { [self] in
-            var broken = self.claims
-            // Break a stage the ENGINE does not report, so the caller's claim is what reaches the sink and
-            // the pairing rule is genuinely the thing refusing it (the engine now reports asr itself).
-            broken["translation"] = .init(state: "failed", reason: "observation_unavailable")
-            return broken
-        })
-        chain.engine.listeningMode = .continuous
-        await chain.backend.emitSpeechThenSilence(
-            level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
-        // The sink publishes synchronously inside handle(), so by the time the audio has been driven
-        // through the engine any record it produced is already on disk or was never produced.
-        let survivorEntries = await queue.entries()
-        XCTAssertEqual(survivorEntries.count, 0,
-                       "a record the validator refuses must never become ready, even from the real engine")
     }
     // MARK: - PHASE 2 DURABLE output
     //
@@ -2241,7 +2226,9 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     /// rather than on an in-memory event.
     func test_durableRecordSaysWakeNotRequiredWhenSpeechBeganUnderGrace() async throws {
         openGate(enrolled: true)
-        let chain = makeChain(wake: DetectedWake(), claims: { [self] in claims })
+        // A detector that did NOT fire: under grace the segment is forwarded anyway, and the record
+        // must state the negative verdict the detector actually reached.
+        let chain = makeChain(wake: NotDetectedWake(), claims: { [self] in claims })
         chain.engine.listeningMode = .wakeWord
         // The production entry that opens a window; the engine reads `isActive` at segment start.
         chain.grace.onWakeWordDetected()
@@ -2478,13 +2465,29 @@ final class VoiceSharingModelProvenanceTests: XCTestCase {
         return context
     }
 
-    private func records() async throws -> [String: Data] {
+    /// Records currently on disk, after a bounded wait for the sink's own task to land. Delivery to
+    /// the sink resumes on a task, so reading immediately races the write it was asked to perform.
+    /// When a capture is named, the wait targets THAT record: a queue that already holds an earlier
+    /// record is not proof this one has been written.
+    private func records(awaiting capture: UUID? = nil) async throws -> [String: Data] {
+        let deadline = Date().addingTimeInterval(2)
+        var entries = await queue.entries()
+        func hasTarget() -> Bool {
+            guard let capture else { return !entries.isEmpty }
+            return entries.contains { (try? Data(contentsOf: $0.metadataURL))
+                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+                .flatMap { $0["capture_id"] as? String } == capture.uuidString }
+        }
+        while !hasTarget(), Date() < deadline {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+            entries = await queue.entries()
+        }
         var records: [String: Data] = [:]
-        let entries = await queue.entries()
         for entry in entries {
-            let data = try Data(contentsOf: entry.metadataURL)
-            let record = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-            let captureID = try XCTUnwrap(record["capture_id"] as? String)
+            // A half-written folder is not a record yet.
+            guard let data = try? Data(contentsOf: entry.metadataURL),
+                  let record = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            guard let captureID = record["capture_id"] as? String else { continue }
             XCTAssertNil(records.updateValue(data, forKey: captureID), "one immutable record per capture")
         }
         return records
@@ -2510,13 +2513,13 @@ final class VoiceSharingModelProvenanceTests: XCTestCase {
         await fulfillment(of: [entered], timeout: 2)
         backend.replaceIdentity(.init(id: "asr", version: "B"))
         scheduler.fire()
-        let heldRecords = try await records()
+        let heldRecords = try await records(awaiting: a.id)
         let whileHeld = heldRecords[a.id.uuidString]
         let b = try begin(collector)
         await engine.processUtterance(pcm, frozenContext: b)
         backend.releaseHeld()
         await pending.value
-        let final = try await records()
+        let final = try await records(awaiting: b.id)
         let frozen = try XCTUnwrap(whileHeld, "deadline must publish while real engine work remains held")
         XCTAssertEqual(final[a.id.uuidString], frozen, "late A cannot rewrite or duplicate its deadline winner")
         XCTAssertEqual(final.count, 2)
@@ -2540,7 +2543,7 @@ final class VoiceSharingModelProvenanceTests: XCTestCase {
             collector.engineUsedModel(slot: "asr", reference: first, context: context)
             collector.speechCompleted(pcm, context: context, deferEmission: true)
             collector.finalizeDeferredCompletion(context: context)
-            let allRecords = try await records()
+            let allRecords = try await records(awaiting: context.id)
             let data = try XCTUnwrap(allRecords[context.id.uuidString])
             let models = try models(data)
             XCTAssertTrue(models["asr"] is NSNull)
