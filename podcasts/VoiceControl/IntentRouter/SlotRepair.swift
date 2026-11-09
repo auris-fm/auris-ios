@@ -12,6 +12,14 @@ enum SlotRepair {
         if tool == "no_match" {
             return ToolCall(name: "no_match", arguments: [:])
         }
+        // A request with no settled amount, or one whose execution is conditioned on
+        // something that has not happened, has nothing safe to act on. Local repair
+        // cannot resolve it by picking a side, and the direction fallback below would
+        // otherwise manufacture a confident seek out of an unresolved one. Drop the
+        // whole call so the local route defers it.
+        if hasUnresolvedExecutionCondition(tool: tool, action: action, utterance: utterance) {
+            return nil
+        }
 
         let parsed = LfmToolCallParser.parse(raw)
         var params = parsed?.arguments ?? [:]
@@ -312,6 +320,103 @@ enum SlotRepair {
         // The mapper adds forward only when it needs one for the sink.
         return out
     }
+
+    /// Whether the utterance leaves the amount unsettled or makes execution conditional.
+    ///
+    /// Two different reasons, one verdict: nothing here can be acted on without guessing. An
+    /// utterance that offers alternatives, states a bound instead of an amount, or gives a range
+    /// names several possibilities and picks none. One that attaches a condition on when to act
+    /// describes an event that may not have happened. Repair resolves slot values; it cannot
+    /// resolve either of these, so the call must not survive repair at all.
+    ///
+    /// The patterns mirror the shared Python fixture authoring so the same utterance is classified
+    /// the same way on every client. Titles and search queries can quote these words without
+    /// conditioning execution, so only actions that consume a numeric slot or drive playback are
+    /// checked.
+    static func hasUnresolvedExecutionCondition(
+        tool: String,
+        action: String,
+        utterance: String
+    ) -> Bool {
+        let numericAction = allowedParams(tool: tool, action: action).contains { key in
+            Self.numericParamKeys.contains(key)
+        }
+        let controlAction = (["playback", "effects", "volume", "sleep"].contains(tool) && action != "query")
+            || (tool == "chapter" && ["next", "previous"].contains(action))
+        guard numericAction || controlAction else { return false }
+
+        let text = utterance.precomposedStringWithCompatibilityMapping
+        if firstMatch(unresolvedExecutionConditionRegex, in: text) != nil { return true }
+        let corrected = correctedNumericRequest(text)
+        return firstMatch(unresolvedAlternativeRegex, in: corrected) != nil
+            || firstMatch(unresolvedBoundRegex, in: corrected) != nil
+            || firstMatch(unresolvedRangeRegex, in: corrected) != nil
+    }
+
+    /// A correction settles the value it affirms, so the rejected value must not keep the request
+    /// looking unresolved. Removing the excluded clause leaves the affirmed amount alone.
+    private static func correctedNumericRequest(_ text: String) -> String {
+        replace(correctionRegex, in: text, with: " ")
+    }
+
+    private static let numericParamKeys: Set<String> = [
+        "delta_seconds", "position_seconds", "minutes", "seconds", "duration", "level",
+    ]
+
+    private static func firstMatch(_ regex: NSRegularExpression, in text: String) -> NSTextCheckingResult? {
+        regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text))
+    }
+
+    /// A number in any of the supported languages, optionally followed by a unit.
+    private static let unresolvedNumber =
+        #"\d+(?:[.,]\d+)?|(?:ten|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)"#
+        + #"|(?:uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|dieciséis|dieciseis|"#
+        + #"diecisiete|dieciocho|diecinueve|veinte|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa)"#
+        + #"|[一二两三四五六七八九十百]+|[０-９]+"#
+    private static let unresolvedUnit =
+        #"(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|秒|分钟|分鐘|分|時間|segundos?|minutos?|horas?)"#
+    private static let unresolvedAmount =
+        "(?:" + unresolvedNumber + ")(?:(?:\\s*(?:of\\s+)?(?:an?\\s+)?)?(?:"
+        + unresolvedUnit + "))?"
+
+    /// "ten or twenty", "十秒或者二十秒", "10秒か20秒".
+    private static let unresolvedAlternativeRegex = try! NSRegularExpression(
+        pattern: unresolvedAmount + "\\s*(?:\\bor\\b|\\bo\\b|或者|或|还是|還是|か)\\s*(?:"
+            + unresolvedNumber + ")",
+        options: [.caseInsensitive])
+
+    /// "at least ten", "至少十秒", "al menos diez".
+    private static let unresolvedBoundRegex = try! NSRegularExpression(
+        pattern: #"(?:\b(?:at\s+(?:least|most)|no\s+(?:more|less)\s+than|more\s+than|less\s+than|over|under|"#
+            + #"al\s+menos|como\s+(?:mínimo|máximo|minimo|maximo)|más\s+de|mas\s+de|menos\s+de)\s+|"#
+            + #"至少|最多|最少|不超过|不超過|不少于|不少於|多于|多於|少于|少於|少なくとも|多くとも)\s*(?:"#
+            + unresolvedNumber + ")|" + unresolvedAmount + #"\s*(?:以上|以下|未満|以内)"#,
+        options: [.caseInsensitive])
+
+    /// "between ten and twenty", "十到二十".
+    private static let unresolvedRangeRegex = try! NSRegularExpression(
+        pattern: #"\b(?:between|entre)\s+"# + unresolvedAmount + #"\s+(?:and|y)\s+(?:"#
+            + unresolvedNumber + ")|" + unresolvedAmount + "\\s*(?:到|至|から|[~〜～])\\s*(?:"
+            + unresolvedNumber + ")",
+        options: [.caseInsensitive])
+
+    /// A condition on WHEN to act: "when this ends", "等这集结束后", "cuando termine".
+    private static let unresolvedExecutionConditionRegex = try! NSRegularExpression(
+        pattern: #"\b(?:when|after|before|until|if|cuando|si|después\s+de|despues\s+de|antes\s+de|hasta\s+que)\b"#
+            + #"|\bonce(?!"#
+            + "(?:\\s+(?:more|again|" + unresolvedUnit + ")\\b)"
+            + #")(?=\s+\w)"#
+            + "|(?:等|当|當|如果|要是).{0,64}(?:结束|結束|完|后|後|时|時|就|再)"
+            + "|(?:结束|結束|播放完|播完)(?:之)?(?:后|後|前)"
+            + "|(?:たら|なら|とき|時に|あとで|後で|秒後|分後|時間後)",
+        options: [.caseInsensitive])
+
+    /// The clause a correction rejects: "twenty, not ten", "二十秒，不是十秒".
+    private static let correctionRegex = try! NSRegularExpression(
+        pattern: #"(?:,|，)?\s*(?:\bnot\b|\binstead\s+of\b|不是|而不是|ではなく|no)\s+"#
+            + "(?:" + unresolvedNumber + ")(?:(?:\\s*(?:of\\s+)?(?:an?\\s+)?)?"
+            + unresolvedUnit + ")?",
+        options: [.caseInsensitive])
 
     /// Check if a delta value is within the contract constraint (±1 hour).
     private static func isValidDelta(_ seconds: Int) -> Bool {
