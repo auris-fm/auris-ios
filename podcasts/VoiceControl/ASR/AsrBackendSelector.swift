@@ -9,7 +9,7 @@ class AsrBackendSelector {
     /// otherwise -> nil (unsupported locale; Whisper remains in-tree but unselected).
     ///
     /// On-device validation of SenseVoice/Canary happens on this branch before it is merged
-    /// (per @merlinran); there is no separate activation flag because the branch is held
+    /// (by explicit owner decision); there is no separate activation flag because the branch is held
     /// unmerged until that pass is done.
     func select(locale: Locale) -> AsrBackend? {
         guard let lang = locale.language.languageCode?.identifier else {

@@ -724,7 +724,7 @@ final class VoiceSharingUploadQueue {
         }
     }
 
-    // MARK: - Change notification 
+    // MARK: - Change notification
 
     private var contentObservers: [UUID: () -> Void] = [:]
     private let contentObserverLock = NSLock()
@@ -4156,7 +4156,7 @@ final class VoiceSharingUploadQueue {
         boundEntryLocked(at: entry) != nil
     }
 
-    /// may this entry be offered to the server? 
+    /// may this entry be offered to the server?
     ///
     /// A bound entry is served, as always. So is an entry whose record exists but no longer agrees
     /// with itself — a digest mismatch or an unparseable record: those are exactly the cases the
