@@ -129,14 +129,14 @@ final class VoiceSharingSettingsModel {
         }
     }
 
-    /// Deletes ALL retained contributions through the owner-wide purge. Never claims success it
+    /// Deletes all retained contributions through the owner-wide purge. Never claims success it
     /// cannot prove: a refused or held purge reports `fullyRevoked == false`.
     /// LOCAL scope, stated in the name: this deletes recordings held ON THIS device. It is not
     /// account-wide deletion — accepted data on the server is a separate operation the client does
     /// not perform here (spec: local removal never stands for server completion).
     func deletePendingRecordingsOnThisDevice() -> DeleteResult {
         let outcome = queue.purgeAll()
-        // Reviewer e66c294a: the gate-loss handler is not the only purge path. This user-initiated
+        // the gate-loss handler is not the only purge path. This user-initiated
         // deletion records the same diagnostic, so no purge anywhere on the app is silent.
         FileLog.shared.addMessage("[VoiceSharing] durable queue PURGE cause=user-request outcome=\(outcome)")
         switch outcome {

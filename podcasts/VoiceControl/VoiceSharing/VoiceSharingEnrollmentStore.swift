@@ -142,7 +142,7 @@ final class VoiceSharingEnrollmentStore {
 
     // MARK: - Reading
 
-    /// SPEC e1529db9: true when CONSENT is gone — the user opted out locally, the account
+    ///: true when CONSENT is gone — the user opted out locally, the account
     /// withdrew, or there is no session. Only this may authorize purging durable recordings;
     /// temporary gate loss (policy flap, network, listening) must retain them.
     var consentGoneForPurge: Bool {

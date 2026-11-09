@@ -4,7 +4,7 @@ import PocketCastsUtils
 
 /// Durable upload queue persistence (spec §Client queue and scheduling, docs commit 270dfa5 lineage).
 ///
-/// Round-23 hardening after the four properties pinned by
+/// hardening after the four properties pinned by
 /// VoiceSharingUploadQueueTests:
 ///
 /// * **Complete-entry validation.** Marker presence alone is not readiness. A ready entry is a
@@ -44,7 +44,7 @@ final class VoiceSharingUploadQueue {
     /// Queue-age bound for ready entries, measured from CAPTURE. Entries older than this are
     /// removed at recovery and refuse publication — a compiled ceiling, not an activation value.
     ///
-    /// SPEC 05ff27d0: a recording not ACCEPTED within seven days of capture is deleted. Retention
+    ///: a recording not ACCEPTED within seven days of capture is deleted. Retention
     /// — not a fixed attempt cap — is what bounds how long an unaccepted recording can persist:
     /// the queue retries for as long as the backoff schedule is due, but never past this instant.
     static let maxEntryAge: TimeInterval = 7 * 24 * 60 * 60
@@ -620,7 +620,7 @@ final class VoiceSharingUploadQueue {
     /// The seconds until the next retry boundary that a wake could actually ACT on, or `nil` when
     /// there is none.
     ///
-    /// Reviewer 7c4c9cff — the PROGRESS rule. Only boundaries over entries the next pass can
+    /// — the PROGRESS rule. Only boundaries over entries the next pass can
     /// attempt count. An unreadable root listing, an unreadable owed delay, or an unknown attempt
     /// count answer `nil`: "unknown" must never be reported as `0`, because a zero delay becomes a
     /// zero-sleep Task in the trigger that re-offers itself forever without progress. Unknown
@@ -634,7 +634,7 @@ final class VoiceSharingUploadQueue {
     func secondsUntilNextRetryBoundary() -> TimeInterval? {
         serialQueue.sync { () -> TimeInterval? in
             // OWNER-WIDE holds first: under either hold `admitAttempt`
-            // refuses EVERY entry, so no boundary is due work. Checked here as well as in the per-
+            // refuses every entry, so no boundary is due work. Checked here as well as in the per-
             // entry prospect so a hold answers `nil` even before the listing is read — the same
             // refusal the drain's admission applies, from the same two flags.
             //
@@ -663,7 +663,7 @@ final class VoiceSharingUploadQueue {
                 let recordName = url.lastPathComponent
                 guard recordName.hasPrefix(Self.notBeforePrefix) else { continue }
                 let entryName = String(recordName.dropFirst(Self.notBeforePrefix.count))
-                // Reviewer ea2964b3: an UNREADABLE or malformed record is debris, not live work.
+                // an UNREADABLE or malformed record is debris, not live work.
                 // Returning 0 here let one orphaned stamp (the simulator has ten) suppress another
                 // live entry's future retry indefinitely. Debris is SKIPPED; only live boundaries
                 // produce a wake.
@@ -717,7 +717,7 @@ final class VoiceSharingUploadQueue {
                 .compactMap { markerAgeLocked($0) }
                 .filter { $0 >= 0 && $0 <= Self.maxEntryAge }
             // The NEAREST expiry is the OLDEST eligible entry (largest age), not the youngest
-            // : `ages.min` waited for the newest entry's expiry and left the
+            // `ages.min` waited for the newest entry's expiry and left the
             // oldest displayed for almost a full extra retention period.
             guard let oldest = ages.max() else { return nil }
             return max(0, Self.maxEntryAge - oldest)
@@ -1152,7 +1152,7 @@ final class VoiceSharingUploadQueue {
         return true
     }
 
-    /// Consent revocation (withdrawal, sign-out, switch-off, lease loss): removes EVERY entry —
+    /// Consent revocation (withdrawal, sign-out, switch-off, lease loss): removes every entry —
     /// ready, unready or disqualified — together with its root-level bookkeeping (settlement
     /// records). The stable lock pool and the root itself are not removed. In-memory attempt state
     /// is cleared under the serial queue. Removal failures leave the offending entry in place
@@ -1314,7 +1314,7 @@ final class VoiceSharingUploadQueue {
             do {
                 try fileManager.removeItem(at: intentPath)
                 try synchronizer(rootDirectory, true)
-                // The origin must be re-derived at EVERY transition: leaving it
+                // The origin must be re-derived at every transition: leaving it
                 // set would mislabel a LATER, genuine failed revocation as unknown coverage.
                 setHold(false, false)
             } catch {
@@ -1632,7 +1632,7 @@ final class VoiceSharingUploadQueue {
     /// to a caller is not enforcement; this is.
     func admitAttempt(_ entry: Entry) throws -> AdmittedAttempt? {
         try serialQueue.sync { () -> AdmittedAttempt? in
-            // EVERY refusal below names its own fixed reason. Without this, one
+            // every refusal below names its own fixed reason. Without this, one
             // generic "admission-refused" made distinct conditions indistinguishable in the log
             // and forced inference from source instead of reading what actually happened. Fixed
             // vocabulary only: no values from disk, no counts that identify content.
@@ -1968,7 +1968,7 @@ final class VoiceSharingUploadQueue {
                 FileLog.shared.forceFlush()
             } else if clock().timeIntervalSince1970 < owed {
                 // not-YET-DUE must be DISTINGUISHABLE from "someone else owns this entry"
-                // : the
+                // the
                 // caller's budget/stopping rules depend on knowing a delay is owed.
                 FileLog.shared.addMessage("[VoiceSharing] admit refusal reason=obligation-not-yet-due")
                 FileLog.shared.forceFlush()
@@ -2040,7 +2040,7 @@ final class VoiceSharingUploadQueue {
                     "[VoiceSharing] attempt entry=\(entry.name) reason=retry-state-unknown disposition=due-now")
                 FileLog.shared.forceFlush()
             }
-            // The enforced retry boundary applies at EVERY entry point.
+            // The enforced retry boundary applies at every entry point.
             try refuseIfNotYetDueLocked(entry)
             guard inFlightAttempts[entry] == nil else { return false }
             // Handle identity is checked before coverage (a foreign handle is a refusal, not a
@@ -2054,7 +2054,7 @@ final class VoiceSharingUploadQueue {
                 !entry.name.contains("/")
             else { throw CocoaError(.fileNoSuchFile) }
             // PER-ENTRY coverage, not owner-WIDE. This
-            // used `strictOwnerCoverageLocked`, so one unreadable sibling entry stopped EVERY
+            // used `strictOwnerCoverageLocked`, so one unreadable sibling entry stopped every
             // attempt: a due recording lost its turn to a fact about a different recording. Only
             // this entry's own state may hold its attempt, and unreadable state means DUE now
             // rather than an invented delay.
@@ -2064,7 +2064,7 @@ final class VoiceSharingUploadQueue {
                 !entry.name.contains("/"),
                 Self.statKind(of: entryDirectoryLocked(for: entry)) == .present
             else { return false }
-            // EVERY non-dispatch path settles explicitly: a lease acquired here must never survive
+            // every non-dispatch path settles explicitly: a lease acquired here must never survive
             // a later refusal or throw, or the entry would be blocked by its own failed attempt.
             let lease = try acquireLeaseLocked(for: entry)
             guard let lease else { return false }
@@ -2239,7 +2239,7 @@ final class VoiceSharingUploadQueue {
             case .present:
                 break
             }
-            // Reviewer 737cba7c (2): read and validate the CURRENT record UNDER the entry lock,
+            //  (2): read and validate the CURRENT record UNDER the entry lock,
             // with the same bounded/regular-file reader the apply path uses. A pre-lock read can
             // be stale: another owner may retire the old record and publish a new settlement
             // before this lock is obtained, and acting on the stale record could delete it.
@@ -2333,7 +2333,7 @@ final class VoiceSharingUploadQueue {
     private func applyAttemptResultLocked(
         _ entry: Entry, lease: AttemptLease, outcome: AttemptOutcome, retryNotBefore: Date?) throws {
         try serialQueue.sync {
-            // Reviewer 4b02a457: handle validation is restored — this entry must belong to THIS
+            // handle validation is restored — this entry must belong to THIS
             // root and carry a name this queue could have minted, before any path is constructed.
             guard entry.root == rootDirectory,
                 UUID(uuidString: entry.name) != nil,
@@ -2348,7 +2348,7 @@ final class VoiceSharingUploadQueue {
                 Self.settlementRecordName(for: entry.name))
 
             enum IntentRead { case record(SettlementRecord); case absent; case unknown }
-            // Reviewer 3aa2b731 (3): oversized, nonregular, unreadable or malformed intent is
+            //  (3): oversized, nonregular, unreadable or malformed intent is
             // UNKNOWN pending state — refuse, never treat as absent or overwrite as fresh.
             func readSettlement() throws -> IntentRead {
                 switch Self.statKind(of: settlementURL) {
@@ -2357,7 +2357,7 @@ final class VoiceSharingUploadQueue {
                 case .failure:
                     return .unknown
                 case .present:
-                    // Reviewer 737cba7c (2): the reader checks the REGULAR-FILE kind too, not
+                    //  (2): the reader checks the REGULAR-FILE kind too, not
                     // only the size bound.
                     guard let size = fileSizeIfRegularLocked(at: settlementURL),
                         size.isRegular, size.bytes > 0,
@@ -2371,7 +2371,7 @@ final class VoiceSharingUploadQueue {
                     return .record(record)
                 }
             }
-            // Reviewer 3aa2b731 (1): the intent file ITSELF is barrier-confirmed (file, then its
+            //  (1): the intent file ITSELF is barrier-confirmed (file, then its
             // naming directory), not just the root.
             func writeSettlement(_ record: SettlementRecord) throws {
                 let data = try record.encoded()
@@ -2379,7 +2379,7 @@ final class VoiceSharingUploadQueue {
                 try synchronizer(settlementURL, false)
                 try synchronizer(rootDirectory, true)
             }
-            /// Reviewer 3aa2b731 (1): before every DESTRUCTIVE continuation on a recorded intent,
+            /// (1): before every DESTRUCTIVE continuation on a recorded intent,
             /// re-confirm that the intent is durably in place (content re-read + file + root
             /// barriers, under the lock). An unconfirmed record must not authorize deletion.
             func confirmIntentDurability(_ expected: SettlementRecord) throws {
@@ -2394,7 +2394,7 @@ final class VoiceSharingUploadQueue {
                 try synchronizer(settlementURL, false)
                 try synchronizer(rootDirectory, true)
             }
-            /// Reviewer 3aa2b731 (2): clearing is two-phase. First REWRITE the record as
+            /// (2): clearing is two-phase. First REWRITE the record as
             /// `confirmed` and barrier it — that write is what makes completion durable and
             /// recoverable. Only then remove the record. If the final removal or its barrier
             /// fails, the confirmed record survives and retry/fresh-instance reconciliation
@@ -2402,7 +2402,7 @@ final class VoiceSharingUploadQueue {
             func confirmPhase(_ record: SettlementRecord) throws {
                 var confirmed = record
                 confirmed.phase = .confirmed
-                // Reviewer d28594ef: the atomic rewrite REPLACES the inode — fsyncing the
+                // the atomic rewrite REPLACES the inode — fsyncing the
                 // previous pending file proves nothing about the replacement. Every journal
                 // rewrite synchronizes FILE first, then its naming directory. A file-barrier
                 // failure retains the recovery state (the atomic temp either lands or not; the
@@ -2425,7 +2425,7 @@ final class VoiceSharingUploadQueue {
                 // Unknown pending state: refuse rather than guess or overwrite.
                 throw PrepareError.accountingUnavailable
             case .record(let prior):
-                // Reviewer 737cba7c (1): identity and outcome are checked before the phase
+                //  (1): identity and outcome are checked before the phase
                 // dispatch — a surviving confirmed record must not let a foreign token or a
                 // contradictory outcome claim success.
                 guard prior.generation == lease.generation else {
@@ -2443,9 +2443,9 @@ final class VoiceSharingUploadQueue {
                     inFlightAttempts.removeValue(forKey: entry)
                     return
                 }
-                // Reviewer 3aa2b731 (1): an UNCONFIRMED record must not authorize deletion until
+                //  (1): an UNCONFIRMED record must not authorize deletion until
                 // its own durability is re-established under this lock.
-                // Reviewer 737cba7c: an UNCONFIRMED record must not authorize deletion. The
+                // an UNCONFIRMED record must not authorize deletion. The
                 // barrier failure surfaces raw here (uncertain outcome) — an already-CONFIRMED
                 // record never needs this re-confirmation, so a retry after the confirmed-phase
                 // barrier failed is not blocked by "unknown intent durability".
@@ -2766,7 +2766,7 @@ final class VoiceSharingUploadQueue {
         // Validate the handle FIRST: a foreign or malformed Entry is an error, not a "not ready"
         // answer, and its absence must never be reported as a benign false.
         _ = try validatedEntryDirectoryLocked(entry)
-        // SPEC 05ff27d0: the count no longer gates servability at all. An entry that has failed a
+        // the count no longer gates servability at all. An entry that has failed a
         // thousand times is exactly as attemptable as a fresh one; retention removes unaccepted
         // recordings, and the backoff schedule spaces the retries.
         // ATTEMPTABILITY is "CONTAINS A CAPTURE", not "BINDS locally" ( ruling 2,
@@ -3131,7 +3131,7 @@ final class VoiceSharingUploadQueue {
             // every other capture hostage. A local inability to read a record is not evidence about
             // any other record, so it is skipped, not propagated.
             guard let state = try? entryStateLocked(at: entry) else { continue }
-            // Reviewer 72e9362d: an unconfirmable READY marker is UNKNOWN coverage for the whole
+            // an unconfirmable READY marker is UNKNOWN coverage for the whole
             // owner — the attempt gate must hold exactly where the serving query holds. Entries
             // still being prepared (incomplete, no marker) are known-incomplete; durability
             // confirmation does not apply to them.
@@ -3216,8 +3216,8 @@ final class VoiceSharingUploadQueue {
     func readyEntriesReportingUnknownCoverage() -> ReadyDiscovery {
         serialQueue.sync {
             guard (try? establishStoragePolicyLocked()) != nil else { return .unknownCoverage }
-            // Reviewer 243ef92d: an absent-entry intent whose retirement failed (e.g. the root
-            // barrier after a successful removal) is retried at EVERY serving pass, not only at
+            // an absent-entry intent whose retirement failed (e.g. the root
+            // barrier after a successful removal) is retried at every serving pass, not only at
             // recovery — the sweeps visit existing entries only, so the reconciler runs here.
             reconcileRefusalIntentsLocked()
             // OWNER-WIDE hold: an unreconciled purge means the on-disk set is not provable, so
@@ -3226,7 +3226,7 @@ final class VoiceSharingUploadQueue {
             if revocationHoldLocked {
                 return revocationOriginUnknownLocked ? .unknownCoverage : .revocationHeld
             }
-            // Reviewer c4d5ecb4: coverage is ALL-OR-NOTHING for the owner. Any required check
+            // coverage is all-OR-NOTHING for the owner. Any required check
             // whose outcome is UNKNOWN (listing failure, required-stat failure, required-file
             // read failure, unconfirmable durability) holds serving for the WHOLE root — one
             // inaccessible entry must not coexist with `.known(others)`.
@@ -3241,7 +3241,7 @@ final class VoiceSharingUploadQueue {
                 // PER-ENTRY refusal hold: an entry with a durable deletion
                 // intent never serves, and the serving sweep retries its SCOPED purge
                 // automatically. Failure holds only THIS entry — the others keep serving.
-                // REVIEWER 4bb7841c item 3: the proven-stage-absence protection applies to
+                // the proven-stage-absence protection applies to
                 // retries too — an intent-bearing entry with an active publication stage (or
                 // an UNKNOWN stage status) is never deleted.
                 let heldIntentKind = intentDiscovery(deletionIntentPathLocked(entry.name))
@@ -3271,7 +3271,7 @@ final class VoiceSharingUploadQueue {
                 do { state = try entryStateLocked(at: entry) } catch {
                     // PER-ENTRY, not owner-WIDE.
                     // One unreadable entry returning `.unknownCoverage` here stopped serving for
-                    // EVERY entry — a single corrupt directory became a queue-wide hold, which is
+                    // every entry — a single corrupt directory became a queue-wide hold, which is
                     // the wedge in another costume. The entry is excluded and logged; its siblings
                     // keep serving.
                     FileLog.shared.addMessage(
@@ -3285,7 +3285,7 @@ final class VoiceSharingUploadQueue {
                     // THE only case that may fall through to the age check and ready.append.
                     break
                 case .unready:
-                    // SPEC 2741a0ca ruling 2, corrected item 1: a capture the
+                    // , corrected item 1: a capture the
                     // client cannot bind is STILL served. "Retained but never sent" is a hold with
                     // extra steps — the first version of this branch excluded it here and only
                     // logged `send-unbound`, which established no upload path at all. The server
@@ -3313,7 +3313,7 @@ final class VoiceSharingUploadQueue {
                     }
                     // A durable publication.failed intent WITHOUT an active publication stage
                     // is a PERMANENT server refusal (or a purge whose removal never completed):
-                    //  deletes it. REVIEWER e71b9524 item 2: entryStateLocked
+                    //  deletes it.: entryStateLocked
                     // returns.disqualified on the failed marker before checking the stage, so
                     // the stage absence must be PROVEN here — an entry carrying both markers
                     // (failed intent + still-active stage) is never deleted, and a stage stat
@@ -3334,7 +3334,7 @@ final class VoiceSharingUploadQueue {
                     excluded.append("\(entry.name):purged(server-refusal)")
                     continue
                 case .incomplete:
-                    // REVIEWER e71b9524 item 1: incomplete entries must never reach the serving
+                    // incomplete entries must never reach the serving
                     // gate — a prepared-but-unfinalized entry with a fresh created.at is not
                     // ready. Retained, never served, never deleted here.
                     excluded.append("\(entry.name):notBound(\(state))")
@@ -3361,7 +3361,7 @@ final class VoiceSharingUploadQueue {
                     continue
                 }
                 // ONE age rule shared with the count signature and the change version
-                // : a future (skewed) date is not fresh, and an unreadable
+                // a future (skewed) date is not fresh, and an unreadable
                 // date cannot claim freshness.
                 if isWithinAgeBoundLocked(entry) {
                     ready.append(entry)
@@ -3384,7 +3384,7 @@ final class VoiceSharingUploadQueue {
     func readyEntries() -> [Entry] {
         serialQueue.sync {
             guard (try? establishStoragePolicyLocked()) != nil else { return [] }
-            // Reviewer 243ef92d: retry absent-entry intent reconciliation from serving too.
+            // retry absent-entry intent reconciliation from serving too.
             reconcileRefusalIntentsLocked()
             // LEGACY serving path also honors the SHARING-OFF hold: an empty
             // list, never a stale one — this path has no unknown-coverage channel.
@@ -3398,7 +3398,7 @@ final class VoiceSharingUploadQueue {
             if currentIdentityLocked != nil {
                 guard (try? strictOwnerCoverageLocked()) != nil else { return [] }
             }
-            // SPEC 1a0d3ffb: purge permanently refused entries before listing, so the served
+            // purge permanently refused entries before listing, so the served
             // set and the usage bound never count bytes the record check has rejected or the
             // server has refused for good. Any proven-state uncertainty must fail closed: the
             // sweep serves nothing rather than guessing (the same discipline as coverage).
@@ -3407,7 +3407,7 @@ final class VoiceSharingUploadQueue {
             // purge failures leave the entry on disk, excluded from the served list.
             do {
                 for entry in try entriesStrictLocked() {
-                    // REVIEWER 4bb7841c items 2+3: intent stat failure => fail closed (serve
+                    //  2+3: intent stat failure => fail closed (serve
                     // nothing); active/unknown stage under an intent => never deleted.
                     let heldIntentKind = intentDiscovery(deletionIntentPathLocked(entry.name))
                     if refusedIntentNamesLocked.contains(entry.name) || heldIntentKind != .absent {
@@ -3435,7 +3435,7 @@ final class VoiceSharingUploadQueue {
                         // authority as the strict path above. A cap quarantine is excluded and
                         // left intact for the recovery resume to serve.
                         //
-                        // REVIEWER 3dd6876c item 1: `nil` means ABSENCE **or an unreadable
+                        // `nil` means ABSENCE **or an unreadable
                         // marker**, and defaulting it to a deletable cause let a marker that
                         // vanished between classification and this read authorise a deletion.
                         // Deletion now needs an AFFIRMATIVELY read cause, in both paths.
@@ -3444,7 +3444,7 @@ final class VoiceSharingUploadQueue {
                             throw PrepareError.accountingUnavailable
                         }
                         guard cause.authorisesDeletion else { continue }
-                        // REVIEWER e71b9524 item 2: deletion requires a durable failed intent
+                        // deletion requires a durable failed intent
                         // AND proven stage absence (see the strict path above).
                         let stageKind = Self.statKind(
                             of: directory.appendingPathComponent(Self.stageName))
@@ -3458,7 +3458,7 @@ final class VoiceSharingUploadQueue {
                     }
                 }
             } catch { return [] }
-            // REVIEWER 4bb7841c item 2: the final legacy list is rebuilt from all complete
+            // the final legacy list is rebuilt from all complete
             // entries, so it must apply the per-entry refusal hold itself — a bindable held
             // survivor (or one whose intent cannot be confirmed absent) never serves.
             return entriesLocked()
@@ -3551,7 +3551,7 @@ final class VoiceSharingUploadQueue {
         }
     }
 
-    /// SPEC 1a0d3ffb: a recording the server refuses permanently, or
+    ///: a recording the server refuses permanently, or
     /// that the client's own record check rejects, is deleted from the queue AT ONCE by routing
     /// it through the SAME reconciled removal machinery as the owner-wide consent purge
     /// (`reconciledRemovalLocked`: durable intent before mutation, mark-then-remove, survivor
@@ -3674,7 +3674,7 @@ final class VoiceSharingUploadQueue {
             let entry = Entry(root: rootDirectory, name: name)
             guard Self.statKind(of: entryDirectoryLocked(for: entry)) == .absent else { continue }
             let intentPath = deletionIntentPathLocked(name)
-            // Reviewer 243ef92d: absence alone is not durable retirement — it is exactly the
+            // absence alone is not durable retirement — it is exactly the
             // state left when a prior pass removed the record but its root barrier failed.
             // Visibility is confirmed only by the root barrier; until it succeeds the hold stays.
             if Self.statKind(of: intentPath) == .absent {
@@ -4047,7 +4047,7 @@ final class VoiceSharingUploadQueue {
     // the same durable state, and the contract requires both to agree. Ambiguity is therefore
     // expressed by `uncertainEntriesLocked` (a hint only) and resolved from disk.
 
-    /// Reviewer c4d5ecb4: `fileExists`/`try?` collapse I/O failure into absence, so one
+    ///: `fileExists`/`try?` collapse I/O failure into absence, so one
     /// inaccessible entry could coexist with `.known(otherEntries)`. The strict state read
     /// distinguishes: REQUIRED-check failure (unknown) throws; genuine absence or a durable
     /// disqualifier classifies the entry.
@@ -4055,7 +4055,7 @@ final class VoiceSharingUploadQueue {
         case bound(VoiceSharingRecordBinding.BoundEntry)
         case disqualified
         /// A CAPTURE holding audio that cannot be bound locally: its metadata is unreadable, or a
-        /// record check rejects it. SPEC 2741a0ca ruling 2 forbids a local verdict here — there is
+        /// record check rejects it. forbids a local verdict here — there is
         /// no local "invalid", only the server's final refusal — so this is not debris and not a
         /// deletion cause. It counts toward the record limit, expires by file time, and is offered
         /// to the uploader so the server can decide. `flatBound` is nil, so nothing that requires a
@@ -4176,7 +4176,7 @@ final class VoiceSharingUploadQueue {
         switch boundFailureLocked(at: entry) {
         case .digestMismatch, .audioDigestMismatch, .malformedJSON, .duplicateKey,
              .nonFiniteNumber, .missingField, .unknownField, .invalidField,
-             // REVIEWER 066e2a70 item 3, ruling a4b417fc ruling 2: a READABLE pair whose audio is
+             // , ruling a4b417fc ruling 2: a READABLE pair whose audio is
              // malformed, wrongly sized or not the representation claimed is still a capture the
              // server must judge. The first version of this split excluded these, which was a local
              // invalid verdict — the exact class of gate the ruling removes. Server's final refusal
@@ -4338,7 +4338,7 @@ final class VoiceSharingUploadQueue {
         // stays queue-owned. Discovery here is BOUNDED too: construction must not eagerly
         // materialise an oversized root just because recovery tolerates failures. On overflow we
         // skip cleanup (fail-closed) rather than enumerate past the bound.
-        // A DEFERRED SWEEP must PERFORM NO DELETION. The
+        // A DEFERRED sweep must PERFORM no deletion. The
         // first version of this logged "deferred" and then swept the TRUNCATED list anyway, which
         // is worse than not logging: `liveEntries` was built from the prefix, so a retry sidecar
         // whose recording directory sat beyond the bound looked orphaned and was DELETED. Removing

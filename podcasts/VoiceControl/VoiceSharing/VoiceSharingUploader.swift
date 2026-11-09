@@ -310,7 +310,7 @@ final class VoiceSharingUploader {
                                           reason: "terminal status with non-owning body")
                 }
                 if statusCode == 400 && code == "invalid_request" {
-                        // SPEC 1a0d3ffb: a recording the server refuses permanently is deleted
+                        // a recording the server refuses permanently is deleted
                         // from the queue at once, not kept. This supersedes the quarantine
                         // compromise: the queue always
                         // drains, and capacity must not be held by unservable bytes.
@@ -507,7 +507,7 @@ final class VoiceSharingUploader {
 
     // MARK: - receipt parsing
 
-    /// Strict: a receipt is accepted only if EVERY required field is the expected type. Anything
+    /// Strict: a receipt is accepted only if every required field is the expected type. Anything
     /// else is `.missingField`/`.notJSON` — which the caller treats as an UNKNOWN outcome.
     static func parseReceipt(_ data: Data) throws -> Receipt {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {

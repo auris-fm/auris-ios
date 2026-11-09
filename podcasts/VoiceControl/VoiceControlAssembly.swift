@@ -17,9 +17,9 @@ class VoiceControlAssembly {
     /// mismatched (fail closed): voice control must not start without a valid
     /// deployment threshold and verified assets.
 /// - Parameter injectedCapture: the microphone source. `nil` keeps the real one; a test
-    ///   substitutes it so the service can be driven through its REAL assembly and start path
-    ///   without opening the microphone. This is the only injection point — everything else is
-    ///   built as the app does.
+    /// substitutes it so the service can be driven through its REAL assembly and start path
+    /// without opening the microphone. This is the only injection point — everything else is
+    /// built as the app does.
     /// Records the factory the sink is built with, so the acceptance entry uses the same one. This is
     /// the point that WIRES the entry: the same call that builds the sink's client retains its factory
     /// for acceptance, so the two cannot diverge.
@@ -151,30 +151,30 @@ class VoiceControlAssembly {
         )
         // Voice-sharing composition (production). The collector observes the engine with production
         // defaults for membership/epoch/session; consent loss on the coordinator's gate — membership
-        // withdrawal, sign-out, refresh observing the switch off, and the SCHEDULED LEASE-EXPIRY
+        // withdrawal, sign-out, refresh observing the switch off, and the SCHEDULED lease-EXPIRY
         // TRIGGER — routes straight into the collector's purge. The feature itself stays disabled
         // until the owner approves activation; wiring exists so consent loss acts on real audio the
         // moment anything upstream produces it.
         // The queue-backed contribution sink (round 62/63): collector event → encoder → durable
-        // queue entry. The gate reads the live policy on EVERY event and the remote switch
+        // queue entry. The gate reads the live policy on every event and the remote switch
         // defaults to disabled, so no upload work is minted until owner-approved activation.
         // Encode/queue failures are logged (opaque IDs only) and dropped — never into the
         // recognition pipeline.
         let queueRoot = VoiceSharingUploadQueue.defaultRootDirectory()
         try? FileManager.default.createDirectory(at: queueRoot, withIntermediateDirectories: true)
-        // PER-ENTRY IDENTITY BINDING (reviewer fd6b8036 / spec fe99ec96): the queue compares each
+        // PER-ENTRY identity binding: the queue compares each
         // entry's own durable enrollment epoch against this LIVE read at admission, so a surviving
         // entry from a previous epoch cannot ride a newer process into an upload — and a new entry
         // is admitted without waiting for a rebuild. The reader is evaluated per admission, never
         // captured at construction.
         let contributionQueue = VoiceSharingUploadQueue(
             rootDirectory: queueRoot,
-            // BOTH halves, structurally (reviewer 2b121320): an epoch value is opaque and can
+            // BOTH halves, structurally: an epoch value is opaque and can
             // collide across accounts, so the live identity pairs it with the account scope.
             currentIdentity: {
                 VoiceSharingUploadIdentity(
                     accountScope: ServerSettings.userId,
-                    // PROVENANCE, NOT PERMISSION (spec 1bb73eac): the epoch is stamped on the
+                    // PROVENANCE, not permission: the epoch is stamped on the
                     // record so the server can attribute it. Using `activeEnrollmentEpoch` here
                     // required a projection round trip in THIS process, which cold start never
                     // has — so a restarted app with consent already given refused every upload
@@ -183,23 +183,23 @@ class VoiceControlAssembly {
                     enrollmentEpoch: VoiceSharingEnrollmentStore.shared
                         .persistedEnrollmentEpochForProvenance)
             })
-        // PRODUCTION WIRE (spec 18:38Z): the real transport (bearer credential + the configured
+        // PRODUCTION wire (spec 18:38Z): the real transport (bearer credential + the configured
         // endpoint, fail-closed on either) feeding the uploader feeding the serialized scheduler.
         // The whole chain sits behind the live authorization gate, so nothing here can mint a
         // request without eligibility AND a credential — and the surface itself is still compiled
         // OFF (VoiceSharingSettingsModel.surfaceEnabled == false): no caller invokes drains yet.
-        // IDENTITY PIN (spec 724577f3 / reviewer d9e99a5e): `permitsCollection` answers "may this
+        // IDENTITY pin: `permitsCollection` answers "may this
         // account collect NOW", which is not the question a queued entry asks. An entry queued
         // under one enrollment epoch must not be uploaded after the account's epoch moves, even
         // when the new epoch also permits collection. The pin is sampled from the SAME store the
         // policy folds on, so account switch and re-enrollment both invalidate it.
         // The PER-ENTRY binding above owns the "may this entry go out" decision. A construction-time
         // pin must not also veto it: that froze identity at assembly time, blocking every new entry
-        // after a re-enrollment and admitting stale entries after a rebuild (reviewer fd6b8036).
-        // SIMPLIFIED CONTRACT (spec 4afc6e43): one authorization gate — the ordinary
+        // after a re-enrollment and admitting stale entries after a rebuild.
+        // SIMPLIFIED contract: one authorization gate — the ordinary
         // authenticated session plus the user's sharing choice. The policy snapshot/lease no
         // longer gates uploads; the server re-checks enrollment/enablement at accept.
-        // THE ONE CONSENT DECISION (spec 4afc6e43, reviewer ee48cdfe): shared by capture, sink
+        // THE one consent decision: shared by capture, sink
         // and upload. Ordinary session + affirmative sharing choice + no explicit consent loss.
         // The server re-checks enrollment at accept; no policy/readiness check.
         let uploadAuthorized: () -> Bool = {
@@ -211,7 +211,7 @@ class VoiceControlAssembly {
         let uploadIdentity: () -> VoiceSharingUploadIdentity? = {
             VoiceSharingUploadIdentity(
                 accountScope: ServerSettings.userId,
-                // PROVENANCE, NOT PERMISSION (spec 1bb73eac). See the queue's identity reader
+                // PROVENANCE, not permission. See the queue's identity reader
                 // above: `activeEnrollmentEpoch` needs a projection round trip in THIS process,
                 // which cold start never has, so admission refused every entry forever.
                 // Explicit opt-out and explicit withdrawal still answer nil here — those are the
@@ -219,14 +219,14 @@ class VoiceControlAssembly {
                 enrollmentEpoch: VoiceSharingEnrollmentStore.shared
                     .persistedEnrollmentEpochForProvenance)
         }
-        // SPEC RULING 2026-11-03: Voice Sharing selects the Auris provider on EVERY build where
+        // SPEC ruling: Voice Sharing selects the Auris provider on every build where
         // sharing is enabled, ignoring the assistant's routing flag and the gateway-cutover gate. With no
         // configured origin there is no credential to present, so sharing is unavailable rather than
         // falling back to a static identity the account route must refuse.
         // Sharing endpoints use the CONFIGURED origin (not the cutover-gated one) so authentication and
         // the requests it authorizes agree, per reviewer on b658801c6. Resolved LIVE per request, not
         // captured once: a captured origin lets auth mint for the new origin while upload still targets
-        // the old one after an origin change (reviewer on f37893cd0).
+        // the old one after an origin change.
         let voiceSharingTokenProvider = CloudTokenProviderRouter.voiceSharingProvider()
         if voiceSharingTokenProvider == nil {
             FileLog.shared.addMessage("[VoiceSharing] sharing unavailable: no Auris origin configured")
@@ -271,14 +271,14 @@ class VoiceControlAssembly {
                     build: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
                     captureSessionID: UUID().uuidString,
                     models: .init(vad: nil, wakeword: nil, asr: nil, translation: nil, router: nil),
-                    conversionVersion: "v1") // spec ruling 2026-10-22: bounded string, not Int
+                    conversionVersion: "v1") // spec ruling: bounded string, not Int
             },
             // A durably published recording is uploadable work: request a drain through the
-            // EXISTING trigger (spec 5ffbfdd5), so an already-foreground app does not wait for a
+            // EXISTING trigger, so an already-foreground app does not wait for a
             // leave-and-return lifecycle event. The trigger keeps its gates, single-flight and
             // workPending coalescing — no new mechanism.
             requestUploadDrain: { [weak uploadTrigger] in uploadTrigger?.triggerDrainIfPermitted() })
-        // No capture allowance (spec c74d7e30, "Actual upload usage"): daily quota is metered
+        // No capture allowance: daily quota is metered
         // from ACTUAL accepted bytes at the server, so capture no longer acquires, reserves or
         // checks any prepaid allocation. The ledger, provisioner and capability objects are not
         // constructed at all — removing only the collector's guard would have left a provisioner
@@ -286,7 +286,7 @@ class VoiceControlAssembly {
         let contributionCollector = VoiceSharingCollector(
             // Capture gate = the same consent truth as upload (session + sharing choice).
             isCollectionPermitted: uploadAuthorized,
-            // CONNECTED CAPTURE ENTRY, second half (2026-11-03): admission ALSO requires the
+            // CONNECTED capture entry, second half: admission ALSO requires the
             // completion wait limit — a nil limit closes the gate before the allowance is ever
             // consulted (collector: `guard outcomeWaitLimit != nil`). Without this the provisioned
             // allowance is real but unreachable: consent live, allowance issued, zero captures.
@@ -302,12 +302,12 @@ class VoiceControlAssembly {
         // Consent loss purges BOTH holders of retained contribution state: the collector's
         // in-memory capture/FIFO, and the durable queue (any entry prepared before the gate
         // closed, ready or not). Cleanup failures inside purge leave entries retained + charged.
-        // AUTHORIZATION INVALIDATION goes through the REAL production path (reviewer 70e5fc58):
+        // AUTHORIZATION invalidation goes through the REAL production path:
         // this handler is the coordinator's single gate-lost signal — withdrawal, sign-out, the
         // refresh observing the switch off, and the scheduled lease-expiry trigger. It must reach
         // the SINK's revocation generation, not just purge storage, or a queued event from the
         // superseded epoch could publish after the switch reads true again.
-        // Re-login recovery (review 15a18d5d): identityBecameReadable must INITIATE the normal
+        // Re-login recovery: identityBecameReadable must INITIATE the normal
         // refresh, not merely permit a later one. Wired here where Firebase is configured; the
         // coordinator's default is a no-op so tests can drive the sequence without Firebase.
         if let uploadTrigger {
@@ -342,7 +342,7 @@ class VoiceControlAssembly {
         // App Clip compiles that file and has no voice layer to publish to.
         EffectsPlayer.echoReferenceHandoff = echoHandoff
 
-        // ASR/LFM preload stays in VoiceControlService.startIfAllowed() (once),
+        // ASR/LFM preload stays in VoiceControlService.startIfAllowed (once),
         // not here — assembly must not download/init models before the service
         // arms (cellular + memory cost when voice is off).
 
@@ -399,7 +399,7 @@ class VoiceControlAssembly {
                             .appendingPathComponent("cloud-operation-journal.json")
                     )
                     let journal = OperationJournal(store: store)
-                    // PRODUCTION RESTART RECOVERY: any operation a previous process left in
+                    // PRODUCTION restart recovery: any operation a previous process left in
                     // progress is reconstructed as typed `unknown` (persisted, never re-executed)
                     // at assembly time, so the first claim of that id after restart replays the
                     // recorded unknown rather than re-running the effect.
@@ -413,7 +413,7 @@ class VoiceControlAssembly {
                     // A wake opens a window; a recognised command continues the current one.
                     (gracePeriodSignal?.isActive ?? false) ? .followUp : .wakeWord
                 },
-                // Grace contract: expiry holds from the turn's ADMITTED DISPATCH through done
+                // Grace contract: expiry holds from the turn's ADMITTED dispatch through done
                 // and the actual drain/stop; token ownership — each hold releases only itself,
                 // and the last release resumes the interval exactly once.
                 onGracePlaybackHoldBegin: { origin in
@@ -444,7 +444,7 @@ class VoiceControlAssembly {
         let ttsEngine = AVSpeechTtsEngine()
         let audioRenderer = AudioFeedbackRenderer(earconPlayer: earconPlayer, ttsEngine: ttsEngine)
 
-        // Pre-warm TTS engine so first speak() has no init penalty.
+        // Pre-warm TTS engine so first speak has no init penalty.
         // Language matches the device locale (same as ASR pipeline).
         let language = Locale.current.language.languageCode?.identifier ?? "en"
         ttsEngine.warmUp(language: language)
@@ -471,7 +471,7 @@ class VoiceControlAssembly {
             parsedIntentObserverFactory: parsedIntentObserverFactory,
             preparedObserverFactory: preparedObserverFactory
         )
-        // An absent sharing origin disables SHARING ONLY. Returning nil here took out the whole Voice
+        // An absent sharing origin disables SHARING only. Returning nil here took out the whole Voice
         // Control service — a working feature broken because an unrelated one is unconfigured, which is
         // failing wide rather than closed. The service is always constructed; with no upload trigger it
         // simply has no voice-sharing lifetime attached.
@@ -491,7 +491,7 @@ class VoiceControlAssembly {
         isAuthorized: @escaping () -> Bool,
         currentIdentity: @escaping () -> VoiceSharingUploadIdentity?,
         baseURLProvider: @escaping () -> String = { CloudConfig.shared.baseUrl },
-        tokenProvider: CloudTokenProviding, // caller supplies the voice-sharing provider (spec 2026-11-03)
+        tokenProvider: CloudTokenProviding, // caller supplies the voice-sharing provider (spec)
         session: URLSession = .shared,
         clock: @escaping () -> Date = Date.init,
         retryPolicy: VoiceSharingRetryPolicy = VoiceSharingRetryPolicy(
@@ -524,32 +524,32 @@ class VoiceControlAssembly {
         uploadTrigger: VoiceSharingUploadTrigger,
         queue: VoiceSharingUploadQueue,
         coordinator: VoiceSharingCoordinator,
-        // Injectable so the focused control can drive the PRODUCTION handler (reviewer 7318214c);
+        // Injectable so the focused control can drive the PRODUCTION handler;
         // production resolves the real consent truth.
         sessionAlive: @escaping () -> Bool = { ServerSettings.userId != nil },
         consentGone: @escaping () -> Bool = { VoiceSharingEnrollmentStore.shared.consentGoneForPurge },
-        // Injectable diagnostic sink (incident 2026-11-05): production logs to FileLog; controls
+        // Injectable diagnostic sink (incident): production logs to FileLog; controls
         // assert the exact purge decision line without touching the log store.
         log: @escaping (String) -> Void = { FileLog.shared.addMessage($0) }
     ) {
         collector.gateLostSubscription = coordinator.registerGateLostHandler {
             [weak collector, weak sink, weak uploadTrigger] in
-            // THE SUSPECTED CAUSE OF THE SILENT QUEUE WIPES, AND NOT A CONFIRMED ONE. On 2026-11-05
+            // THE suspected cause of the silent queue wipes, AND not A CONFIRMED one. On
             // staging lost ~32 durable entries with zero accepted records, and this handler purged
-            // on EVERY gate closure — including the old policy snapshot flapping "no installed
+            // on every gate closure — including the old policy snapshot flapping "no installed
             // snapshot". That is a mechanism that WOULD explain the loss, but the incident's cause
             // remains UNRESOLVED (the retention behaviour observed afterwards does not identify
             // which path removed those entries). Do not cite this as the established root cause.
             // Under
-            // the simplified contract (spec 4afc6e43) gate closure is not consent withdrawal; the
+            // the simplified contract gate closure is not consent withdrawal; the
             // only purge is the user's explicit opt-out (settings) — see SettingsModel.
             sink?.noteRevocation()
             collector?.gateLost()
             uploadTrigger?.stop()
-            // SPEC e1529db9: explicit WITHDRAWAL (local opt-out, server withdrawal, sign-out)
+            // explicit WITHDRAWAL (local opt-out, server withdrawal, sign-out)
             // still clears pending recordings; TEMPORARY loss (policy flap, network, listening)
             // must retain them. Consent truth, not the gate event, decides the purge.
-            // INCIDENT 2026-11-05 (staging): 32 durable entries were removed at 19:58 with ZERO
+            // INCIDENT (staging): 32 durable entries were removed at 19:58 with ZERO
             // log lines. Silence is its own defect: every purge decision — keep OR clear — is
             // now logged with its cause and the reconciled counts. No audio, no credentials.
             if !sessionAlive() {
@@ -582,8 +582,8 @@ class VoiceControlAssembly {
 
     /// Product ASR selection for assembly/tests. Nil = unsupported locale (fail closed).
     /// - Parameter override: PER-ASSEMBLY substitution; `nil` keeps the product selector, so
-    ///   production is unchanged. A per-instance parameter rather than a global static, so one
-    ///   fixture's substitution cannot leak into a concurrently running case.
+    /// production is unchanged. A per-instance parameter rather than a global static, so one
+    /// fixture's substitution cannot leak into a concurrently running case.
     func resolveAsrBackend(locale: Locale, override: (() -> AsrBackend?)? = nil) -> AsrBackend? {
         if let override { return override() }
         return AsrBackendSelector().select(locale: locale)
@@ -607,7 +607,7 @@ class VoiceControlAssembly {
 
     // MARK: - Acceptance operator entry
 
-    /// THE OPERATOR INVOCATION for authenticated acceptance. It builds the SAME client the sink uses
+    /// THE operator invocation for authenticated acceptance. It builds the SAME client the sink uses
     /// (`injectedClientFactory` when a test supplied one, else the production factory), so the harness
     /// submits through the app's real credential path, and it exports only the allowlisted fields.
     ///

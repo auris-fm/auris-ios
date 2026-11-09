@@ -20,7 +20,7 @@ struct VoiceSharingRetryPolicy {
     /// Compiled resource defaults (spec: `retry_initial_s` / `retry_max_s`, validated against
     /// compiled ceilings). Production assembly uses these; controls inject smaller ones.
     static let compiledInitialDelaySeconds: TimeInterval = 2
-    /// SPEC 05ff27d0: the ceiling is one hour. Retries therefore back off exponentially from the
+    ///: the ceiling is one hour. Retries therefore back off exponentially from the
     /// base up to an hour and stay there: still retrying (a temporary outage ends), never hot
     /// (an outage lasting days costs one request per entry per hour, not per minute).
     static let compiledMaximumDelaySeconds: TimeInterval = 3600

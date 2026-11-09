@@ -19,7 +19,7 @@ final class VoiceSharingUploadTrigger {
     private let scheduler: VoiceSharingUploadScheduler
     private let surfaceEnabled: () -> Bool
     private let isAuthorized: () -> Bool
-    /// The live drain task. ALL reads and writes go through `stateLock`: a
+    /// The live drain task. all reads and writes go through `stateLock`: a
     /// fast completion/re-offer re-assigns this handle while a test await or deinit may read it.
     private var drainTaskStorage: Task<Void, Never>?
     private var drainTask: Task<Void, Never>? {
@@ -409,7 +409,7 @@ final class VoiceSharingUploadTrigger {
         retryWakeTaskStorage = nil
         stateLock.unlock()
         existing?.cancel()
-        // Reviewer ea2964b3: arm for EVERY live boundary, including one closer than the schedule
+        // arm for every live boundary, including one closer than the schedule
         // floor — a due-or-near boundary is real work and must produce a second pass. The floor
         // only coalesces sub-50ms waits; each pass still makes progress (the due entry is
         // attempted, or the boundary advances), so no hot loop.

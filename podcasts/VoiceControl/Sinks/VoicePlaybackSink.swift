@@ -35,7 +35,7 @@ protocol VoicePlaybackSink {
     /// clamp.
     func seekTo(positionSeconds: Int, episodeDurationSeconds: Int) -> VoiceResponse
     func nextEpisode() -> VoiceResponse
-    /// THE FACT CHANNEL: pause with the sink's own structured fact. Protocol REQUIREMENT (with
+    /// THE fact channel: pause with the sink's own structured fact. Protocol REQUIREMENT (with
     /// the default below) so overrides dispatch dynamically through the existential — a protocol
     /// extension alone would silently route every call to the default.
     func pauseWithFact() -> (response: VoiceResponse, fact: SinkActionFact?)
@@ -44,7 +44,7 @@ protocol VoicePlaybackSink {
     func nextEpisodeWithFact() -> (response: VoiceResponse, fact: SinkActionFact?)
 }
 
-/// THE FACT CHANNEL, introduced one method at a time. The default reports NO fact — the
+/// THE fact channel, introduced one method at a time. The default reports NO fact — the
 /// executor's bridge then keeps the verdict unknown, because a presentation cannot prove an
 /// outcome. A sink that knows what its action did overrides the method and states the fact.
 extension VoicePlaybackSink {

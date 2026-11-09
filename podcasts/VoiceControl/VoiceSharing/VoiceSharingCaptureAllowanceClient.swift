@@ -263,7 +263,7 @@ struct VoiceSharingCaptureAllowanceClient {
         }
     }
 
-    /// A delegate-driven bounded read for EVERY status. The delegate retains at most
+    /// A delegate-driven bounded read for every status. The delegate retains at most
     /// limit+1 bytes and cancels the session task as soon as retained bytes EXCEED the
     /// limit (including the exact limit+1 boundary). The delegate session is invalidated
     /// on every completion path; caller cancellation is per-invocation.

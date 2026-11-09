@@ -7,7 +7,7 @@ import Foundation
 /// Composition point: the collector's sink calls this, then hands the result to
 /// `VoiceSharingUploadQueue.prepare(metadata:audio:)`. The encoder refuses to emit anything the
 /// queue's own validator (`VoiceSharingRecordBinding.bind` — the same authority recovery and
-/// readiness apply) would reject: it round-trips EVERY output through `bind` before returning, so
+/// readiness apply) would reject: it round-trips every output through `bind` before returning, so
 /// a malformed stage outcome or truncation fact fails at collection time, not as a corrupt queue
 /// entry discovered later.
 ///
@@ -192,7 +192,7 @@ enum VoiceSharingContributionEncoder {
     // MARK: WAV (pcm_s16le, mono, 16 kHz, canonical 44-byte header)
 
     private static func wavBytes(from samples: [Float]) throws -> Data {
-        // Reviewer 9fbb9d24: Float→Int conversion TRAPS on NaN/infinity/overflow — validate and
+        // Float→Int conversion TRAPS on NaN/infinity/overflow — validate and
         // clamp in the FLOAT domain first, so the advertised rejection policy runs before any
         // integer conversion exists to crash.
         guard samples.count <= VoiceSharingCollector.maxRetainedSamples else {
