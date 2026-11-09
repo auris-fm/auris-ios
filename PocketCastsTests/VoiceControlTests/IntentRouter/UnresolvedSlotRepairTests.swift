@@ -215,46 +215,105 @@ final class UnresolvedSlotRepairTests: XCTestCase {
         }
     }
 
-    /// What the service actually does with a deferred turn.
+    /// What the real router does with an ambiguous utterance.
     ///
-    /// Repair returning nil is not the end of the story: the router reports a failed parse, and the
-    /// escalation policy decides what happens next. A deferred turn must reach the service rather
-    /// than a local sink, because the alternatives, bounds and conditions are answers the local
-    /// model could not give and the service may. The counterpart matters just as much: the turn
-    /// must not also be executed locally, since that is the wrong action this work exists to
-    /// prevent.
-    func test_aDeferredUtteranceEscalatesInsteadOfTouchingALocalSink() throws {
+    /// Repair returning nil is only half the story: the router must report it as a routing failure
+    /// rather than a local decision, because that is what sends the turn to the service. A constant
+    /// reason proves nothing about the route, so this drives `LfmIntentRouter` with an inference
+    /// fake that produces the ambiguous local call and reads the diagnostic the router actually
+    /// emits. The turn must yield no intent — nothing for a sink to execute — and the reason it
+    /// fails with must be one the escalation policy sends onward.
+    func test_anAmbiguousUtteranceFailsRoutingAndDoesNotExecuteLocally() async throws {
         let fixtures = try loadFixtures().filter { $0.repaired == nil }
         XCTAssertFalse(fixtures.isEmpty, "expected deferred fixtures to exist")
 
-        for fixture in fixtures {
-            let raw = "<|tool_call_start|>[\(rawCall(fixture.predicted))]<|tool_call_end|>"
-            let call = SlotRepair.repair(
-                raw: raw,
-                utterance: fixture.utterance,
-                tool: fixture.predicted.tool,
-                action: fixture.predicted.action,
-                textLanguage: fixture.textLanguage)
-            XCTAssertNil(call, "\(fixture.id): a deferred turn must not produce a call to execute")
+        // One representative per distinct ambiguous shape; the fixture sweep already covers the
+        // rest against the same repair path.
+        let representatives = [
+            "nov09o-root-001-en-decoded-0",   // alternatives
+            "unresolved-precedence-1-en-0",   // bound
+        ]
+        let chosen = fixtures.filter { representatives.contains($0.id) }
+        XCTAssertEqual(chosen.count, representatives.count, "representative fixtures must exist")
 
-            // The reason the router reports when repair declines.
-            let reason = RouterStageDiagnostic.reasonParseOrRepairFailed
-            XCTAssertEqual(
-                RouteFailureEscalationPolicy.outcome(for: reason), .escalate,
-                "\(fixture.id): a deferred turn asks the service rather than staying silent")
+        for fixture in chosen {
+            let inference = FakeLfmInference()
+            inference.classifyLabel = "\(fixture.predicted.tool):\(fixture.predicted.action):"
+            inference.generateResult =
+                "<|tool_call_start|>[\(rawCall(fixture.predicted))]<|tool_call_end|>"
 
-            // The mapper is how a parsed call becomes an intent a sink executes, so an unmappable
-            // call proves the local route is empty rather than merely unvisited.
-            // `call` is proven nil above, so nothing can be mapped. Stated as a property of the
-            // mapper rather than of this one value: a call reconstructed from the predicted
-            // arguments would be the wrong action, and deferring must not leave that reachable.
-            if let unmapped = call {
-                let intent: (any VoiceIntent)? = ToolCallMapper().map(unmapped)
-                XCTAssertNil(
-                    intent,
-                    "\(fixture.id): mapped to \(String(describing: intent)) — the deferred turn "
-                        + "would have executed locally as well as escalated")
+            let manager = ModelManager(storageDir: try makeRouterStorage())
+            seedLfmAssets(manager: manager)
+            let router = LfmIntentRouter(modelManager: manager, inference: inference)
+
+            var diagnostics: [RouterStageDiagnostic] = []
+            router.onMetrics = { diagnostics.append($0) }
+
+            _ = await router.ensureReady()
+            XCTAssertTrue(router.isReady, "\(fixture.id): router must be ready")
+
+            let result = router.classify(transcript: fixture.utterance, utteranceId: "u-defer")
+
+            // Nothing may be executed: a `.none` from the router is what the service turns into an
+            // escalation, and any `.intent` here would reach a sink as the wrong action.
+            if case .none = result {
+                // expected
+            } else {
+                XCTFail("\(fixture.id): router produced \(result) — that would execute locally")
             }
+
+            // The router's OWN diagnostic, not one supplied to the policy by the test.
+            let diagnostic = try XCTUnwrap(diagnostics.last, "\(fixture.id): no diagnostic emitted")
+            XCTAssertEqual(diagnostic.finalOutcome, RouterStageDiagnostic.outcomeNoIntent,
+                           "\(fixture.id): a deferred turn is not a local decision")
+            XCTAssertEqual(diagnostic.failedStage, RouterStageDiagnostic.stageParseRepair,
+                           "\(fixture.id): failure must be attributed to parse/repair")
+            XCTAssertEqual(
+                RouteFailureEscalationPolicy.outcome(for: diagnostic.reason), .escalate,
+                "\(fixture.id): reason=\(diagnostic.reason ?? "nil") must reach the service")
         }
+    }
+
+    private func makeRouterStorage() throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("slot-repair-router-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    /// The router loads only from a directory that looks like a released set, so the same minimal
+    /// manifest the router's own tests use is written here.
+    private func seedLfmAssets(manager: ModelManager) {
+        let modelDir = manager.lfmDir
+        try? FileManager.default.createDirectory(at: modelDir, withIntermediateDirectories: true)
+        try? "gguf".write(to: manager.lfmModelFile, atomically: true, encoding: .utf8)
+        try? "LFMC".write(to: manager.lfmClassifierFile, atomically: true, encoding: .utf8)
+        try? #"{"labels":["playback:pause","playback:seek_relative"]}"#
+            .write(to: manager.lfmLabelMapFile, atomically: true, encoding: .utf8)
+        let assets = [
+            ("model.gguf", manager.lfmModelFile, "gguf"),
+            ("classifier.bin", manager.lfmClassifierFile, "LFMC"),
+            ("label_map.json", manager.lfmLabelMapFile,
+             #"{"labels":["playback:pause","playback:seek_relative"]}"#),
+        ]
+        var entries: [String] = []
+        for (name, _, contents) in assets {
+            var digest = SHA256()
+            digest.update(data: Data(contents.utf8))
+            let hash = digest.finalize().map { String(format: "%02x", $0) }.joined()
+            entries.append("""
+            "\(name)": {"bytes": \(contents.utf8.count), "sha256": "\(hash)",
+                        "url": "https://example.test/\(name)"}
+            """)
+        }
+        let manifest = """
+        {
+          "version": "2026-06-21-143005",
+          "router_input_format": "english_v1",
+          "assets": { \(entries.joined(separator: ",")) }
+        }
+        """
+        try? manifest.write(to: manager.lfmDir.appendingPathComponent("manifest.json"),
+                           atomically: true, encoding: .utf8)
     }
 }
