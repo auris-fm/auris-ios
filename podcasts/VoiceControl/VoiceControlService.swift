@@ -352,7 +352,10 @@ class VoiceControlService: ObservableObject {
         interruptionHandler.onInterruptionBegan = { [weak self] in
             guard let self else { return }
             let wasCapturing = self.isListening
-            self.stop()  // stops capture, discards current pipeline state
+            // An interruption is the system taking audio away, not the user ending the session.
+            // Capture stops so the reclaimed route is not retained, but the session stays open:
+            // if capture comes back, it is the same session continuing and must not cue again.
+            self.stop(endsSession: false)
             if wasCapturing {
                 // Audio session reclaimed by the system — an active-capture stop
                 // that the user did not request → ERROR per the mic lifecycle spec.
@@ -445,6 +448,13 @@ class VoiceControlService: ObservableObject {
 
             guard !self.isStopping else { return }
             let wasCapturing = self.isListening
+            // Turning voice control off is the user ending the session, the same as stopping it, so
+            // turning it back on starts a new one and cues. Every other reason the gate closes — a
+            // call, playback, a route change — is temporary, and capture returning is the same
+            // session continuing.
+            if !gate.posture.setup.enabledByUser.isAllowed {
+                self.sessionCuePlayed = false
+            }
             switch gate.state {
             case .off:
                 self.stopCapture()
@@ -851,19 +861,30 @@ class VoiceControlService: ObservableObject {
         isListening = true
         listeningMode = mode
         // Only the start of a session cues. Continuous listening never does: it is the window a
-        // committed command opened, not a session the user just started.
-        if mode == .wakeWord, !sessionCuePlayed {
+        // committed command opened, not a session the user just started. The opportunity is still
+        // CONSUMED either way, which is what makes this a session boundary rather than a sound
+        // guard: a session that opens during grace has had its one cue, so a later restart in
+        // wake-word mode as grace ends must not play it late.
+        if !sessionCuePlayed {
             sessionCuePlayed = true
-            audioRenderer.playEarcon(.listeningStart)
+            if mode == .wakeWord {
+                audioRenderer.playEarcon(.listeningStart)
+            }
         }
     }
 
-    func stop() {
+    /// - Parameter endsSession: whether this stop ends the session the user is in. A stop the user
+    ///   asked for does; a stop the system forced (an audio interruption reclaiming the route) does
+    ///   not, because capture resuming afterwards continues the same session.
+    func stop(endsSession: Bool = true) {
         guard !isStopping else { return }
         isStopping = true
         defer { isStopping = false }
-        // An explicit stop ends the session, so the next start is a new one and cues again.
-        sessionCuePlayed = false
+        // An explicit stop ends the session, so the next start is a new one and cues again. A forced
+        // stop keeps it: the cue already marked this session's opening.
+        if endsSession {
+            sessionCuePlayed = false
+        }
         cancelAcquisition()
         stopCapture()
     }

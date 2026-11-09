@@ -1,4 +1,5 @@
 import XCTest
+import AVFoundation
 import Combine
 @testable import podcasts
 
@@ -59,6 +60,118 @@ final class ListeningCueRepetitionTests: XCTestCase {
 
         XCTAssertEqual(cues.filter { $0 == .listeningStart }.count, 1,
                        "three interruptions are still one session")
+    }
+
+    /// The real audio-session interruption callback, not a simulated gate change. The system taking
+    /// audio away stops capture without the user ending anything, so the resume that follows is the
+    /// same session and stays silent. This drives the notification the app actually receives,
+    /// because the gate-change controls above take a different path into stop().
+    func test_aSystemInterruptionDoesNotCueAgainOnResume() throws {
+        let (service, monitor) = try Self.armedService()
+        var cues: [EarconId] = []
+        service.earconObserverForTesting = { cues.append($0) }
+        service.startIfAllowed()
+
+        monitor.context = .appInForeground
+        try Self.waitFor { service.isListening }
+        XCTAssertEqual(cues.filter { $0 == .listeningStart }.count, 1,
+                       "the session opens with one cue")
+
+        Self.postInterruption(.began)
+        try Self.waitFor { !service.isListening }
+
+        Self.postInterruption(.ended, shouldResume: true)
+        try Self.waitFor { service.isListening }
+
+        XCTAssertEqual(cues.filter { $0 == .listeningStart }.count, 1,
+                       "an interruption the user did not cause keeps the session open")
+    }
+
+    /// A session that opens while grace is active has no cue — continuous never sounds — but the
+    /// opportunity is spent. When grace ends and capture restarts in wake-word mode, that restart
+    /// must not play the cue late.
+    ///
+    /// The gate admits as soon as it is armed in this harness, so the session is opened by DISABLING
+    /// voice control first: that ends any session, and the re-enable below is the moment that opens
+    /// a new one — with grace already active.
+    func test_aSessionOpenedDuringGraceDoesNotCueLaterWhenGraceEnds() throws {
+        let (service, monitor) = try Self.armedService()
+        var cues: [EarconId] = []
+        service.earconObserverForTesting = { cues.append($0) }
+        service.startIfAllowed()
+
+        // End the automatic session so the next open is one this control causes.
+        monitor.updateUserEnabled(false)
+        try Self.waitFor { !service.isListening }
+        cues.removeAll()
+
+        // Open a new session with grace ALREADY active, so it resolves to continuous.
+        service.gracePeriodSignalForTesting.onCommandRecognized()
+        monitor.updateUserEnabled(true)
+        try Self.waitFor { service.isListening }
+        try Self.waitFor { service.gateState.listeningMode == .continuous }
+        XCTAssertEqual(cues.filter { $0 == .listeningStart }.count, 0,
+                       "a session opened during grace never sounds the cue")
+
+        // Grace expires AND capture is interrupted, then comes back in wake-word mode. Without a
+        // real stop-and-restart the mode label changes but start() never runs again, and the control
+        // would pass whatever the cue logic does. The interruption is a conflict, which blocks the
+        // gate regardless of context.
+        service.gracePeriodSignalForTesting.deactivateForTesting(trigger: "timeout")
+        try Self.waitFor { service.gateState.listeningMode == .wakeWord }
+        monitor.conflicts = GateConflicts(
+            notOnCall: .blocked(reason: "call_in_progress"),
+            notCasting: .allowed,
+            batteryOk: .allowed,
+            otherAppPlaying: .allowed
+        )
+        try Self.waitFor { !service.isListening }
+        monitor.conflicts = .noneBlocked
+        try Self.waitFor { service.isListening }
+        try Self.waitFor { service.gateState.listeningMode == .wakeWord }
+
+        XCTAssertEqual(cues.filter { $0 == .listeningStart }.count, 0,
+                       "a session that opened during grace already had its cue spent")
+    }
+
+    /// Turning voice control off ends the session just as an explicit stop does, so turning it back
+    /// on is a user start and cues again. Without that, a deliberate off/on would be silent and the
+    /// user would have no confirmation their session opened.
+    func test_turningVoiceControlBackOnCuesAgain() throws {
+        let (service, monitor) = try Self.armedService()
+        var cues: [EarconId] = []
+        service.earconObserverForTesting = { cues.append($0) }
+        service.startIfAllowed()
+
+        // Enable: a user start, so one cue.
+        monitor.updateUserEnabled(true)
+        monitor.context = .appInForeground
+        try Self.waitFor { service.isListening }
+        XCTAssertEqual(cues.filter { $0 == .listeningStart }.count, 1,
+                       "turning voice control on opens a session")
+
+        // Disable: the user ended the session.
+        monitor.updateUserEnabled(false)
+        try Self.waitFor { !service.isListening }
+
+        // Enable again: this is a NEW user-started session, so a second cue.
+        monitor.updateUserEnabled(true)
+        try Self.waitFor { service.isListening }
+        XCTAssertEqual(cues.filter { $0 == .listeningStart }.count, 2,
+                       "turning voice control off and on again is a user start")
+
+        // An automatic resume after that must still be silent.
+        monitor.conflicts = GateConflicts(
+            notOnCall: .blocked(reason: "call_in_progress"),
+            notCasting: .allowed,
+            batteryOk: .allowed,
+            otherAppPlaying: .allowed
+        )
+        try Self.waitFor { !service.isListening }
+        monitor.conflicts = .noneBlocked
+        try Self.waitFor { service.isListening }
+        XCTAssertEqual(cues.filter { $0 == .listeningStart }.count, 2,
+                       "an automatic resume after a re-enable is still the same session")
     }
 
     /// Continuous listening — the grace period after a command — never cues, whatever the
@@ -128,6 +241,24 @@ final class ListeningCueRepetitionTests: XCTestCase {
         // real headset produces, which is the only exposure the gate admits.
         service.routeMonitorForTesting.micExposure = MicExposure.isolated
         return (service, monitor)
+    }
+
+    /// Posts the interruption notification the app subscribes to, so the control exercises the real
+    /// handler rather than a stand-in for it.
+    private static func postInterruption(
+        _ type: AVAudioSession.InterruptionType,
+        shouldResume: Bool = false
+    ) {
+        var info: [AnyHashable: Any] = [AVAudioSessionInterruptionTypeKey: type.rawValue]
+        if type == .ended {
+            info[AVAudioSessionInterruptionOptionKey] =
+                shouldResume ? AVAudioSession.InterruptionOptions.shouldResume.rawValue : 0
+        }
+        NotificationCenter.default.post(
+            name: AVAudioSession.interruptionNotification,
+            object: nil,
+            userInfo: info
+        )
     }
 
     /// Polls with a bounded budget. The gate is Combine-driven, so a state change lands on a
