@@ -120,7 +120,7 @@ gh api repos/{owner}/{repo}/pulls/{pr_number}/comments/{comment_id}/replies \
 
 ```bash
 gh api repos/{owner}/{repo}/issues/{pr_number}/comments \
-  --method POST -f body="@reviewer Re: your comment about X — Done in ${FULL_COMMIT_HASH}"
+  --method POST -f body="Re: your comment about X — Done in ${FULL_COMMIT_HASH}"
 ```
 
 **If not fixed** (inline review comment):
@@ -134,21 +134,21 @@ gh api repos/{owner}/{repo}/pulls/{pr_number}/comments/{comment_id}/replies \
 
 ```bash
 gh api repos/{owner}/{repo}/issues/{pr_number}/comments \
-  --method POST -f body="@reviewer Re: your comment about X — I considered this but didn't make the change because: [reason]"
+  --method POST -f body="Re: your comment about X — I considered this but didn't make the change because: [reason]"
 ```
 
 **If fixed** (PR review submission):
 
 ```bash
 gh api repos/{owner}/{repo}/issues/{pr_number}/comments \
-  --method POST -f body="@reviewer Re: your review — Done in ${FULL_COMMIT_HASH}"
+  --method POST -f body="Re: your review — Done in ${FULL_COMMIT_HASH}"
 ```
 
 **If not fixed** (PR review submission):
 
 ```bash
 gh api repos/{owner}/{repo}/issues/{pr_number}/comments \
-  --method POST -f body="@reviewer Re: your review — I considered this but didn't make the change because: [reason]"
+  --method POST -f body="Re: your review — I considered this but didn't make the change because: [reason]"
 ```
 
 ### 6. Post a summary comment
@@ -160,10 +160,10 @@ gh pr comment {pr_number} --body "$(cat <<'EOF'
 ## Review feedback addressed
 
 {For each comment, one bullet point:}
-- **File.swift:42** (@reviewer): [what was asked] — Done in <full-sha>
-- **File.swift:87** (@reviewer): [what was asked] — Done in <full-sha>
-- **General** (@reviewer): [what was asked] — Not changed because [reason]
-- **Review** (@reviewer): [what was asked] — Done in <full-sha>
+- **File.swift:42** (review comment): [what was asked] — Done in <full-sha>
+- **File.swift:87** (review comment): [what was asked] — Done in <full-sha>
+- **General** (review comment): [what was asked] — Not changed because [reason]
+- **Review** (review comment): [what was asked] — Done in <full-sha>
 EOF
 )"
 ```
