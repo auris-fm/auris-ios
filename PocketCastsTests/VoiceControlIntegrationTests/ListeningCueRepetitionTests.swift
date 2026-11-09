@@ -7,7 +7,7 @@ import Combine
 /// its own — another app released audio, a route change, a pipeline restart — is the same session
 /// continuing, so it must stay silent. Continuous listening never cues at all.
 ///
-/// These controls assert the cue COUNT, not a state flag. The behaviour under test is how many
+/// These controls assert the cue count, not a state flag. The behaviour under test is how many
 /// times a sound reaches the user, and a state assertion passes whether the cue played once or
 /// twice, so it cannot fail for the reason this is testing.
 final class ListeningCueRepetitionTests: XCTestCase {
@@ -91,7 +91,7 @@ final class ListeningCueRepetitionTests: XCTestCase {
     /// opportunity is spent. When grace ends and capture restarts in wake-word mode, that restart
     /// must not play the cue late.
     ///
-    /// The gate admits as soon as it is armed in this harness, so the session is opened by DISABLING
+    /// The gate admits as soon as it is armed in this harness, so the session is opened by disabling
     /// voice control first: that ends any session, and the re-enable below is the moment that opens
     /// a new one — with grace already active.
     func test_aSessionOpenedDuringGraceDoesNotCueLaterWhenGraceEnds() throws {
@@ -105,7 +105,7 @@ final class ListeningCueRepetitionTests: XCTestCase {
         try Self.waitFor { !service.isListening }
         cues.removeAll()
 
-        // Open a new session with grace ALREADY active, so it resolves to continuous.
+        // Open a new session with grace already active, so it resolves to continuous.
         service.gracePeriodSignalForTesting.onCommandRecognized()
         monitor.updateUserEnabled(true)
         try Self.waitFor { service.isListening }
@@ -113,7 +113,7 @@ final class ListeningCueRepetitionTests: XCTestCase {
         XCTAssertEqual(cues.filter { $0 == .listeningStart }.count, 0,
                        "a session opened during grace never sounds the cue")
 
-        // Grace expires AND capture is interrupted, then comes back in wake-word mode. Without a
+        // Grace expires and capture is interrupted, then comes back in wake-word mode. Without a
         // real stop-and-restart the mode label changes but start() never runs again, and the control
         // would pass whatever the cue logic does. The interruption is a conflict, which blocks the
         // gate regardless of context.
@@ -154,7 +154,7 @@ final class ListeningCueRepetitionTests: XCTestCase {
         monitor.updateUserEnabled(false)
         try Self.waitFor { !service.isListening }
 
-        // Enable again: this is a NEW user-started session, so a second cue.
+        // Enable again: this is a new user-started session, so a second cue.
         monitor.updateUserEnabled(true)
         try Self.waitFor { service.isListening }
         XCTAssertEqual(cues.filter { $0 == .listeningStart }.count, 2,
@@ -179,7 +179,7 @@ final class ListeningCueRepetitionTests: XCTestCase {
     ///
     /// This clause already held before the session flag: the cue was gated on wake-word mode, and a
     /// resume inside a grace window resolves to continuous, so it stayed silent on its own. The
-    /// control is kept as the regression guard for that, NOT as evidence for the resume fix — it
+    /// control is kept as the regression guard for that, not as evidence for the resume fix — it
     /// passes with the flag removed, which the other two controls do not.
     func test_continuousListeningNeverCues() throws {
         let (service, monitor) = try Self.armedService()
@@ -201,7 +201,7 @@ final class ListeningCueRepetitionTests: XCTestCase {
         try Self.waitFor { service.gateState.listeningMode == .continuous }
         let afterOpeningCue = cues.filter { $0 == .listeningStart }.count
 
-        // Interrupt and resume INSIDE the continuous window. Foreground loss alone will not stop
+        // Interrupt and resume inside the continuous window. Foreground loss alone will not stop
         // capture while a window is open, so the interruption is a conflict: it blocks the gate
         // regardless of context, and clearing it re-admits capture. A continuous capture never
         // cues, so the count must not move.

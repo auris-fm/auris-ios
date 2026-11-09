@@ -253,7 +253,7 @@ class VoiceControlService: ObservableObject {
     private var isStopping = false
 
     /// True once a cue has been played for the session the user is currently in, so a capture that
-    /// resumes on its own does not cue again. The cue marks the START of a session; an interruption
+    /// resumes on its own does not cue again. The cue marks the start of a session; an interruption
     /// that clears is the same session continuing, and sounding it again would tell the user they
     /// opened something new when they did not. Cleared by an explicit user stop, which ends the
     /// session, so the next start cues again as it should.
@@ -862,7 +862,7 @@ class VoiceControlService: ObservableObject {
         listeningMode = mode
         // Only the start of a session cues. Continuous listening never does: it is the window a
         // committed command opened, not a session the user just started. The opportunity is still
-        // CONSUMED either way, which is what makes this a session boundary rather than a sound
+        // consumed either way, which is what makes this a session boundary rather than a sound
         // guard: a session that opens during grace has had its one cue, so a later restart in
         // wake-word mode as grace ends must not play it late.
         if !sessionCuePlayed {
