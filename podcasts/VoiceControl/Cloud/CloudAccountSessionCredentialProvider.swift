@@ -15,7 +15,7 @@ struct CloudAccountSessionCredentialProvider {
         self.migrate = migrate ?? (refreshTokenReader == nil ? { ServerSettings.refreshPasswordSessionIfNeeded() } : {})
     }
 
-    /// The credential to present, or nil when the user is not signed in — in
+    /// The credential to present, or nil when the user is not signed in in
     /// which case the caller fails closed and dials nothing.
     ///
     /// The credential to present, or nil when the app holds no refresh token.

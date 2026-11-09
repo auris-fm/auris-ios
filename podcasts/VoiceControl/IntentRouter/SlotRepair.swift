@@ -224,22 +224,22 @@ enum SlotRepair {
     /// Fill genuinely absent defaults for `seek_relative`.
     ///
     /// Per the recovery contract (PR 59, cloud-seek-relative):
-    /// - The mapper must NOT manufacture a delta for a direction-only call.
-    ///   The sink owns the app's configurable seek interval and applies it in
-    ///   the request's direction.
+    /// - The mapper must not manufacture a delta for a direction-only call.
+    /// The sink owns the app's configurable seek interval and applies it in
+    /// the request's direction.
     /// - A direction the utterance states decides the sign. When the utterance
-    ///   also states an amount, `repairNumericParams` has already replaced the
-    ///   magnitude with the spoken one ("rewind fifteen seconds" ⇒ -15). When it
-    ///   states a direction alone, the model's magnitude is kept and only the
-    ///   sign is corrected ("go back" with a produced `+30` ⇒ `-30`).
+    /// also states an amount, `repairNumericParams` has already replaced the
+    /// magnitude with the spoken one ("rewind fifteen seconds" ⇒ -15). When it
+    /// states a direction alone, the model's magnitude is kept and only the
+    /// sign is corrected ("go back" with a produced `+30` ⇒ `-30`).
     /// - A produced `0` is not a stated amount — when no spoken amount
-    ///   appears in the utterance, zero is dropped so the sink receives
-    ///   `null` and applies its interval in the stated direction.
+    /// appears in the utterance, zero is dropped so the sink receives
+    /// `null` and applies its interval in the stated direction.
     /// - The mapper may fill direction when neither delta nor direction is
-    ///   stated — defaults to forward (the only defaulting case).
+    /// stated — defaults to forward (the only defaulting case).
     /// - Returns nil when the resulting amount exceeds ±1 hour (the contract
-    ///   constraint), producing no repaired call at all. Checks both the
-    ///   utterance-extracted amount and any produced nonzero delta.
+    /// constraint), producing no repaired call at all. Checks both the
+    /// utterance-extracted amount and any produced nonzero delta.
     private static func fillSeekRelativeDefault(
         tool: String,
         action: String,
@@ -280,7 +280,7 @@ enum SlotRepair {
         if let delta = out["delta_seconds"] as? Int, delta != 0 {
             // A stated direction with no stated amount: "go back" with a
             // produced `+30` must seek backward the model's amount, not forward
-            // — the direction is the one thing the utterance states, and the
+            // the direction is the one thing the utterance states, and the
             // magnitude is the one thing the model produced. Consulting the
             // utterance only when it also names an amount left this case
             // seeking the wrong way.

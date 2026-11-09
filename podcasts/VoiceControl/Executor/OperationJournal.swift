@@ -30,14 +30,14 @@ enum OperationOutcome: String, Equatable, CaseIterable {
     /// The admission predicate is `(unknown ∨ failed) ∧ idempotent` — **not**
     /// `wasFailure(outcome)`. Stated by the cloud side from the turn contract:
     ///
-    ///   * `succeeded` is a settled FACT. An empty state is a real answer ("the app looked and
-    ///     there is nothing"), not an absence, so replaying it contradicts an answer already given.
-    ///   * `refused` is a settled DECISION — the app declined BEFORE acting. Replaying contradicts
-    ///     its answer.
-    ///   * `failed` means the app TRIED and did not complete. A non-idempotent failed operation may
-    ///     already have had its effect, so `failed` alone is NOT a retry signal.
-    ///   * `unknown` is the one that says nothing was established — "do not reason as if it did or
-    ///     did not happen".
+    /// * `succeeded` is a settled FACT. An empty state is a real answer ("the app looked and
+    /// there is nothing"), not an absence, so replaying it contradicts an answer already given.
+    /// * `refused` is a settled DECISION — the app declined before acting. Replaying contradicts
+    /// its answer.
+    /// * `failed` means the app TRIED and did not complete. A non-idempotent failed operation may
+    /// already have had its effect, so `failed` alone is not a retry signal.
+    /// * `unknown` is the one that says nothing was established — "do not reason as if it did or
+    /// did not happen".
     ///
     /// The `idempotent` conjunct is what stops this being permissive in exactly the case where
     /// permissiveness has consequences: a NON-IDEMPOTENT operation that failed.
@@ -177,7 +177,7 @@ enum OperationClaim: Equatable {
     case alreadyRun(OperationResult)
     /// A previous process claimed the operation and did not record an outcome — the app was
     /// interrupted while the mutation was in flight. The effect is not knowable: the operation
-    /// must NOT be executed again, and its result is `unknown`.
+    /// must not be executed again, and its result is `unknown`.
     case interrupted(OperationResult)
 }
 
@@ -209,13 +209,13 @@ enum StoredRecord: Equatable {
 /// Two properties this type has to provide, and they are different:
 ///
 /// * **Exactly-once ownership** — the claim performs the check and the transition in one
-///   critical section, so two callers cannot both see the operation absent and both execute.
-///   A lock around separate "has it run?" and "mark it running" calls would not provide this.
+/// critical section, so two callers cannot both see the operation absent and both execute.
+/// A lock around separate "has it run?" and "mark it running" calls would not provide this.
 /// * **Execution deduplication across an interruption** — a process that dies mid-mutation
-///   leaves an in-progress record behind. On the next launch that record is read back as
-///   `.interrupted`, whose effect is not knowable, so the operation is answered `unknown`
-///   rather than run again. Without the durable store the record would be gone and the
-///   operation would execute a second time.
+/// leaves an in-progress record behind. On the next launch that record is read back as
+/// `.interrupted`, whose effect is not knowable, so the operation is answered `unknown`
+/// rather than run again. Without the durable store the record would be gone and the
+/// operation would execute a second time.
 ///
 /// The record is written *before* the mutation runs, which is what makes the interruption
 /// answerable: a record that is only written afterwards cannot distinguish "never started"
@@ -224,7 +224,7 @@ enum StoredRecord: Equatable {
 /// answered from the record instead of being executed a second time — including across a
 /// process restart, which is the case the durable store exists for.
 ///
-/// PHASE STATUS (PR #49 review 4305981658): this type has NO production constructor, and that
+/// PHASE status (PR #49 58): this type has NO production constructor, and that
 /// is deliberate, not a gap. Its records are keyed on `operation_id`, which the normative
 /// cloud-multiturn wire contract (core-app-tools `app-operation-wire-contract.md`, rev
 /// da327e624) does not put on today's actions — no cloud-multiturn action carries an
@@ -293,7 +293,7 @@ final class OperationJournal {
         guard case .inProgress? = records[operationID] else { return nil }
         let result = OperationResult.nonSuccess(.unknown, reason: OperationReason.interruptedInFlight)
         // Persist FIRST, publish second: a failed settlement write must leave the durable
-        // record in progress (still interrupted, never executable) and NOT report settled
+        // record in progress (still interrupted, never executable) and not report settled
         // unknown that disk never saw.
         var updated = records
         updated[operationID] = .finished(result)
@@ -306,7 +306,7 @@ final class OperationJournal {
     }
 
     /// Records the outcome of a claimed operation.
-    /// Settles a claimed operation. Returns false when the settlement could NOT be persisted:
+    /// Settles a claimed operation. Returns false when the settlement could not be persisted:
     /// the in-memory record then stays in progress and the caller must not report success.
     @discardableResult
     func complete(_ operationID: String, result: OperationResult) -> Bool {

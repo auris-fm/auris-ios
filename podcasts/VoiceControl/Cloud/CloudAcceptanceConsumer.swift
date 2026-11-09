@@ -1,11 +1,11 @@
 import Foundation
 
-/// THE EXECUTABLE CONSUMER for the acceptance protocol. It drives `collectAcceptance` for the three
+/// THE executable consumer for the acceptance protocol. It drives `collectAcceptance` for the three
 /// controlled turns and decides recall and isolation from the RECORDS, not from logs:
 ///
-///   A1  conversation A carries the benign nonce
-///   A2  the SAME conversation asks for the nonce without supplying it  -> recall iff A2's response contains it
-///   B1  a NEW conversation asks for the nonce without supplying it     -> isolation iff B1's response does not
+/// A1 conversation A carries the benign nonce
+/// A2 the SAME conversation asks for the nonce without supplying it -> recall iff A2's response contains it
+/// B1 a NEW conversation asks for the nonce without supplying it -> isolation iff B1's response does not
 ///
 /// It enforces the checks a log scan cannot: every request id must be nonempty and FRESH, the
 /// conversation ids must satisfy A1 == A2 != B1, each step must have its own terminal, and a step's
@@ -43,7 +43,7 @@ struct CloudAcceptanceConsumer {
     }
 
     func evaluate() -> Verdict {
-        // An EMPTY NONCE proves nothing: every response would vacuously "not contain" it, so isolation
+        // An EMPTY nonce proves nothing: every response would vacuously "not contain" it, so isolation
         // would pass for the wrong reason and recall could never be demonstrated.
         guard !nonce.isEmpty else { return .fail("the nonce is empty, so recall cannot be demonstrated") }
 

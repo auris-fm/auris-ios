@@ -17,8 +17,8 @@ class SpokenTemplateResolver {
     private let localeBundle: Bundle?
 
     /// - Parameter localeBundle: injectable for tests; defaults to the bundle for
-    ///   the current language, discovered explicitly so a missing translation can
-    ///   be *detected* rather than silently falling back to the base language.
+    /// the current language, discovered explicitly so a missing translation can
+    /// be *detected* rather than silently falling back to the base language.
     init(mainBundle: Bundle = .main, localeBundle: Bundle? = nil, locale: Locale = .current) {
         self.mainBundle = mainBundle
         if let localeBundle {
@@ -62,7 +62,7 @@ class SpokenTemplateResolver {
     /// for a language the user doesn't read: an English sentence spoken to a
     /// Korean user conveys nothing while occupying the channel that should be
     /// signalling failure. Callers fall back to the error earcon, which reads as
-    /// "that didn't work" in every language (spec ruling, 2026-09-24).
+    /// "that didn't work" in every language (spec ruling).
     ///
     /// Revisit when translations are added: the moment a user's locale carries
     /// the key, this returns it and the earcon stops being used.
@@ -76,8 +76,8 @@ class SpokenTemplateResolver {
 
     /// Resolve a template key with the given format arguments.
     /// - Parameters:
-    ///   - key: The template key (e.g. "effects.set_speed")
-    ///   - args: Positional format arguments interpolated into the template
+    /// - key: The template key (e.g. "effects.set_speed")
+    /// - args: Positional format arguments interpolated into the template
     /// - Returns: The resolved string, or "" if the key is not found
     func resolve(_ key: String, _ args: CVarArg...) -> String {
         let format = NSLocalizedString(key, tableName: tableName, bundle: .main, value: "", comment: "")

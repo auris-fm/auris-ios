@@ -25,7 +25,7 @@ struct CloudAcceptanceRecord: Equatable {
     enum Stage: String, Equatable {
         /// The client could not construct the request (bad URL, unencodable frame).
         case clientRequest
-        /// An ERROR EVENT parsed from the server's frames.
+        /// An ERROR event parsed from the server's frames.
         case serverEvent
         /// The transport failed or the stream ended without a terminal event.
         case transport
@@ -42,7 +42,7 @@ struct CloudAcceptanceRecord: Equatable {
         /// The STAGE says WHERE the outcome originated, because the code alone does not: the same
         /// code string can come from client request construction or from a served error, and the
         /// export previously carried only the code, so neither could be distinguished after the fact.
-        /// The server's message, carried ONLY when the stage is a served event. It answers the question
+        /// The server's message, carried only when the stage is a served event. It answers the question
         /// the code alone cannot: whether an empty message was actually sent, or merely not surfaced.
         /// The client's own construction failures carry no server message.
         case transportFailure(stage: Stage, code: String, message: String?)
@@ -76,7 +76,7 @@ struct CloudAcceptanceRecord: Equatable {
             if terminal == nil { terminal = .cancelled }
         }
 
-        /// Marks the stream ENDED WITHOUT a terminal event: an incomplete turn, classified as a
+        /// Marks the stream ENDED without a terminal event: an incomplete turn, classified as a
         /// transport failure rather than as cancellation or success.
         func markStreamEndedWithoutTerminal() {
             lock.lock(); defer { lock.unlock() }
@@ -87,7 +87,7 @@ struct CloudAcceptanceRecord: Equatable {
 
         /// Called at the transport boundary for every event of THIS turn.
         ///
-        /// THE TERMINAL IS FINAL: once a turn has a terminal, later events are ignored, so a trailing
+        /// THE terminal is final: once a turn has a terminal, later events are ignored, so a trailing
         /// token cannot extend a finished turn's response and a second terminal cannot overwrite the
         /// first. Overwriting would let a late frame rewrite the outcome a consumer had already read.
         func observe(_ event: CloudRouteEvent) {
@@ -99,10 +99,10 @@ struct CloudAcceptanceRecord: Equatable {
             case .done:
                 terminal = .done
             case .error(let source, let code, let message):
-                // THE SOURCE IS STRUCTURAL, taken from the event itself rather than inferred from the
+                // THE source is structural, taken from the event itself rather than inferred from the
                 // message text. The previous version sniffed a `stage=clientRequest` prefix, which
                 // misclassifies whenever a server message happens to look like a tag or a tag is
-                // reworded. The SERVER MESSAGE is retained for a served error so the export can answer
+                // reworded. The SERVER message is retained for a served error so the export can answer
                 // whether it was present and empty.
                 let stage: Stage
                 switch source {

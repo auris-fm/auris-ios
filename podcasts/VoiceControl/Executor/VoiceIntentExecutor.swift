@@ -112,7 +112,7 @@ extension PlaybackManager: PlaybackStateProviding {
 
 extension FingerprintTimingManager: FingerprintMappingProviding {}
 
-/// The single entry point `VoiceControlService` needs from the executor. Extracted (spec 85cec5b7) so the
+/// The single entry point `VoiceControlService` needs from the executor. Extracted so the
 /// service's routing branches can be driven with a chosen RESULT — including a failure — without
 /// constructing every sink.
 /// The executor's own structured verdict for a turn (spec: `execution.outcome` must be a
@@ -150,7 +150,7 @@ extension VoiceIntentExecuting {
         case .earcon(.error):
             return (response, ExecutionVerdict(state: "failed", reason: "action_failed", outcome: "failed"))
         case .earcon(.confirmRequired):
-            // SPEC ALIGNMENT 553ec4a6 (matches Android): a refusal is state `failed`, outcome
+            // SPEC alignment 553ec4a6 (matches Android): a refusal is state `failed`, outcome
             // `refused`, reason `client_refused` — not a not_run, which states no outcome.
             return (response, ExecutionVerdict(state: "failed", reason: "client_refused", outcome: "refused"))
         default:
@@ -177,9 +177,9 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
 
     /// Retires the sink's retained dispatches on the window boundary (production wiring). The
     /// sink transition is lock-guarded and nonisolated, so this stays synchronous — the window
-    /// transition is atomic with the manager's origin clear (reviewer a2723c92).
+    /// transition is atomic with the manager's origin clear.
     /// The follow-up an interruption acknowledgement released, waiting to be submitted on its own
-    /// socket (cloud-assistant.md → Interruption, spec c5fe3416). Read-and-clear: the submitter
+    /// socket (cloud-assistant.md → Interruption, ). Read-and-clear: the submitter
     /// takes it once, so a follow-up can never be submitted twice.
     @MainActor
     func takeReleasedInterruptionFollowUp() -> CloudInterruptionState.ReleasedFollowUp? {
@@ -208,7 +208,7 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
         )
     }
 
-    /// TEST-ONLY: forwarded to the sink for the NEXT dispatch, so a case observes the identity
+    /// TEST-only: forwarded to the sink for the NEXT dispatch, so a case observes the identity
     /// prepared for ITS turn rather than a sink-wide "last prepared" value.
     private let playbackContextProvider: PlaybackContextProvider
     private let gracePeriodSignal: GracePeriodSignal
@@ -274,14 +274,14 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
             // context rather than as an invented episode and position. Refusing here is what
             // made the discovery turn unreachable on the client.
             let context = playbackContextProvider.current() ?? PlaybackContext.absent
-            // ONE AUTHORITATIVE ADMISSION decides both wire and effect ownership (reviewer
+            // ONE authoritative admission decides both wire and effect ownership (reviewer
             // b2c09394): `beginDispatch` returns an ownership TOKEN fenced by the live origin,
             // and that SAME token is passed to the dispatch. Only the token owner runs the wire
             // turn and repeats its effects; a duplicate whose admission is refused can never
             // start the owner's turn even if it reaches the sink.
             let ownership = cloudRouteSink.beginDispatch(utteranceId: cr.utteranceId, origin: cr.generation)
             let ownsEffects = ownership.ownsDispatch
-            // OBSERVABLE DISPATCH OWNERSHIP (nil in production). "Submitted exactly once" is not a
+            // OBSERVABLE dispatch ownership (nil in production). "Submitted exactly once" is not a
             // property the outbound frame count can attribute: it cannot say WHICH of two candidate
             // dispatches won, or whether the loser was refused or never ran. This reports the
             // executor's own admission decision so a control can assert both sides.
@@ -296,7 +296,7 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
                 // window and the selection it was issued under.
                 origin: cr.generation,
                 selection: cr.selection,
-                // REQUEST OWNERSHIP: the captured utterance's identity, so a duplicate
+                // REQUEST ownership: the captured utterance's identity, so a duplicate
                 // callback joins the in-flight request instead of minting another.
                 utteranceId: cr.utteranceId,
                 preparedObserver: preparedObserver,
@@ -306,7 +306,7 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
             )
             // A duplicate (a joined or settled copy of the owner's dispatch) observes
             // completion QUIETLY: it must not repeat the owner's analytics, grace renewal, or
-            // rendered feedback (reviewer 0c546ce5 item 4).
+            // rendered feedback.
             if !ownsEffects {
                 FileLog.shared.addMessage("[VoicePipeline] Duplicate utterance completed quietly: \(cr.utteranceId ?? "?")")
                 return (.silent, nil)
@@ -371,7 +371,7 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
     }
 
     /// The verdict rides the ONE shared execution path: `executeCollectingFact` performs the
-    /// turn exactly once (analytics + grace effects, reviewer 8bc80b2b) and threads the sink's
+    /// turn exactly once (analytics + grace effects, ) and threads the sink's
     /// own fact invocation-locally; where the channel is silent the verdict is the TEMPORARY
     /// presentation bridge (labeled at its definition).
     func executeWithVerdict(_ intent: any VoiceIntent) async -> (response: VoiceResponse, verdict: ExecutionVerdict) {
@@ -384,7 +384,7 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
             // Cloud turns with no stated fact are EXPLICITLY unknown: the
             // presentation bridge would recreate the action-failure claim the
             // sink just declined to make (error earcon on a server
-            // admission/transport error — reviewer b9b9fe0f/516acc58).
+            // admission/transport error — /516acc58).
             if intent is CloudRouteIntent {
                 return (response, ExecutionVerdict(state: "unknown", reason: "observation_unavailable"))
             }
@@ -401,10 +401,10 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
         return (response, Self.presentationBridgeVerdict(response))
     }
 
-    /// TEMPORARY BRIDGE (reviewer 03593972/7b09ce42, spec cac5e28b): the error earcon and
+    /// TEMPORARY bridge: the error earcon and
     /// confirm-required earcon are PRESENTATION classifications, kept only because they are the
     /// conclusions the executor itself currently acts on (it logs "Command failed" and withholds
-    /// grace on exactly this value). They are NOT decision-site facts; the sink-side fact channel
+    /// grace on exactly this value). They are not decision-site facts; the sink-side fact channel
     /// (SinkActionFact) replaces them as it reaches each sink. Everything else stays unknown.
     static func presentationBridgeVerdict(_ response: VoiceResponse) -> ExecutionVerdict {
         switch response {

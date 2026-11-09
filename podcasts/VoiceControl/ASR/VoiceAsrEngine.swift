@@ -55,7 +55,7 @@ class VoiceAsrEngine {
     }
 
     var contributionCollector: VoiceSharingCollector?
-    /// Segments that completed with NO collector attached (spec 13f80de6). Zero in a healthy
+    /// Segments that completed with NO collector attached. Zero in a healthy
     /// process; a non-zero value names the exact failure shape the incident forensics could not
     /// obtain, and the first occurrence is logged immediately.
     private(set) var segmentsWithoutCollectorCount = 0
@@ -126,10 +126,10 @@ class VoiceAsrEngine {
             observation: echoReference?.consistentObservation())
     }
 
-    /// TEST-ONLY: fires between the filter-path observation and the filter call. See call site.
+    /// TEST-only: fires between the filter-path observation and the filter call. See call site.
     var echoObservationTakenForTesting: (() -> Void)?
 
-    /// TEST SEAM (r4357901593): the offset arithmetic applied to a CALLER-SUPPLIED observation,
+    /// TEST seam (r4357901593): the offset arithmetic applied to a CALLER-SUPPLIED observation,
     /// so a control can prove the filter uses the observation it took rather than a fresh
     /// (post-append, displaced) read.
     func engineOffsetFromObservationForTesting(
@@ -175,17 +175,17 @@ class VoiceAsrEngine {
     var listeningMode: ListeningMode = .wakeWord
     /// INJECTABLE for controls: mints the utterance identity at ADMISSION. Production uses a fresh
     /// UUID; a control can supply a known sequence so it can prove the id the routing input carries
-    /// is the ADMITTED one rather than a value rebuilt downstream (spec delta3b1def9).
+    /// is the ADMITTED one rather than a value rebuilt downstream.
     var utteranceIdGeneratorForTesting: (() -> String)?
 
-    /// TEST SEAM: the engine's live grace signal, so controls can prove a discarded capture did
-    /// NOT renew the window (generation unchanged) — cleanup, not consumption (reviewer 1f2c96ce).
+    /// TEST seam: the engine's live grace signal, so controls can prove a discarded capture did
+    /// not renew the window (generation unchanged) — cleanup, not consumption.
     var gracePeriodSignalForTesting: GracePeriodSignal { gracePeriodSignal }
 
-    /// Invoked once the wake decision has established THIS turn's window origin and BEFORE the
+    /// Invoked once the wake decision has established THIS turn's window origin and before the
     /// backend wait, so the turn can be recorded as admitted while its window is still live.
     ///
-    /// It has to be here rather than at `onRoutingInput`: that callback runs AFTER recognition, and
+    /// It has to be here rather than at `onRoutingInput`: that callback runs after recognition, and
     /// on a cold backend the deadline can pass first — in which case a reservation recorded there
     /// would be rejected outright and the turn silently lost (spec `voice-control-core.md:270`: an
     /// utterance observed before the deadline stays eligible through recognition). It also has to
@@ -291,13 +291,13 @@ class VoiceAsrEngine {
     /// Kick off SenseVoice/Canary download+init before capture starts so the
     /// first wake is not blocked behind a silent backend-ready wait.
     /// Only successes are cached: a failed preload clears the task so a later
-    /// `start()` (gate restart) re-attempts `ensureReady()` instead of reusing
+    /// `start` (gate restart) re-attempts `ensureReady` instead of reusing
     /// the failure forever.
     ///
-    /// Concurrency note: `preloadBackend()`'s check-then-set is not atomic — two
-    /// concurrent calls can both spawn `ensureReady()` (last writer wins the
+    /// Concurrency note: `preloadBackend`'s check-then-set is not atomic — two
+    /// concurrent calls can both spawn `ensureReady` (last writer wins the
     /// cache; the identity guard still prevents stale clears). Backends must
-    /// therefore tolerate concurrent `ensureReady()` calls ( SenseVoice/Canary/
+    /// therefore tolerate concurrent `ensureReady` calls ( SenseVoice/Canary/
     /// Whisper all do: the call is idempotent per instance).
     func preloadBackend() {
         backendReadyLock.lock()
@@ -338,15 +338,15 @@ class VoiceAsrEngine {
 
     /// Identifies the current capture session.
     ///
-    /// `capture.stop()` does not drain callbacks already queued by the capture, so a stopped
-    /// session's samples and the faults they produce can arrive AFTER a restart. Main-queue
+    /// `capture.stop` does not drain callbacks already queued by the capture, so a stopped
+    /// session's samples and the faults they produce can arrive after a restart. Main-queue
     /// delivery does not order events produced on different threads, so the fence has to be a
     /// generation: notifications carrying an older generation are dropped instead of reviving
     /// state that a stop or restart already cleared.
     private var sessionGeneration = 0
     private let sessionLock = NSLock()
 
-    /// Serializes segmenter mutation between queued capture processing and stop()/start().
+    /// Serializes segmenter mutation between queued capture processing and stop/start.
     private let segmenterLock = NSLock()
 
     private func currentSession() -> Int {
@@ -389,8 +389,8 @@ class VoiceAsrEngine {
         }
     }
 
-    /// TEST SEAM: the main queue deliveries are posted to. Passing a queue whose blocks the
-    /// control releases by hand lets it place a `stop()`/`start()` BETWEEN a delivery being
+    /// TEST seam: the main queue deliveries are posted to. Passing a queue whose blocks the
+    /// control releases by hand lets it place a `stop`/`start` BETWEEN a delivery being
     /// enqueued and that delivery running — the real interleave, forced rather than hoped for.
     var deliveryQueueForTesting: DispatchQueue = .main
 
@@ -398,7 +398,7 @@ class VoiceAsrEngine {
     ///
     /// Delivered WITHOUT a session fence: recovery reports that the fault state is gone, not work
     /// owned by a capture session, and a restart bumping the generation after this is queued must
-    /// not suppress it — `stop()` sees `isStuckActive == false` once silence already cleared it and
+    /// not suppress it — `stop` sees `isStuckActive == false` once silence already cleared it and
     /// would queue no replacement, leaving the interruption presented forever.
     ///
     /// Because it is unfenced, it must not clear a NEWER fault. That state is read under
@@ -418,7 +418,7 @@ class VoiceAsrEngine {
         }
     }
 
-    /// TEST SEAM: installs the capture/segmenter callbacks without opening the microphone, so a
+    /// TEST seam: installs the capture/segmenter callbacks without opening the microphone, so a
     /// control can prove a fault reaches an observer through the engine's own forwarding.
     func installCaptureCallbacksForTesting() {
         wireCaptureCallbacks()
@@ -441,7 +441,7 @@ class VoiceAsrEngine {
             self.contributionCollector?.segmentationEnded(frozen)
             Task { [weak self] in
                 guard let self else { return }
-                // Re-check when the task actually runs: a stop() can land between enqueue and
+                // Re-check when the task actually runs: a stop can land between enqueue and
                 // execution, and the check above only proves the session was valid then.
                 guard session == self.currentSession() else {
                     FileLog.shared.addMessage("[VoicePipeline] dropped utterance queued before a session change session=\(session) current=\(self.currentSession())")
@@ -457,7 +457,7 @@ class VoiceAsrEngine {
             // state the speech actually began under. Wake-word mode without grace requires the wake
             // word; anything else (grace window active, continuous mode) does not.
             guard let self else { return }
-            // NO-COLLECTOR OBSERVABILITY (spec 13f80de6): every capture call site is
+            // NO-COLLECTOR observability: every capture call site is
             // `contributionCollector?.…`, so a nil reference skips collection with NO log line —
             // indistinguishable from a detector that never ran. The reference is a plain optional
             // assigned once inside `buildVoiceControlService` (VoiceControlAssembly.swift), so nil
@@ -501,7 +501,7 @@ class VoiceAsrEngine {
             // Recovery is a statement about segmenter state, not work owned by a capture session,
             // so it is delivered UNFENCED. It must not be suppressible by an unrelated session
             // change: if a stop/restart lands while this is queued, it would be dropped and —
-            // `isStuckActive` already being false — stop() would queue no replacement, leaving the
+            // `isStuckActive` already being false — stop would queue no replacement, leaving the
             // interruption presented with nothing left to clear it.
             //
             // It is still delivered in order, and it must not report recovery over a NEWER fault:
@@ -523,7 +523,7 @@ class VoiceAsrEngine {
             guard let self else { return }
             // Ownership is the session carried WITH the buffer — stamped when the tap was
             // installed — never the session current at delivery.
-            // Segmenter mutation is serialized against start()'s wiring and stop()'s reset, which
+            // Segmenter mutation is serialized against start's wiring and stop's reset, which
             // run on other threads. Without this the two would interleave and stale PCM could
             // change the next utterance even though its notification was suppressed.
             self.segmenterLock.lock()
@@ -543,16 +543,16 @@ class VoiceAsrEngine {
     func start() -> Bool {
         contributionCollector?.pipelineStarting()
         FileLog.shared.addMessage("[VoicePipeline] engine starting backend=\(backend.requiredModel.id)")
-        // The new session must exist BEFORE callbacks are installed: installing them replays
+        // The new session must exist before callbacks are installed: installing them replays
         // current state (a missing classifier) through the delivery fence, and a replay tagged
         // with the previous generation would be dropped as stale — losing the very fault that
         // explains why capture is about to be refused.
-        // The tap is stamped with the value `beginNewSession()` RETURNED: re-reading the property
-        // here would race a concurrent stop() and could stamp the tap with a superseded session.
+        // The tap is stamped with the value `beginNewSession` RETURNED: re-reading the property
+        // here would race a concurrent stop and could stamp the tap with a superseded session.
         let session = beginNewSession()
         capture.tapSession = session
         // Mutates the segmenter (installs callbacks, replays state), so it is serialized against
-        // capture processing and stop() on other threads.
+        // capture processing and stop on other threads.
         segmenterLock.lock()
         wireCaptureCallbacks()
         segmenterLock.unlock()
@@ -597,15 +597,15 @@ class VoiceAsrEngine {
             segmenter.clearStuckActiveFault()
             queueRecoveryNotification()
         }
-        // Reset ALL remaining segmentation state at the boundary. A partially buffered utterance
+        // Reset all remaining segmentation state at the boundary. A partially buffered utterance
         // is not a fault, so the block above does not cover it; leaving it in place would
         // concatenate old-session PCM with the new session's and dispatch them as one command.
         segmenter.resetForNewSession()
         contributionCollector?.pipelineStopped()
     }
 
-    /// Test seam: the capture→segmenter closure installed by `start()`. Reading it proves the production
-    /// wiring exists without needing a live audio session; production callers use `start()` itself.
+    /// Test seam: the capture→segmenter closure installed by `start`. Reading it proves the production
+    /// wiring exists without needing a live audio session; production callers use `start` itself.
     var captureCallbackForTesting: (([Float]) -> Void)? {
         capture.onCapturedSamples.map { callback in { [weak self] samples in
             guard let self else { return }
@@ -625,9 +625,9 @@ class VoiceAsrEngine {
     /// the Task exists — so a queued-but-not-yet-running utterance A keeps A's identity even if B starts and
     /// opens its own capture before A's body ever runs. Reading "what is current" inside the async body would
     /// hand A's audio to B.
-    /// `taskBodyGate`, when provided (tests only), runs as the Task body's first statement — AFTER the
+    /// `taskBodyGate`, when provided (tests only), runs as the Task body's first statement — after the
     /// freeze, so tests can hold the body back and mutate collector state in between deterministically.
-    /// Test-only body gate used by the PRODUCTION closure path too, so the start()-installed
+    /// Test-only body gate used by the PRODUCTION closure path too, so the start-installed
     /// `onUtterance` closure can be held mid-flight deterministically (nil in production).
     var utteranceBodyGateForTesting: (() -> Void)?
 
@@ -645,7 +645,7 @@ class VoiceAsrEngine {
         }
     }
 
-    /// `frozenContext` is captured by the synchronous `onUtterance` closure BEFORE this Task was created.
+    /// `frozenContext` is captured by the synchronous `onUtterance` closure before this Task was created.
     /// `processUtterance` itself must not read "current" state: by the time an async body runs, a successor
     /// may have started.
     /// The context frozen for the most recent utterance — what the service's routing/execution decision
@@ -660,7 +660,7 @@ class VoiceAsrEngine {
         }
         lastUtteranceContextForTesting = utteranceContext
         stageTimer.mark() // VAD segment ready
-        // ONE IDENTITY FROM ADMISSION (spec delta3b1def9): the utterance is admitted HERE, so its
+        // ONE identity from admission: the utterance is admitted HERE, so its
         // identity is minted here — not rebuilt later. Retries/duplicates that re-emit the SAME
         // capture carry this id; an independent utterance has its own. It flows unchanged through
         // trimming, router diagnostics, the prepared wire request_id and server diagnostics.
@@ -668,13 +668,13 @@ class VoiceAsrEngine {
         FileLog.shared.addMessage("[VoicePipeline] utterance admitted id=\(utteranceId)")
 
         if echoFilterRoute.appliesCorrelationWindow {
-            // ONE CONSISTENT OBSERVATION (PR50 review r4357901593): samples, offset and anchor
+            // ONE consistent observation (PR50 review r4357901593): samples, offset and anchor
             // come from a single lock acquisition, so the offset always describes exactly the
             // samples the mic segment is correlated against — an append landing between two
             // separate reads can no longer shift the window out from under the offset.
             let observation = echoReference?.consistentObservation()
-            // TEST-ONLY boundary hook (r4366062986 disposition): fires AFTER the observation is
-            // taken and BEFORE the filter call, so a control can force an append/anchor advance
+            // TEST-only boundary hook (r4366062986 disposition): fires after the observation is
+            // taken and before the filter call, so a control can force an append/anchor advance
             // into the exact window a split-read regression would read across — deterministically,
             // no timing. Nil in production.
             echoObservationTakenForTesting?()
@@ -686,13 +686,13 @@ class VoiceAsrEngine {
                 mic: utterance,
                 reference: observation?.samples ?? [],
                 segmentEndOffset: segmentEndOffset) {
-                // THE DETECTOR RAN AND RETURNED A VERDICT (reviewer 7f83f874): the bleed stage is
+                // THE detector ran and returned A VERDICT: the bleed stage is
                 // `completed` with `decision: overlap` and NO reason, because that is what actually
                 // happened. An earlier version of this fix used `unknown`/`no_playback_reference`,
                 // which passes the deployed schema's membership check but asserts the OPPOSITE of
                 // the observed fact — "there was no reference" when the detector had just consulted
                 // one. A well-formed record that misstates an observation is worse than a rejected
-                // one, because it enters the dataset looking clean (@cloud 1cb92ee6). The original
+                // one, because it enters the dataset looking clean. The original
                 // "playback_bleed" was in neither enumeration nor the deployed schema
                 // (`record_schema.ts:93`), so every bleed rejection failed validation and vanished.
                 // Why recognition did not run is carried separately, on the ASR stage, as
@@ -704,9 +704,9 @@ class VoiceAsrEngine {
             }
         }
 
-        // ENGINE-PRODUCED OBSERVATION (spec 2dcf8c5b): reaching here means the bleed filter produced a
+        // ENGINE-PRODUCED observation: reaching here means the bleed filter produced a
         // verdict for this capture. When the reference is not exposed the filter is not consulted at all,
-        // which is NOT a verdict — that case stays `unknown`/`no_playback_reference` from the caller.
+        // which is not a verdict — that case stays `unknown`/`no_playback_reference` from the caller.
         if echoFilterRoute.appliesCorrelationWindow {
             contributionCollector?.engineReported(
                 stage: "bleed",
@@ -741,7 +741,7 @@ class VoiceAsrEngine {
         switch WakeGate.decide(result: result, listeningMode: listeningMode, graceActive: gracePeriodSignal.isActive) {
         case .discardProcessing(let errorCode):
             FileLog.shared.addMessage("[VoicePipeline] wake error \(errorCode) → drop")
-            // ENGINE-PRODUCED OBSERVATION (review bc692f91): the DETECTOR failed for this capture — a real
+            // ENGINE-PRODUCED observation: the DETECTOR failed for this capture — a real
             // observed error, reported from the site that made the decision.
             contributionCollector?.engineReported(
                 stage: "wake",
@@ -753,11 +753,11 @@ class VoiceAsrEngine {
             FileLog.shared.addMessage("[VoicePipeline] wake \(wakeCmp) → drop (no grace)")
             // Wake-negative: collectable audio. Notifying here adds NO ASR/router/action work — the very
             // next statement returns, and nothing downstream runs for this segment either way.
-            // ENGINE-PRODUCED OBSERVATION (review bc692f91): the detector RAN and reported no wake for
+            // ENGINE-PRODUCED observation: the detector RAN and reported no wake for
             // this segment — reported from the decision site, never inferred from receiving frames.
-            // An OBSERVED NEGATIVE is still `completed`: the detector ran and gave a verdict. The
+            // An OBSERVED negative is still `completed`: the detector ran and gave a verdict. The
             // verdict lives in the DECISION field, because a completed stage carries no reason
-            // (spec 94073918) — emitting the reason here would be refused by the binding and the
+            // emitting the reason here would be refused by the binding and the
             // capture would vanish instead of being recorded as a real no-wake observation.
             contributionCollector?.engineReported(
                 stage: "wake",
@@ -767,21 +767,21 @@ class VoiceAsrEngine {
             contributionCollector?.segmentRejected(kind: .rejectedWake, samples: utterance.count, context: utteranceContext)
             return
         case .forward(let detected):
-            // ENGINE-PRODUCED OBSERVATION (review bc692f91): the wake decision below is made HERE, by
+            // ENGINE-PRODUCED observation: the wake decision below is made HERE, by
             // the detector, so this is the only place entitled to report the wake stage.
             // The detector RAN and returned a verdict either way. A forwarded NEGATIVE segment in
             // grace/continuous mode observed `no_wake_detected` exactly as a dropped one did, so the
             // same outcome must be reported here — dropping it would lose a real observation
-            // (reviewer 7c6e628e).
+            // .
             contributionCollector?.engineReported(
                 stage: "wake",
                 outcome: .init(
                     state: "completed", reason: nil,
-                    // SERVER SCHEMA (record_schema.ts validateWake): the decision enum is
+                    // SERVER schema (record_schema.ts validateWake): the decision enum is
                     // {detected, rejected} and a COMPLETED wake stage must carry one — the
                     // server files a decision-less completed wake under request/ as if no
                     // wake decision was made (spec GO review, fixture refusal nov07). A
-                    // completed stage carries no reason (spec 94073918), so the verdict
+                    // completed stage carries no reason, so the verdict
                     // lives in decision under the schema's own values, detected included.
                     decision: detected ? "detected" : "rejected",
                     score: measuredWake?.score, threshold: measuredWake?.threshold),
@@ -833,7 +833,7 @@ class VoiceAsrEngine {
         }
         if case .failure(let error) = ready {
             FileLog.shared.addMessage("[VoicePipeline] → drop (backend not ready: \(error))")
-            // ENGINE-PRODUCED OBSERVATION (spec 2dcf8c5b): the recogniser could not be started, so this
+            // ENGINE-PRODUCED observation: the recogniser could not be started, so this
             // capture's ASR genuinely failed — a real observed failure, not an unobserved stage.
             contributionCollector?.engineReported(
                 stage: "asr",
@@ -867,16 +867,16 @@ class VoiceAsrEngine {
             return "trim[ut=\(utteranceId)] '\(asrResult.text)' → '\(trimmedText)'"
         }()
 
-        // ENGINE-PRODUCED OBSERVATION (spec 406c247e): the ASR stage states the RECOGNISER'S OWN RESULT,
+        // ENGINE-PRODUCED observation: the ASR stage states the RECOGNISER'S OWN result,
         // and nothing else. A wake-only capture is a SUCCESSFUL recognition whose text happens to be just
-        // the wake phrase — removing that phrase is the COMMAND INPUT's job, downstream, not an ASR
+        // the wake phrase — removing that phrase is the COMMAND input's job, downstream, not an ASR
         // failure and not a wake rejection. So the raw transcript is published as completed.
         let rawText = asrResult.text.trimmingCharacters(in: .whitespacesAndNewlines)
         if !rawText.isEmpty {
             // The language is the RECOGNISER'S OWN observation and router_input is the exact text
-            // handed onward as the command input (spec 78480a17: existing schema fields, stated by
+            // handed onward as the command input (: existing schema fields, stated by
             // the site that produced them). `empty_result` never carries either member.
-            // NON-CONTENT (reviewer 9be75bf0, found through the durable-output control): a transcript
+            // NON-CONTENT: a transcript
             // with no letter or number is discarded below, before translation, the router, or any cloud
             // work — so NO command input was ever produced. Reporting `router_input` here claimed a
             // command that never proceeded; a reader of the record would see "?!" as the input to a
@@ -892,12 +892,12 @@ class VoiceAsrEngine {
                                routerInput: commandInput),
                 context: utteranceContext)
         } else {
-            // A GENUINELY EMPTY recogniser result is a SUCCESSFUL recognition with nothing usable in it
-            // (spec delta c6f3bdf7): `completed` carrying `empty_result`, with no text and no router
+            // A GENUINELY empty recogniser result is a SUCCESSFUL recognition with nothing usable in it
+            // `completed` carrying `empty_result`, with no text and no router
             // input. It is not `not_run` — the recogniser did run — and not `provider_error` — nothing
             // failed. The binding enforces exactly this pairing on every path.
             //
-            // The LANGUAGE survives an empty transcript (reviewer 67ecb11e). An empty result means "it
+            // The LANGUAGE survives an empty transcript. An empty result means "it
             // heard speech and recognised nothing", which is a different fact from "it could not tell
             // what language was spoken" — and cleanly distinguishes silence-shaped output in a language
             // that transcribes confidently empty from one whose recogniser never engaged. Dropping it
@@ -921,7 +921,7 @@ class VoiceAsrEngine {
             return
         }
 
-        // NON-CONTENT OUTPUT (task #78, spec 77eacc9b): a transcript with NO Unicode letter or
+        // NON-CONTENT output (task #78, ): a transcript with NO Unicode letter or
         // number carries no command — whitespace-only, punctuation-only, or any other non-content
         // the recogniser returns. It is discarded SILENTLY, before translation, the router, the
         // dialog, or any cloud work. No minimum length: a short MEANINGFUL utterance ("yes", "停",
@@ -952,9 +952,9 @@ class VoiceAsrEngine {
             contributionCollector?.finalizeDeferredCompletion(context: utteranceContext)
             return
         }
-        // OWNERSHIP TRANSFER, CONDITIONAL ON ACCEPTANCE: only a router that actually took the
+        // OWNERSHIP transfer, CONDITIONAL on acceptance: only a router that actually took the
         // input will release the reservation on its terminal outcome. If it refuses — a late
-        // completion after `stop()`, say — nobody owns the turn, so the engine keeps ownership and
+        // completion after `stop`, say — nobody owns the turn, so the engine keeps ownership and
         // its `defer` releases. Transferring unconditionally would leak in exactly that case.
         let routingInput = Self.makeRoutingInput(
             source: trimmedResult,
@@ -1000,7 +1000,7 @@ class VoiceAsrEngine {
                 utteranceId: utteranceId
             )
         }
-        // NO FABRICATED LANGUAGE: an unknown LID stays nil on the input (and is omitted on the
+        // NO FABRICATED language: an unknown LID stays nil on the input (and is omitted on the
         // wire) — defaulting to "en" mislabeled an undetected-language utterance as English.
         return IntentRoutingInput.english(
             transcript: routerText,
@@ -1011,14 +1011,14 @@ class VoiceAsrEngine {
     }
 
     /// True when the text carries NO Unicode letter or number — i.e. no content a machine can
-    /// act on (task #78, spec 77eacc9b). Uses Unicode character classes, so every script counts:
+    /// act on (task #78, ). Uses Unicode character classes, so every script counts:
     /// CJK, Hangul, Arabic, digits in any script. Punctuation and whitespace alone do not qualify.
-    /// Deliberately NOT a length rule: "yes", "停", "嗯" and "3" all pass.
+    /// Deliberately not a length rule: "yes", "停", "嗯" and "3" all pass.
     static func isNonContent(_ text: String) -> Bool {
         // Unicode general categories, not CharacterSet: the spec's rule is L (letters) and N
         // (numbers) — and `CharacterSet.decimalDigits` covers only Nd, which would silently
         // DISCARD other numbers such as "²" (No), "½" (No) and "Ⅻ" (Nl) though the shared rule
-        // treats them as content (spec clarification + reviewer 68afef6f). Counting is over
+        // treats them as content. Counting is over
         // CHARACTERS for letters (multi-scalar letters such as "Ǆ" carry one letter category).
         text.unicodeScalars.contains { scalar in
             let category = scalar.properties.generalCategory
@@ -1065,7 +1065,7 @@ class VoiceAsrEngine {
         func report(_ outcome: VoiceSharingContributionEncoder.StageOutcome) {
             contributionCollector?.engineReported(stage: "translation", outcome: outcome, context: context)
         }
-        // BACKEND PROVENANCE FIRST: a backend that translates to English has already produced the
+        // BACKEND provenance first: a backend that translates to English has already produced the
         // English router text — including when it reported no language. Asking for a language id
         // before the backend capability mislabeled that translated-only output as original text.
         if backend.capabilities.canTranslateToEnglish {
@@ -1103,7 +1103,7 @@ class VoiceAsrEngine {
             return (result, "translate=noop(\(detected))")
         }
         // The owning schema already carries `translated_text` and `target_language`, so a successful
-        // translation now states what it actually produced instead of only that it ran (spec d09c320c).
+        // translation now states what it actually produced instead of only that it ran.
         report(.init(state: "completed", reason: nil,
                      translatedText: translated, targetLanguage: "en"))
         return (
@@ -1161,7 +1161,7 @@ class VoiceAsrEngine {
         guard echoFilterRoute != route else { return }
         FileLog.shared.addMessage("[VoicePipeline] echoFilterRoute=\(route)")
         echoFilterRoute = route
-        // Retire on EVERY transition, in both directions. The retained audio belongs to
+        // Retire on every transition, in both directions. The retained audio belongs to
         // the outgoing route and is not an aligned reference for the incoming one —
         // including built-in → external *and* external → built-in, where audio captured
         // on the old path would otherwise be correlated against the new path's window.

@@ -16,7 +16,7 @@ struct AppOperationResultFrame: Equatable {
     /// Bounded prose for humans. Never the gate.
     let detail: String?
 
-    /// Typed refusal of an invalid external result shape — NEVER a crash: reason values and
+    /// Typed refusal of an invalid external result shape — never a crash: reason values and
     /// outcomes can arrive from caller code assembling results from untrusted action frames, and
     /// a precondition there would take the app down over a shape the contract merely refuses.
     /// Nil = invalid: a success carrying a reason, or a non-success without one.
@@ -28,10 +28,10 @@ struct AppOperationResultFrame: Equatable {
         detail: String? = nil
     ) {
         // Owning-frame contract, enforced on every external shape:
-        // - operation_id is always present and NON-EMPTY (an empty id names nothing);
-        // - reason is non-empty on every non-success and absent on success;
-        // - state rides SUCCESS ONLY (a non-success has no resulting state to report);
-        // - detail is bounded prose (512 chars), never the gate.
+        // operation_id is always present and NON-EMPTY (an empty id names nothing);
+        // reason is non-empty on every non-success and absent on success;
+        // state rides SUCCESS only (a non-success has no resulting state to report);
+        // detail is bounded prose (512 chars), never the gate.
         guard !operationId.isEmpty else { return nil }
         guard (outcome == .succeeded) == (reason == nil) else { return nil }
         if let reason, reason.isEmpty { return nil }
@@ -85,12 +85,12 @@ final class AppOperationResultSocket: @unchecked Sendable {
 
 extension AppOperationResultSocket {
     /// Set by `routeWithResultSocket`; invoked by the sink when the turn's event loop has ended.
-    /// Closes (cancels + retires) the turn socket AFTER the consumer's awaited result sends —
+    /// Closes (cancels + retires) the turn socket after the consumer's awaited result sends —
     /// never on producer completion, which `AsyncStream` signals via `onTermination` on
-    /// `finish()` while the consumer may still be mid-turn.
+    /// `finish` while the consumer may still be mid-turn.
     /// True once the turn's close hook has been TAKEN for running. NOTE this is not yet the
     /// lifetime's actual close: taking nils the hook here, and the hook BODY (which retires the
-    /// registration via `lifetime.close()`) runs afterwards, outside the lock. A caller that must
+    /// registration via `lifetime.close`) runs afterwards, outside the lock. A caller that must
     /// know whether a result send is still deliverable cannot decide from this flag alone — the
     /// binding/registration check remains the authority.
     var isTurnFinished: Bool {
@@ -98,7 +98,7 @@ extension AppOperationResultSocket {
         return _closeHook == nil
     }
 
-    /// HOOK CLOSURE RACE (PR50 review): `finishTurn` previously ran the hook and THEN nilled it
+    /// HOOK closure race (PR50 review): `finishTurn` previously ran the hook and THEN nilled it
     /// with no synchronization on `_closeHook` — two concurrent turn-end paths could both observe
     /// non-nil and close the lifetime twice, and the unsynchronized read/write of a cross-thread
     /// optional was a data race. The hook is now TAKEN under `bindingLock` (exactly one taker wins

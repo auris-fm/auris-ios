@@ -7,7 +7,7 @@ class VoiceControlGate {
     /// Re-reading raced with log-before-assign in `GracePeriodSignal` and inverted
     /// wakeWord ↔ continuous in production logs.
     private let gracePeriodActive: Bool
-    /// DEBUG-SIMULATOR-ONLY DIAGNOSTIC (owner approval, #core:25b91a1b `77121fd4`).
+    /// Debug-simulator-only diagnostic, enabled by explicit owner approval.
     ///
     /// The simulator exposes no external input route, so `micExposure` is permanently `.exposed`
     /// there and the gate can never reach `.listening` — which means the end-to-end capture path

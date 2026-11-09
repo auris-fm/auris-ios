@@ -1,6 +1,6 @@
 import Foundation
 
-/// Activation-slice disclosure facts (@spec dispatch `d42369ac`).
+/// Activation-slice disclosure facts.
 ///
 /// The version is the exact server-supported disclosure token; the body is the
 /// user-facing copy surfaced by the enroll confirmation dialog. The copy states

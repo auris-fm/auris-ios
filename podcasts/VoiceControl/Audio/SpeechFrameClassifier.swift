@@ -47,7 +47,7 @@ final class EnergySpeechFrameClassifier: SpeechFrameClassifier {
 /// arrives and the utterance never closes. A model that classifies the *structure* of speech
 /// can report non-speech in that room, which is what lets an endpoint occur at all.
 ///
-/// WHAT THIS DOES NOT DO. It does not by itself guarantee an endpoint: a room loud enough to
+/// WHAT this does not do. It does not by itself guarantee an endpoint: a room loud enough to
 /// look like speech to the model still yields none. That case is a fault, reported separately,
 /// not a silent no-op.
 ///

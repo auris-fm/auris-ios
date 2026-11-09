@@ -5,7 +5,7 @@ struct VoiceControlSettingsView: View {
 
     var body: some View {
         List {
-            // Layout mirrors Android's Voice Control screen (spec 233c0d02, @android f86c6a67):
+            // Layout mirrors Android's Voice Control screen:
             // enable switch, model readiness, one plain status line, then the sharing section.
             Section {
                 Toggle(isOn: Binding(
@@ -30,13 +30,13 @@ struct VoiceControlSettingsView: View {
 
             // A plain status line, not a diagnostics block. iOS-specific wording: there is no
             // microphone-isolation requirement on this platform, so Android's "a headset or earbud
-            // microphone is required" is deliberately NOT reproduced here — it would state
+            // microphone is required" is deliberately not reproduced here — it would state
             // something false about this build.
             Section {
                 statusRow(label: "Status", value: primaryStatusText(service.gatePosture))
             }
 
-            // The sharing rows embed as PLAIN SECTIONS in this single List (reviewer on
+            // The sharing rows embed as PLAIN sections in this single List (reviewer on
             // b61af2897: no nested List). The host owns ONE account model for the screen
             // lifetime via @StateObject, so a service refresh cannot replace in-flight
             // operation/status state with a freshly constructed model.
@@ -176,9 +176,9 @@ struct VoiceSharingSectionHost: View {
     init(localModel: VoiceSharingSettingsModel?) {
         self.localModel = localModel
         // No configured origin ⇒ a never-yielding credential: the client exists so the screen
-        // composes, but every server action fails closed (token() -> nil) exactly as signed out.
+        // composes, but every server action fails closed (token -> nil) exactly as signed out.
         // purgeLocal is nil unless a local settings model exists — the closure must return a
-        // NON-optional DeleteResult (reviewer on b34660ce2 reproduced the type mismatch).
+        // NON-optional DeleteResult.
         let tokenProvider = CloudTokenProviderRouter.voiceSharingProvider() ?? NeverTokenProvider()
         _account = StateObject(wrappedValue: VoiceSharingAccountModel(
             client: VoiceSharingAccountClient(tokenProvider: tokenProvider),

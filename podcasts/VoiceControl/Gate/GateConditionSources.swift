@@ -166,7 +166,7 @@ class LiveConditionMonitor: ObservableObject {
     /// The owning core spec: the gate context comes from ACTUAL foreground OR a current ELIGIBLE
     /// playback context (an episode loaded, playing or paused) — nothing else. A cloud/grace hold
     /// is NEITHER: it must not manufacture foreground, or capture would stay allowed after the
-    /// last genuine context is gone (spec 3893cd55; the same grace-as-context defect Android
+    /// last genuine context is gone (; the same grace-as-context defect Android
     /// removed). Foreground loss is therefore preserved only while an independent playback
     /// context still allows capture.
     static func resolveContext(foregroundAllowed: Bool, playbackContextAvailable: Bool) -> GateContext {

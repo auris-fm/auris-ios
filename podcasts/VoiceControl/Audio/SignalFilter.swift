@@ -35,11 +35,11 @@ class SignalFilter {
     /// so genuine user speech is rejected as bleed.
     ///
     /// - Parameters:
-    ///   - mic: the captured segment at the pipeline rate.
-    ///   - reference: the retained emitted audio at the pipeline rate.
-    ///   - segmentEndOffset: where the segment's capture ends, in pipeline samples from
-    ///     the reference's start. Negative means the segment cannot be placed, so no
-    ///     alignment claim is made.
+    /// - mic: the captured segment at the pipeline rate.
+    /// - reference: the retained emitted audio at the pipeline rate.
+    /// - segmentEndOffset: where the segment's capture ends, in pipeline samples from
+    /// the reference's start. Negative means the segment cannot be placed, so no
+    /// alignment claim is made.
     func isPlaybackBleed(mic: [Float], reference: [Float], segmentEndOffset: Int) -> Bool {
         guard segmentEndOffset >= 0, segmentEndOffset <= reference.count else { return false }
         let start = max(0, segmentEndOffset - mic.count)

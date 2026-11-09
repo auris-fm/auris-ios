@@ -12,10 +12,10 @@ import Foundation
 ///
 /// What the seam buys now:
 /// - every cloud call takes its credential from one place, so swapping the
-///   issuer is a provider change rather than a call-site sweep;
-/// - async acquisition/refresh has a defined home (`token()` is async and may
-///   return nil to mean "no credential available" — callers must not retry in a
-///   loop, matching the turn contract's no-retry posture);
+/// issuer is a provider change rather than a call-site sweep;
+/// - async acquisition/refresh has a defined home (`token` is async and may
+/// return nil to mean "no credential available" — callers must not retry in a
+/// loop, matching the turn contract's no-retry posture);
 /// - an expiry mid-session has one place to be handled.
 protocol CloudTokenProviding {
     /// The credential to present, or nil when none is available. Implementations
@@ -25,7 +25,7 @@ protocol CloudTokenProviding {
 
     /// Optional warm-up, called off the turn path (assistant UI open, session
     /// start) so the turn path only ever reads a cache. The default is a no-op
-    /// for providers whose `token()` is already instant.
+    /// for providers whose `token` is already instant.
     func prepare() async
 
     /// Called after a 401, reporting **which** credential was rejected.

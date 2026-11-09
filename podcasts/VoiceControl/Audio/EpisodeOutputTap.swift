@@ -8,9 +8,9 @@ import PocketCastsUtils
 /// properties constrain where a tap can go:
 ///
 /// - `timePitch` changes both rate and duration, so audio tapped before it would be
-///   correlated against a timeline nothing heard.
+/// correlated against a timeline nothing heard.
 /// - Three units are bypassed conditionally when volume boost is off, so a tap placed among
-///   them means different things in different configurations.
+/// them means different things in different configurations.
 ///
 /// Tapping the output node satisfied both because it is last. But the SDK advises AGAINST
 /// tapping `AVAudioOutputNode`: "there could be a mismatch between the tap buffer format and
@@ -34,8 +34,8 @@ final class EpisodeOutputTap {
     private static let bus: AVAudioNodeBus = 0
 
     /// - Parameter engine: the renderer's engine. Optional so the publish path and the
-    ///   placement record can be exercised without building an `AVAudioEngine`, which
-    ///   interferes with the process audio session that capture activates.
+    /// placement record can be exercised without building an `AVAudioEngine`, which
+    /// interferes with the process audio session that capture activates.
     init(engine: AVAudioEngine?) {
         self.engine = engine
     }
@@ -55,15 +55,15 @@ final class EpisodeOutputTap {
 
     /// Installs the tap on the node feeding output, on the bus that actually feeds it.
     ///
-    /// INSTALLING AGAIN IS SAFE BY CONSTRUCTION, not by claim: any tap this object previously
+    /// INSTALLING again is safe by construction, not by claim: any tap this object previously
     /// installed is REMOVED from the node it was actually installed on before a new one goes on, so
     /// a graph replacement cannot leave the prior node tapped and cannot leave two taps competing
     /// for one bus (which CoreAudio refuses outright). The bus is the one the feeder reports as
     /// feeding output, so a chain whose connection is not on bus 0 is still tapped correctly.
     func install() {
-        // REMOVE FIRST AND UNCONDITIONALLY, before any early return. An earlier version resolved the
+        // REMOVE first and unconditionally, before any early return. An earlier version resolved the
         // feeder before removing, so a guard failure (no engine, or nothing feeding output) returned
-        // EARLY and LEFT THE PRIOR TAP INSTALLED on the old node: the reference would keep receiving
+        // EARLY and LEFT the prior tap installed on the old node: the reference would keep receiving
         // from the old tap under the old identity while the caller believed a fresh install had
         // happened. Removing first means every exit path leaves at most the tap that was actually
         // installed here, which is the state the object reports.
@@ -72,7 +72,7 @@ final class EpisodeOutputTap {
         guard let connection = Self.outputFeederConnection(of: engine) else { return }
         nodeIncarnation &+= 1
         handoff?.rotateIncarnation(for: .episodeTap, to: nodeIncarnation)
-        // THE ADMITTED IDENTITY, captured HERE so the callback carries the incarnation it was
+        // THE admitted identity, captured HERE so the callback carries the incarnation it was
         // admitted under rather than reading whatever `self` holds when it later fires. A held old
         // callback after a reinstall must submit its OWN identity, not acquire the new one.
         let admitted = producerIdentity
@@ -104,18 +104,18 @@ final class EpisodeOutputTap {
     /// PRIOR install's closure after a reinstall — the seam that makes the capture itself
     /// observable: a closure that read the current identity at fire time would acquire the new
     /// incarnation here, where the immutable capture submits its own.
-    /// TEST-ONLY observer: receives each install's tap closure at install time. A test retains
+    /// TEST-only observer: receives each install's tap closure at install time. A test retains
     /// the closures it wants to invoke later; production uses the no-op default and stores
     /// nothing, so no closure history exists outside tests.
     var onInstalledClosure: (@escaping (AVAudioPCMBuffer, AVAudioTime) -> Void) -> Void = { _ in }
 
-    /// TEST-ONLY arrival counter hook, no-op in production: fires on the render thread as each tap
+    /// TEST-only arrival counter hook, no-op in production: fires on the render thread as each tap
     /// callback enters, carrying the callback's own sample time and host instant (either may be nil
     /// when the corresponding field is invalid), so a trace can establish arrival ordering and the
     /// advancing frame/host progression rather than infer them.
     var onCallbackArrived: ((_ sampleTime: Double?, _ hostSeconds: Double?) -> Void)?
 
-    /// TEST-ONLY observer of the buffers this tap PUBLISHES, with the callback's time. It exists so
+    /// TEST-only observer of the buffers this tap PUBLISHES, with the callback's time. It exists so
     /// a control can locate a distinctive marker in the published samples and correlate that
     /// sample's index and host instant, rather than inferring the marker from a proxy.
     var onBuffer: ((AVAudioPCMBuffer, AVAudioTime, Int) -> Void)?
@@ -153,7 +153,7 @@ final class EpisodeOutputTap {
     }
 
     /// The core of the search, parameterized over the connection-point lookup. A feeder output
-    /// bus can feed ANY of the output node's input buses, so every input bus is searched rather
+    /// bus can feed any of the output node's input buses, so every input bus is searched rather
     /// than assuming bus 0.
     static func outputFeederConnection(
         inputBusCount: Int,
@@ -186,7 +186,7 @@ final class EpisodeOutputTap {
     }
 
     /// Records where the tap was installed, so placement can be asserted without building an
-    /// engine. `install()` records the same thing from the real graph.
+    /// engine. `install` records the same thing from the real graph.
     func recordPlacementForTesting(_ node: AVAudioNode) {
         installedNode = node
     }
@@ -203,7 +203,7 @@ final class EpisodeOutputTap {
     /// on the graph — and the graph itself holds the node for as long as the tap is
     /// installed, so this does not extend its life.
     private var installedNode: AVAudioNode?
-    /// The bus the tap was installed on, so `remove()` targets the same one.
+    /// The bus the tap was installed on, so `remove` targets the same one.
     private var installedBus: AVAudioNodeBus = 0
 
     /// Copies a delivered buffer and hands it off.
@@ -266,7 +266,7 @@ final class EpisodeOutputTap {
         let producerFrames = renderedAt.flatMap { time -> Double? in
             time.isSampleTimeValid ? Double(time.sampleTime) : nil
         }
-        // THE TIME IS THE BLOCK'S START. Measured through an explicitly scheduled marker
+        // THE time is the block'S START. Measured through an explicitly scheduled marker
         // (ExplicitScheduleOriginProbe): the marker's host instant matches H + j/R within ~0.6 ms
         // and misses H + (j-N)/R by a full buffer, so `sampleTime` labels the buffer's FIRST
         // sample. The block therefore spans [sampleTime, sampleTime + frameLength), and the range
@@ -280,7 +280,7 @@ final class EpisodeOutputTap {
             producer: producerIdentity,
             sampleRate: buffer.format.sampleRate,
             renderedAt: hostInstant,
-            // THE RENDER POSITION IS T, the frame the timestamp describes — NOT the range end.
+            // THE render position is T, the frame the timestamp describes — not the range end.
             // Passing the end here made the handoff publish an automatic anchor pairing the
             // block's last frame with the start's instant, an incoherent pair observable until
             // the later render-position submit corrected it.
@@ -290,7 +290,7 @@ final class EpisodeOutputTap {
             blockKey: blockKey
         )
 
-        // A SECOND submitRenderPosition IS NOT NEEDED: the block above already carries the
+        // A SECOND submitRenderPosition IS not needed: the block above already carries the
         // producer's rendered position (T) and its host instant, and the handoff publishes the
         // anchor from exactly those two fields when it accepts the block. Publishing the same pair
         // again through the render-position queue would leave two operations whose only difference

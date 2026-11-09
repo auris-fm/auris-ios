@@ -23,7 +23,7 @@ class StatsQuerySink: VoiceStatsQuerySink {
     }
 
     func listeningStreak() -> VoiceResponse {
-        // TODO: Requires StatsRepository.listeningStreak() API
+        // TODO: Requires StatsRepository.listeningStreak API
         .spoken(templates.resolve("stats.check_profile_streak"))
     }
 

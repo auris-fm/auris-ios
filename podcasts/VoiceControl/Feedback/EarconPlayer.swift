@@ -9,9 +9,9 @@ open class EarconPlayer {
     /// preloaded asset. Falls back to the assets' authored rate when nothing loaded.
     /// Optional because there is no graph on the publishing-only route (`engine: nil`).
     ///
-    /// Declared `var` with an explicit default, NOT a `let` assigned later: every stored
+    /// Declared `var` with an explicit default, not a `let` assigned later: every stored
     /// property must be initialized before `self` is used in an instance method, and
-    /// `preloadAll()` reads `cachedEarcons`. With a deferred assignment the `engine: nil`
+    /// `preloadAll` reads `cachedEarcons`. With a deferred assignment the `engine: nil`
     /// path returned from `init` without ever setting this, which does not compile.
     private var connectionSampleRate: Double?
 
@@ -34,17 +34,17 @@ open class EarconPlayer {
     var handoff: EchoReferenceHandoff?
 
     /// - Parameter engine: the playback engine. Optional so the publishing route can be
-    ///   exercised without building an `AVAudioEngine`, which interferes with the process
-    ///   audio session that capture activates — a test-side hazard, not a production one.
+    /// exercised without building an `AVAudioEngine`, which interferes with the process
+    /// audio session that capture activates — a test-side hazard, not a production one.
     init(engine: AVAudioEngine?) {
         self.engine = engine
         guard let engine else { return }
         preloadAll()
         // Connect at the ASSETS' own rate, not the echo pipeline's.
         //
-        // The six shipped earcons are mono 16-bit at 44.1 kHz (review thread 4237185302).
+        // The six shipped earcons are mono 16-bit at 44.1 kHz.
         // Connecting the node at 16 kHz made every `scheduleBuffer` resample down to 16 kHz
-        // BEFORE the mixer, which then upsampled for the hardware — a double conversion,
+        // before the mixer, which then upsampled for the hardware — a double conversion,
         // bandwidth-limited to an 8 kHz band, with no purpose: the echo reference keeps its
         // own 16 kHz copy separately via `publishForEchoReference`, converted through the
         // handoff's resampler. What the user hears should go through the graph at the rate
@@ -100,7 +100,7 @@ open class EarconPlayer {
 
     /// The rate the node graph is ACTUALLY connected at, read back from the engine rather
     /// than from the value we intended to use. Exposed so a test can pin the real path:
-    /// scheduling a buffer whose format does NOT match the connection format fails the
+    /// scheduling a buffer whose format does not match the connection format fails the
     /// graph's own check, so building a buffer at this rate exercises the same contract
     /// production does.
     ///
@@ -110,7 +110,7 @@ open class EarconPlayer {
     /// nil when there is no graph (the publishing-route tests).
     var negotiatedSampleRateForTesting: Double? {
         guard let engine else { return nil }
-        // The mixer BUS THIS PLAYER FEEDS, and its format, read from the live graph.
+        // The mixer BUS this player feeds, and its format, read from the live graph.
         //
         // Why not the obvious probes (each was tried and failed for an AVFoundation reason):
         //   * `engine.inputNode.inputFormat(forBus: 0)` reported 0.0. This player never touches
@@ -204,7 +204,7 @@ open class EarconPlayer {
     /// first play and negative immediately after one, so no block range is submitted and
     /// an observation that cannot be placed is refused rather than guessed.
     ///
-    /// **The listener-side half of the rate split (review thread 4237185302).** The graph
+    /// **The listener-side half of the rate split.** The graph
     /// now renders at the assets' authored rate (44.1 kHz), so the buffer handed here is no
     /// longer pre-downsampled by the connection format. The echo filter needs 16 kHz, so
     /// THIS route converts explicitly — through the same `PlaybackResampler` the handoff
@@ -288,7 +288,7 @@ open class EarconPlayer {
     /// reference claiming audio is audible before it is.
     /// This node's current frame count in its own clock, or nil when it cannot be read.
     ///
-    /// Uses the same `playerTime(forNodeTime:)` conversion as `renderPosition()`; both must
+    /// Uses the same `playerTime(forNodeTime:)` conversion as `renderPosition`; both must
     /// agree on the clock or a position observation and its containing block would disagree.
     /// Reading the render time requires the node to be attached to an engine — on the
     /// no-graph path there is no render clock, and nil metadata is the honest answer: the
@@ -330,7 +330,7 @@ open class EarconPlayer {
 
     /// This producer's clock incarnation, rotated whenever the node restarts.
     ///
-    /// `AVAudioPlayerNode.playerTime` counts from the node's start, and `stop()` returns it to
+    /// `AVAudioPlayerNode.playerTime` counts from the node's start, and `stop` returns it to
     /// zero. A position observed before that reset therefore uses the same numbers as one after
     /// it, while describing different audio, so the incarnation changes HERE — at the reset —
     /// and travels with every block and position this producer submits. Rotating it anywhere
@@ -347,7 +347,7 @@ open class EarconPlayer {
     /// against the real node rather than asserting over an unverified assumption.
     var nodeSampleTimeForTesting: Double? { nodeSampleTime() }
 
-    /// Test-only: the value `nodeSampleTime()` should report instead of reading the node.
+    /// Test-only: the value `nodeSampleTime` should report instead of reading the node.
     ///
     /// The harness's node never renders, so its clock is unreadable there and a fabricated
     /// range would be nil and thus invisible. Injecting a readable clock is what makes the
@@ -365,7 +365,7 @@ open class EarconPlayer {
     /// The identity this producer is currently submitting under.
     ///
     /// Readable so a test can observe a real reset through the lifecycle rather than
-    /// constructing both values by hand: the restart case captures this before `stop()` and
+    /// constructing both values by hand: the restart case captures this before `stop` and
     /// expects the post-restart incarnation to be the captured one advanced by exactly one.
     var currentIdentity: EchoReferenceHandoff.ProducerIdentity { producerIdentity }
 

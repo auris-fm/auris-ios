@@ -58,7 +58,7 @@ final class CloudConversationManager {
     /// Conversations opened by DELAYED admitted work, keyed by the origin that opened them.
     ///
     /// A turn admitted before the deadline remains eligible through recognition and may prepare
-    /// after its window expired, under ITS OWN origin. That turn owns its window's conversation
+    /// after its window expired, under ITS own origin. That turn owns its window's conversation
     /// and must not publish into `current`, which belongs to whichever window is live now: doing
     /// so would let a late turn replace a successor's handle, and the successor's own follow-up
     /// would then create a second conversation instead of resuming the one it opened.
@@ -67,7 +67,7 @@ final class CloudConversationManager {
     /// resumes the conversation that window opened, which is what the window-scoped rule is for.
     /// Retired with its origin (see `registerLiveOrigin`), so this is not an immortal second map.
     private var byOrigin: [Int: OpenConversation] = [:]
-    /// REQUEST OWNERSHIP: utterance id -> prepared logical request, for utterances prepared in
+    /// REQUEST ownership: utterance id -> prepared logical request, for utterances prepared in
     /// the LIVE window. Retired wholesale with the window (registerLiveOrigin change) — one
     /// entry per real utterance, never evicted mid-window.
     private var preparedByUtteranceId: [String: CloudPreparedConversation] = [:]
@@ -83,18 +83,18 @@ final class CloudConversationManager {
     /// The conversation a live turn must carry, or nil when the turn's origin is not live.
     ///
     /// - Parameters:
-    ///   - selection: what selected this turn.
-    ///   - origin: the generation the turn was DISPATCHED under. `nil` for an unstamped
-    ///     dispatch: it belongs to no window, so it cannot create or continue one.
-    ///   - utteranceId: the admitted utterance's identity. A transport retry of the SAME
-    ///     utterance passes the SAME id and is served from retention — it can never adopt
-    ///     a different identity, and a turn without an id is refused.
+    /// - selection: what selected this turn.
+    /// - origin: the generation the turn was DISPATCHED under. `nil` for an unstamped
+    /// dispatch: it belongs to no window, so it cannot create or continue one.
+    /// - utteranceId: the admitted utterance's identity. A transport retry of the SAME
+    /// utterance passes the SAME id and is served from retention — it can never adopt
+    /// a different identity, and a turn without an id is refused.
     func prepare(
         selection: CloudConversationSelection,
         origin: Int?,
         utteranceId: String? = nil
     ) -> CloudPreparedConversation? {
-        // Origin validated BEFORE every reuse path (reviewer 0c546ce5 item 3): a stale
+        // Origin validated before every reuse path: a stale
         // callback — including one carrying a retained utterance identity or a retry id — can
         // never bypass the live-window check.
         // An origin that is no longer live can still be the origin of admittedly-live work
@@ -108,14 +108,14 @@ final class CloudConversationManager {
         }()
         guard originIsLive || turnHoldsAdmittedWork else { return nil }
 
-        // ONE IDENTITY ON THE WIRE (contract delta f47e972, reviewer 9ab31c6d): the turn's
+        // ONE identity on the wire (contract delta f47e972, ): the turn's
         // `request_id` IS the admitted utterance's identity. A dispatch without one has no
         // identity to present and is refused here — the manager never mints a stand-in UUID,
         // so no turn can reach the wire under a fabricated identity.
         guard let utteranceId else { return nil }
 
-        // REQUEST OWNERSHIP (owner delta 3484cbc/5eca874): a repeated callback for the SAME
-        // utterance reuses its retained logical request. RETENTION RULE: every utterance
+        // REQUEST ownership (owner delta 3484cbc/5eca874): a repeated callback for the SAME
+        // utterance reuses its retained logical request. RETENTION rule: every utterance
         // prepared inside the live window is retained for exactly the WINDOW's lifetime — no
         // cap, no eviction — so a duplicate can never become a fresh dispatch; the window's
         // close (registerLiveOrigin to nil or a new generation) retires the whole map.
@@ -124,7 +124,7 @@ final class CloudConversationManager {
         }
 
         var prepared: CloudPreparedConversation
-        // The conversation this turn carries: the one opened FOR ITS OWN ORIGIN, so a delayed
+        // The conversation this turn carries: the one opened FOR its own origin, so a delayed
         // admitted turn continues its own window's conversation and never the successor's.
         let existingForOrigin = originIsLive ? current : byOrigin[origin]
         if case .followUp = selection, let existing = existingForOrigin, existing.origin == origin {
@@ -217,17 +217,17 @@ final class CloudConversationManager {
         preparedByUtteranceId.removeAll()
     }
 
-    /// Releases the delayed-work state that existed ONLY for this turn's admitted work: once the
+    /// Releases the delayed-work state that existed only for this turn's admitted work: once the
     /// turn's reservation is gone, the conversation its window opened can no longer be reached by
     /// a delayed follow-up, so keeping it would be exactly the unbounded retention the window
     /// sweep exists to avoid. Released by the turn's OWN completion, not by a future wake.
-    /// TEST SEAM: whether a delayed conversation is currently retained for this origin.
+    /// TEST seam: whether a delayed conversation is currently retained for this origin.
     func hasDelayedStateForTesting(forOrigin origin: Int) -> Bool { byOrigin[origin] != nil }
 
     func releaseDelayedState(forOrigin origin: Int) {
         guard origin != liveOrigin else { return }
         // Only when the LAST admitted owner of that origin has gone. Two admitted turns of the
-        // same window can be in flight at once; the first completion must NOT delete the shared
+        // same window can be in flight at once; the first completion must not delete the shared
         // conversation the second still needs, or that one opens a duplicate instead of resuming.
         // The admitted-work count is the authority, so this is a refcount, not an inference.
         guard admittedWorkAuthority?()?.hasAdmittedWork(origin) != true else { return }

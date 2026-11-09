@@ -35,8 +35,8 @@ struct AudioRouteIdentity: Equatable {
 /// The epoch is what makes a *physical route-change notification* grant one attempt
 /// even when the route identity is unchanged. It is deliberately per-notification:
 /// each received physical notification advances it, so each is entitled to one
-/// attempt on its own. Distinct notifications are NOT inferred to be one physical
-/// event (spec 5d418579) — that is not required, and the counter cannot establish it.
+/// attempt on its own. Distinct notifications are not inferred to be one physical
+/// event — that is not required, and the counter cannot establish it.
 struct AcquisitionRouteKey: Equatable {
     let route: AudioRouteIdentity
     let deviceChangeEpoch: UInt
@@ -198,12 +198,12 @@ enum AudioSessionError: Error {
 class IOSAudioRouteMonitor: ObservableObject {
     @Published var currentRoute: AudioRoute = .unknown
     @Published var micExposure: MicExposure = .noMic
-    /// Whether ANY external microphone is available to capture from right now.
+    /// Whether any external microphone is available to capture from right now.
     ///
-    /// The Debug-simulator diagnostic exception must apply ONLY when this is false. Reading it
+    /// The Debug-simulator diagnostic exception must apply only when this is false. Reading it
     /// from the session keeps the exception pinned to "the simulator genuinely has no external
     /// route" rather than "the gate happens to be off".
-    /// Whether an external microphone is or COULD BE available.
+    /// Whether an external microphone is or COULD be available.
     ///
     /// Deliberately conservative in the direction that preserves the requirement: it is true if an
     /// external input is listed OR the current output is itself an external route that could carry
@@ -267,7 +267,7 @@ class IOSAudioRouteMonitor: ObservableObject {
                     AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue,
                 ]
                 let isPhysicalDeviceChange = validReasons.contains(reason)
-                // Re-read the route for EVERY reason: an `.override`, `.categoryChange` or
+                // Re-read the route for every reason: an `.override`, `.categoryChange` or
                 // `.routeConfigurationChange` can move the input away from the headset, and a stale
                 // `.isolated` would leave capture running on the built-in microphone. Only a
                 // physical connect/disconnect advances the epoch and breaks grace.
@@ -298,14 +298,14 @@ class IOSAudioRouteMonitor: ObservableObject {
     /// disconnect and reconnect the session is in `.playback`, so it selects no
     /// input: the identity is type-level (`input: nil`) and *identical* to the
     /// failed attempt that preceded the disconnect — yet the device is genuinely
-    /// re-presented and the contract grants one fresh attempt (spec 5d418579).
+    /// re-presented and the contract grants one fresh attempt.
     /// The epoch distinguishes the two: it advances once per received physical
     /// route-change notification, so a later notification produces a key that
     /// differs from the failed attempt's key even with an unchanged identity.
     ///
     /// Note the actual publication ordering — the epoch is incremented by the
-    /// monitor's route-change handler, not atomically with `refreshRoute()`. The
-    /// handler calls `refreshRoute()` first (which publishes `micExposure` →
+    /// monitor's route-change handler, not atomically with `refreshRoute`. The
+    /// handler calls `refreshRoute` first (which publishes `micExposure` →
     /// one gate evaluation carrying the OLD epoch) and only then increments the
     /// epoch and breaks grace (whose `isActive` publication → a second gate
     /// evaluation carrying the NEW epoch). So a single physical notification can
@@ -464,7 +464,7 @@ class IOSAudioRouteMonitor: ObservableObject {
         return .selectionFailed
     }
 
-    /// DIAGNOSTIC ONLY (Debug simulator): make the session input-capable so the built-in
+    /// DIAGNOSTIC only (Debug simulator): make the session input-capable so the built-in
     /// microphone can be captured. Mirrors the normal path's configure/activate bookkeeping so
     /// release-on-failure still undoes exactly what was opened, and reports `.acquired` only when
     /// a built-in input is actually present in the live route.
@@ -515,7 +515,7 @@ class IOSAudioRouteMonitor: ObservableObject {
             return .noCandidate
         }
 
-        // Deliberately does NOT select a preferred input: on the built-in route there is nothing
+        // Deliberately does not select a preferred input: on the built-in route there is nothing
         // to select, and the diagnostic must not touch input selection at all.
         return acquiredResult(activatedByAcquisition: activatedByAcquisition, hadSelectedInput: false, isPlaybackActive: isPlaybackActive)
     }

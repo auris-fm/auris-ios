@@ -11,7 +11,7 @@ enum ClassificationResult {
 
 /// The one classification entry point `VoiceControlService` needs. Extracted so a test can drive the
 /// real routing branches with a deterministic result — the LFM model is not required to exercise
-/// branch composition, only to exercise the model (spec 85cec5b7).
+/// branch composition, only to exercise the model.
 protocol IntentClassifying: AnyObject {
     var isReady: Bool { get }
     func classify(input: IntentRoutingInput, pendingDialog: PendingVoiceDialog?) -> ClassificationResult
@@ -238,7 +238,7 @@ final class LfmIntentRouter: IntentClassifying {
                     routerTranscript: trimmed,
                     translationKind: input.translationKind,
                     selection: input.selection,
-                    // REQUEST OWNERSHIP: trimming is a view of the SAME utterance, so the id
+                    // REQUEST ownership: trimming is a view of the SAME utterance, so the id
                     // travels — a duplicate callback joins the same request, not a new one.
                     utteranceId: input.utteranceId
                 )

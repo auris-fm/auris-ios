@@ -1,6 +1,6 @@
 import Foundation
 
-/// THE REAL OPT-IN CLIENT PATH: it submits the three controlled turns through the client, collects the
+/// THE real opt-IN CLIENT path: it submits the three controlled turns through the client, collects the
 /// records each one returns, and hands them to `CloudAcceptanceConsumer` for the verdict.
 ///
 /// It is opt-in per run and used only for the controlled benign acceptance turns; it is not a general

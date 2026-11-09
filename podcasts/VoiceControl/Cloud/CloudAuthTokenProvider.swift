@@ -7,11 +7,11 @@ import PocketCastsUtils
 ///
 /// Contract (`core` edge-particle, `53a83e2` + `28cd409`):
 /// - `POST /api/v1/auth/token` — body `{credential, device{platform, app_version}}`;
-///   the credential is the account session the app already holds. Response:
-///   `{access_token, token_type, expires_in, refresh_token, refresh_expires_in, issuer, subject}`.
+/// the credential is the account session the app already holds. Response:
+/// `{access_token, token_type, expires_in, refresh_token, refresh_expires_in, issuer, subject}`.
 /// - `POST /api/v1/auth/refresh` — body `{refresh_token}`; returns a **new**
-///   access + refresh pair (rotation). Replaying a rotated token revokes the
-///   chain and returns `401`, so concurrent refreshes must be single-flighted.
+/// access + refresh pair (rotation). Replaying a rotated token revokes the
+/// chain and returns `401`, so concurrent refreshes must be single-flighted.
 /// - Access lifetime is 15 minutes; refresh lifetime 30 days.
 ///
 /// Postures kept from the seam: fail closed with no credential (callers then
@@ -19,7 +19,7 @@ import PocketCastsUtils
 /// refresh endpoint means re-acquire from the account credential via the token
 /// endpoint — never retry the refresh.
 ///
-/// `handleUnauthorized()` is called by callers on a 401; the *next* `token()`
+/// `handleUnauthorized` is called by callers on a 401; the *next* `token`
 /// carries the new credential. Tokens are held in memory only: a cold start
 /// re-exchanges the account credential, which avoids persisting a long-lived
 /// refresh token in a second place (the account session is already in the
@@ -76,7 +76,7 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
 
     private let authBaseURLProvider: () -> String
     private let credentialProvider: () -> String?
-    /// Stable account identity (the account uuid), NOT the rotating session
+    /// Stable account identity (the account uuid), not the rotating session
     /// credential — see `Tokens.sourceIdentity`.
     private let identityProvider: () -> String?
     private let appVersionProvider: () -> String
@@ -132,7 +132,7 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
         }
         // Past the proactive boundary but still inside the real lifetime: serve it
         // and refresh out of band, so the turn path never waits on a network round
-        // trip — the contract this seam documents for `token()` (PR #20 review).
+        // trip — the contract this seam documents for `token` (PR #20 review).
         if let usable = cachedUsableToken() {
             refreshInBackground()
             return usable
@@ -141,14 +141,14 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
         // from "we had one and the exchange failed" — the first is a local state
         // problem and must not be reported as a server rejection.
         if credentialProvider()?.isEmpty != false {
-            // State ONLY the observed fact. A cached refresh acquisition can still follow this
+            // State only the observed fact. A cached refresh acquisition can still follow this
             // point in the await below, so claiming "nothing was dialled" pre-judges an outcome
             // this line cannot see.
             Self.diagnose("no account credential is stored, so no token can be acquired from the account")
         }
 
         // Nothing usable cached: the unavoidable await. Retried **in place** (not
-        // by recursing into `token()`) when the account changed under an in-flight
+        // by recursing into `token`) when the account changed under an in-flight
         // acquisition — a joiner can resume before the single-flight owner clears
         // its handle, and re-reading a published handle would spin (PR #20 review).
         for attempt in 0..<2 {
@@ -173,7 +173,7 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
                 // the credential was withdrawn, or was minted against another
                 // origin: acquire for the current state rather than handing it over.
                 //
-                // Name WHICH guard failed. `token()` returning nil has several
+                // Name WHICH guard failed. `token` returning nil has several
                 // distinct causes — a rejected refresh, an inconclusive exchange,
                 // or a success disqualified here — and a caller that reports only
                 // "no credential" cannot tell a bad session from a bad origin.
@@ -212,7 +212,7 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
     func handleUnauthorized(rejectedToken: String?) async {
         // A rejection for a token a concurrent refresh has already replaced is a
         // no-op: without this, a burst of N 401s costs N sequential refreshes and
-        // every `token()` in between misses the cache (PR #20 review).
+        // every `token` in between misses the cache (PR #20 review).
         if let rejectedToken, !rejectedToken.isEmpty,
            let current = currentTokens()?.accessToken, current != rejectedToken {
             return
@@ -262,7 +262,7 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
     }
 
     /// Drops the cached tokens when the account behind them is gone, when no
-    /// credential is present, or when a different account signed in — but **not**
+    /// credential is present, or when a different account signed in but **not**
     /// on a renewal that keeps a credential present, which is the case keying on
     /// the credential got wrong (PR #20 review).
     ///

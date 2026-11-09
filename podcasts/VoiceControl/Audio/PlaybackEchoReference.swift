@@ -97,7 +97,7 @@ final class PlaybackEchoReference {
     /// construction, which no call-site ordering can provide.
     ///
     /// - Returns: the reference-stream index of the block's FIRST sample, i.e. the total
-    ///   appended before this block. Empty frames append nothing and return the current index.
+    /// appended before this block. Empty frames append nothing and return the current index.
     @discardableResult
     func appendReturningOrigin(_ frame: [Float]) -> Int {
         lock.lock()
@@ -128,10 +128,10 @@ final class PlaybackEchoReference {
         return samples
     }
 
-    /// ONE CONSISTENT OBSERVATION (PR50 review r4357901593): the retained audio, its audible-end
+    /// ONE consistent observation (PR50 review r4357901593): the retained audio, its audible-end
     /// offset, and the render anchor, all read under a SINGLE lock acquisition. The filter path
-    /// needs all three to agree: `snapshot()` and `audibleEndOffsetInRetainedWindow()` were
-    /// separate acquisitions, so an `append()` landing between them shifted the window the offset
+    /// needs all three to agree: `snapshot` and `audibleEndOffsetInRetainedWindow` were
+    /// separate acquisitions, so an `append` landing between them shifted the window the offset
     /// describes away from the samples it indexes — the filter then aligned the mic segment
     /// against a reference that no longer matched its own offset, and the assistant's own voice
     /// could pass the bleed filter while talking over a streaming answer.
@@ -145,7 +145,7 @@ final class PlaybackEchoReference {
         lock.lock()
         defer { lock.unlock() }
         // The offset body is the single-lock-acquisition version of
-        // `audibleEndOffsetInRetainedWindow()`; see that method for the reasoning.
+        // `audibleEndOffsetInRetainedWindow`; see that method for the reasoning.
         var offset: Int?
         if let anchor = renderAnchor, !samples.isEmpty {
             let windowStart = totalAppended - samples.count
@@ -155,7 +155,7 @@ final class PlaybackEchoReference {
         // CORRECTION (reviewer, independent Swift check): an earlier comment here attributed a
         // test observation of "80300 samples from an 80000-sample observation" to CoW aliasing.
         // That was wrong — Swift value semantics already isolate the returned array from later
-        // appends. The 80300 was READ TIMING: the engine observes at filter time, which was
+        // appends. The 80300 was READ timing: the engine observes at filter time, which was
         // after the test's append. The single lock acquisition is the actual guarantee this
         // method makes: samples, offset and anchor describe ONE instant.
         return ConsistentObservation(
@@ -281,11 +281,11 @@ final class PlaybackEchoReference {
 /// the clamp silently saturates it to the block length instead of the real figure.
 ///
 /// - Parameters:
-///   - rangeStart: reference index where this block begins.
-///   - producerBlockStart: the producer's own frame count when this block began.
-///   - producerFrames: how far the producer's node had rendered, in the same count.
-///   - producerRate: the rate those frames are counted at.
-///   - blockLength: the block's length in reference samples, used to clamp.
+/// - rangeStart: reference index where this block begins.
+/// - producerBlockStart: the producer's own frame count when this block began.
+/// - producerFrames: how far the producer's node had rendered, in the same count.
+/// - producerRate: the rate those frames are counted at.
+/// - blockLength: the block's length in reference samples, used to clamp.
 /// - Returns: the reference index of the block's audible end.
 func referenceIndexForProducerPosition(
     rangeStart: Int,

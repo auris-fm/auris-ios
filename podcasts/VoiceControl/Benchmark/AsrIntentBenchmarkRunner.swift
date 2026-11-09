@@ -9,7 +9,7 @@ import CryptoKit
 /// router is measured per case over the shared text contract for
 /// D (`english_v1`) and E (`dual_v1`), and the report lands in Documents.
 ///
-/// Provenance rules from the standing ruling (@spec, `#reviews:d18481a8`):
+/// Provenance rules from the standing ruling:
 /// the run manifest records the contract sha, the sideload release, and the
 /// benchmark-exception label. Production stays fail-closed: the `dual_v1`
 /// gate is opened only for the duration of the run.

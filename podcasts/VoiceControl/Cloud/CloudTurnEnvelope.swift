@@ -4,13 +4,13 @@ import Foundation
 ///
 /// Contract (`docs/specs/cloud-assistant.md` → "Turn control fields"):
 /// - `request_id`: client-assigned UUID, stable for the logical turn, reused
-///   across transport attempts; a server-assigned id must never be auto-retried.
+/// across transport attempts; a server-assigned id must never be auto-retried.
 /// - `capabilities`: advertise `search_results_v1` only when the client can
-///   render the structured `result` event (see `CloudClientCapabilities`).
+/// render the structured `result` event (see `CloudClientCapabilities`).
 /// - `route_hint`: `{operation, arguments}` supplied only by typed UI flows or a
-///   validated upstream parser — never synthesized from free text.
+/// validated upstream parser — never synthesized from free text.
 /// - `context.recent_conversation`: up to four `{role, text}` entries, at most
-///   8 KiB UTF-8 in total, treated as untrusted context.
+/// 8 KiB UTF-8 in total, treated as untrusted context.
 struct CloudTurnEnvelope: Equatable {
     let requestId: String
     let capabilities: [String]
@@ -29,7 +29,7 @@ struct CloudTurnEnvelope: Equatable {
     /// pipeline minted at admission and the manager prepared. There is no fallback mint here:
     /// a turn without an admitted identity is refused upstream (sink), never re-identifed.
     /// Keeping ONE identity on the type means every consumer — wire frame, socket/result
-    /// registration, bind callbacks, diagnostics — binds the same value (reviewer 9ab31c6d).
+    /// registration, bind callbacks, diagnostics — binds the same value.
     static func make(
         capabilities: [String],
         routeHint: CloudRouteHint?,
@@ -52,9 +52,9 @@ enum CloudClientCapabilities {
     static let searchResultsV1 = "search_results_v1"
 
     /// - Parameter rendersStructuredResults: true only once the iOS renderer
-    ///   handles the result/empty/unavailable states, scope, and play/seek
-    ///   eligibility (`search_results_v1`). Until then the server falls back to
-    ///   deterministic short `token` text plus `done`.
+    /// handles the result/empty/unavailable states, scope, and play/seek
+    /// eligibility (`search_results_v1`). Until then the server falls back to
+    /// deterministic short `token` text plus `done`.
     static func advertised(rendersStructuredResults: Bool) -> [String] {
         rendersStructuredResults ? [searchResultsV1] : []
     }
@@ -139,7 +139,7 @@ enum CloudRouteRequestBuilder {
         sourceTranscript: String? = nil,
         sourceLanguage: String? = nil
     ) -> [String: Any] {
-        // SOURCE-FIRST RUNTIME REQUEST (core b6eafe25): the runtime `request` carries the complete
+        // SOURCE-FIRST runtime request (core b6eafe25): the runtime `request` carries the complete
         // wake-trimmed SOURCE utterance when one is available — the English routing translation
         // selects the action but never REPLACES the original the model answers. When no original
         // exists (backend translate exposes English only), the available text is used without
@@ -151,7 +151,7 @@ enum CloudRouteRequestBuilder {
         // client did not make. Both read as real to the server, so the discovery turn — the
         // app's normal first interaction, with nothing playing — must send neither.
         var contextObject: [String: Any] = [:]
-        // EVERY playback-position key is omitted when there is no episode context — not just
+        // every playback-position key is omitted when there is no episode context — not just
         // the id and the client position. `recent_reference_positions` is a position key too:
         // sending an empty array still asserts that the client has a position history for a
         // turn where no current episode exists, and the contract says to omit playback positions
@@ -181,7 +181,7 @@ enum CloudRouteRequestBuilder {
             // a fresh one here would make the server see a second logical turn.
             "request_id": turn.requestId,
         ]
-        // The admission contract requires both on EVERY turn, first included. Carried at
+        // The admission contract requires both on every turn, first included. Carried at
         // the top level rather than inside `context`, and independent of episode
         // availability: a conversation is not a property of what is playing.
         if let conversation = turn.conversation {

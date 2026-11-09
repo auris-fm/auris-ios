@@ -127,15 +127,15 @@ final class CloudRouteClient {
         sourceLanguage: String? = nil,
         // The pending interruption report for this turn's AUTHENTICATION frame
         // (cloud-assistant.md → Interruption): the server applies it to already-settled history
-        // BEFORE assembling model input, so it must ride the auth frame rather than the turn body.
+        // before assembling model input, so it must ride the auth frame rather than the turn body.
         pendingInterruptReport: CloudInterruptionState.PendingReport? = nil,
         onReportAttached: (@Sendable (String) async -> Void)? = nil
     ) -> (stream: AsyncStream<CloudRouteEvent>, resultSocket: AppOperationResultSocket) {
         let socket = AppOperationResultSocket(requestId: turn.requestId)
         let lifetime = TurnSocketLifetime()
         // The socket lives as long as the consumer's turn: the sink closes it via
-        // `finishTurn()` when its event loop ends — never on producer completion, which
-        // AsyncStream surfaces as `onTermination` on `finish()` while the consumer may still
+        // `finishTurn` when its event loop ends — never on producer completion, which
+        // AsyncStream surfaces as `onTermination` on `finish` while the consumer may still
         // be awaiting a result send. Awaiting local submission before normal retirement is the
         // design; server receipt stays unclaimed.
         // Strong: the socket OWNS its lifetime. The lifetime must outlive the producer task so
@@ -143,8 +143,8 @@ final class CloudRouteClient {
         socket.closeHook = { lifetime.close() }
         socket.claimHook = { lifetime.claimOwnership() }
         // Bounded cleanup armed at creation: if no consumer ever claims the turn, the
-        // registration is retired on a bound. claimOwnership() cancels this timer; a
-        // claimed consumer is NEVER closed by it, however long its work takes.
+        // registration is retired on a bound. claimOwnership cancels this timer; a
+        // claimed consumer is never closed by it, however long its work takes.
         lifetime.closeAfterGrace()
         let stream = route(
             request: request,
@@ -213,7 +213,7 @@ final class CloudRouteClient {
 
         /// The consumer takes ownership when it starts iterating the turn: from then on the
         /// registration lives only as long as the consumer's own close (or stream cancellation).
-        /// A claimed consumer held past the grace deadline must NOT lose its registration.
+        /// A claimed consumer held past the grace deadline must not lose its registration.
         fileprivate func claimOwnership() {
             closeLock.lock()
             consumerClaimed = true
@@ -279,7 +279,7 @@ final class CloudRouteClient {
                     lifetime?.close()
                 }
                 // `.finished` needs no action: the grace was armed at creation and is
-                // cancelled by claimOwnership(); a claimed consumer closes via finishTurn.
+                // cancelled by claimOwnership; a claimed consumer closes via finishTurn.
             }
         }
     }
@@ -295,10 +295,10 @@ final class CloudRouteClient {
         get async { await tokenProvider.token() != nil }
     }
 
-    /// OPT-IN ACCEPTANCE COLLECTION. It consumes the route stream for ONE controlled acceptance turn and
+    /// OPT-IN ACCEPTANCE collection. It consumes the route stream for ONE controlled acceptance turn and
     /// emits a single `CloudAcceptanceRecord` carrying only the allowlisted fields — the turn's request
     /// id, its conversation id, the server's response text and the terminal outcome — with the request
-    /// id taken from the TURN THAT WAS SUBMITTED, so the record can be matched to its own incoming
+    /// id taken from the TURN that was submitted, so the record can be matched to its own incoming
     /// events. It is deliberately not a general traffic capture: a caller opts in per turn, for the
     /// benign acceptance turns only, and nothing outside the allowlist is exported.
     func collectAcceptance(
@@ -329,14 +329,14 @@ final class CloudRouteClient {
                     if case .error = event { sawTerminal = true }
                     continuation.yield(event)
                 }
-                // AN END WITHOUT A TERMINAL IS AN INCOMPLETE TURN, not a cancellation: an upstream EOF
+                // AN END without A TERMINAL is an incomplete turn, not a cancellation: an upstream EOF
                 // happens on completion and on failure too. It is classified as a transport failure so
-                // a missing done/error cannot pass as success, and cancellation is NOT inferred here.
+                // a missing done/error cannot pass as success, and cancellation is not inferred here.
                 if !sawTerminal { recorder.markStreamEndedWithoutTerminal() }
                 continuation.finish()
             }
             continuation.onTermination = { _ in
-                // Downstream termination cancels the work but does NOT by itself mean the TURN was
+                // Downstream termination cancels the work but does not by itself mean the TURN was
                 // cancelled: the consumer may simply have stopped reading. The recorder is left to
                 // whichever terminal it observed, and the caller marks .cancelled explicitly if it
                 // actually cancelled the turn.
@@ -353,8 +353,8 @@ final class CloudRouteClient {
     /// Live turn sockets by `request_id`, so an `app_operation_result` can ride the SAME socket
     /// its operation arrived on.
     ///
-    /// Ownership is PER REGISTRATION: each registration carries a unique identity, and a turn's
-    /// close retires ONLY its own registration. A `request_id` reused while a predecessor socket
+    /// Ownership is PER registration: each registration carries a unique identity, and a turn's
+    /// close retires only its own registration. A `request_id` reused while a predecessor socket
     /// is still open therefore cannot have its registration removed by the predecessor's finishing
     /// defer — the successor keeps its own entry.
     private struct SocketRegistration {
@@ -374,7 +374,7 @@ final class CloudRouteClient {
         return registration.identity
     }
 
-    /// Retires ONLY the registration made by this turn (identity-checked), so a duplicate live
+    /// Retires only the registration made by this turn (identity-checked), so a duplicate live
     /// `request_id` is never un-registered by a predecessor's close.
     private func retireSocket(requestId: String, identity: UUID) {
         liveSocketsLock.lock()
@@ -384,7 +384,7 @@ final class CloudRouteClient {
         }
     }
 
-    /// TEST SEAM: retire a turn's socket registration EXACTLY as a consumer close would, so a
+    /// TEST seam: retire a turn's socket registration EXACTLY as a consumer close would, so a
     /// control can produce the `.undelivered` branch through the production send path instead of
     /// calling state transitions directly. Identity-checked in `retireSocket`, so it cannot retire
     /// a different turn's registration.
@@ -392,8 +392,8 @@ final class CloudRouteClient {
         retireSocket(requestId: requestId, identity: identity)
     }
 
-    /// What a result send established — LOCAL SUBMISSION KNOWLEDGE ONLY. `submitted` means the
-    /// frame was handed to the socket without error; it is NOT a server receipt, and a send may
+    /// What a result send established — LOCAL submission knowledge only. `submitted` means the
+    /// frame was handed to the socket without error; it is not a server receipt, and a send may
     /// transmit and still lose the connection after. `undelivered` means no live socket existed
     /// (or the send failed): the server's only honest reading is `unknown` — never a retry
     /// signal, never a fabricated success.
@@ -424,7 +424,7 @@ final class CloudRouteClient {
     }
 
     /// Sends the `interrupt` control frame on the PRIOR turn's still-open socket
-    /// (`docs/specs/cloud-assistant.md` → Interruption, spec ruling c5fe3416).
+    /// (`docs/specs/cloud-assistant.md` → Interruption, ).
     ///
     /// The ordering is not negotiable and is not retried: the server acts on an interrupt only
     /// while the named turn is live, and IGNORES one that arrives after that turn's terminal. So a
@@ -486,7 +486,7 @@ final class CloudRouteClient {
     /// either with the turn's events or with a delivered error. The return value
     /// is always `true`; it is kept for the caller's shape.
     /// Producer-side observation seam, set only by controls: called after EACH frame is received,
-    /// on the producer's own task — just before the next `receive()`. Lets a control park the
+    /// on the producer's own task — just before the next `receive`. Lets a control park the
     /// producer exactly where the turn needs to be held (after the frame carrying the action,
     /// before the frame carrying its result). Production never sets it.
     var onFrameReceived: (@Sendable () -> Void)?
@@ -547,7 +547,7 @@ final class CloudRouteClient {
             // A test double. It owns its own readiness, so nothing is resumed here.
             wsTask = injected
         } else {
-            // PRODUCTION PATH. A `URLSessionWebSocketTask` starts SUSPENDED and must be resumed to
+            // PRODUCTION path. A `URLSessionWebSocketTask` starts SUSPENDED and must be resumed to
             // begin its connection: without this the task never reached startup, so a turn could
             // not begin. (The observable is startup, not a claim about every send's behaviour —
             // that stronger statement was not measured and is not made.) The controlled tests
@@ -567,8 +567,8 @@ final class CloudRouteClient {
         // registration identity is retired conditionally at close (a duplicate live id keeps
         // its own registration).
         let socketRegistration = registerSocket(wsTask, requestId: turn.requestId, resultSocket: resultSocket)
-        // DETERMINISTIC BIND SEAM (test-only). This point is the last instant before the bind makes
-        // its ACCEPTANCE DECISION, and the registration has already been published into the live
+        // DETERMINISTIC bind seam (test-only). This point is the last instant before the bind makes
+        // its ACCEPTANCE decision, and the registration has already been published into the live
         // table — so a lifetime settled here is exactly the window that a publish-then-check bind
         // would honour (keeping a registration whose lifetime is already closed) while the single
         // synchronized transition still rejects it. The seam is a synchronous call on the
@@ -602,11 +602,11 @@ final class CloudRouteClient {
             }
         }
 
-        // THERE IS NO never-submitted PRODUCER IN THIS TRANSPORT, and this is the place to say so
+        // THERE is no never-submitted PRODUCER in this transport, and this is the place to say so
         // plainly rather than leave a dead branch implying otherwise.
         //
         // The failure kinds that could precede submission — frame construction and encoding —
-        // already return above as `invalid_request` BEFORE this point. Everything that can fail
+        // already return above as `invalid_request` before this point. Everything that can fail
         // from here on happens after the send has been INVOKED, and a send may transmit and then
         // throw, so admission is possible and the outcome must be preserved rather than replayed.
         //
@@ -615,9 +615,9 @@ final class CloudRouteClient {
         // never submitted", so any recovery caller has nothing eligible to act on. Supplying that
         // producer is separate work; until then, automatic retry of a turn is not available.
 
-        // PENDING INTERRUPTION REPORT ON THE AUTH FRAME (cloud-assistant.md → Interruption, spec
+        // PENDING interruption report on the auth frame (cloud-assistant.md → Interruption, spec
         // c5fe3416): the contract says to report the interruption in the NEXT turn's
-        // authentication frame, and the server applies it to already-settled history BEFORE
+        // authentication frame, and the server applies it to already-settled history before
         // assembling model input. It rides here, not the turn body, because `CloudRouteRequestBuilder`
         // is shared with the envelope path and history correction is an authentication-time
         // concern. `playback_position_ms` is omitted when unmeasured — the contract makes it
@@ -643,19 +643,19 @@ final class CloudRouteClient {
                 continuation.finish()
                 return true
             }
-            // SUBMISSION PROVENANCE. The flag is set only AFTER the send returns, so a failure
+            // SUBMISSION provenance. The flag is set only after the send returns, so a failure
             // before this line is a frame that provably never left — the sole case where automatic
             // recovery cannot duplicate a turn. Anything past this line may have been admitted.
-            // SUBMISSION IS ATTEMPTED BEFORE THE CALL, not proven after it. A send can TRANSMIT
+            // SUBMISSION is attempted before the call, not proven after it. A send can TRANSMIT
             // and then throw or lose its completion, so a flag set only on return would classify
             // that frame as never-submitted — and it would be replayed although it may have been
             // admitted. The conservative reading is the correct one here: once the send is
-            // INVOKED, admission is possible, so only a failure BEFORE entry proves the frame
+            // INVOKED, admission is possible, so only a failure before entry proves the frame
             // never left.
             try await wsTask.send(.string(authText))
 
-            // THE REPORT IS NOW SPENT — confirmed only HERE, after the frame actually reached the
-            // transport (reviewer ff00457c item 4). A URL/auth/encoding failure above throws before
+            // THE report is now spent — confirmed only HERE, after the frame actually reached the
+            // transport. A URL/auth/encoding failure above throws before
             // this point, so the correction survives for the next attempt instead of being
             // destroyed by the attempt that failed. `confirmReportAttached` is identity-checked, so
             // a newer report recorded meanwhile is not lost by this late confirmation.
@@ -673,7 +673,7 @@ final class CloudRouteClient {
             // The task must not finish the stream once it has been cancelled:
             // cancellation is how a received frame says "the deadline was met",
             // and `Task.sleep` throwing on cancel would otherwise fall through
-            // to `finish()` and truncate the turn's remaining events.
+            // to `finish` and truncate the turn's remaining events.
             let firstFrameTimeout = Task {
                 do {
                     try await Task.sleep(nanoseconds: 5_000_000_000)
@@ -702,7 +702,7 @@ final class CloudRouteClient {
                     // Text frame: JSON event. One event per text frame.
                     for event in Self.parseTextFrame(string) {
                         if case .error(_, let code, _) = event {
-                            // BOUNDED: the CODE only. The server's free-form message is NOT written —
+                            // BOUNDED: the CODE only. The server's free-form message is not written —
                             // an arbitrary server string is not known to be free of sensitive content,
                             // and the allowlist here is the acceptance protocol, not general traffic.
                             FileLog.shared.addMessage("[CloudRoute] server error code=\(code)")

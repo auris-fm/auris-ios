@@ -207,7 +207,7 @@ final class VoiceSharingCollector {
     private(set) var peakPendingSignals = 0
     private(set) var peakRetainedSamples = 0
 
-    /// SPEC 05ff27d0 / incident: SEGMENTS seen vs CAPTURES emitted, counted from the
+    /// / incident: SEGMENTS seen vs CAPTURES emitted, counted from the
     /// collector's own decisions. The simulator stopped turning utterances into captures at
     /// 10:00:21Z with no log line naming a decision, so the numbers had to be inferred from
     /// absence — which is exactly the evidence that could not be produced afterwards. These two
@@ -314,7 +314,7 @@ final class VoiceSharingCollector {
 
     // MARK: - Gate
 
-    /// Re-read at EVERY decision. Cached permission is exactly what the spec forbids.
+    /// Re-read at every decision. Cached permission is exactly what the spec forbids.
     /// Called WITHOUT `lock` held.
     ///
     /// CONSENT is the only admission decision. The retired readiness gates are gone:
@@ -359,7 +359,7 @@ final class VoiceSharingCollector {
             return nil
         }
         let session = sessionIdentity()
-        // PROVENANCE WITH NO PLACEHOLDER: every record must carry the
+        // PROVENANCE with no placeholder: every record must carry the
         // real epoch the account holds at capture time. When no epoch is available there is nothing
         // truthful to stamp, so the capture is not opened — ordinary record construction fails rather
         // than writing an unsupported value the server refuses. This is not a readiness lifecycle: it
@@ -788,7 +788,7 @@ return }
         markTerminal(c)
         terminalRing[c.id]?.emitted = true
         cancelOutcomeDeadlineLocked(c.id)
-        // SPEC 1e79e5b4: for a bleed-rejected segment the ASR stage did not run because the engine
+        // for a bleed-rejected segment the ASR stage did not run because the engine
         // OBSERVED playback bleed and skipped it — a known skip, not an absent observation. The bleed
         // stage keeps its own observed decision from the contract enum (`overlap` here); this fact says
         // only why ASR did not run.
@@ -896,7 +896,7 @@ return }
                 // frame, unlike the event audio) leave the ledger; the event's exact audio enters
                 // it below. The bytes are owned somewhere at every instant.
                 aggregateAudioSamples -= evicted.retained.count
-                // Reviewer ea2964b3: the handoff must be BOUNDED and ACCOUNTED. The audio now
+                // the handoff must be BOUNDED and ACCOUNTED. The audio now
                 // moves through the pending FIFO under the SAME caps as every other event — the
                 // aggregate still owns these bytes (added below, never decremented early), so a
                 // blocked worker cannot grow untracked PCM outside the ledger. Pressure is counted
@@ -969,7 +969,7 @@ return }
         }
     }
 
-    /// Disposes ALL retained audio in the ring (withdrawal path). Identity bookkeeping stays; bytes go.
+    /// Disposes all retained audio in the ring (withdrawal path). Identity bookkeeping stays; bytes go.
     private func disposeRingAudio() {
         for deadline in outcomeDeadlines.values { deadline.work.cancel() }
         outcomeDeadlines.removeAll()
@@ -1173,7 +1173,7 @@ return }
         guard stillValid else {
             lock.lock()
             aggregateAudioSamples -= event.audio.count
-            // Reviewer 34aae0fa (4): this drop used to be SILENT. It names its bound so the two
+            //  (4): this drop used to be SILENT. It names its bound so the two
             // cases are separable: the account/session moved, or consent closed behind the event.
             let why = event.authorizationSession == sessionIdentity()
                 ? "consent-not-permitted" : "session-moved"
@@ -1192,7 +1192,7 @@ return }
     private func deliverUnderSinkOwnership(_ event: SegmentEvent) {
         let n = event.audio.count
         lock.lock()
-        // Reviewer 34aae0fa (4) + 43f457ab finding 3: count CONTRIBUTIONS, not events. The sink
+        //  (4) + 43f457ab finding 3: count CONTRIBUTIONS, not events. The sink
         // ignores `.started`, so counting every non-gate-control event counted one segment twice
         // (start then completion) before a single contribution existed. A COMPLETED segment and a
         // REJECTED one (wake or bleed) both reach the sink as a contribution record — a rejected

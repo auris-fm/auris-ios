@@ -2,14 +2,14 @@ import Foundation
 
 /// Capture telemetry accumulator.
 ///
-/// WHY THIS EXISTS (#core:25b91a1b `98ba5c48`): after a successful start the capture path logged
+/// Why this exists: after a successful start the capture path logged
 /// exactly one line per process (`First buffer`) and the VAD logged only when an utterance was
 /// EMITTED. A user reporting "everything is ready but still no wake word" therefore could not be
 /// diagnosed at all: a quiet room, a level that never crosses the VAD threshold, and a tap that
 /// stopped delivering buffers are three different defects producing identical logs — none.
 ///
 /// This accumulator answers the question the log could not: are samples still arriving, and how
-/// loud are they. It deliberately does NOT judge the level against a speech threshold — that value
+/// loud are they. It deliberately does not judge the level against a speech threshold — that value
 /// belongs to the segmenter and is not visible from here, and a wrong comparison is worse than none.
 ///
 /// Kept free of AVFoundation and of `FileLog` so the reporting rule is unit-testable without an

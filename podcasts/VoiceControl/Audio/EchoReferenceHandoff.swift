@@ -8,14 +8,14 @@ import PocketCastsUtils
 /// in strength and are stated separately because of it:
 ///
 /// - **`append` has a confirmed in-lock cost.** Past capacity it drops the oldest samples
-///   with `removeFirst` inside the lock, which is a memmove of the retained window on every
-///   append. That is unconditionally inside the lock.
+/// with `removeFirst` inside the lock, which is a memmove of the retained window on every
+/// append. That is unconditionally inside the lock.
 /// - **`snapshot` may wait, by an amount that is not established.** It returns a Swift
-///   array under the lock, which is a retain rather than a copy: the buffer's copy is
-///   copy-on-write and happens later, possibly outside the lock, depending on the caller.
-///   So an earlier claim here that a snapshot copies the whole retained window inside the
-///   lock was wrong — that figure is an upper bound on what a caller could pay, not a cost
-///   the lock holds.
+/// array under the lock, which is a retain rather than a copy: the buffer's copy is
+/// copy-on-write and happens later, possibly outside the lock, depending on the caller.
+/// So an earlier claim here that a snapshot copies the whole retained window inside the
+/// lock was wrong — that figure is an upper bound on what a caller could pay, not a cost
+/// the lock holds.
 ///
 /// Either way a callback that waits on that lock can miss its deadline, and an `NSLock`
 /// prevents a data race without bounding the wait. **Whether a tap callback actually waits,
@@ -34,7 +34,7 @@ import PocketCastsUtils
 /// the consumer see less audio than the producer submitted, which is the visible signal
 /// that the two got out of step.
 ///
-/// **Ownership.** `reset()` discards pending blocks, so audio produced before a stop is
+/// **Ownership.** `reset` discards pending blocks, so audio produced before a stop is
 /// not delivered after a restart — those blocks describe a timeline that no longer exists.
 /// Each submitted block is applied exactly once, in submission order.
 final class EchoReferenceHandoff {
@@ -65,12 +65,12 @@ final class EchoReferenceHandoff {
         let renderedFramesInProducer: Double?
         /// The producer's own frame count when this block began.
         let producerBlockStart: Double?
-        /// A STABLE PER-BLOCK KEY supplied by the producer: unique per submitted block, so a
-        /// callback can be linked to the acceptance of ITS OWN block. The producer identity alone
+        /// A STABLE per-BLOCK key supplied by the producer: unique per submitted block, so a
+        /// callback can be linked to the acceptance of ITS own block. The producer identity alone
         /// cannot do this — one installation publishes many blocks.
         let blockKey: Int?
         /// The producer's own frame count at the END of this block (exclusive). Carried separately
-        /// from `renderedFramesInProducer`, which is the RENDER POSITION the timestamp describes:
+        /// from `renderedFramesInProducer`, which is the RENDER position the timestamp describes:
         /// one field cannot serve as both the range end and the represented position, because the
         /// automatic anchor would then pair the end frame with the start's instant.
         let producerBlockEnd: Double?
@@ -90,11 +90,11 @@ final class EchoReferenceHandoff {
     /// recall a block that has already been removed from it.
     var onDeliveryDequeued: (() -> Void)?
 
-    /// TEST-ONLY acknowledgment fired IMMEDIATELY AFTER a block's samples are appended and its
-    /// automatic anchor is published, inside the same critical section — i.e. BEFORE any later
+    /// TEST-only acknowledgment fired IMMEDIATELY after a block's samples are appended and its
+    /// automatic anchor is published, inside the same critical section — i.e. before any later
     /// queued correction can run. It is the observation point at which a coherent frame/instant
     /// pair must already hold, and it is what makes the end-position mutation detectable.
-    /// The acknowledgment carries the accepted block's STABLE IDENTITY together with the range
+    /// The acknowledgment carries the accepted block's STABLE identity together with the range
     /// that identity covers, so a caller can link one callback to one acceptance rather than
     /// matching ranges to a list of counts.
     var onBlockAccepted: ((_ producer: ProducerIdentity, _ blockKey: Int?, _ producerStart: Double?, _ producerEnd: Double?, _ rate: Double) -> Void)?
@@ -170,7 +170,7 @@ final class EchoReferenceHandoff {
     ///
     /// A producer reports its new identity when its node restarts, and the handoff records it
     /// here. Observations whose identity is not the active one for their kind are refused
-    /// BEFORE range lookup: a retired incarnation's numbers are still valid numbers, and its
+    /// before range lookup: a retired incarnation's numbers are still valid numbers, and its
     /// retained blocks may still be resident, so a range-and-identity match alone would accept
     /// a late observation from a clock that has already been replaced. Refusing on identity is
     /// the boundary; the retained block is kept because its audio is genuinely still resident.
@@ -195,7 +195,7 @@ final class EchoReferenceHandoff {
     /// Number of blocks dropped because the queue was full. A consumer that sees this
     /// climb is behind the producer, and the reference has gaps as a result.
     ///
-    /// SESSION-SCOPED: `reset()` zeroes this with the rest of the session's state, so a
+    /// SESSION-SCOPED: `reset` zeroes this with the rest of the session's state, so a
     /// consumer reading it after a stop/restart sees the NEW session's drops, not a total
     /// accumulated across sessions. The previous cumulative semantics made the accessor's
     /// own doc ("a consumer that sees this climb") false across session boundaries.
@@ -277,14 +277,14 @@ final class EchoReferenceHandoff {
     ///
     /// The cloud player is the one producer whose samples do not travel this queue — it runs on
     /// its own runner thread rather than a real-time deadline callback, so appending directly is
-    /// legitimate. But its RENDER POSITIONS still need the containing-block mapping, and that
+    /// legitimate. But its RENDER positions still need the containing-block mapping, and that
     /// mapping needs the ranges. Without this record, a position submitted through the handoff
     /// finds no containing block and is refused (anchor cleared), which would make the cloud
     /// producer's audio uncorrelatable whenever a handoff is wired — worse than the defect this
     /// replaces. So the producer publishes its accepted range here, in the same critical section
     /// as the retention trim, and positions map against it exactly like a handed-off block's.
     ///
-    /// A retired incarnation for this kind is refused BEFORE recording, matching `deliver`'s
+    /// A retired incarnation for this kind is refused before recording, matching `deliver`'s
     /// acceptance boundary: a block from a replaced clock must not extend the timeline the new
     /// clock's positions will be matched against.
     func recordCloudBlockRange(
@@ -342,7 +342,7 @@ final class EchoReferenceHandoff {
     /// Blocks until `body` returns, having first stopped the handoff's serial consumer at a
     /// known point. Test-only seam for overflow controls.
     ///
-    /// Without it a drop test is a race: `submit` enqueues `deliver()` on the same serial
+    /// Without it a drop test is a race: `submit` enqueues `deliver` on the same serial
     /// queue, so with capacity 1 the consumer can empty `pending` between two submissions and
     /// no overflow ever happens — the assertion then depends on scheduling luck (reviewer
     /// finding). This runs `body` as a barrier ON the consumer queue, so nothing else queued
@@ -353,7 +353,7 @@ final class EchoReferenceHandoff {
     }
 
     /// Ends the session: pending blocks are discarded and later deliveries from before the
-    /// reset are refused. The session's DROP DIAGNOSTICS go with it — the count and the
+    /// reset are refused. The session's DROP diagnostics go with it — the count and the
     /// logged-once latch — so `droppedBlockCount` means "this session" and a new session
     /// gets its own first notice rather than inheriting a latch that silences it.
     ///
@@ -379,17 +379,17 @@ final class EchoReferenceHandoff {
     /// Records a producer's render position against the block that contains it.
     ///
     /// The position arrives in the submitting producer's own frame count, so it is converted
-    /// through the SHARED-REFERENCE RANGE of the block whose producer-local range contains it
+    /// through the SHARED-REFERENCE range of the block whose producer-local range contains it
     /// — not through the latest append's origin, which may belong to a later block or to
     /// another producer entirely.
     ///
     /// The generation check and the reference update are in ONE critical section, the same
-    /// boundary `deliver()` closes: a check that releases the lock before the act permits a
+    /// boundary `deliver` closes: a check that releases the lock before the act permits a
     /// reset to land in between, and the position then lands in a session that ended. Holding
     /// the lock across both means a reset either happens before the check (the position is
     /// refused) or after the update (the position was already in the old session's reference).
     ///
-    /// Lock order is `handoff.lock` -> `reference.lock`; `deliver()` already takes that order
+    /// Lock order is `handoff.lock` -> `reference.lock`; `deliver` already takes that order
     /// when it reads `reference.streamIndex` under this lock, and nothing in the reference
     /// calls back into the handoff, so the reverse order does not exist.
     private func record(
@@ -478,7 +478,7 @@ final class EchoReferenceHandoff {
         onDeliveryDequeued?()
 
         // The generation is re-checked inside the same critical section that performs the
-        // append, not before it. Checking first and appending after leaves a window: `reset()`
+        // append, not before it. Checking first and appending after leaves a window: `reset`
         // can land between the two, and the block then lands in a session that ended — the
         // exact boundary a check-then-act sequence cannot close. Holding the lock across the
         // append means a reset either happens before the check (the block is refused) or after
@@ -489,14 +489,14 @@ final class EchoReferenceHandoff {
             lock.unlock()
             return
         }
-        // THE SAME PRODUCER-IDENTITY POLICY THE RENDER-POSITION PATH ENFORCES, applied to SAMPLES
+        // THE same producer-IDENTITY policy the render-POSITION path enforces, applied to SAMPLES
         // and enforced HERE, at the synchronized acceptance boundary rather than at enqueue. A
         // callback retired before its block is delivered must be refused exactly as its position
         // would be: the two halves of one producer's output cannot be policed differently. Checking
         // here -- not in `submit` -- also covers a retirement that happens BETWEEN enqueue and this
         // acceptance, which a check at enqueue could not see.
         //
-        // ALREADY-ACCEPTED AUDIO IS UNTOUCHED: this refuses a NEWLY SUBMITTED stale callback and
+        // ALREADY-ACCEPTED audio is untouched: this refuses a NEWLY submitted stale callback and
         // appends nothing; it does not delete blocks that were accepted before the retirement, so
         // the existing retention contract is preserved.
         if let active = activeIncarnations[block.producer.kind],
@@ -510,7 +510,7 @@ final class EchoReferenceHandoff {
             block.samples,
             sourceRate: block.sampleRate
         )
-        // Where this block lands in the reference, read IN THE SAME critical section as the
+        // Where this block lands in the reference, read IN THE same critical section as the
         // append. This is the producer's own range within the shared timeline, and it is the
         // only correct origin for a position inside the block: an interleaved producer's appends
         // sit between this producer's blocks, so no single per-producer offset maps them and the
@@ -578,7 +578,7 @@ final class EchoReferenceHandoff {
                 }
             }
         )
-        // FIRED AFTER THE ATOMIC PUBLICATION: the samples are appended and the anchor is written
+        // FIRED after the atomic publication: the samples are appended and the anchor is written
         // inside this same critical section, so a coherent frame/instant pair already holds here and
         // no later queued operation has yet run.
         onBlockAccepted?(block.producer, block.blockKey, block.producerBlockStart, block.producerBlockEnd, block.sampleRate)
@@ -589,14 +589,14 @@ final class EchoReferenceHandoff {
     /// Logged once per session rather than per drop: a producer that is persistently behind
     /// would otherwise flood the log from a queue that is already saturated.
     ///
-    /// The I/O is NOT performed on the submitting thread. `submit` documents that its caller
+    /// The I/O is not performed on the submitting thread. `submit` documents that its caller
     /// is the real-time audio thread and must not block; every step here up to the hand-off
     /// is an O(1) lock section, but the sink itself is third-party work (FileLog buffers in
     /// memory and dispatches disk writes off-thread — it does not block on disk — yet an
     /// os.log call or a future synchronous destination would). So the notice is hopped onto
     /// the handoff's OWN serial queue, which is explicitly the non-real-time side of the
     /// boundary, and never onto the submitting caller. `dropLogged` is latched under the
-    /// lock BEFORE the hop, so concurrent overflows enqueue at most one notice per session.
+    /// lock before the hop, so concurrent overflows enqueue at most one notice per session.
     private func logDropOnce() {
         lock.lock()
         guard !dropLogged else {

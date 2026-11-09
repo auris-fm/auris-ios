@@ -1,11 +1,11 @@
 import Foundation
 import PocketCastsUtils
 
-/// THE OPERATOR ENTRY for authenticated acceptance. It is the ONE place that reaches the acceptance
+/// THE operator entry for authenticated acceptance. It is the ONE place that reaches the acceptance
 /// path through the PRODUCTION client — the same factory the app's sink uses, hence the same base URL,
 /// identity and token provider — rather than an injected closure.
 ///
-/// It runs the three controlled turns, exports ONLY the allowlisted acceptance fields, and prints a
+/// It runs the three controlled turns, exports only the allowlisted acceptance fields, and prints a
 /// single machine-readable verdict. It never prints or writes a credential: the token provider supplies
 /// it inside the client and nothing here reads it.
 enum CloudAcceptanceHarness {
@@ -21,7 +21,7 @@ enum CloudAcceptanceHarness {
         /// previously carried only the code, so a client construction failure and a served error were
         /// indistinguishable after the fact — which is what an "empty message" reading rested on.
         let stage: String
-        /// A BOUNDED reason for a served rejection, and its length. Free-form server text is NOT
+        /// A BOUNDED reason for a served rejection, and its length. Free-form server text is not
         /// exported: an arbitrary server string is outside this protocol's allowlist. Only the
         /// request-validation reason this controlled run needs is preserved, and it is matched against a
         /// known set rather than passed through, so the export carries a bounded token.
@@ -50,7 +50,7 @@ enum CloudAcceptanceHarness {
 
     /// Runs the protocol against the production client and returns the export.
     ///
-    /// It records the CLIENT'S OWN resolved base URL and whether a credential is present BEFORE the
+    /// It records the CLIENT'S OWN resolved base URL and whether a credential is present before the
     /// turns run, because `invalid_request` and `unauthorized` have different sources and the difference
     /// decides what the run is evidence of. Neither value is a credential: the URL is configuration and
     /// the credential is reported as a boolean.

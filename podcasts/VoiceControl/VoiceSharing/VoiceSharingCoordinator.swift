@@ -49,7 +49,7 @@ final class VoiceSharingCoordinator {
             guard let self else { return }
             self.refreshCohortAttributes()
             // THE fan-OUT is for A CONSENT loss, not for "SOMETHING changed". This
-            // observer used to fire `consentGateLost` on EVERY store notification — including a
+            // observer used to fire `consentGateLost` on every store notification — including a
             // first authoritative projection and the ordinary sign-in transition. The foreground
             // path refreshes the projection, the refresh applies the membership, `notify` fires,
             // and the handler called `uploadTrigger?.stop` — cancelling the very drain the same

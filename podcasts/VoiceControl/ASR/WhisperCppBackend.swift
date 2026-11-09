@@ -70,7 +70,7 @@ class WhisperCppBackend: AsrBackend {
 
     func transcribe(samples: [Float], sampleRateHz: Int) async -> AsrResult {
         #if canImport(whisper)
-        // Serialize whisper access — whisper is NOT thread-safe.
+        // Serialize whisper access — whisper is not thread-safe.
         // `async` bridging to serial queue: continuation + dispatch_async.
         return await withCheckedContinuation { continuation in
             transcribeQueue.async { [weak self] in

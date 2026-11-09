@@ -10,16 +10,16 @@ class GracePeriodSignal: ObservableObject {
     private let timeout: TimeInterval
     private var timer: Timer?
 
-    /// TEST SEAM (reviewer 1f2c96ce): the live window's scheduled expiry, so controls can
+    /// TEST seam: the live window's scheduled expiry, so controls can
     /// distinguish a NEW window (generation bump) from a RENEWAL inside the same generation
     /// (same generation, later fire date). A discarded capture must do NEITHER.
     var timerFireDateForTesting: Date? { timer?.fireDate }
 
-    /// TEST SEAM: run the window's real expiry transition now, instead of waiting out the
+    /// TEST seam: run the window's real expiry transition now, instead of waiting out the
     /// timeout. It takes the SAME path the timer takes (`deactivate(trigger: "timeout")`), so a
     /// control can hold recognition open across an expiry without the test depending on wall
     /// clock alignment between the timeout and the suspended backend.
-    /// TEST SEAM: run a named deactivation trigger now.
+    /// TEST seam: run a named deactivation trigger now.
     func deactivateForTesting(trigger: String) {
         if Thread.isMainThread {
             deactivate(trigger: trigger)
@@ -69,7 +69,7 @@ class GracePeriodSignal: ObservableObject {
     /// refuse it here as everywhere else.
     struct AdmittedWorkAuthority {
         let isAdmittedWork: (String, Int) -> Bool
-        /// Whether ANY admitted turn currently holds work under this origin. Used to retire
+        /// Whether any admitted turn currently holds work under this origin. Used to retire
         /// per-origin conversation state only once nothing can still reach it.
         let hasAdmittedWork: (Int) -> Bool
     }
@@ -133,7 +133,7 @@ class GracePeriodSignal: ObservableObject {
     /// used. This only governs the window's lifetime.
     func onAppBackgrounded() {
         isForegroundAllowed = false
-        // Preservation requires BOTH (reviewer 0c546ce5; spec 3893cd55): a live hold (work worth
+        // Preservation requires BOTH: a live hold (work worth
         // preserving) AND an INDEPENDENT playback context (an eligible episode loaded, playing
         // or paused — a real source that keeps capture allowed). Neither alone suffices: a hold
         // alone manufactures nothing (grace must not self-sustain), and context alone means
@@ -153,7 +153,7 @@ class GracePeriodSignal: ObservableObject {
     /// the provider on each playback event). LOSING the last context while the foreground is
     /// ALREADY gone retires the window — no further lifecycle notification is needed, and
     /// `deactivate` bumps the generation, releases holds, and (via the origin binding) clears
-    /// the live origin. A hold does NOT save the window: preservation is hold AND context, so
+    /// the live origin. A hold does not save the window: preservation is hold AND context, so
     /// with the context gone nothing independently sustains it.
     func onPlaybackContextChanged(_ available: Bool) {
         guard !available, !isForegroundAllowed else { return }  // foreground alone is still context
@@ -179,7 +179,7 @@ class GracePeriodSignal: ObservableObject {
     ///
     /// There is deliberately NO grace-window dispatch budget (owner delta 3484cbc/5eca874):
     /// each independent utterance may dispatch its own request, including within one window.
-    /// Duplicate-dispatch protection lives with the per-utterance REQUEST OWNERSHIP
+    /// Duplicate-dispatch protection lives with the per-utterance REQUEST ownership
     /// (`CloudConversationManager.prepare`), not here — so this must not refuse a second,
     /// independent dispatch.
     func claimDispatchOwnership() -> Int? {
@@ -192,7 +192,7 @@ class GracePeriodSignal: ObservableObject {
     ///
     /// The comparison is a single main-actor operation: a separate "is this origin current?"
     /// check would leave a gap in which a wake or a privacy close could land, so a turn could be
-    /// dispatched against a window it never belonged to. The refusal here is WINDOW IDENTITY,
+    /// dispatched against a window it never belonged to. The refusal here is WINDOW identity,
     /// not a count — a live window may own many independent utterances. `nil` means refused; the
     /// caller must not consume, build a client, or act.
     ///
@@ -212,7 +212,7 @@ class GracePeriodSignal: ObservableObject {
     }
 
     /// Claims dispatch ownership for a turn, and for a turn carrying a captured origin the claim
-    /// is authorised by THAT TURN'S OWN admission — never by the mere existence of some other
+    /// is authorised by THAT turn'S OWN admission — never by the mere existence of some other
     /// reservation with the same origin. A different turn must not borrow another's eligibility.
     private func claimDispatchOwnershipOnMain(capturedOrigin origin: Int?, utteranceId: String?) -> Int? {
         // A turn with no captured identity keeps the live-window policy.
@@ -255,7 +255,7 @@ class GracePeriodSignal: ObservableObject {
     /// it must never adopt a window that opened afterwards.
     private var retiredTurns: Set<String> = []
 
-    /// TEST SEAM: admit a turn that was admitted into an EARLIER window, which is what the
+    /// TEST seam: admit a turn that was admitted into an EARLIER window, which is what the
     /// production admission recorded before the deadline passed. `admitInFlightTurn` refuses this
     /// by design (it only admits into the LIVE window), so a control that needs a still-in-flight
     /// turn of a superseded origin records it here.
@@ -264,12 +264,12 @@ class GracePeriodSignal: ObservableObject {
         if Thread.isMainThread { apply() } else { DispatchQueue.main.sync(execute: apply) }
     }
 
-    /// TEST SEAM: the most recent dispatch claim's outcome, as (capturedOrigin, grantedOrigin).
+    /// TEST seam: the most recent dispatch claim's outcome, as (capturedOrigin, grantedOrigin).
     /// Nil until a claim is attempted. Lets a control observe the claim its own path made without
     /// reaching into the executor's sink.
     private(set) var lastClaimObservationForTesting: (captured: Int?, granted: Int?)?
 
-    /// TEST SEAM.
+    /// TEST seam.
     var inFlightCountForTesting: Int { inFlightTurns.count }
 
     /// A captured origin that can never be claimed, for a turn whose admission was retired. It is
@@ -286,7 +286,7 @@ class GracePeriodSignal: ObservableObject {
         return result
     }
 
-    /// Releases one admitted turn's reservation. Called on EVERY terminal outcome for that turn —
+    /// Releases one admitted turn's reservation. Called on every terminal outcome for that turn —
     /// completion, drop, cancellation — so eligibility is owned for exactly as long as the work is
     /// in flight and a claim can never be honoured twice.
     func releaseInFlightTurn(utteranceId: String) {
@@ -294,7 +294,7 @@ class GracePeriodSignal: ObservableObject {
         DispatchQueue.main.sync { releaseInFlightTurnOnMain(utteranceId) }
     }
 
-    /// TEST/PRODUCTION SEAM: called after a turn's reservation is released, with the turn's id and
+    /// TEST/PRODUCTION seam: called after a turn's reservation is released, with the turn's id and
     /// the origin it held. Downstream state that exists only because of that admitted work (the
     /// per-origin conversation a delayed turn opened) is released here, so it dies with its OWNER
     /// rather than waiting for some future window transition — which may never come.
@@ -346,7 +346,7 @@ class GracePeriodSignal: ObservableObject {
         // A RECOGNIZED command is a SELECTED renewal (the success model): the answer arrived, so
         // the window's allowance is new information again — even while a playback hold keeps the
         // clock from arming. Clock arming and explicit recognized renewal are separate concerns
-        // (review 24f236de): the hold suppresses ARMING only.
+        // the hold suppresses ARMING only.
         startOrResetOnMain(trigger: "cloud route", renewingAllowance: true)
         return true
     }
@@ -432,7 +432,7 @@ class GracePeriodSignal: ObservableObject {
             generation += 1   // a window belongs to a generation
         }
         isActive = true
-        // Renewal is each caller's EXPLICIT decision (review 24f236de): a recognized command
+        // Renewal is each caller's EXPLICIT decision: a recognized command
         // renews (success model); the fallback extension and the hold's plain release do not.
         if renewingAllowance {
             // The allowance is restored for this window, so a refusal in it is new
@@ -443,7 +443,7 @@ class GracePeriodSignal: ObservableObject {
             FileLog.shared.addMessage("[VoicePipeline] GracePeriod: true (\(trigger))")
         }
         timer?.invalidate()
-        // GRACE CONTRACT (shared timer path): while THIS window's work/playback holds expiry, NO
+        // GRACE contract (shared timer path): while THIS window's work/playback holds expiry, NO
         // caller re-arms the clock under the hold — command recognition, fallback extension, and
         // wake resets all preserve their allowance/state here, and the expiry resumes exactly
         // once when the last hold releases. Holds of OTHER (older) generations do not bind this
@@ -470,7 +470,7 @@ class GracePeriodSignal: ObservableObject {
     }
 
     /// SUSPENDS this window's expiry while its cloud work / local playback runs — from the
-    /// ADMITTED DISPATCH through done and the actual drain/stop, regardless of duration (grace
+    /// ADMITTED dispatch through done and the actual drain/stop, regardless of duration (grace
     /// contract). Identity-bound at acquisition: refused unless `generation` is the LIVE window —
     /// a stale turn's work can never hold a window it does not belong to. The interval is not
     /// restarted here; releasing the LAST hold does that exactly once, at the real stop.
@@ -489,9 +489,9 @@ class GracePeriodSignal: ObservableObject {
     }
 
     /// ENDS exactly this token's hold at its real terminal/stop/cancel. When the LAST hold goes,
-    /// the permitted interval starts (resumes) EXACTLY ONCE — and only if the released hold's
+    /// the permitted interval starts (resumes) EXACTLY once — and only if the released hold's
     /// generation is still the live window: a stale stop, a privacy close that already ended the
-    /// window, or a successor's event drops its own hold and NEVER starts or extends the current
+    /// window, or a successor's event drops its own hold and never starts or extends the current
     /// window.
     func endPlaybackHold(_ token: PlaybackHoldToken?) {
         guard let token else { return }
@@ -505,21 +505,21 @@ class GracePeriodSignal: ObservableObject {
         // CURRENT-GENERATION counting: only holds belonging to the LIVE window keep its expiry
         // suspended. A stale hold from an older generation neither delays this release nor can
         // its later end repair (or disturb) this window — it is retired here so it can never
-        // suppress a successor's clock. (Reviewer 7fc40b74 defect 2: an old outstanding hold
+        // suppress a successor's clock. ( defect 2: an old outstanding hold
         // used to leave a released successor hold-free AND timer-free.)
         playbackHolds.removeAll { $0.generation != self.generation }
         guard !playbackHolds.contains(where: { $0.generation == self.generation }) else { return }
         // Only the LIVE window resumes: a hold whose window was closed (privacy close, expiry of
         // a later interval) is dropped without re-arming anything.
         guard isActive, self.generation == token.generation else { return }
-        // DEFECT 1 (reviewer 7fc40b74): the resume arms the clock WITHOUT renewal. This window
+        // DEFECT 1: the resume arms the clock WITHOUT renewal. This window
         // already spent its escalation allowance and tone decision before the hold; a drained
         // playback resumes the SAME interval, it does not open a fresh one.
         startOrResetOnMain(trigger: "playback drained", renewingAllowance: false)
     }
 
     private func deactivate(trigger: String) {
-        // An ordinary inactivity expiry ends the window for NEW follow-ups but must NOT retire an
+        // An ordinary inactivity expiry ends the window for NEW follow-ups but must not retire an
         // already-admitted turn still in recognition (voice-control-core.md:270). Every other
         // trigger is an invalidation — privacy, route, context loss, app background — and DOES
         // retire in-flight work, because the user's speech may no longer be safe to act on.

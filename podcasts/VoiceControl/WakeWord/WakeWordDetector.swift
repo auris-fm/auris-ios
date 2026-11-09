@@ -7,10 +7,10 @@ class WakeWordDetector: WakeWordDetectorProtocol {
     private var loadedIdentity: VoiceSharingContributionEncoder.ModelRef?
 
     /// - Parameters:
-    ///   - melModel: Path to melspectrogram ONNX model
-    ///   - embedModel: Path to embedding ONNX model
-    ///   - classifierModel: Path to "Auris" classifier ONNX model
-    ///   - threshold: Deployment threshold loaded from the eval manifest
+    /// - melModel: Path to melspectrogram ONNX model
+    /// - embedModel: Path to embedding ONNX model
+    /// - classifierModel: Path to "Auris" classifier ONNX model
+    /// - threshold: Deployment threshold loaded from the eval manifest
     init(melModel: URL, embedModel: URL, classifierModel: URL, threshold: Float,
          verifiedModelIdentity: VoiceSharingContributionEncoder.ModelRef? = nil) {
         self.threshold = threshold

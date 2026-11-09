@@ -8,7 +8,7 @@ struct IntentRoutingInput: Equatable {
     let sourceLanguage: String?
     let routerTranscript: String
     let translationKind: TranslationKind
-    /// REQUEST OWNERSHIP (owner delta 3484cbc/5eca874): the identity of the captured utterance
+    /// REQUEST ownership (owner delta 3484cbc/5eca874): the identity of the captured utterance
     /// this input carries. Duplicate callbacks re-emitting the SAME utterance carry the SAME id,
     /// so the request owner can join/reuse one prepared wire request; an independent utterance
     /// has its own id and dispatches its own request, even inside one grace window.

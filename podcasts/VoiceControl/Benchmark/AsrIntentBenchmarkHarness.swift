@@ -6,7 +6,7 @@ import PocketCastsUtils
 ///
 /// Set on launch (simctl launch env or Xcode scheme):
 /// - `ASR_INTENT_BENCHMARK_UTTERANCES` — absolute path to the text-contract
-///   JSONL (1118 rows, frozen sha `20a68433…`)
+/// JSONL (1118 rows, frozen sha `20a68433…`)
 /// - `ASR_INTENT_BENCHMARK_TRANSLATIONS` — optional English sidecar JSON
 /// - `ASR_INTENT_BENCHMARK_SIDELOAD_DIR` — absolute path to the Q8 sideload dir
 ///

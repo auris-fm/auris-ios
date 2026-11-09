@@ -52,7 +52,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
 
     /// Whether an interruption report awaits a later EXPLICIT user request. A refusal retains the
     /// report but submits nothing, so the turn ends locally and there is no successor frame to
-    /// observe it on (reviewer c38ff4ba item 2).
+    /// observe it on.
     @MainActor var hasPendingInterruptionReportForTesting: Bool { interruptionState.hasPendingReport }
 
     /// The client that owns this sink's socket registrations. Exposed so a control can retire one
@@ -68,7 +68,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// callback — the raw `CloudRouteIntent.origin` — rather than whatever window is live later.
     @MainActor private(set) var lastOriginForTesting: Int?
     /// The ownership INSTANCE currently owning an utterance's record, for controls that must
-    /// prove a stale token no longer owns it (reviewer b2c09394).
+    /// prove a stale token no longer owns it.
     func recordInstanceForTesting(utteranceId: String) -> UUID? {
         ownershipLock.lock(); defer { ownershipLock.unlock() }
         return recordForTesting(utteranceId: utteranceId)?.instance
@@ -78,7 +78,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         ownershipLock.lock(); defer { ownershipLock.unlock() }
         return recordForTesting(utteranceId: utteranceId) != nil
     }
-    /// Await a joiner's resolution against an admission token, for controls (reviewer 8501bd91).
+    /// Await a joiner's resolution against an admission token, for controls.
     func joinForTesting(token: CloudDispatchOwnership.DispatchToken) async -> CloudRouteResult? {
         await resolveJoin(token: token)
     }
@@ -104,7 +104,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     @MainActor var clientCreationCountForTesting: Int = 0
 
     /// REQUEST-SCOPED preparation observer: the dispatch supplies it, so the prepared identity is
-    /// captured FOR THAT DISPATCH rather than read from a sink-wide "last" slot. A shared slot is a
+    /// captured FOR that dispatch rather than read from a sink-wide "last" slot. A shared slot is a
     /// last-value property: with more than one turn on a sink it reports whichever ran most
     /// recently, which is the wrong subject for an identity comparison.
     typealias PreparedObserver = @MainActor (CloudPreparedConversation) -> Void
@@ -131,7 +131,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// Consulted by the dispatch fence: does this exact turn still hold admitted work under
     /// `origin`? Nil means the sink was constructed without one and fences on the live origin
     /// alone (the pre-existing behaviour).
-    /// TEST-ONLY: an interleaving barrier invoked inside the coherent admission block, before the
+    /// TEST-only: an interleaving barrier invoked inside the coherent admission block, before the
     /// decision reads. Nil in production.
     @MainActor var admissionInterleavingBarrierForTesting: (() -> Void)?
 
@@ -168,7 +168,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     var interruptionStateForTesting: CloudInterruptionState { interruptionState }
     /// The origin the turn runs under, so a resume cannot cross an ended window.
 
-    /// ONE pre-effect hold, used ONLY by controls to strike cancellation deterministically between
+    /// ONE pre-effect hold, used only by controls to strike cancellation deterministically between
     /// the durable claim and the effect. Production never sets it (nil = no pause). The hold is
     /// AWAITED, so the OWNER really suspends here — "the consumer is held" is a fact about the
     /// owner, not about some detached task. Its implementation must be cancellation-INSENSITIVE
@@ -225,18 +225,18 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// carries no turn identity, and a turn's audio can still be draining after a later turn has
     /// taken over the hold, so acting on the flag alone let an older turn's notification restore
     /// playback that the newer turn was deliberately holding.
-    /// The deferred restoration, carrying the identity captured WHEN ITS DRAIN WAS SCHEDULED:
+    /// The deferred restoration, carrying the identity captured WHEN its drain was scheduled:
     /// which turn deferred and which drain it waits on. Neither alone suffices — the current owner
     /// can be the same turn when a foreign notification arrives, and a drain identity alone cannot
     /// say whether this turn still owns the release.
     private var restoreHeldForPlayerDrain: (owner: CloudTurnToken, drainEpoch: Int)?
     /// THIS sink's live playback hold. Acquired at the turn's admitted dispatch; ownership
-    /// TRANSFERS atomically (begin-successor BEFORE end-predecessor) when a new turn is admitted,
+    /// TRANSFERS atomically (begin-successor before end-predecessor) when a new turn is admitted,
     /// so a successor never runs hold-free between turns. Released at every terminal: error,
     /// superseded/earlyClose, done-without-pending, and the real drain/stop.
     private var heldPlaybackToken: GracePeriodSignal.PlaybackHoldToken?
     /// A rolled-back admission's hold, kept live until the retire stop it is waiting on
-    /// CONFIRMS (review 8eb9fb44): the hold is the last live one over the predecessor's
+    /// CONFIRMS: the hold is the last live one over the predecessor's
     /// still-outstanding output, so its release responsibility transfers to the stop
     /// confirmation instead of firing at rollback time.
     private var pendingHoldRelease: (hold: GracePeriodSignal.PlaybackHoldToken, epoch: Int)?
@@ -248,14 +248,14 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// overlapping turns (double wake, barge-in) cannot interleave actions or
     /// double-restore the pause.
     private var activeTurn: CloudTurnToken?
-    /// PLAYBACK ownership, distinct from consumer-Task lifetime (review 14f66b72): a turn that
+    /// PLAYBACK ownership, distinct from consumer-Task lifetime: a turn that
     /// finished its NETWORK work can still own pending player audio (a deferring drain), so a
     /// successor must retire THAT even though `activeTurn` is already gone. Set at each
     /// admission transfer; never cleared on completion — retirement is by the next transfer.
     private var playbackOwner: CloudTurnToken?
-    /// The stop identity each predecessor's retirement requested, captured AT THE TRANSFER and
-    /// associated with the predecessor's token (review 14f66b72): the superseded turn's cleanup
-    /// awaits ITS OWN captured identity — never the shared latest counter, which later stops
+    /// The stop identity each predecessor's retirement requested, captured AT THE transfer and
+    /// associated with the predecessor's token: the superseded turn's cleanup
+    /// awaits ITS own captured identity — never the shared latest counter, which later stops
     /// move.
 
 
@@ -267,7 +267,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         private let lock = NSLock()
         private var cancelled = false
         /// The retire identity captured for THIS turn at the successor's admission transfer
-    /// (review 14f66b72): stored ON the token so it lives exactly as long as the suspended
+    ///: stored ON the token so it lives exactly as long as the suspended
     /// turn that must await it — no shared table to reap, and no reap can discard it early.
     private let tokenLock = NSLock()
     private var capturedRetireEpochStorage: Int?
@@ -295,12 +295,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
 
         // MARK: - Interruption acknowledgement latch
         //
-        // When a successor interrupts this turn, it must NOT proceed until this turn's terminal
-        // has actually arrived (reviewer ff00457c item 1). Cancelling immediately ends the receive
+        // When a successor interrupts this turn, it must not proceed until this turn's terminal
+        // has actually arrived. Cancelling immediately ends the receive
         // loop through the owner-cancel path, so the `done`/`error` branches that carry the
         // interruption transitions are never reached and the acknowledgement is silently skipped.
         //
-        // The latch CARRIES A BOUND RESOLUTION, not a bare boolean (reviewer eaa8c06a). A boolean
+        // The latch CARRIES A BOUND resolution, not a bare boolean. A boolean
         // let both `.done` and `.error` wake the successor, which then unconditionally proceeded to
         // authenticate: a refusal therefore promoted an unacknowledged utterance into an ordinary
         // turn, and so did a timeout and an undelivered send. The resolution is now explicit and
@@ -313,13 +313,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
 
         /// How this turn resolved for an interruption waiter.
         enum InterruptionResolution: Equatable {
-            /// A `done` arrived — even a `completed` one. This is the ONLY outcome that may submit
+            /// A `done` arrived — even a `completed` one. This is the only outcome that may submit
             /// the held follow-up.
             case acknowledged
             /// An `error` terminal: the server refused the interruption. Nothing may be submitted.
             case refused
             /// No resolution: the bound expired, or the send never reached the server. Nothing may
-            /// be submitted, and the held input must NOT be promoted to an ordinary turn.
+            /// be submitted, and the held input must not be promoted to an ordinary turn.
             case failed
         }
 
@@ -414,13 +414,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // Last so a call site can always supply them after whatever other defaults it uses.
         conversationManager: CloudConversationManager = CloudConversationManager(),
         conversationSelectionProvider: @escaping () -> CloudConversationSelection = { .wakeWord },
-        // Interruption state (cloud-assistant.md → Interruption, spec c5fe3416): the retained
+        // Interruption state (cloud-assistant.md → Interruption, ): the retained
         // follow-up and the pending report, held ACROSS turn boundaries. A default instance keeps
         // direct-constructed test sinks working; production passes the service's one instance so
         // two turns of the same app session share it.
         interruptionState: CloudInterruptionState = CloudInterruptionState(),
-        // Grace contract (token ownership holds): from the ADMITTED DISPATCH through done and the
-        // actual drain/stop, the turn's window expiry is SUSPENDED and resumes EXACTLY ONCE when
+        // Grace contract (token ownership holds): from the ADMITTED dispatch through done and the
+        // actual drain/stop, the turn's window expiry is SUSPENDED and resumes EXACTLY once when
         // the last hold releases. Identity is bound at acquisition (live generation only); release
         // is per-token, so a stale terminal never clears another owner's hold. Optional so
         // direct-constructed sinks in tests opt in.
@@ -428,7 +428,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         onGracePlaybackHoldEnd: ((GracePeriodSignal.PlaybackHoldToken?) -> Void)? = nil,
         // Carries ADMITTED-WORK authority to the dispatch fence. A turn admitted before the
         // deadline stays eligible through recognition (voice-control-core.md:270), so its claim
-        // can be granted AFTER the window expires and the live origin has moved on. The fence
+        // can be granted after the window expires and the live origin has moved on. The fence
         // must therefore admit an origin that this turn still HOLDS, not only the origin that is
         // live now — otherwise the granted claim is refused one step later. Retirement
         // (privacy/route) still refuses, because a retired turn is not admitted work. Absent by
@@ -474,25 +474,25 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         resultsPresenter?.present(model)
     }
 
-    // REQUEST OWNERSHIP (owner delta 3484cbc/5eca874, reviewer 39beabc7/a2723c92): one logical
+    // REQUEST ownership (owner delta 3484cbc/5eca874, /a2723c92): one logical
     // dispatch per utterance. A duplicate invocation for the SAME utterance joins the owner (in
     // flight) or observes its settled result — never a second wire request. INDEPENDENT
     // utterances dispatch independently.
     //
-    // RETENTION. Per-utterance OWNERSHIP RECORDS live for the WINDOW's lifetime with no cap and
-    // no eviction. A window change does NOT destroy in-flight records: a held duplicate joiner
+    // RETENTION. Per-utterance OWNERSHIP records live for the WINDOW's lifetime with no cap and
+    // no eviction. A window change does not destroy in-flight records: a held duplicate joiner
     // must still be settled by its owner, so in-flight records survive retirement and are
     // settled with that owner's result; only SETTLED records and effect claims retire. Each
     // record carries an ownership INSTANCE, so a late owner completing after its window retired
     // cannot publish into the successor's map — it settles its own waiters and stops.
     private let ownershipLock = NSLock()
 
-    /// One OWNERSHIP RECORD per utterance dispatch. It carries the ownership INSTANCE that
-    /// admission tokens bind to and ONE terminal state. LIFETIME IS ARC: the sink's live map holds
-    /// the record until retirement detaches it, and each ADMITTED CALLER'S TOKEN holds it while
+    /// One OWNERSHIP record per utterance dispatch. It carries the ownership INSTANCE that
+    /// admission tokens bind to and ONE terminal state. LIFETIME is arc: the sink's live map holds
+    /// the record until retirement detaches it, and each ADMITTED caller'S TOKEN holds it while
     /// that caller is still resolving (`DispatchToken.record`). A detached record is therefore
     /// deallocated exactly when its live-map entry and its last outstanding token are both gone —
-    /// no counter, no second map (reviewer be89233d/f3492082).
+    /// no counter, no second map.
     final class UtteranceRecord {
         let origin: Int?
         let instance = UUID()
@@ -506,7 +506,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         var detached = false
         init(origin: Int?) { self.origin = origin }
     }
-    /// Records keyed by (utterance id, origin). This is the ONLY index: an id may be live in two
+    /// Records keyed by (utterance id, origin). This is the only index: an id may be live in two
     /// windows at once (a delayed admitted turn and a successor reusing the id), and each must
     /// keep its own ownership until its own token releases it. There is no second id-keyed map:
     /// a single id slot either hides a delayed turn's record behind a successor's or vice versa.
@@ -518,7 +518,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         let utteranceId: String
         let origin: Int
     }
-    /// Retirement detaches records from the live map; each record is held ONLY by the ownership
+    /// Retirement detaches records from the live map; each record is held only by the ownership
     /// tokens that were admitted against it (owner + joiners), and is released by the last of
     /// them to resolve. There is no separate long-lived map to leak.
     /// The window identity the retained SETTLED results belong to.
@@ -528,13 +528,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// results and effect claims retire with the window — a new window starts clean. IN-FLIGHT
     /// records are RETAINED so their held joiners are still settled by their owner; they accept
     /// no new joiners and cannot publish into the new window.
-    /// TEST SEAM: whether a record is nameable for this EXACT identity.
+    /// TEST seam: whether a record is nameable for this EXACT identity.
     func hasRecordForTesting(utteranceId: String, origin: Int) -> Bool {
         ownershipLock.lock(); defer { ownershipLock.unlock() }
         return recordsByIdentity[RecordKey(utteranceId: utteranceId, origin: origin)] != nil
     }
 
-    /// TEST SEAM resolution: the record of the LIVE origin for this id, or the only entry when
+    /// TEST seam resolution: the record of the LIVE origin for this id, or the only entry when
     /// just one exists. There is no id-keyed slot behind this.
     private func recordForTesting(utteranceId: String) -> UtteranceRecord? {
         let liveOrigin = conversationManager.liveOriginForTesting
@@ -544,7 +544,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     }
 
     /// Releases the index entry of a DELAYED admitted turn whose final owner has gone. The record
-    /// object itself is NOT detached: already-issued tokens and parked waiters keep it alive and
+    /// object itself is not detached: already-issued tokens and parked waiters keep it alive and
     /// resolve exactly as before. Only its nameability ends, and only for the non-live origin — a
     /// live-window turn's settled dedup lifetime is unchanged.
     func releaseRetainedAdmittedDispatch(utteranceId: String, origin: Int) {
@@ -556,13 +556,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     func retireRetainedDispatchesIfWindowChanged(to origin: Int?) {
         ownershipLock.lock()
         if origin != retainedOrigin {
-            // Every record belongs to the OLD window. Detach them ALL from the live map: a
+            // Every record belongs to the OLD window. Detach them all from the live map: a
             // detached record accepts no new joiners and, crucially, must not block a same-id
             // utterance in the NEW window. Each detached record is still reachable through the
             // ownership TOKENS admitted against it, so its admitted callers resolve against it and
-            // it is RELEASED by the last of them (reviewer be89233d) — no immortal second map.
+            // it is RELEASED by the last of them — no immortal second map.
             //
-            // A RECORD OF ADMITTED WORK IS THE EXCEPTION, and it is not an immortal second map:
+            // A RECORD of admitted work is the exception, and it is not an immortal second map:
             // the same token lifetime that keeps it reachable through its token must also keep it
             // NAMEABLE by id, or a repeated callback for that delayed turn would find no record
             // and mint a FRESH one — fresh ownership for work that already owns a dispatch. Its
@@ -588,18 +588,18 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     }
 
     /// Admits a dispatch for the utterance and returns its ownership token ATOMICALLY, fenced by
-    /// the LIVE origin, which is validated BEFORE any record is inspected so a stale caller can
-    /// never observe or join a successor's record (reviewer 8501bd91).
+    /// the LIVE origin, which is validated before any record is inspected so a stale caller can
+    /// never observe or join a successor's record.
     ///
     /// The returned token CARRIES the record it was admitted against, so a caller that pauses and
-    /// resumes after a window change still resolves against ITS OWN record — a reused utterance id
-    /// is never mistaken for the same owner (reviewer 8501bd91/be89233d).
+    /// resumes after a window change still resolves against ITS own record — a reused utterance id
+    /// is never mistaken for the same owner.
     func beginDispatch(utteranceId: String?, origin: Int?) -> CloudDispatchOwnership {
         guard let utteranceId else {
             // No identity: legacy per-call effects, no join semantics, no retained record.
             return .owner(.init(utteranceId: "", instance: UUID(), record: nil))
         }
-        // COHERENT ADMISSION (review 4d474d80/086c0172): the decision reads main-bound state
+        // COHERENT admission: the decision reads main-bound state
         // (origin liveness, the turn's admitted-work answer), so it must run ON the main queue,
         // and its publication (recordsByIdentity) must be atomic with that decision or a
         // retirement between snapshot and publication could admit a stale origin. Both are
@@ -613,7 +613,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // through the normal ownership path.
         guard let origin else { return .refused }
         let decideAndPublish: () -> CloudDispatchOwnership = {
-            // TEST HOOK (review 5fa6e007): an explicit interleaving barrier INSIDE the coherent
+            // TEST hook: an explicit interleaving barrier INSIDE the coherent
             // block — production nil. A control can pause the admission mid-decision, perform a
             // window retirement, and release, proving the decision observes the retirement because
             // it reads state INSIDE the block (never from a pre-block snapshot).
@@ -626,7 +626,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             self.ownershipLock.lock()
             defer { self.ownershipLock.unlock() }
             guard originIsLive || turnHoldsAdmittedWork else { return .refused }
-            // ORIGIN-BOUND OWNERSHIP: a retained record is only the SAME ownership if it belongs to
+            // ORIGIN-BOUND ownership: a retained record is only the SAME ownership if it belongs to
             // THIS request's origin. A retained record of a different origin must not be joined or
             // observed — otherwise a new-window request that happens to reuse the id would inherit
             // (or be settled by) the earlier window's turn. It is a different turn entirely.
@@ -700,7 +700,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// Settles ONE admitted caller against the record its TOKEN was issued for. A record that is
     /// terminal answers immediately; otherwise the caller parks on that record. Either way the
     /// caller RELEASES its reference, so a detached terminal record is dropped once no admitted
-    /// caller needs it (reviewer be89233d).
+    /// caller needs it.
     private func resolveJoin(token: CloudDispatchOwnership.DispatchToken) async -> CloudRouteResult {
         guard let record = token.record else {
             return CloudRouteResult(response: .earcon(.error), outcome: .refused)
@@ -718,7 +718,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         return result
     }
 
-    /// Runs the WIRE TURN for the token owner. Liveness is decided against the LIVE MAP, not the
+    /// Runs the WIRE turn for the token owner. Liveness is decided against the LIVE map, not the
     /// token, because retirement may have intervened between admission and this entry.
     private func ownDispatch(
         token: CloudDispatchOwnership.DispatchToken,
@@ -744,8 +744,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         }()
         guard isLive else {
             // The window closed (or the record was replaced) between admission and dispatch: this
-            // caller owns no live turn. Settle EVERY admitted caller (itself included) with the
-            // record's terminal result and release, so nothing is abandoned (reviewer be89233d).
+            // caller owns no live turn. Settle every admitted caller (itself included) with the
+            // record's terminal result and release, so nothing is abandoned.
             let settlement = CloudRouteResult(response: .earcon(.error), outcome: .refused)
             settle(record, with: settlement)
             return settlement
@@ -763,7 +763,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// Terminal settlement of a record: the result is stored ONCE on the record's own instance,
     /// every parked waiter is resumed with it, and the record leaves the live map if it was
     /// detached (a stale owner must never stand in for a successor's map entry). The record itself
-    /// survives until its last admitted caller releases it (reviewer be89233d).
+    /// survives until its last admitted caller releases it.
     private func settle(_ record: UtteranceRecord, with result: CloudRouteResult) {
         ownershipLock.lock()
         if record.terminalResult == nil { record.terminalResult = result }
@@ -790,15 +790,15 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         sourceTranscript: String?,
         sourceLanguage: String?
     ) async -> CloudRouteResult {
-        // Recorded BEFORE any guard: what selected this turn is a property of the TURN, not of
+        // Recorded before any guard: what selected this turn is a property of the TURN, not of
         // whether the sink happens to be configured. Recording after the configured check made
         // the seam blind to exactly the refused turns a caller-level case most needs to observe.
         MainActor.assumeIsolated {
             lastSelectionForTesting = selection ?? (try? conversationSelectionProvider())
             lastOriginForTesting = origin
         }
-        // MISSING-ID REFUSAL (reviewer 9ab31c6d): a dispatch without an admitted utterance
-        // identity has no honest `request_id` to present, so it is refused BEFORE prepare,
+        // MISSING-ID REFUSAL: a dispatch without an admitted utterance
+        // identity has no honest `request_id` to present, so it is refused before prepare,
         // before any client creation, and before touching successor-owned state — the sink
         // never lets the turn reach the wire under a fabricated identity.
         guard let utteranceId else {
@@ -806,7 +806,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         }
         guard isConfigured() else {
             // Same rule as the error path: a client-authored message is spoken
-            // only in the user's own locale (spec ruling 2026-09-24).
+            // only in the user's own locale (spec ruling).
             let comingSoon = spokenTemplates.resolveForUserLocale("general.cloud_coming_soon")
             return CloudRouteResult(
                 response: comingSoon.isEmpty ? .earcon(.error) : .spoken(comingSoon),
@@ -815,7 +815,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         }
 
         // The conversation identity is prepared FIRST, before anything this turn can disturb.
-        // A nil result means the origin is NOT LIVE: this turn has no claim on any conversation,
+        // A nil result means the origin is not live: this turn has no claim on any conversation,
         // so it is refused — and it must be refused before touching successor-owned state. The
         // supersede block below cancels the in-flight turn and claims `activeTurn`; running that
         // for a turn that is then refused would let a stale dispatch CANCEL a live successor and
@@ -829,7 +829,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 // replaces.
                 selection: effectiveSelection,
                 origin: origin,
-                // REQUEST OWNERSHIP: a repeated callback for the SAME utterance reuses the
+                // REQUEST ownership: a repeated callback for the SAME utterance reuses the
                 // already-prepared wire identity instead of minting another request.
                 utteranceId: utteranceId
             ) else {
@@ -843,9 +843,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         let client = clientFactory()
         let routeContext = CloudRouteContext(from: context)
 
-        // GRACE CONTRACT, acquisition at the ADMITTED DISPATCH: the window's expiry is held from
+        // GRACE contract, acquisition at the ADMITTED dispatch: the window's expiry is held from
         // here — before any cloud/streamed audio — through done and the actual drain/stop.
-        // Atomic transfer of ownership: the successor's hold is begun BEFORE the predecessor's is
+        // Atomic transfer of ownership: the successor's hold is begun before the predecessor's is
         // released, so there is never a hold-free instant between turns in which the clock could
         // re-arm mid-flight.
         let admittedHoldOrigin = origin
@@ -856,28 +856,28 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             onGracePlaybackHoldEnd?(predecessor)
         }
 
-        // INTERRUPT THE OPEN PRIOR SOCKET (cloud-assistant.md → Interruption, spec c5fe3416).
+        // INTERRUPT the open prior socket (cloud-assistant.md → Interruption, ).
         //
         // Barge-in means the user spoke over an answer. That is a DIFFERENT act from a local
         // supersede: it must tell the SERVER to stop generating and settle the turn as
-        // `interrupted`, on the prior turn's still-open socket, BEFORE that turn's terminal. The
+        // `interrupted`, on the prior turn's still-open socket, before that turn's terminal. The
         // server ignores a post-terminal interrupt, so this is a one-shot send with no retry —
         // `claimInterruptEmission` makes "one shot" a property of the state rather than of caller
         // discipline, and a claim made after the terminal returns false.
         //
-        // Ordering is load-bearing and deliberate: the claim + send happen BEFORE `cancel()` below.
+        // Ordering is load-bearing and deliberate: the claim + send happen before `cancel` below.
         // Cancelling first would retire the socket registration the frame needs (and could race
         // the server's own terminal), turning every barge-in into a lost interrupt.
-        // THE EAGER PATH MAY HAVE ALREADY RUN (spec e38a790a / reviewer bea7a291). The service
+        // THE eager path may have already run. The service
         // calls `emitBargeIn` at input admission, AHEAD of its serial chain, because a barge-in
         // must reach the wire while the predecessor socket is still open — and the serial chain
         // otherwise delays this turn until that socket has closed. Here we only ADOPT that
         // emission; emitting a second time is impossible anyway (`claimInterruptEmission` is one
         // shot), but asking the state rather than re-claiming keeps the reason explicit.
-        // A FOLLOW-UP SUBMISSION IS NOT A NEW BARGE-IN. When this utterance is the retained
+        // A FOLLOW-UP SUBMISSION is not A NEW barge-IN. When this utterance is the retained
         // follow-up being submitted after its acknowledgement, the interruption already happened:
         // claiming another one would interrupt whatever is now live and hold this same utterance
-        // AGAIN, which is how one utterance became two submissions (reviewer eaa8c06a, observed on
+        // AGAIN, which is how one utterance became two submissions (, observed on
         // the wire as u-barge authenticating as its own turn and again as the follow-up).
         //
         // The binding tells us which turn this utterance interrupted. The submission is the
@@ -902,9 +902,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         }
 
         if interruptedRequestIdForThisTurn != nil, let priorToken = activeTurn {
-            // KEEP THE INTERRUPTED TURN'S RECEIVE ALIVE UNTIL ITS TERMINAL (reviewer ff00457c
+            // KEEP the interrupted turn'S RECEIVE alive until its terminal (
             // item 1), now that the interrupt has been SENT. The interrupt needs that turn's
-            // terminal to resolve the hold, and the `cancel()` below would otherwise end its
+            // terminal to resolve the hold, and the `cancel` below would otherwise end its
             // receive loop through the owner-cancel path — skipping the very branch that records
             // the acknowledgement, so the acknowledgement would silently never happen.
             //
@@ -913,9 +913,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // not reintroduce the audio overlap the quiescence wait exists to prevent.
             //
             // A turn that cannot answer must not wedge the successor: the wait is BOUNDED, and its
-            // expiry is acted on — the hold is dropped, since no terminal is coming to resolve it,
+            // expiry is acted on the hold is dropped, since no terminal is coming to resolve it,
             // and this turn proceeds as an ordinary new turn rather than pretending it settled.
-            // STOP LOCAL OUTPUT IMMEDIATELY, BEFORE THE WAIT (reviewer eaa8c06a item 3).
+            // STOP local output immediately, before the wait.
             //
             // The contract's barge-in rule is "the client IMMEDIATELY stops local output and clears
             // buffered answer audio while retaining captured user input" (cloud-assistant.md →
@@ -934,7 +934,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 )
                 switch resolution {
                 case .acknowledged:
-                    // The ONLY outcome that may submit. The follow-up was already released by the
+                    // The only outcome that may submit. The follow-up was already released by the
                     // terminal branch; this turn proceeds.
                     break
                 case .refused:
@@ -950,7 +950,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                         forRequestId: interruptedRequestIdForThisTurn ?? ""
                     )
                     interruptedRequestIdForThisTurn = nil
-                    // END LOCALLY (reviewer c38ff4ba item 2). Clearing the id and falling through
+                    // END locally. Clearing the id and falling through
                     // made THIS turn continue into its own dispatch, authenticating the very
                     // utterance the refusal discarded. A refusal is a server answer about the
                     // interruption; it is not settlement and it authorizes nothing, so nothing may
@@ -961,7 +961,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     return CloudRouteResult(response: .silent, outcome: .refused)
                 case .failed:
                     // Timeout or an undelivered send: no acknowledgement can ever arrive, so this
-                    // must END LOCALLY. It must NOT be promoted to an ordinary turn — the user's
+                    // must END locally. It must not be promoted to an ordinary turn — the user's
                     // utterance was an interruption of a turn whose fate is now unknown, and
                     // submitting it would assert a settlement that never happened.
                     FileLog.shared.addMessage(
@@ -988,10 +988,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         let playbackPredecessor = playbackOwner
         activeTurn?.cancel()
         // Transfer happens AT ADMISSION, before the quiescence wait: a turn that supersedes US
-        // while we wait must observe itself as the owner (review 14f66b72).
+        // while we wait must observe itself as the owner.
         activeTurn = turnToken
         playbackOwner = turnToken
-        // ATOMIC RETIRE + QUIESCENCE AT ADMISSION (reviews 9fc2603e / 14f66b72): the successor
+        // ATOMIC retire + QUIESCENCE at admission: the successor
         // retires the PLAYBACK predecessor's output HERE — before this turn can admit any audio
         // of its own — and WAITS for the confirmed stop before admitting, because `cancel` only
         // QUEUES a runner stop: frames admitted before the runner processes it would be shed by
@@ -1000,7 +1000,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // Sequential turns (no playback predecessor, or nothing pending) retire nothing: an
         // extra stop request would only shift confirmed-stop identities under existing deferral
         // records.
-        // THE INTERRUPTION POINT FOR SETTLED PLAYBACK (reviewer eaa8c06a item 4).
+        // THE interruption point for settled playback.
         //
         // If the predecessor settled with audio still outstanding, THIS successor stopping it is
         // the moment the user stopped hearing the answer — the fact the contract owes the server.
@@ -1023,12 +1023,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             )
         }
         if let playbackPredecessor, audioPlayer.hasOutstandingOutput {
-            // CLEANUP BEFORE THE FIRST AWAIT (review 05d27ddb): this turn already acquired its
+            // CLEANUP before the first await: this turn already acquired its
             // token, playback ownership, and the admitted hold. A return from INSIDE this block
             // (timeout or superseded-while-waiting) bypasses the turn-wide defer below, so the
             // scoped defer here retires exactly what this turn acquired — never a strand.
             let retireEpoch = audioPlayer.cancel()
-            // Identity lives ON the predecessor's token (review 4fc59e2c): a suspended turn
+            // Identity lives ON the predecessor's token: a suspended turn
             // always finds its own identity, however many transfers happen meanwhile.
             playbackPredecessor.capturedRetireEpoch = retireEpoch
             var returnedEarly = true
@@ -1040,7 +1040,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // nothing, so the next successor must gate on the SAME outstanding output
                     // this turn saw.
                     if playbackOwner === turnToken { playbackOwner = playbackPredecessor }
-                    // HOLD RESPONSIBILITY (review 8eb9fb44): the predecessor's own hold was
+                    // HOLD responsibility: the predecessor's own hold was
                     // already ended at the atomic transfer, so THIS hold is the last live one.
                     // Ending it while the predecessor's stop is unconfirmed would leave the
                     // output with NO hold and re-arm the allowance mid-flight. If the stop is
@@ -1072,9 +1072,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 // confirmed quiescent, and never run as a superseded-while-waiting turn.
                 return CloudRouteResult(response: .silent, outcome: .earlyClose)
             }
-            // Success: the scoped rollback above must NOT fire on fall-through — B keeps the
+            // Success: the scoped rollback above must not fire on fall-through — B keeps the
             // active ownership, playback ownership, and admitted hold through its stream
-            // (review 4fc59e2c).
+            // .
             returnedEarly = false
         }
         let turn = CloudTurnEnvelope.make(
@@ -1104,7 +1104,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             turnToken.markAcknowledgement(.failed)
         }
 
-        // NOTHING IS RETAINED FOR REPLAY. An earlier version kept the prepared request so a retry
+        // NOTHING is retained for replay. An earlier version kept the prepared request so a retry
         // could re-drive it, and that retention IS what made replay possible: a completed or
         // possibly-submitted request left on the books is exactly what a replay path would find.
         // With no producer able to establish that a frame was never submitted, the honest state is
@@ -1118,7 +1118,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // captured position (task #12 PR review).
         preQuotePositionMs = nil
         // Action outcomes are INVOCATION-LOCAL to this turn: the aggregate fact
-        // is built ONLY from the actions this turn actually ran, and two
+        // is built only from the actions this turn actually ran, and two
         // overlapping turns on one sink can never see each other's entries.
         var turnActionFacts: [SinkActionFact] = []
 
@@ -1145,10 +1145,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         }
 
         // The pending interruption report rides THIS turn's authentication frame
-        // (cloud-assistant.md → Interruption, spec c5fe3416): taken once, so a turn attaches it a
+        // (cloud-assistant.md → Interruption, ): taken once, so a turn attaches it a
         // single time. Taken here — at the turn's own wire construction — rather than earlier, so a
         // report cannot be consumed by a turn that never reaches the socket.
-        // ABANDONMENT CHECK FIRST (`cloud-assistant.md` → Interruption: abandoning the
+        // ABANDONMENT check first (`cloud-assistant.md` → Interruption: abandoning the
         // conversation discards the report). A report describes ONE conversation's settled
         // history; attaching it to a turn that opened or switched to a DIFFERENT conversation
         // would ask the server to correct turns it never settled. Detected here, at the wire
@@ -1198,10 +1198,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         let turnSocket = routed.resultSocket
         currentOwnerCancelFlag = ownerCancelledFlag
 
-        // ONE turn-wide cleanup covering EVERY exit — normal end, break, early return, error,
+        // ONE turn-wide cleanup covering every exit — normal end, break, early return, error,
         // token cancellation: retire the registration idempotently. Never per-action: a second
         // action, audio, and done must all keep riding the same live socket. Prompt retirement on
-        // OWNER cancellation is NOT delivered by a poller here — it is performed synchronously by
+        // OWNER cancellation is not delivered by a poller here — it is performed synchronously by
         // the owning task's cancellation handler below (the only legal observation of another
         // task's cancellation), so no unstructured polling task exists to mask it.
         defer {
@@ -1228,8 +1228,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 // late actions or overwrite the new turn's state. The stream's own
                 // termination closes the transport. (`break turnLoop` — a bare
                 // `break` inside the switch would only leave the switch.)
-                // OWNER-CANCELLATION GATE before ANY admission: connected/audioFrame/action/done/
-                // error and their result sends ALL refuse buffered work once the owning Task is
+                // OWNER-CANCELLATION gate before any admission: connected/audioFrame/action/done/
+                // error and their result sends all refuse buffered work once the owning Task is
                 // cancelled — not only action/done. Post-loop classification returns earlyClose.
                 if ownerCancelledFlag.isSet || Task.isCancelled || turnToken.isCancelled { break turnLoop }
                 switch event {
@@ -1243,7 +1243,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     if ownerCancelledFlag.isSet || Task.isCancelled { break turnLoop }
                     audioPlayer.enqueue(frame)
                 case let .action(tool, action, params, operationId, capabilityVersion):
-                    // BUFFERED ADMISSION CHECK: an event drained from the buffer after the owner
+                    // BUFFERED admission check: an event drained from the buffer after the owner
                     // was cancelled must not admit any later effect or a completed result. The
                     // handler's mark (or Task.isCancelled) stops consumption here; the turn is
                     // classified earlyClose below, never `completed`.
@@ -1264,7 +1264,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // Buffered-`done` admission check: a cancelled owner must not report a
                     // completed result for an event drained after cancellation (mirrors the
                     // action guard above; earlyClose classification follows below).
-                    // THE TERMINAL LANDED — signal before any cancellation guard below. A
+                    // THE terminal landed — signal before any cancellation guard below. A
                     // successor that interrupted this turn is parked on this latch, and the whole
                     // point of the latch is that the terminal ARRIVED; whether this turn then
                     // reports completion is a separate question it answers for itself.
@@ -1275,8 +1275,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     turnToken.markAcknowledgement(.acknowledged)
                     if ownerCancelledFlag.isSet || Task.isCancelled { break turnLoop }
                     guard !turnToken.isCancelled else { break turnLoop }
-                    // INTERRUPTION, ACKNOWLEDGEMENT-FIRST ORDERING (cloud-assistant.md →
-                    // Interruption, spec c5fe3416): this `done` — even with `outcome: completed` —
+                    // INTERRUPTION, ACKNOWLEDGEMENT-FIRST ordering (cloud-assistant.md →
+                    // Interruption, ): this `done` — even with `outcome: completed` —
                     // IS the acknowledgement the retained follow-up was waiting for. The contract
                     // forbids waiting for a second terminal or reopening the socket, so this is
                     // settled here: record the pending report for the NEXT turn, and release the
@@ -1309,7 +1309,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     } else {
                         restoreTransientAudioState()
                     }
-                    // BUFFERED PLAYBACK AFTER `done` (`cloud-assistant.md` → Interruption:
+                    // BUFFERED playback after `done` (`cloud-assistant.md` → Interruption:
                     // "Buffered audio may still play after `done` closes the socket. Report that
                     // interruption in the next turn's authentication frame instead"). The socket
                     // is closed but the user is still HEARING the answer, so the fact that only
@@ -1321,7 +1321,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // measurement. A report that named a turn whose audio had already drained
                     // would tell the server the user heard less than they did.
                     if needsDeferral {
-                        // BIND THE REPORT'S PRODUCER TO THIS TURN (reviewer eaa8c06a item 4).
+                        // BIND the report'S PRODUCER to this turn.
                         //
                         // The report is owed when the user stops hearing THIS turn's audio short
                         // of its end. That cannot be known at `done`: `done` only says the server
@@ -1361,14 +1361,14 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // A terminal — refused or failed — settles the latch too: a waiter must not be
                     // left parked because the answer was an error rather than a `done`. It settles
                     // as `.refused`, so a successor DISCARDS the held follow-up instead of
-                    // submitting an utterance the server never acknowledged (reviewer eaa8c06a).
+                    // submitting an utterance the server never acknowledged.
                     turnToken.markAcknowledgement(.refused)
                     // A cancelled owner (cloud-token supersession OR the caller's own
                     // Task.cancel) classifies as an incomplete turn via the owner-cancel path
                     // below — never as a connection failure it did not observe.
                     guard !turnToken.isCancelled && !Task.isCancelled else { break turnLoop }
-                    // INTERRUPTION, REFUSAL-FIRST ORDERING (cloud-assistant.md → Interruption,
-                    // spec c5fe3416): a refusal before any terminal acknowledgement DISCARDS the
+                    // INTERRUPTION, REFUSAL-FIRST ordering (cloud-assistant.md → Interruption,
+                    // ): a refusal before any terminal acknowledgement DISCARDS the
                     // retained follow-up and retains the pending interruption report for a later
                     // explicit user request. Never treat refusal as settlement, and never submit
                     // the held utterance — so this is the one path that drops it.
@@ -1377,7 +1377,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                         interruptedRequestId: interruptedRequestIdForThisTurn,
                         code: code
                     )
-                    // GRACE STOP ORDER: release waits for the ACTUAL stop this cancel requested
+                    // GRACE stop order: release waits for the ACTUAL stop this cancel requested
                     // (identity-bound). On a timeout the confirmed stop notification itself
                     // releases via the deferral record — never an unconfirmed resume.
                     let stopEpoch = audioPlayer.cancel()
@@ -1398,9 +1398,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                         }
                     }
                     analytics?.recordCloudAssistantTurn(outcome: "error", inputTokens: nil, outputTokens: nil)
-                    // THE REMOTE MESSAGE IS NEVER SPOKEN (cloud-assistant.md, spec 961fab07): the
-                    // wire `message` is bounded OPERATOR DIAGNOSTICS — "never spoken or used to
-                    // select client feedback". So `message` is deliberately NOT read here. What the
+                    // THE remote message is never spoken (cloud-assistant.md, ): the
+                    // wire `message` is bounded OPERATOR diagnostics — "never spoken or used to
+                    // select client feedback". So `message` is deliberately not read here. What the
                     // user hears is resolved LOCALLY from the stable code: every code maps to its
                     // own `cloud_error_<code>` template in the user's own locale. A code with no
                     // template in that locale (a Required code whose translation is missing is an
@@ -1428,18 +1428,18 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             return CloudRouteResult(response: turnResponse, outcome: turnResult, fact: Self.aggregateActionFact(turnActionFacts))
         }
         if turnToken.isCancelled || ownerCancelledFlag.isSet {
-            // OWNER CANCELLATION (review dee03708/fa03b7f9): the cancelled turn's OWNED output
+            // OWNER cancellation: the cancelled turn's OWNED output
             // still has to STOP, and the actual stop must complete before the window's host
             // playback resumes over it. The successor owns the WINDOW (pause/restore/analytics),
             // so this turn releases only if it still owns the captured release — but its own
             // audio dies here, identity-bound, not whenever the successor's drain happens to
             // shed it. Superseded is not a completion either.
             //
-            // AUDIO OWNERSHIP (review 9fc2603e): this turn NEVER cancels the shared player on
+            // AUDIO ownership: this turn never cancels the shared player on
             // the superseded path — the successor retired this turn's output AT ADMISSION
             // (before admitting its own), so a cancel here could only destroy successor-owned
             // audio. If no successor ran (plain Task cancellation), this turn is still the
-            // owner and requests the stop itself. TIMEOUT DISPOSITION: a timeout is NOT a
+            // owner and requests the stop itself. TIMEOUT disposition: a timeout is not a
             // confirmed stop — the turn returns earlyClose WITHOUT restoring the host playback
             // and records a deferral so the confirmed stop notification releases the window;
             // never an unconfirmed release.
@@ -1461,7 +1461,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 }
             } else {
                 // Superseded: await the identity captured for THIS token at the transfer
-                // (review 14f66b72) — never the shared latest counter, which later stops move.
+                // never the shared latest counter, which later stops move.
                 if let capturedEpoch = turnToken.capturedRetireEpoch {
                     turnToken.capturedRetireEpoch = nil // consumed: nothing leaks
                     // Bounded: the confirmed stop lands via the normal path; if every bound
@@ -1482,16 +1482,16 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             }
             return CloudRouteResult(response: .silent, outcome: .earlyClose, fact: Self.aggregateActionFact(turnActionFacts))
         }
-        // DEFECT 3 (reviewer 7fc40b74) + review 24f236de: stop THIS turn's OWNED output and
-        // AWAIT the identity-bound stop completion BEFORE releasing the host playback and the
+        // DEFECT 3 +: stop THIS turn's OWNED output and
+        // AWAIT the identity-bound stop completion before releasing the host playback and the
         // hold. A truncated stream can leave enqueued cloud audio in the player; resuming the
         // episode under it would overlap two outputs. On a timeout the confirmed stop
         // notification releases via the deferral record. Successor-safe: the cancel touches only
         // audio this turn enqueued.
         let stopEpoch = audioPlayer.cancel()
         if await audioPlayer.awaitActualStop(after: stopEpoch) {
-            // REVALIDATE after the suspension (review 5295572f): a successor B can start while
-            // this turn was suspended on the stop wait; release ONLY the own token. A successor
+            // REVALIDATE after the suspension: a successor B can start while
+            // this turn was suspended on the stop wait; release only the own token. A successor
             // still gets its own truncation release (the earlyClose return below stands).
             if activeTurn == nil || activeTurn === turnToken {
                 restoreTransientAudioState()
@@ -1561,7 +1561,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     }
 
     /// The wire contract's runtime gate (rev da327e624 §1): every cloud app operation carries
-    /// `operation_id` and `capability_version`; an identity-less app operation does NOT execute
+    /// `operation_id` and `capability_version`; an identity-less app operation does not execute
     /// as a legacy fallback — it is refused (no mutation) and the refusal is reported.
     private func executeCloudMutation(
         action: String,
@@ -1576,11 +1576,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             await reportResult(refused, operationId: operationId, capabilityVersion: capabilityVersion)
             return
         }
-        // Exactly-once: the durable claim happens BEFORE the effect, so an interruption leaves a
+        // Exactly-once: the durable claim happens before the effect, so an interruption leaves a
         // reconstructible record (`.interrupted` → `unknown`) rather than a silent re-run.
         switch operationJournal?.claim(operationId) ?? .claimed {
         case .alreadyRun(let recorded):
-            // REPLAY CONTRACT: answer from the DURABLE RECORD — the outcome AND the state settled
+            // REPLAY contract: answer from the DURABLE record — the outcome AND the state settled
             // with it. The live playback state is not read: an unrelated operation may have moved
             // it since, and a settled answer must not be rewritten by later events.
             await reportRecorded(recorded, operationId: operationId, capabilityVersion: capabilityVersion)
@@ -1602,7 +1602,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // Runtime gate: an identified operation whose action this build does not implement
             // is REFUSED (unsupported_operation) and the refusal SETTLED durably — never a
             // fabricated success, and a redelivery replays the recorded refusal. Identity-less
-            // playback frames NEVER reach here: the gate above refuses them before any claim
+            // playback frames never reach here: the gate above refuses them before any claim
             // (there is no legacy fallback that authorizes a mutation without
             // operation_id + capability_version).
             let knownActions: Set<String> = ["seek_to", "play_quote", "stop_quote", "seek_relative", "pause", "resume"]
@@ -1619,14 +1619,14 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             }
         }
         // Test-only deterministic hold between the durable claim and the effect (nil in
-        // production assembly). Production cancellation policy around it: after ANY suspension,
-        // check the owning Task's cancellation BEFORE starting the effect. A cancelled owner
+        // production assembly). Production cancellation policy around it: after any suspension,
+        // check the owning Task's cancellation before starting the effect. A cancelled owner
         // must never execute merely because the final result is journalable. On pre-effect
         // cancellation the ORIGINAL registration is retired immediately (prompt retirement while
         // still held in action handling) and the claimed-but-unexecuted operation stays durably
         // IN PROGRESS — no settlement here: this process reports `unknown`, and a restart
         // reconstructs the same honest unknown. Never a replay, never a fabricated outcome.
-        // DETERMINISTIC CLAIM BOUNDARY (control-only): the durable claim above has COMMITTED.
+        // DETERMINISTIC claim boundary (control-only): the durable claim above has COMMITTED.
         // The OWNER awaits the hold here, so the suspension is the owner's own and "held" is a
         // fact about the owner rather than about a detached task. Cancellation is observed by the
         // ordinary post-suspension check below, once this returns.
@@ -1658,13 +1658,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // Persist the settlement FIRST and observe it: a failed settlement write must not
             // be reported as success — the durable record is still in progress, so the honest
             // answer is unknown, never a replayable success.
-            // Settle with the state CAPTURED AT SETTLEMENT: replay must answer with what was
+            // Settle with the state CAPTURED at settlement: replay must answer with what was
             // true when THIS operation finished, never a later reading.
             let settledResult = OperationResult.succeeded(state: currentPlaybackState())
             let settled = operationJournal?.complete(operationId, result: settledResult) ?? true
             if settled {
-                // The FIRST send is the SAME CAPTURED envelope that was settled — not a second
-                // live snapshot (review 5295572f): between settlement and send the state could
+                // The FIRST send is the SAME captured envelope that was settled — not a second
+                // live snapshot: between settlement and send the state could
                 // move, and then the wire answer and the durable record would disagree.
                 await reportFrame(
                     AppOperationResultFrame(
@@ -1691,13 +1691,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             let referenceMs = params["reference_position_ms"]?.int64Value
             switch (sinkSeconds, referenceMs) {
             case (let seconds?, nil):
-                // REAL PRECONDITION: no current episode (zero duration) makes the system seek
-                // wrapper a silent no-op — that is NOT a success. Refuse durably instead.
+                // REAL precondition: no current episode (zero duration) makes the system seek
+                // wrapper a silent no-op — that is not a success. Refuse durably instead.
                 if let precondition = currentEpisodePrecondition { return precondition }
                 seekToSinkSeconds(seconds)
                 return nil
             case (nil, let reference?):
-                // The reference form was BYPASSED by the episode check (review fa03b7f9) —
+                // The reference form was BYPASSED by the episode check —
                 // the mapping wrapper would early-return on no episode and report unavailable
                 // for the WRONG reason; the honest precondition runs first.
                 if let precondition = currentEpisodePrecondition { return precondition }
@@ -1750,7 +1750,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             if let fact { onFact(fact) }
             // The turn that PAUSED owns the restore: without this, the end-of-
             // turn restore would resume over the cloud's own pause (the
-            // hold/release protocol — reviewer af68a7bb regression).
+            // hold/release protocol — regression).
             didAutoPause = false
             return nil
         case "resume":
@@ -1833,7 +1833,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         }
     }
 
-    // MARK: - Eager barge-in (spec e38a790a, reviewer bea7a291)
+    // MARK: - Eager barge-in
 
     /// Whether this utterance's interruption was refused, so its turn must not be submitted.
     @MainActor
@@ -1886,10 +1886,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         return report
     }
 
-    /// THE EAGER BARGE-IN STEP. Called by the service at INPUT ADMISSION, ahead of its serial
+    /// THE eager barge-IN STEP. Called by the service at INPUT admission, ahead of its serial
     /// routing chain.
     ///
-    /// WHY IT MUST BE EAGER (spec e38a790a, reviewer bea7a291): the contract requires the interrupt
+    /// WHY it must be eager: the contract requires the interrupt
     /// while the prior socket remains open (`9e309cc1` → Interruption). Routing inputs run through
     /// a serial chain, so this turn's dispatch cannot run until the predecessor has finished — by
     /// which time its socket is closed and the interrupt is useless or refused. The interruption
@@ -1915,7 +1915,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         isEpochStillCurrent: (@Sendable (UInt64) -> Bool)? = nil
     ) async -> String? {
         guard let utteranceId else { return nil }
-        // A PRE-EXISTING BINDING IS NOT RETENTION (regression caught by the
+        // A PRE-EXISTING binding is not retention (regression caught by the
         // ServiceSelectionProvenance queued-input controls). `interruptedRequestIdForUtterance` is
         // keyed by utterance id, and two DISTINCT turns may legitimately reuse one. Returning the
         // old binding made the second turn believe it had been retained by an interruption that had
@@ -1925,7 +1925,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         //
         // A genuine second eager call for the SAME capture cannot reach here — the eager step runs
         // once per admission — so nothing is lost by not short-circuiting on the stored binding.
-        // A TURN CANNOT INTERRUPT ITSELF. If the live predecessor carries the SAME identity as the
+        // A TURN cannot interrupt itself. If the live predecessor carries the SAME identity as the
         // incoming capture, this is not a barge-in: it is the same admitted utterance (a repeated
         // dispatch, or a follow-up reconstructed from the same capture) meeting its own turn. The
         // ServiceSelectionProvenance queued-input controls drive exactly this shape, and treating it
@@ -1951,9 +1951,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // retained follow-up, so this utterance must not displace it.
             return nil
         }
-        // THE INPUT'S OWN WINDOW IS REVALIDATED AT THE EFFECT BOUNDARY (reviewer c38ff4ba item 3).
+        // THE input'S OWN window is revalidated at the effect boundary.
         //
-        // The caller checked `epoch` BEFORE the main-actor hop into this function, and awaits sit
+        // The caller checked `epoch` before the main-actor hop into this function, and awaits sit
         // between that check and the send. Testing the PRIOR socket/token here would answer a
         // different question — "is the turn being interrupted still live?" — and would let a stale
         // capture interrupt a perfectly valid turn: a service stop/restart in that window ends
@@ -1976,7 +1976,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             )
             return nil
         }
-        // STOP LOCAL OUTPUT IMMEDIATELY — before the send, and long before any wait. The contract
+        // STOP local output immediately — before the send, and long before any wait. The contract
         // says the client stops output and clears buffered answer audio immediately on barge-in.
         _ = audioPlayer.cancel()
         if await sendInterruptOnPriorSocket(forRequestId: priorRequestId) == .undelivered {
@@ -2125,7 +2125,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// Nil = this sink has no journal (assembly wires the durable store).
     private var operationJournal: OperationJournal?
 
-    /// The client this turn routed on — result sends ride the SAME client/socket.
+    /// The client this turn routed on result sends ride the SAME client/socket.
     private var resultSendClient: CloudRouteClient?
 
     /// Capture the current playback position before a relative seek so that a
@@ -2168,17 +2168,17 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// The most recent malformed-seek rejection, consumed by the executor.
     @MainActor private(set) var lastSeekRejection: OperationResult?
 
-    /// REAL PRECONDITION (review 5295572f): the system seek wrapper early-returns when no
+    /// REAL precondition: the system seek wrapper early-returns when no
     /// episode is current, and its silent response would dress "nothing happened" as success.
     /// A position-changing operation REQUIRES a current episode with a duration; without one the
     /// honest durable outcome is refused (stale precondition of current state), not a success.
     private var currentEpisodePrecondition: OperationResult? {
-        // EXPLICIT AVAILABILITY (review fa03b7f9), not duration: PlaybackManager.play/seek
+        // EXPLICIT availability, not duration: PlaybackManager.play/seek
         // early-return on no current episode, and their silent wrappers would dress "nothing
         // happened" as success. The injected closure is the test seam; production consults the
-        // manager's own current-episode state. Applies to EVERY position-changing form INCLUDING
+        // manager's own current-episode state. Applies to every position-changing form INCLUDING
         // the reference-target seek and RESUME (play early-returns the same way).
-        // PRODUCTION source (review 0846e993): the manager's REAL current-episode state — an
+        // PRODUCTION source: the manager's REAL current-episode state — an
         // EXISTING episode with unknown/zero duration is present, not absent. Duration is not
         // availability.
         let availabilitySource = episodeAvailable.map { $0() }
@@ -2234,7 +2234,7 @@ extension CloudRouteSink {
             if heldPlaybackToken === pending.hold {
                 heldPlaybackToken = nil
                 // End THIS hold explicitly (restoreTransientAudioState only ends what is still
-                // in heldPlaybackToken), then run the FULL transient restore (review 9a093876):
+                // in heldPlaybackToken), then run the FULL transient restore:
                 // the rolled-back turn inherited the host's auto-pause responsibility at the
                 // transfer, so the confirmation must resume the inherited pause — exactly once,
                 // guarded by the same flags as every other restore.
@@ -2254,10 +2254,10 @@ extension CloudRouteSink {
         // whether it took the hold or inherited it.
         guard let deferred = restoreHeldForPlayerDrain else { return }
         // The notification must belong to the drain this turn is waiting on. A foreign drain's
-        // notification is rejected on its own identity, and the record is LEFT INTACT so the turn
+        // notification is rejected on its own identity, and the record is LEFT intact so the turn
         // that does own it is not robbed of its restoration.
-        // MONOTONIC QUIESCENCE PROOF for the DEFERRAL RELEASE (review 9a093876): the claimed
-        // drain epoch (the turn's finish()) and the epoch the runner actually stopped (a later
+        // MONOTONIC quiescence proof for the DEFERRAL release: the claimed
+        // drain epoch (the turn's finish) and the epoch the runner actually stopped (a later
         // retire-cancel can shed the drain) differ, but any CONFIRMED stop at or after the
         // claimed epoch proves the output quiesced — the exact-identity rule governs
         // CONFIRMATION records, not this restore.
@@ -2269,7 +2269,7 @@ extension CloudRouteSink {
             return
         }
         restoreHeldForPlayerDrain = nil
-        // THE PRODUCTION DRAIN PATH (reviewer c38ff4ba item 4). Until now nothing in production
+        // THE production drain path. Until now nothing in production
         // ever cleared the buffered-playback binding: a test called it directly, so the "audio
         // drained on its own owes nothing" claim had no production witness. The confirmed drain
         // IS that moment — the turn has finished and its output quiesced — so a later successor

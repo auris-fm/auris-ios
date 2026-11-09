@@ -5,30 +5,30 @@ import Foundation
 ///
 /// The contract requires the client to hold, across a turn boundary, two things:
 ///
-///   * **the retained follow-up** — the complete interrupting utterance, held until the PRIOR turn
-///     reaches a terminal acknowledgement, then submitted ONCE on its own socket; and
-///   * **the pending interruption report** — `{"request_id", "playback_position_ms"}`, attached to
-///     the next turn's authentication frame so the server can correct already-settled history
-///     before assembling model input.
+/// * **the retained follow-up** — the complete interrupting utterance, held until the PRIOR turn
+/// reaches a terminal acknowledgement, then submitted ONCE on its own socket; and
+/// * **the pending interruption report** — `{"request_id", "playback_position_ms"}`, attached to
+/// the next turn's authentication frame so the server can correct already-settled history
+/// before assembling model input.
 ///
 /// Both orderings are reachable and they resolve differently:
 ///
-///   * **acknowledgement first** (`done` for the interrupted turn, even with `completed`) — the
-///     follow-up is released for submission exactly once, and the report is retained;
-///   * **refusal first** (a pre-terminal `invalid_request` on that turn) — the follow-up is
-///     DISCARDED, the report is retained, and nothing is submitted.
+/// * **acknowledgement first** (`done` for the interrupted turn, even with `completed`) — the
+/// follow-up is released for submission exactly once, and the report is retained;
+/// * **refusal first** (a pre-terminal `invalid_request` on that turn) — the follow-up is
+/// DISCARDED, the report is retained, and nothing is submitted.
 ///
-/// REQUEST BINDING IS THE CENTRAL INVARIANT. Every transition here names the interrupted turn, and
+/// REQUEST binding is the central invariant. Every transition here names the interrupted turn, and
 /// a terminal for any OTHER turn is ignored. An earlier version released the hold for whatever
 /// terminal arrived while something was held, which let an unrelated turn's `done` authorise a
-/// follow-up the user had addressed to the interrupted one (reviewer ff00457c item 2). The bound
+/// follow-up the user had addressed to the interrupted one. The bound
 /// id is `interruptedRequestId`, set by `hold` and never inferred from "something is pending".
 ///
-/// SEQUENTIAL INTERRUPTIONS. Resolving one interruption must not lock out the next: the resolved
+/// SEQUENTIAL interruptions. Resolving one interruption must not lock out the next: the resolved
 /// ids live in `resolved` and are consulted per turn, rather than a single "released" slot that
 /// stayed set forever and made `claimInterruptEmission` refuse every later turn (reviewer item 3).
 ///
-/// REPORT DURABILITY. `takePendingReport` does NOT clear. The report survives until it is either
+/// REPORT durability. `takePendingReport` does not clear. The report survives until it is either
 /// ACKNOWLEDGED as attached to a turn that reached the server (`confirmReportAttached`) or the
 /// conversation is abandoned. An earlier version cleared on take, so a connection or token failure
 /// before the frame left destroyed the correction with no way to recover it (reviewer item 4).
@@ -71,10 +71,10 @@ final class CloudInterruptionState: @unchecked Sendable {
         let origin: Int?
         /// The selection this capture was ADMITTED under, carried so the follow-up submitter
         /// dispatches the same complete input rather than reconstructing one with a live default
-        /// (reviewer ca629c34 / b36c8ab1: preserve provenance across the hand-off).
+        ///.
         let selection: CloudConversationSelection?
         /// The ORIGINAL capture's source transcript and language. Selection alone does not
-        /// establish complete-input preservation (reviewer b8af462e): the follow-up must dispatch
+        /// establish complete-input preservation: the follow-up must dispatch
         /// the input that was admitted, including what was recognized and in which language.
         let sourceTranscript: String?
         let sourceLanguage: String?
@@ -167,12 +167,12 @@ final class CloudInterruptionState: @unchecked Sendable {
     ///
     /// Returns the follow-up on the first call for that turn and nil on every call after, so two
     /// callers racing to submit cannot both win. A terminal for any OTHER turn returns nil and
-    /// changes nothing — that is the binding reviewer ff00457c item 2 required.
+    /// changes nothing — that is the binding required.
     @discardableResult
     func recordTerminalAcknowledgement(forRequestId requestId: String) -> ReleasedFollowUp? {
         lock.lock(); defer { lock.unlock() }
         guard let held else { return nil }
-        // THE BINDING: only the interrupted turn's own terminal may release its follow-up.
+        // THE binding: only the interrupted turn's own terminal may release its follow-up.
         guard held.interruptedRequestId == requestId else { return nil }
         guard !resolved.contains(requestId) else { return nil }
         resolved.insert(requestId)
@@ -207,7 +207,7 @@ final class CloudInterruptionState: @unchecked Sendable {
             || interruptSentForRequestId == requestId
         guard isInterruption else { return false }
         resolved.insert(requestId)
-        // REFUSAL DISCARDS THE UTTERANCE: mark it suppressed so its already-enqueued turn cannot
+        // REFUSAL discards the utterance: mark it suppressed so its already-enqueued turn cannot
         // reach the wire. The contract forbids submitting it after a refusal.
         if let held, held.interruptedRequestId == requestId {
             suppressedUtterances.insert(held.utteranceId)
@@ -226,7 +226,7 @@ final class CloudInterruptionState: @unchecked Sendable {
 
     // MARK: - The pending report
 
-    /// ABANDONING THE CONVERSATION DISCARDS THE REPORT (`cloud-assistant.md` → Interruption:
+    /// ABANDONING the conversation discards the report (`cloud-assistant.md` → Interruption:
     /// "Abandoning that conversation discards the report; retained history still cannot claim the
     /// generated answer was heard"). The report annotates one conversation's prior history, so
     /// carrying it into a DIFFERENT conversation would tell the server to correct turns it never
@@ -243,12 +243,12 @@ final class CloudInterruptionState: @unchecked Sendable {
         return pendingReport?.conversationId
     }
 
-    /// The report to attach to a turn's authentication frame. Does NOT consume it.
+    /// The report to attach to a turn's authentication frame. Does not consume it.
     ///
     /// The caller must call `confirmReportAttached(requestId:)` once that turn's frame has actually
     /// reached the transport. Retaining until then is what makes a failed connection, a token
     /// failure or an unbuildable frame harmless: the correction survives for the next attempt
-    /// instead of being destroyed by the attempt that failed (reviewer ff00457c item 4).
+    /// instead of being destroyed by the attempt that failed.
     func takePendingReport() -> PendingReport? {
         lock.lock(); defer { lock.unlock() }
         return pendingReport
@@ -281,13 +281,13 @@ final class CloudInterruptionState: @unchecked Sendable {
     ///
     /// Called when there was no transport to send on, or the send reported `.undelivered`: no
     /// acknowledgement can ever arrive for an interruption the server never saw, so keeping the
-    /// follow-up held would strand the user's own utterance forever. The turn is NOT marked
+    /// follow-up held would strand the user's own utterance forever. The turn is not marked
     /// resolved — nothing happened to it — so it may be interrupted by a later turn. Not a retry
     /// path: the hold is dropped, not re-armed.
     func releaseUnsentHold(forRequestId requestId: String) {
         lock.lock(); defer { lock.unlock() }
         guard let current = held, current.interruptedRequestId == requestId else { return }
-        // AN UNSENT INTERRUPT MUST ALSO SUPPRESS (reviewer c38ff4ba item 1).
+        // AN UNSENT interrupt must also suppress.
         //
         // Releasing only the HOLD left the utterance free: its turn is already queued behind the
         // predecessor, so it went on to authenticate as an ordinary question — asserting a
@@ -353,7 +353,7 @@ final class CloudInterruptionState: @unchecked Sendable {
     /// Drop the binding without producing a report: the audio drained on its own, so the user
     /// heard the answer and nothing is owed.
     ///
-    /// OWNER-SCOPED (reviewer c38ff4ba item 4). An unscoped clear lets a *superseded* turn's drain
+    /// OWNER-SCOPED. An unscoped clear lets a *superseded* turn's drain
     /// notification erase the binding of the turn that replaced it, after which a genuine
     /// interruption of that successor's playback would have no record and owe no report. Passing
     /// the owner keeps the clear aligned with the same identity rule the drain release uses.

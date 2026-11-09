@@ -1,17 +1,17 @@
 import Foundation
 
-/// DEBUG-SIMULATOR-ONLY BUILT-IN-MIC DIAGNOSTIC (owner approval, #core:25b91a1b `77121fd4`).
+/// Debug-simulator-only built-in-mic diagnostic, enabled by explicit owner approval.
 ///
-/// WHY THIS EXISTS: the simulator has no external input route, so `MicExposureClassifier` reports
+/// WHY this exists: the simulator has no external input route, so `MicExposureClassifier` reports
 /// `.exposed` for the built-in microphone and `VoiceControlGate` can never reach `.listening`
 /// there. The entire end-to-end capture path — acquisition, sample delivery, echo reference,
 /// wake-word filtering — is therefore unexercised on a simulator.
 ///
-/// WHAT IT DOES NOT DO: it does not change the classification, weaken permission or user
+/// WHAT it does not do: it does not change the classification, weaken permission or user
 /// enablement, skip readiness/conflict/context checks, or alter capture ownership. It admits the
 /// built-in microphone to the gate on a Debug simulator build, and nothing else.
 ///
-/// DEVICE AND RELEASE ARE UNCHANGED. All three conditions below must hold; a Release build
+/// DEVICE and release are unchanged. All three conditions below must hold; a Release build
 /// compiles the constant to `false`, so the exception cannot be reached in a shipping binary even
 /// if the process were misconfigured.
 enum DiagnosticMicOverride {

@@ -28,7 +28,7 @@ protocol AudioCaptureSource: AnyObject {
     /// Carries the session of the tap that produced these samples.
     ///
     /// The session must travel WITH the buffer rather than be read from a property at delivery:
-    /// capture `stop()` does not drain buffers the tap already queued, so a property would hold
+    /// capture `stop` does not drain buffers the tap already queued, so a property would hold
     /// the restarted session's value by the time an old buffer is delivered and the old audio
     /// would pass as new.
     var onCapturedSamples: (([Float], MonotonicTime?, Int) -> Void)? { get set }
@@ -76,10 +76,10 @@ class NativeAudioCapture: AudioCaptureSource {
     /// emitted, so after the first buffer nothing reports whether samples still arrive. A user
     /// reporting "everything is ready but still no wake word" could not be diagnosed from the log
     /// at all: a quiet room, a level under the VAD threshold, and a dead tap all produce silence
-    /// (#core:25b91a1b `98ba5c48`). This reports buffer arrival and the peak level against the
+    /// This reports buffer arrival and the peak level against the
     /// threshold, throttled so a healthy pipeline does not flood the log.
     ///
-    /// This accumulator is OWNED PER TAP: a fresh `CaptureTelemetry` is created where the tap is
+    /// This accumulator is OWNED per tap: a fresh `CaptureTelemetry` is created where the tap is
     /// installed, not shared across taps. A restart's already-queued blocks would otherwise race
     /// the new tap's counters on this property (log-only skew, but still a data race).
     private static let telemetryInterval: TimeInterval = 5
@@ -128,7 +128,7 @@ class NativeAudioCapture: AudioCaptureSource {
 
     func start() throws {
         try session.configureForCapture()
-        // NOTE: Do NOT call setPreferredSampleRate — it locks the hardware to one
+        // NOTE: Do not call setPreferredSampleRate — it locks the hardware to one
         // rate and breaks playback at other rates. The resample below handles any
         // rate mismatch between hardware input and the model's 16kHz requirement.
         try session.setActive(true, notifyOthers: false)
@@ -205,7 +205,7 @@ class NativeAudioCapture: AudioCaptureSource {
                     interval: Self.telemetryInterval
                 ) {
                     FileLog.shared.addMessage(report)
-                    // FORCE THE FLUSH. `FileLog` holds entries in memory until 100 accumulate
+                    // FORCE the flush. `FileLog` holds entries in memory until 100 accumulate
                     // (`bufferThreshold`), so a buffered line is invisible for minutes and is lost
                     // entirely if the process is terminated first. The whole point of this line is
                     // to be readable WHILE capture is running — a buffered diagnostic is no better

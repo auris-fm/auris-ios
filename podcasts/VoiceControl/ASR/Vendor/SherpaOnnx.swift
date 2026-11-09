@@ -1,5 +1,5 @@
 /// swift-api-examples/SherpaOnnx.swift
-/// Copyright (c)  2023  Xiaomi Corporation
+/// Copyright (c) 2023 Xiaomi Corporation
 
 import Foundation  // For NSString
 #if SWIFT_PACKAGE
@@ -10,7 +10,7 @@ import SherpaOnnxC
 /// the C language.
 ///
 /// - Parameters:
-///   - s: The String to convert.
+/// - s: The String to convert.
 /// - Returns: A pointer that can be passed to C as `const char*`
 
 public func toCPointer(_ s: String) -> UnsafePointer<Int8>! {
@@ -25,9 +25,9 @@ public func toCPointer(_ s: String) -> UnsafePointer<Int8>! {
 /// to download the required `.onnx` files.
 ///
 /// - Parameters:
-///   - encoder: Path to encoder.onnx
-///   - decoder: Path to decoder.onnx
-///   - joiner: Path to joiner.onnx
+/// - encoder: Path to encoder.onnx
+/// - decoder: Path to decoder.onnx
+/// - joiner: Path to joiner.onnx
 ///
 /// - Returns: Return an instance of SherpaOnnxOnlineTransducerModelConfig
 public func sherpaOnnxOnlineTransducerModelConfig(
@@ -49,8 +49,8 @@ public func sherpaOnnxOnlineTransducerModelConfig(
 /// to download the required `.onnx` files.
 ///
 /// - Parameters:
-///   - encoder: Path to encoder.onnx
-///   - decoder: Path to decoder.onnx
+/// - encoder: Path to encoder.onnx
+/// - decoder: Path to decoder.onnx
 ///
 /// - Returns: Return an instance of SherpaOnnxOnlineParaformerModelConfig
 public func sherpaOnnxOnlineParaformerModelConfig(
@@ -94,8 +94,8 @@ public func sherpaOnnxOnlineToneCtcModelConfig(
 /// to download the required `.onnx` files.
 ///
 /// - Parameters:
-///   - tokens: Path to tokens.txt
-///   - numThreads:  Number of threads to use for neural network computation.
+/// - tokens: Path to tokens.txt
+/// - numThreads: Number of threads to use for neural network computation.
 ///
 /// - Returns: Return an instance of SherpaOnnxOnlineTransducerModelConfig
 public func sherpaOnnxOnlineModelConfig(
@@ -206,8 +206,8 @@ public func sherpaOnnxOnlineRecognizerConfig(
 ///
 /// Usage:
 ///
-///  let result = recognizer.getResult()
-///  print("text: \(result.text)")
+/// let result = recognizer.getResult
+/// print("text: \(result.text)")
 ///
 public class SherpaOnnxOnlineRecognitionResult {
   /// A pointer to the underlying counterpart in C
@@ -273,9 +273,9 @@ public class SherpaOnnxRecognizer {
   /// Decode wave samples.
   ///
   /// - Parameters:
-  ///   - samples: Audio samples normalized to the range [-1, 1]
-  ///   - sampleRate: Sample rate of the input audio samples. Must match
-  ///                 the one expected by the model.
+  /// - samples: Audio samples normalized to the range [-1, 1]
+  /// - sampleRate: Sample rate of the input audio samples. Must match
+  /// the one expected by the model.
   public func acceptWaveform(samples: [Float], sampleRate: Int = 16_000) {
     SherpaOnnxOnlineStreamAcceptWaveform(stream, Int32(sampleRate), samples, Int32(samples.count))
   }
@@ -322,7 +322,7 @@ public class SherpaOnnxRecognizer {
   }
 
   /// Signal that no more audio samples would be available.
-  /// After this call, you cannot call acceptWaveform() any more.
+  /// After this call, you cannot call acceptWaveform any more.
   public func inputFinished() {
     SherpaOnnxOnlineStreamInputFinished(stream)
   }
@@ -785,9 +785,9 @@ public class SherpaOnnxOfflineRecognizer {
   /// Decode wave samples.
   ///
   /// - Parameters:
-  ///   - samples: Audio samples normalized to the range [-1, 1]
-  ///   - sampleRate: Sample rate of the input audio samples. Must match
-  ///                 the one expected by the model.
+  /// - samples: Audio samples normalized to the range [-1, 1]
+  /// - sampleRate: Sample rate of the input audio samples. Must match
+  /// the one expected by the model.
   public func decode(samples: [Float], sampleRate: Int = 16_000) -> SherpaOnnxOfflineRecognitionResult {
     let stream = createStream()
     stream.acceptWaveform(samples: samples, sampleRate: sampleRate)
@@ -1661,7 +1661,7 @@ public class SherpaOnnxKeywordSpotterWrapper {
   }
 
   /// Signal that no more audio samples would be available.
-  /// After this call, you cannot call acceptWaveform() any more.
+  /// After this call, you cannot call acceptWaveform any more.
   public func inputFinished() {
     SherpaOnnxOnlineStreamInputFinished(stream)
   }
@@ -2136,9 +2136,9 @@ public func getSherpaOnnxGitDate() -> String {
 public func getSherpaOnnxOnnxruntimeVersion() -> String {
   return String(cString: SherpaOnnxGetOnnxruntimeVersionStr())
 }
-//---------------------------
+//--------------------------
 // Source separation
-//---------------------------
+//--------------------------
 
 public struct AudioData {
   private enum Storage {

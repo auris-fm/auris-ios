@@ -119,7 +119,7 @@ struct CloudRouteIntent: VoiceIntent, Equatable {
     /// The ASR pipeline's actual detected language (LID). Unknown stays nil and is OMITTED on
     /// the wire — never the OS locale, never a default. Preserves yue vs zh.
     var sourceLanguage: String? = nil
-    /// REQUEST OWNERSHIP (owner delta 3484cbc/5eca874): the captured utterance's identity, so
+    /// REQUEST ownership (owner delta 3484cbc/5eca874): the captured utterance's identity, so
     /// duplicate preparation/callbacks join one wire request instead of minting another.
     /// `nil` keeps the legacy per-call identity for constructions without an utterance.
     var utteranceId: String? = nil

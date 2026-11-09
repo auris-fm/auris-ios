@@ -7,9 +7,9 @@ import os.log
 /// shared audio output path with buffering, pause-and-resume on underrun,
 /// and duck/restore of existing playback.
 ///
-/// The player owns one continuous playback session per turn.  Frames are
+/// The player owns one continuous playback session per turn. Frames are
 /// buffered in-order; when the buffer drains below a threshold playback is
-/// paused and resumed once new frames arrive.  The first frame ducks
+/// paused and resumed once new frames arrive. The first frame ducks
 /// existing playback; `done`/`error` restores it.
 final class CloudAudioPlayer: @unchecked Sendable {
 
@@ -53,7 +53,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     /// Start (or resume) playback with new frames.
     ///
-    /// Call for each frame received on the WebSocket.  If the player was
+    /// Call for each frame received on the WebSocket. If the player was
     /// stopped, the first frame restarts it; if it was already playing the
     /// frame is enqueued.
     func enqueue(_ frame: CloudAudioFrame) {
@@ -107,7 +107,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// rather than binding to zero or borrowing an older pending notification.
     func finishWithStopBinding() -> DrainRequest {
         runnerLock.lock()
-        // Same atomic coalescing as cancel(): the check and the publication share one
+        // Same atomic coalescing as cancel: the check and the publication share one
         // critical section, so the runner cannot complete a decrement before the increment.
         let sharesNotification = stopRequested || drainRemaining || drainClaimInFlight
         drainEpoch += 1
@@ -119,14 +119,14 @@ final class CloudAudioPlayer: @unchecked Sendable {
             supersededStopRequests.insert(allocated)
         } else if drainRemaining {
             // A drain is already pending/claimed: this finish COALESCES onto that drain's
-            // single physical stop (the owner keeps its identity — review dc70303d: a newer
+            // single physical stop (the owner keeps its identity —: a newer
             // queued finish is not "stopped" for being newer). It settles as superseded when
             // that stop lands, satisfying its waiter without a second stop.
             supersededStopRequests.insert(allocated)
         } else {
             stopOwnerEpoch = allocated
         }
-        // Re-queue work ONLY when this finish is the one that will be physically served. A
+        // Re-queue work only when this finish is the one that will be physically served. A
         // coalesced finish (stop requested or a claim in flight) must not re-arm the runner:
         // the pending/in-flight stop is the quiescent end for it too, and a re-queued drain
         // would produce a SECOND physical stop after the coalescing that was supposed to
@@ -154,7 +154,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// engine stop. Callers that must release a grace hold / resume host playback only after the
     /// real stop await this epoch's confirmation (`awaitActualStop(after:)`) — `cancel` only
     /// REQUESTS the stop; it does not report one.
-    /// TEST-ONLY observation: how many times `cancel()` was requested on this shared player.
+    /// TEST-only observation: how many times `cancel` was requested on this shared player.
     /// Lets a control pin "this path never touches the shared player" without depending on
     /// epoch arithmetic (which races concurrent finish/drain scheduling).
     private(set) var cancelRequestCountForTesting = 0
@@ -167,12 +167,12 @@ final class CloudAudioPlayer: @unchecked Sendable {
         bufferClearCountForTesting += 1
         bufferLock.unlock()
         runnerLock.lock()
-        // COALESCED ACCOUNTING (review 4fc59e2c): cancel/finish coalesce through the runner's
+        // COALESCED accounting: cancel/finish coalesce through the runner's
         // boolean flags — several requests can share ONE processed stop and ONE notification.
         // An increment per REQUEST would strand the counter positive forever (a successor would
         // then be refused on every admission). Increment only when this request transitions the
         // runner from not-queued to queued; the single notification settles it.
-        // COALESCED ACCOUNTING, ATOMIC (review 8eb9fb44): cancel/finish coalesce through the
+        // COALESCED accounting, ATOMIC: cancel/finish coalesce through the
         // runner's boolean flags — several requests can share ONE processed stop and ONE
         // notification. The pending-notification count is incremented INSIDE the same critical
         // section that signals the runner: the runner can never observe the signal and complete
@@ -182,7 +182,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         drainEpoch += 1
         let requestedEpoch = drainEpoch
         // OWNERSHIP: this cancel's stop SUPERSEDES whatever drain/finish was queued — the
-        // queued request never performs its own physical stop (review dc70303d: settle only
+        // queued request never performs its own physical stop (: settle only
         // cancellation requests actually satisfied by this physical stop; a superseded
         // finish is not marked stopped for being sequence-newer — it is settled as superseded).
         if stopRequested || drainRemaining || drainClaimInFlight {
@@ -211,7 +211,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     /// Waits (bounded) for the ACTUAL stop of `epoch` — the identity-bound completion a caller
     /// needs before releasing a grace hold or resuming host playback. Each await gets its OWN
-    /// ticket (a UUID, not an epoch key), created BEFORE the cancellation handler is installed,
+    /// ticket (a UUID, not an epoch key), created before the cancellation handler is installed,
     /// so a cancellation that races registration can never strand a later-registered waiter:
     /// the ticket's cancel state is observable at registration time. Tickets are removed on
     /// every exit path — confirmation, timeout, and cancellation — so the registry holds only
@@ -282,7 +282,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         }
     }
 
-    // Registry, guarded by the buffer lock. Keyed by the ticket's UUID — NEVER by epoch, so two
+    // Registry, guarded by the buffer lock. Keyed by the ticket's UUID — never by epoch, so two
     // concurrent waiters on one identity cannot overwrite each other and a cancellation can
     // never resume the WRONG waiter.
     private var stopWaiters: [UUID: StopWaiterTicket] = [:]
@@ -297,10 +297,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
         }
     }
 
-    /// TEST-ONLY, NON-CANCELLATION-SENSITIVE latch run immediately BEFORE ticket registration.
-    /// A control parks here, cancels the owning task (so the cancellation handler runs BEFORE
+    /// TEST-only, NON-CANCELLATION-SENSITIVE latch run immediately before ticket registration.
+    /// A control parks here, cancels the owning task (so the cancellation handler runs before
     /// registration), then releases — making the cancel-before-register ordering DETERMINISTIC
-    /// instead of a scheduling race (review fa03b7f9/3b2d4386). Never installed in production.
+    /// instead of a scheduling race. Never installed in production.
     var preRegistrationLatchForTesting: (() async -> Void)?
 
     private func waitAsStopWaiterBody(_ ticket: StopWaiterTicket) async -> Bool {
@@ -393,7 +393,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
     private let bufferLock = NSLock()
     /// Guards the runner's state. `NSCondition` is used as *both* the mutex and
     /// the wait primitive: a separate `NSLock` would be held across
-    /// `runnerLock.wait()` — which releases only the condition's own lock — so
+    /// `runnerLock.wait` — which releases only the condition's own lock — so
     /// `enqueue`/`finish`/`cancel` could never acquire it and would deadlock.
     private let runnerLock = NSCondition()
 
@@ -457,15 +457,15 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// Request drain-and-stop (done / error).
     private var drainRemaining = false
 
-    /// Identity of the drain most recently SCHEDULED, incremented in `finish()`/`cancel()`.
+    /// Identity of the drain most recently SCHEDULED, incremented in `finish`/`cancel`.
     private var drainEpoch = 0
 
     /// Request an immediate stop without draining (cancel).
     private var stopRequested = false
 
-    /// OWNED-STOP RECORD (spec a9e27935 / review dc70303d): which REQUESTED identity physically
+    /// OWNED-STOP record: which REQUESTED identity physically
     /// owns the next stop the runner performs, and which requested identities that single
-    /// physical stop SUPERSEDES. `cancel()`/`finish()` publish ownership under `runnerLock` at
+    /// physical stop SUPERSEDES. `cancel`/`finish` publish ownership under `runnerLock` at
     /// request time; the runner consumes it AT the physical stop and confirms exactly the
     /// owner's identity once. A superseded request settles through its own terminal path —
     /// it is never relabelled onto another operation's stop, and never promoted by a later
@@ -478,10 +478,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// ownership record honest until the stop consumes it (guard: runnerLock).
     private var drainClaimInFlight = false
     /// Explicitly settled displaced identities (guard: bufferLock). Retained so a waiter that
-    /// registers AFTER its settlement can still resolve from the retained fact — settlement is
+    /// registers after its settlement can still resolve from the retained fact — settlement is
     /// terminal for exactly these identities, and no max/upTo shortcut is restored.
     private var settledDisplacedIdentities: Set<Int> = []
-    /// TEST-ONLY RESCUE: resumes EVERY registered waiter false and clears the registry. A
+    /// TEST-only rescue: resumes every registered waiter false and clears the registry. A
     /// control uses this to reap a (mutant-)stranded waiter after its bounded completion probe
     /// failed, so the test process never hangs on a leaked continuation.
     func rescueStopWaitersForTesting() {
@@ -496,7 +496,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         }
     }
 
-    /// TEST OBSERVABILITY: the registry must hold ZERO tickets after every exit path
+    /// TEST observability: the registry must hold ZERO tickets after every exit path
     /// (confirmation, timeout, cancellation) — a stranded ticket is a leaked continuation.
     var stopWaiterCountForTesting: Int {
         bufferLock.lock()
@@ -534,7 +534,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
     weak var echoReferenceHandoff: EchoReferenceHandoff?
     /// Test-visible view of the wiring above. The handoff is `weak` because the assembly owns it
     /// for the session, so a case that wants to drive or drain it needs the same object rather
-    /// than a locally constructed stand-in — two mappings would each see part of the stream.
+    /// than a locally constructed stand-in two mappings would each see part of the stream.
     var echoReferenceHandoffForTesting: EchoReferenceHandoff? { echoReferenceHandoff }
 
     /// This producer's clock identity within the shared reference. `nodeIncarnation` advances
@@ -574,7 +574,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// (`VoiceControlAssembly`) and the runner thread retains it, so this
     /// deinitializer does not run in practice and the shutdown path below
     /// exists for completeness rather than as live teardown. The runner must
-    /// therefore survive a drain — `finish()` ends a turn, not the thread, and
+    /// therefore survive a drain — `finish` ends a turn, not the thread, and
     /// returning there is what made every turn after the first silent.
     deinit {
         runnerLock.lock()
@@ -607,7 +607,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
             // `finish`/`cancel` set their own flags, so any of the three wake
             // this loop.
             //
-            // Render catch-up (@spec contract, PR #49): when the buffer emptied but the node
+            // Render catch-up ( contract, PR #49): when the buffer emptied but the node
             // still has scheduled-unrendered audio, the engine stays alive and the wait is
             // BOUNDED by the pending audio's duration, so the runner re-enters processFrames
             // to re-check measured render progress — queue emptiness alone must not stop or
@@ -635,7 +635,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
             // Cancelled: drop everything and stop the engine, without draining.
             if stopRequested {
                 stopRequested = false
-                // CANONICAL QUIESCENCE (review 9a093876/d2561f9b): a cancel stop SUPERSEDES any
+                // CANONICAL quiescence: a cancel stop SUPERSEDES any
                 // queued drain — a finish that landed after the cancel re-queued
                 // `drainRemaining` while `stopRequested` was still true; leaving it set would
                 // make the runner run a SECOND stop after this one, and a successor admitted on
@@ -667,8 +667,8 @@ final class CloudAudioPlayer: @unchecked Sendable {
             // would be silent and would leave its hold unreleased.
             if drainRemaining {
                 drainRemaining = false
-                // SNAPSHOT AT THE CLAIM, then RELEASE THE LOCK BEFORE any barrier. Holding
-                // `runnerLock` across `claimRelease.wait()` would block the test's own `finish()`,
+                // SNAPSHOT at the claim, then RELEASE the lock before any barrier. Holding
+                // `runnerLock` across `claimRelease.wait` would block the test's own `finish`,
                 // which needs the same lock — a lock must never span a barrier.
                 let claimedEpoch = drainEpoch
                 drainClaimInFlight = true
@@ -729,7 +729,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         guard isPlaying else { return }
 
         // Drain as many frames as we can. The count is read under the buffer
-        // lock: `cancel()` empties the buffer from another thread (a server
+        // lock: `cancel` empties the buffer from another thread (a server
         // error after audio started), so a count taken outside it can outlive
         // the frames it describes.
         //
@@ -745,7 +745,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
         // Check if buffer drained.
         //
-        // Queue emptiness is NOT proof that the scheduled audio finished rendering (@spec
+        // Queue emptiness is not proof that the scheduled audio finished rendering (
         // contract, PR #49 review round): stopping here discarded still-pending audible work
         // and rotated the incarnation away from ranges whose audio had not been heard yet.
         // Stop only when MEASURED render progress has caught up with what was scheduled;
@@ -819,7 +819,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
     private var renderStopDeadline: Date?
 
     /// Authoritative playback-active state under the RUNNER lock: every writer (runner loop,
-    /// processFrames) and every admission-gating reader synchronize here (review 8eb9fb44).
+    /// processFrames) and every admission-gating reader synchronize here.
     /// No write site holds the lock (the runner unlocks before engine operations), so the
     /// computed accessor's own locking is safe everywhere.
     private var playbackActiveStorage = false
@@ -827,17 +827,17 @@ final class CloudAudioPlayer: @unchecked Sendable {
         get { runnerLock.lock(); defer { runnerLock.unlock() }; return playbackActiveStorage }
         set { runnerLock.lock(); playbackActiveStorage = newValue; runnerLock.unlock() }
     }
-    /// Stop requests queued but not yet processed by the runner (review 14f66b72/05d27ddb):
+    /// Stop requests queued but not yet processed by the runner:
     /// a queued stop is INVISIBLE to buffer/isPlaying once the buffer is cleared but before the
     /// runner acts — a successor that skips its quiescence wait on that window would be shed by
     /// the queued stop. Incremented by every cancel/finish (each is followed by exactly one
     /// stop notification); decremented when that notification is issued.
     /// Pending stop NOTIFICATIONS, owned by the RUNNER lock together with the queued flags:
     /// request publication and runner completion can never interleave across two locks
-    /// (review 8eb9fb44). Incremented at request time in the same critical section that
+    ///. Incremented at request time in the same critical section that
     /// signals the runner; decremented when the stop notification is issued.
     private var pendingStopNotifications = 0
-    /// Test-only: how many times cancel() cleared the buffer (each retire shed buffered audio).
+    /// Test-only: how many times cancel cleared the buffer (each retire shed buffered audio).
     private(set) var bufferClearCountForTesting = 0
     var hasQueuedStop: Bool {
         runnerLock.lock()
@@ -849,7 +849,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         pendingStopNotifications = max(0, pendingStopNotifications - 1)
         runnerLock.unlock()
     }
-    /// Outstanding-output signal for admission gating (review 14f66b72): frames buffered OR the
+    /// Outstanding-output signal for admission gating: frames buffered OR the
     /// engine still up — a queued-but-unprocessed stop keeps `isPlaying` true until the runner
     /// processes it, so a successor can detect "a stop is still in flight" and must not skip
     /// its quiescence await.
@@ -877,7 +877,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
     }
 
     /// Removes the oldest frame, or `nil` when the buffer was emptied by a
-    /// concurrent `cancel()`. `removeFirst()` on an empty array traps, so the
+    /// concurrent `cancel`. `removeFirst` on an empty array traps, so the
     /// emptiness is decided under the same lock as the removal.
     private func dequeueFrame() -> CloudAudioFrame? {
         bufferLock.lock()
@@ -888,7 +888,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         return frame
     }
 
-    /// TEST-ONLY: park the drain runner until released, WITHOUT returning an exhaustion sentinel.
+    /// TEST-only: park the drain runner until released, WITHOUT returning an exhaustion sentinel.
     ///
     /// An earlier version returned `nil` from `dequeueFrame` while held. That is indistinguishable
     /// from "the buffer is empty", so the drain loop treated a deliberately-held player as an
@@ -1013,7 +1013,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// and submits positions THROUGH the handoff, like every other producer. The previous
     /// version assumed the just-appended block was the one being rendered —
     /// `progressInProducer ≡ one block` — which fails under queue lead: the append happens
-    /// BEFORE `scheduleBuffer`, and the node is still rendering an earlier block, so the anchor
+    /// before `scheduleBuffer`, and the node is still rendering an earlier block, so the anchor
     /// ran ahead of the emitted audio and bleed could not correlate (PR #49 review comment
     /// 4305981528). Mapping through the containing block is what the handoff already does for
     /// the tap and earcon producers; using it here makes all three use one mapping.
@@ -1134,14 +1134,14 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // Appends to the reference directly, rather than through `EchoReferenceHandoff`.
         //
         // Checked rather than assumed: this is called from the bounded drain loop above
-        // (`for _ in 0..<framesToProcess { dequeueFrame(); playFrame(frame) }`), not from an
+        // (`for _ in 0..<framesToProcess { dequeueFrame; playFrame(frame) }`), not from an
         // `AVAudioEngine` tap callback. The handoff's reason is a real-time deadline, and
         // this path has none — the drain loop yields. So its SAMPLES are appended here, while
         // its render positions travel through the handoff's mapping like every other
         // producer's. The producers that run on a deadline callback (the episode tap and the
         // earcon) submit both halves instead.
         appendToEmittedReference(pcmBuffer, node: node)
-        // SCHEDULE AFTER the publish, deliberately (PR #49 review comment 4305981528): the
+        // SCHEDULE after the publish, deliberately (PR #49 review comment 4305981528): the
         // position published above is the node's ACTUAL rendered state — it excludes this
         // buffer if the node has not reached it yet. That is the honest anchor, and it is what
         // keeps the reference aligned with what the microphone can hear rather than with what
@@ -1229,7 +1229,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     /// Test-host-only output setup, applied to the real graph before starting it.
     static var configureEngineForTesting: ((AVAudioEngine) throws -> Void)?
-    /// TEST-ONLY observation of the availability decision as the PRODUCTION call site sees it:
+    /// TEST-only observation of the availability decision as the PRODUCTION call site sees it:
     /// whether the process reported itself as a test host at all (the override is consulted only
     /// then) and what availability was decided. A control asserts this instead of assuming the
     /// override took effect.
@@ -1282,7 +1282,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     /// The engine and node the runner thread built, or nil before a turn has started one.
     ///
-    /// Exposed so a test host can render this graph offline and advance ITS OWN counter. The point
+    /// Exposed so a test host can render this graph offline and advance ITS own counter. The point
     /// of the queue-lead controls is that the position comes from a real node rather than from the
     /// test's arithmetic, and reading the player's own node is what preserves that: the alternative
     /// — handing the player a node the test made — reintroduces the assumption under review.
@@ -1291,15 +1291,15 @@ final class CloudAudioPlayer: @unchecked Sendable {
     var engineForTesting: AVAudioEngine? { engine }
     var playerNodeForTesting: AVAudioPlayerNode? { playerNode }
 
-    /// TEST-ONLY drain hold. Guarded by `runnerLock` — the single domain for every read and write,
+    /// TEST-only drain hold. Guarded by `runnerLock` — the single domain for every read and write,
     /// including the condition wait in `parkIfHeld`.
     private var drainHoldRequested = false
 
-    /// TEST-ONLY claim signals. See the drainRemaining branch.
+    /// TEST-only claim signals. See the drainRemaining branch.
     var claimReached: DispatchSemaphore?
     var claimRelease: DispatchSemaphore?
 
-    /// TEST-ONLY: how the runner's bounded wait on `claimRelease` ended, so a case can ASSERT the
+    /// TEST-only: how the runner's bounded wait on `claimRelease` ended, so a case can ASSERT the
     /// release succeeded rather than a bound merely preventing an infinite block.
     enum ClaimReleaseOutcome { case released, timedOut }
 
@@ -1312,15 +1312,15 @@ final class CloudAudioPlayer: @unchecked Sendable {
     }
     var capturedStopNotification: ((Int, @escaping () -> Void) -> Void)?
 
-    /// TEST-ONLY: the coalesced pending-stop-notification counter. A stranded positive value
+    /// TEST-only: the coalesced pending-stop-notification counter. A stranded positive value
     /// refuses every future admission, so controls assert it returns to zero.
-    /// TEST-ONLY: the retained settled-displaced identities (bounded-retirement probe).
+    /// TEST-only: the retained settled-displaced identities (bounded-retirement probe).
     var settledDisplacedIdentitiesForTesting: Set<Int> {
         bufferLock.lock(); defer { bufferLock.unlock() }
         return settledDisplacedIdentities
     }
 
-    /// TEST-ONLY: the last PHYSICALLY confirmed stop identity (excludes displaced settlements).
+    /// TEST-only: the last PHYSICALLY confirmed stop identity (excludes displaced settlements).
     var confirmedStopEpochForTesting: Int { confirmedStopEpoch() }
 
     var pendingStopNotificationsForTesting: Int {
@@ -1328,7 +1328,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         return pendingStopNotifications
     }
 
-    /// TEST-ONLY: hold the drain, or release it. Releasing re-arms the runner's work predicate so
+    /// TEST-only: hold the drain, or release it. Releasing re-arms the runner's work predicate so
     /// the same drain loop continues.
     func setDrainHoldForTesting(_ hold: Bool) {
         runnerLock.lock()
@@ -1392,7 +1392,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
             runnerLock.unlock()
             if interrupted { break }
         }
-        // OWNED-STOP (spec a9e27935): the stop's identity is the CURRENT OWNER published at
+        // OWNED-STOP: the stop's identity is the CURRENT owner published at
         // request time — the drain claim when nothing displaced it, the cancel that landed
         // mid-window otherwise. Never a fresh re-read of `drainEpoch` (that let a successor's
         // unscheduled request steal the stop's identity) and never the stale claim once a
@@ -1403,7 +1403,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         supersededStopRequests = []
         stopOwnerEpoch = 0
         drainClaimInFlight = false
-        // CANONICAL QUIESCENCE AT THE DRAIN END (review 0585959a): a cancel that landed while
+        // CANONICAL quiescence at the drain end: a cancel that landed while
         // this drain was claimed/playing bumped the identity and queued `stopRequested`. The
         // physical stop below IS that cancel's stop — the epoch snapshot proves it — so the
         // queued flag is consumed HERE. Leaving it set would run a SECOND physical stop after
@@ -1420,10 +1420,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     /// Terminal settlement for requests this physical stop SUPERSEDED: their waiters resolve
     /// through their OWN record, never by relabelling them onto the owner's stop identity
-    /// (review dc70303d: exactly-once, only-after-actual-stop settlement).
+    ///.
     private func settleSupersededRequests(_ displaced: Set<Int>) {
         guard !displaced.isEmpty else { return }
-        // EXACT-SET settlement (review 47f67d4d): resume ONLY waiters whose epoch is in the
+        // EXACT-SET settlement: resume only waiters whose epoch is in the
         // displaced record — never a lower identity that this stop did not satisfy. The
         // `upTo` sweep is for CONFIRMED identities (a physical stop of E satisfies every
         // request ≤ E); a displaced record is a SETTLEMENT of specific requests, and folding
@@ -1434,11 +1434,11 @@ final class CloudAudioPlayer: @unchecked Sendable {
             stopWaiters.removeValue(forKey: id)
             if let continuation = ticket.takeContinuation() { resumed.append(continuation) }
         }
-        // RETAIN the settlement fact (review 82714c29): a waiter registering after settlement
+        // RETAIN the settlement fact: a waiter registering after settlement
         // must resolve from this retained set. NO floor fold into `lastConfirmedStopEpoch` —
         // that would implicitly satisfy any lower identity; the set proves exactly these.
         settledDisplacedIdentities.formUnion(displaced)
-        // Retire redundancies HERE as well (review 20ec6eaa): the physical stop that owns this
+        // Retire redundancies HERE as well: the physical stop that owns this
         // settlement raised the floor synchronously via notifyDidStop's record when delivery is
         // synchronous; when delivery is queued, this settlement path is the one that observably
         // runs — retire anything at or below the current floor under the same lock so the set
@@ -1452,7 +1452,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// the frames handed to the output node and whether an output node exists (i.e. the engine
     /// is up for THIS incarnation). Called by the runner at the gate's arrival — the moment the
     /// control needs the parked state — and by the control itself for the settled state.
-    // TEST-ONLY (physical engine-stop evidence): when armed, the runner's physical stop
+    // TEST-only (physical engine-stop evidence): when armed, the runner's physical stop
     // operation passes the first `allow` stops and PARKS each subsequent one until the gate
     // is opened. Lets a control hold the actual stop operation — not a notification — and
     // prove what may and may not happen while it is pending.
@@ -1460,7 +1460,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
     // ONE NSCondition owns BOTH the predicate (`allow`) and the waiting: arm/open mutate the
     // predicate under the condition's lock and broadcast; the waiter checks and waits on the
     // SAME lock — no lost-wake window between a predicate write and a parked waiter. Arrival
-    // is published BEFORE waiting so a control can assert a real stop is actually parked;
+    // is published before waiting so a control can assert a real stop is actually parked;
     // the wait is bounded so the runner can never wedge past the bound.
     private let physicalStopGate = NSCondition()
     private var physicalStopGateAllow = -1 // unarmed: every stop passes
@@ -1471,7 +1471,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
     enum PhysicalStopGateOutcome { case unarmed, admitted, released, timedOut }
     private var physicalStopGateOutcome: PhysicalStopGateOutcome = .unarmed
 
-    /// TEST-ONLY: the gate predicate, so a control can see whether the gate is still armed
+    /// TEST-only: the gate predicate, so a control can see whether the gate is still armed
     /// (`0` = parking) or has been opened (Int.max).
     var physicalStopGateAllowProbeForTesting: Int {
         physicalStopGate.lock()
@@ -1501,7 +1501,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
     }
 
     /// Stops that reached an ARMED gate (parked or admitted). A control asserts this grew
-    /// BEFORE checking successor state, so the premise "a real stop is held" is measured,
+    /// before checking successor state, so the premise "a real stop is held" is measured,
     /// not assumed.
     var physicalStopGateArrivalsForTesting: Int {
         physicalStopGate.lock()
@@ -1522,7 +1522,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         }
         physicalStopGateArrivals += 1
         if physicalStopGateAllow > 0 {
-            // Admitted immediately. An OPENED gate (Int.max) must NOT restamp the outcome: the
+            // Admitted immediately. An OPENED gate (Int.max) must not restamp the outcome: the
             // record of the park that the control released would be overwritten by a later stop
             // taking this fast path, erasing the `released`/`timedOut` evidence.
             if physicalStopGateAllow < Int.max {
@@ -1548,7 +1548,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         stopRequestSettled()
         guard delegate != nil || capturedStopNotification != nil else { return }
         DispatchQueue.main.async {
-            // TEST-ONLY CAPTURE: a test can intercept the REAL notification instead of invoking
+            // TEST-only capture: a test can intercept the REAL notification instead of invoking
             // the delegate itself, so a delayed notification can be delivered at a chosen moment
             // while another turn owns the hold.
             if let capture = self.capturedStopNotification {
@@ -1566,7 +1566,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// CONFIRMATION: the stop for `epoch` completed — the engine actually stopped (output
     /// quiescent) and the stop notification was issued. EXACTLY this identity is confirmed,
     /// never a later one: a delayed stop of A must not promote a cancel-bumped B identity that
-    /// was never physically stopped (review 5295572f).
+    /// was never physically stopped.
     private func recordConfirmedStop(_ epoch: Int) {
         bufferLock.lock()
         // Monotonic over CONFIRMED identities only: a delayed stop of A (older identity) must
@@ -1574,7 +1574,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // physically stopped (the banned `max(epoch, drainEpoch)` folded the REQUESTED identity;
         // this max folds only identities that actually fired).
         lastConfirmedStopEpoch = max(lastConfirmedStopEpoch, epoch)
-        // BOUNDED RETIREMENT (review 20ec6eaa): a PHYSICALLY confirmed identity makes every
+        // BOUNDED retirement: a PHYSICALLY confirmed identity makes every
         // retained settlement at or below it redundant — the floor itself proves them — so
         // retire those entries here, under the same lock. The set therefore tracks only
         // outstanding settlements ABOVE the confirmed floor and returns to empty in steady

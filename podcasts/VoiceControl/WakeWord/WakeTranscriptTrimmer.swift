@@ -5,12 +5,12 @@ import Foundation
 ///
 /// The spec's shape, and the reason each part is here:
 /// - **Before intent routing, and only for a `Detected` utterance**: if timed
-///   tokens are present, drop every token overlapping the completion band
-///   (`[0, completionMs + 120 ms]`, `startMs < bandEndMs && endMs > 0`) and
-///   concatenate the rest.
+/// tokens are present, drop every token overlapping the completion band
+/// (`[0, completionMs + 120 ms]`, `startMs < bandEndMs && endMs > 0`) and
+/// concatenate the rest.
 /// - **If timed tokens are absent**, leave the backend transcript unchanged:
-///   *"Do not guess a spelling prefix. The LFM router is the backstop for an
-///   unstripped wake rendering."*
+/// *"Do not guess a spelling prefix. The LFM router is the backstop for an
+/// unstripped wake rendering."*
 /// - **`NotDetected` never applies the band**, even when tokens exist.
 ///
 /// The pipeline *"never strips by spelling (exact phrase, homophone list, or edit
