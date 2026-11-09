@@ -3,33 +3,33 @@ import PocketCastsServer
 
 /// Backend-authoritative Voice Sharing membership, and the single place local state is allowed to change.
 ///
-/// Why a store exists at all: the policy asks `isAccountEnrolled()` at decision time, but that question has
+/// Why a store exists at all: the policy asks `isAccountEnrolled` at decision time, but that question has
 /// exactly one honest answer source — the server projection. Nothing else on the device may claim
 /// enrollment, including a locally flipped toggle, so this type owns the fold:
 ///
-///   * `effectiveEnrolled` is **server state AND the user's local intent**, never either alone. A remote
-///     switch or a UI gesture cannot enable collection by itself; the backend epoch must back it.
-///   * NOTHING orders or compares `membership_revision`: the contract makes it opaque, so any local
-///     comparison would be a guess that fails toward re-enabling a user who already withdrew. Instead every
-///     read and mutation is stamped with a `ProjectionToken` captured BEFORE the request — the account/session
-///     lifecycle plus a membership-operation counter — and a reply may only be applied while BOTH still match
-///     the live session. The counter bumps on each local membership move, so a delayed opt-in cannot
-///     resurrect membership after a withdrawal however its revision is spelled.
-///   * Withdrawal takes effect LOCALLY and immediately — new collection stops without waiting for the
-///     network — because "the user said stop" must not depend on a round trip. The server call still runs,
-///     and its result only reconciles; it is never what stops collection.
-///   * Account transitions replace the whole projection. An account switch cannot inherit the previous
-///     account's enrollment, even if both are enrolled, because the epochs belong to different accounts.
+/// * `effectiveEnrolled` is **server state AND the user's local intent**, never either alone. A remote
+/// switch or a UI gesture cannot enable collection by itself; the backend epoch must back it.
+/// * NOTHING orders or compares `membership_revision`: the contract makes it opaque, so any local
+/// comparison would be a guess that fails toward re-enabling a user who already withdrew. Instead every
+/// read and mutation is stamped with a `ProjectionToken` captured before the request — the account/session
+/// lifecycle plus a membership-operation counter — and a reply may only be applied while BOTH still match
+/// the live session. The counter bumps on each local membership move, so a delayed opt-in cannot
+/// resurrect membership after a withdrawal however its revision is spelled.
+/// * Withdrawal takes effect LOCALLY and immediately — new collection stops without waiting for the
+/// network — because "the user said stop" must not depend on a round trip. The server call still runs,
+/// and its result only reconciles; it is never what stops collection.
+/// * Account transitions replace the whole projection. An account switch cannot inherit the previous
+/// account's enrollment, even if both are enrolled, because the epochs belong to different accounts.
 ///
 /// Storage: app-private `UserDefaults`, opaque values only (revision/epoch/disclosure version as received).
-/// It deliberately does NOT store audio, transcripts, or credentials, and it is not the durable contribution
+/// It deliberately does not store audio, transcripts, or credentials, and it is not the durable contribution
 /// queue — purging queued audio is Task 6's job and must run through `transitionToAccount` / `withdraw` here
 /// so both use one production transition rather than two divergent notions of "stopped".
 final class VoiceSharingEnrollmentStore {
     static let shared = VoiceSharingEnrollmentStore()
 
     /// What the policy reads at decision time.
-    /// ONE STATE CHANGE, WITH THE ACCOUNT MOMENT IT BELONGS TO (spec 8a9c057f).
+    /// ONE state change, WITH the account moment it belongs to.
     ///
     /// The state, the account scope and the session identity are read under a single hold, so a
     /// handler can never pair one account's membership with another account's identity. `sequence`
@@ -47,14 +47,14 @@ final class VoiceSharingEnrollmentStore {
         /// The user's own opt-in gesture, persisted so a launch does not silently re-enable something they
         /// turned off. Never sufficient on its own — see `effectiveEnrolled`.
         var localOptIn = false
-        /// True only once a projection has been ACCEPTED FROM THE SERVER IN THIS SESSION. Loading disk can
+        /// True only once a projection has been ACCEPTED from the server in this session. Loading disk can
         /// never set it: a remembered active epoch plus a remembered opt-in is not permission, because the
         /// account may have withdrawn on another device, been disabled server-side, or the process may simply
         /// have restarted into a state the server no longer recognises. Until a current-session reply lands,
         /// `effectiveEnrolled` is false and collection stays off.
         var hasAuthoritativeProjection = false
         /// True only when the USER turned sharing off. A fresh or default-wiped store is false:
-        /// unknown consent retains recordings (spec e1529db9).
+        /// unknown consent retains recordings.
         var explicitOptOut = false
 
         /// Enrollment requires BOTH halves. This is the property the plan states as
@@ -74,14 +74,14 @@ final class VoiceSharingEnrollmentStore {
     private let defaults: UserDefaults
     private var state = State()
     private var authoritativeLifecycle: String?
-    /// Each subscriber records the sequence of ITS OWN baseline; anything at or below it is
-    /// pre-subscription history and is never delivered to that subscriber (reviewer 65eb3141).
+    /// Each subscriber records the sequence of ITS own baseline; anything at or below it is
+    /// pre-subscription history and is never delivered to that subscriber.
     private var observers: [UUID: (Transition) -> Void] = [:]
     private var observerBaselines: [UUID: Int] = [:]
     /// Monotonic position in the state's history. Every mutation bumps it under the state lock, so
     /// two transitions can never claim the same position or be delivered out of order.
     private var transitionSequence: Int = 0
-    /// TRANSITIONS AWAITING DELIVERY, captured at the mutation and drained in sequence order.
+    /// TRANSITIONS awaiting delivery, captured at the mutation and drained in sequence order.
     private var pendingDeliveries: [Delivery] = []
     /// The single-drainer gate, owned by the SAME lock as the queue and the state.
     private var draining = false
@@ -117,7 +117,7 @@ final class VoiceSharingEnrollmentStore {
     /// Membership is per-account. Keying storage by the signed-in account means signing into a different
     /// account cannot read the previous account's enrollment out of disk, and signing back in restores the
     /// user's own prior intent rather than resetting it.
-    /// ORDINARY ACCOUNT OWNERSHIP (spec 4afc6e43): the lifecycle a projection was read under is the
+    /// ORDINARY account ownership: the lifecycle a projection was read under is the
     /// signed-in account itself, read from the same place every other authenticated request reads it. The
     /// retired sharing lifecycle registry used to supply this and no longer exists, so leaving the default
     /// pointed at it would refuse every signed-in operation before a request was made.
@@ -142,7 +142,7 @@ final class VoiceSharingEnrollmentStore {
 
     // MARK: - Reading
 
-    /// SPEC e1529db9: true when CONSENT IS GONE — the user opted out locally, the account
+    /// SPEC e1529db9: true when CONSENT is gone — the user opted out locally, the account
     /// withdrew, or there is no session. Only this may authorize purging durable recordings;
     /// temporary gate loss (policy flap, network, listening) must retain them.
     var consentGoneForPurge: Bool {
@@ -151,7 +151,7 @@ final class VoiceSharingEnrollmentStore {
             || state.membership.withdrawalState == .withdrawn
     }
 
-    /// ONE CONSENT DECISION for capture AND upload (reviewer ee48cdfe): the ordinary session,
+    /// ONE consent decision for capture AND upload: the ordinary session,
     /// an affirmative local sharing choice, and no explicit consent loss. Unknown projection is
     /// transient and permits; the server re-checks enrollment at accept. Never a readiness gate.
     var consentAllowsCollection: Bool {
@@ -185,7 +185,7 @@ final class VoiceSharingEnrollmentStore {
 
     /// The PERSISTED enrollment epoch, for use as upload PROVENANCE only.
     ///
-    /// Deliberately NOT gated on `effectiveEnrolled` (spec 1bb73eac): that gate needs
+    /// Deliberately not gated on `effectiveEnrolled`: that gate needs
     /// `hasAuthoritativeProjection`, which is false after every cold start until a projection round
     /// trip lands in THIS process. Requiring it here made a leftover readiness dependency — a
     /// restarted app with consent already given could not admit a single upload, and a failed or
@@ -233,8 +233,8 @@ final class VoiceSharingEnrollmentStore {
 
     /// A queued delivery: the transition and the exact subscribers that must receive it.
     ///
-    /// THE RECIPIENTS ARE FROZEN WHEN THE TRANSITION IS CAPTURED (spec b01608c6). A subscriber
-    /// records the position it registered at, and only transitions strictly AFTER that position are
+    /// THE recipients are frozen when the transition is captured. A subscriber
+    /// records the position it registered at, and only transitions strictly after that position are
     /// addressed to it — so pre-subscription history can never be replayed to a newcomer, and a
     /// baseline goes to the new subscriber alone.
     private struct Delivery {
@@ -245,7 +245,7 @@ final class VoiceSharingEnrollmentStore {
     /// Called after every state change, on the thread that made it. The coordinator uses this to invalidate
     /// an in-flight refresh the moment membership moves.
     ///
-    /// BASELINE AND SUBSCRIPTION ARE ONE STEP: the newcomer's first delivery is a baseline addressed
+    /// BASELINE and subscription are one step: the newcomer's first delivery is a baseline addressed
     /// to itself, queued at its own position. Nothing can precede it, and nothing older can follow it.
     @discardableResult
     func addObserver(_ body: @escaping (Transition) -> Void) -> UUID {
@@ -259,7 +259,7 @@ final class VoiceSharingEnrollmentStore {
         let id = UUID()
         observers[id] = body
         observerBaselines[id] = transitionSequence
-        // ADDRESSED TO THE NEW SUBSCRIBER ONLY, so nobody else sees a duplicate of their own past.
+        // ADDRESSED to the new subscriber only, so nobody else sees a duplicate of their own past.
         pendingDeliveries.append(Delivery(transition: baseline, recipients: [body]))
         lock.unlock()
         drain()
@@ -273,9 +273,9 @@ final class VoiceSharingEnrollmentStore {
         lock.unlock()
     }
 
-    /// Captures the current state as the next transition. The CALLER MUST ALREADY HOLD `lock`.
+    /// Captures the current state as the next transition. The CALLER must already hold `lock`.
     ///
-    /// CAPTURE HAPPENS INSIDE THE MUTATION'S OWN HOLD, which is what stops an opt-out being
+    /// CAPTURE happens inside the mutation'S OWN hold, which is what stops an opt-out being
     /// overtaken: it releases nothing until its snapshot — with its owning account scope — is on
     /// the queue. Recipients are frozen here too, so delivery choices cannot disagree with the
     /// state they belong to.
@@ -297,7 +297,7 @@ final class VoiceSharingEnrollmentStore {
 
     /// Delivers queued transitions in order, holding NO lock while invoking a handler.
     ///
-    /// ONE LOCK FOR THE QUEUE AND THE OWNERSHIP FLAG (spec b01608c6). Ownership is taken once per
+    /// ONE lock for the queue and the ownership flag. Ownership is taken once per
     /// pass and released under that same lock only after the queue is observed empty — so an
     /// enqueue either finds a live drainer (which will see it) or finds the queue itself. A
     /// re-entrant mutation from inside a handler only appends; this loop picks it up. Handlers are
@@ -316,7 +316,7 @@ final class VoiceSharingEnrollmentStore {
         draining = true
         while true {
             guard !pendingDeliveries.isEmpty else {
-                draining = false          // clear ownership BEFORE unlocking: no window remains
+                draining = false          // clear ownership before unlocking: no window remains
                 lock.unlock()
                 return
             }
@@ -329,7 +329,7 @@ final class VoiceSharingEnrollmentStore {
 
     // MARK: - Local intent
 
-    /// The user's opt-in gesture. Recording it does NOT enroll anyone: `effectiveEnrolled` also demands a
+    /// The user's opt-in gesture. Recording it does not enroll anyone: `effectiveEnrolled` also demands a
     /// server projection carrying an epoch and accepted disclosure. Callers must not read `true` back as
     /// permission to collect.
     func setLocalOptIn(_ value: Bool) {
@@ -337,8 +337,8 @@ final class VoiceSharingEnrollmentStore {
         bumpOperationGenerationLocked()
         state.localOptIn = value
         defaults.set(value, forKey: Key.scoped(Key.optIn, scope))
-        // EXPLICIT OPT-OUT is consent loss (spec e1529db9); a never-opted-in or default-wiped
-        // store is NOT — unknown consent must retain recordings, never authorize deleting them.
+        // EXPLICIT opt-OUT is consent loss; a never-opted-in or default-wiped
+        // store is not — unknown consent must retain recordings, never authorize deleting them.
         state.explicitOptOut = !value
         defaults.set(!value, forKey: Key.scoped(Key.optOut, scope))
         captureTransitionLocked()
@@ -350,7 +350,7 @@ final class VoiceSharingEnrollmentStore {
 
     /// Applies a server projection issued under `token`.
     ///
-    /// NO REVISION ORDERING. `membership_revision` is opaque by contract, so any local comparison would be a
+    /// NO REVISION ordering. `membership_revision` is opaque by contract, so any local comparison would be a
     /// guess — and this guess fails in the dangerous direction: treating a late reply as "not older" and
     /// accepting it can restore permission a user already withdrew. A projection is applied only if the
     /// account/session lifecycle AND the membership-operation generation it was read under are both still
@@ -372,7 +372,7 @@ final class VoiceSharingEnrollmentStore {
         state.hasAuthoritativeProjection = true
         authoritativeLifecycle = token.lifecycleGeneration
         persist(projection)
-        // IDENTICAL REPLAYS ANNOUNCE NOTHING; a first authority in this session must publish.
+        // IDENTICAL replays announce nothing; a first authority in this session must publish.
         if changed {
             captureTransitionLocked()
             lock.unlock()
@@ -390,7 +390,7 @@ final class VoiceSharingEnrollmentStore {
         let operationGeneration: Int
     }
 
-    /// Current fence value. Call this BEFORE issuing a request, never after the reply.
+    /// Current fence value. Call this before issuing a request, never after the reply.
     func projectionToken() -> ProjectionToken? {
         lock.lock()
         let operation = operationGeneration
@@ -405,7 +405,7 @@ final class VoiceSharingEnrollmentStore {
     private var operationGeneration: Int = 0
 
     /// Enrollment as a TRI-STATE for consumers that must not conflate "the server has not told us"
-    /// with "not enrolled" (reviewer 05aaaedc). `nil` means there is no authoritative projection in
+    /// with "not enrolled". `nil` means there is no authoritative projection in
     /// this session — the answer is unknown, not negative.
     var currentEnrollmentAnswer: Bool? {
         lock.lock(); defer { lock.unlock() }
@@ -415,7 +415,7 @@ final class VoiceSharingEnrollmentStore {
 
     /// The current membership-operation generation. Consumers that must prove several reads belong
     /// to ONE moment (the settings surface) stamp with this: a mutation between their reads bumps it
-    /// and the combination is rejected as incoherent (reviewer e40508a1).
+    /// and the combination is rejected as incoherent.
     var currentEnrollmentGeneration: Int {
         lock.lock(); defer { lock.unlock() }
         return operationGeneration
@@ -424,9 +424,9 @@ final class VoiceSharingEnrollmentStore {
     private func bumpOperationGenerationLocked() { operationGeneration += 1 }
 
     /// Replaces the projection from a 409 conflict payload. Surfacing the real state is required; the caller
-    /// must NOT auto-replay the opt-in against the newer revision.
+    /// must not auto-replay the opt-in against the newer revision.
     /// A 409 carries the server's current projection. Surfacing it is required; auto-replaying the opt-in
-    /// against the newer revision is forbidden, and reconciling happens through a NEW GET under a NEW token.
+    /// against the newer revision is forbidden, and reconciling happens through a NEW get under a NEW token.
     func applyConflict(current projection: VoiceSharingMembership?, readUnder token: ProjectionToken) {
         guard let projection else { return }
         apply(authoritative: projection, readUnder: token)
@@ -438,11 +438,11 @@ final class VoiceSharingEnrollmentStore {
     /// caller should send. The returned projection is what the local state now claims; the server reply only
     /// reconciles it.
     ///
-    /// This is deliberately not "wait for POST .../withdrawal then clear": a user who opts out must not keep
+    /// This is deliberately not "wait for POST.../withdrawal then clear": a user who opts out must not keep
     /// contributing while a request is in flight or fails.
     func withdrawLocally(acceptedServerProjectionAfterward: Bool) -> VoiceSharingMembership {
         lock.lock()
-        // FENCE FIRST: everything issued before this instant becomes inapplicable the moment the user opts
+        // FENCE first: everything issued before this instant becomes inapplicable the moment the user opts
         // out. Ordering matters — bumping after the change would leave a window where a late old reply still
         // matches the old fence value.
         bumpOperationGenerationLocked()
@@ -494,7 +494,7 @@ final class VoiceSharingEnrollmentStore {
         loadForCurrentAccountLocked()
     }
 
-    /// Cold start restores the user's OWN INTENT and the last known display state, and nothing more.
+    /// Cold start restores the user's OWN intent and the last known display state, and nothing more.
     /// `hasAuthoritativeProjection` stays false, so permission cannot come from disk — only from a reply
     /// received in this session. Keeping the fields loaded (rather than resetting them) means the settings UI
     /// can still show what the server last said while collection remains off until a GET confirms it.

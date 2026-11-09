@@ -2,7 +2,7 @@ import Foundation
 import PocketCastsServer
 import PocketCastsUtils
 
-/// Client for the Go-owned voice-sharing account routes (spec `270dfa5b`).
+/// Client for the Go-owned voice-sharing account routes.
 ///
 /// Deliberately narrow: it performs HTTP, decodes the published projection, and enforces the two rules the
 /// contract places on clients — never apply a response belonging to an obsolete account/session, and never
@@ -60,13 +60,13 @@ final class VoiceSharingAccountClient {
 
     init(
         // The CONFIGURED sharing origin, not the cutover-gated one: authentication and the requests it
-        // authorizes must agree (reviewer on b658801c6).
+        // authorizes must agree.
         baseURLProvider: @escaping () -> String = { CloudConfig.shared.configuredOrigin },
         tokenProvider: CloudTokenProviding,
         session: URLSession = URLSession(configuration: .default),
         requestIDFactory: @escaping () -> String = { UUID().uuidString.lowercased() },
-        // Default is ORDINARY ACCOUNT OWNERSHIP (spec 4afc6e43): the signed-in account is the lifecycle
-        // a request belongs to. NOTE: this deliberately does NOT read a credential — refresh rotation
+        // Default is ORDINARY account ownership: the signed-in account is the lifecycle
+        // a request belongs to. NOTE: this deliberately does not read a credential — refresh rotation
         // would look like logout, and credentials are not operation identity.
         sessionIdentity: @escaping () -> SessionIdentity? = VoiceSharingEnrollmentStore.currentSessionOwner,
         membershipStore: VoiceSharingEnrollmentStore = .shared
@@ -82,7 +82,7 @@ final class VoiceSharingAccountClient {
     // MARK: - GET projection
 
     /// Reads the current projection. Returns it together with the membership-operation fence value captured
-    /// BEFORE the request was issued, because the caller cannot reconstruct that instant afterwards: by the
+    /// before the request was issued, because the caller cannot reconstruct that instant afterwards: by the
     /// time this returns, a withdrawal or account switch may already have bumped the fence, and applying such
     /// a reply would re-enable a user who just opted out. `token` is nil when no lifecycle existed to read
     /// under, which the caller must treat as "do not apply".
@@ -107,7 +107,7 @@ final class VoiceSharingAccountClient {
             guard sessionIdentity() == identityAtStart else { return nil }
             guard let http = response as? HTTPURLResponse else { return nil }
             if http.statusCode == 401 || http.statusCode == 403 {
-                // Validate BEFORE the side effect, then report the bearer this request carried.
+                // Validate before the side effect, then report the bearer this request carried.
                 guard sessionIdentity() == identityAtStart else { return nil }
                 let rejected = request.value(forHTTPHeaderField: "Authorization")?.replacingOccurrences(of: "Bearer ", with: "")
                 await tokenProvider.handleUnauthorized(rejectedToken: rejected)
@@ -117,7 +117,7 @@ final class VoiceSharingAccountClient {
                 var code = "<none>"
                 if let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                    let c = object["code"] as? String { code = String(c.prefix(100)) }
-                // Correlation identifier only (reviewer a7712cfc / spec a4aacfc3): the edge ray, if any,
+                // Correlation identifier only: the edge ray, if any,
                 // ties this attempt to gateway/edge logs. Never a verdict on the producing layer.
                 let ray = String((http.value(forHTTPHeaderField: "cf-ray") ?? "-").prefix(64))
                 FileLog.shared.addMessage("[VoiceSharing] projection GET failed: status \(http.statusCode), code: \(code), cf-ray: \(ray)")
@@ -152,8 +152,8 @@ final class VoiceSharingAccountClient {
         let path: String
         /// Body must never contain credential material; it carries only contract fields.
         let body: [String: Any]
-        /// Optimistic-concurrency precondition, sent as `If-Match`. ALWAYS present: the contract requires
-        /// it (spec core e3cfc8ae), so a client with no revision must `GET` first rather than write without
+        /// Optimistic-concurrency precondition, sent as `If-Match`. always present: the contract requires
+        /// it, so a client with no revision must `GET` first rather than write without
         /// a precondition. An empty value is not a precondition either, which is why `begin` refuses it.
         let ifMatch: String
         /// Non-secret generation of the session that BEGAN this operation, retained across retries. A
@@ -168,7 +168,7 @@ final class VoiceSharingAccountClient {
         let issuedUnder: VoiceSharingEnrollmentStore.ProjectionToken
     }
 
-    /// One membership operation, expressed as the DESIRED STATE (phase 2). Retry by calling `perform(_:)`
+    /// One membership operation, expressed as the DESIRED state (phase 2). Retry by calling `perform(_:)`
     /// again with the SAME operation (bounded backoff), never by beginning another: the body is unchanged,
     /// so a repeated opt-in is a resend of identical bytes and the server's idempotent PUT applies.
     ///
@@ -178,7 +178,7 @@ final class VoiceSharingAccountClient {
     ///
     /// `lastReadRevision` is the `membership_revision` from the newest projection this client applied. It is
     /// REQUIRED: `If-Match` is mandatory, so a caller holding no revision must read the state with
-    /// `fetchProjection()` first, and that read is what supplies the value. Refusing here keeps an
+    /// `fetchProjection` first, and that read is what supplies the value. Refusing here keeps an
     /// unpreconditioned write from ever being constructed, let alone sent.
     func beginMembership(enrolled: Bool, acceptedDisclosureVersion: String?, lastReadRevision: String?) -> MutationOperation? {
         // Refuse locally rather than let the server report it: turning sharing ON without a consent
@@ -211,7 +211,7 @@ final class VoiceSharingAccountClient {
     /// request_id and body are unchanged, so the server's idempotency rule applies instead of a second
     /// mutation being recorded.
     func perform(_ operation: MutationOperation) async -> VoiceSharingMutationOutcome {
-        // Refusal happens BEFORE any transport work: sending A's intent under B's credential would attribute
+        // Refusal happens before any transport work: sending A's intent under B's credential would attribute
         // one account's mutation to another, and the server cannot tell the difference.
         guard sessionIdentity() == operation.originatingGeneration else { return .refusedStaleSession }
         guard !operation.body.keys.contains(where: { $0.lowercased().contains("token") || $0.lowercased().contains("credential") }) else {
@@ -305,13 +305,13 @@ final class VoiceSharingAccountClient {
         }
         request.setValue(ifMatch, forHTTPHeaderField: Field.ifMatch)
         guard sessionIdentity() == originatingGeneration else { return .refusedStaleSession }
-        // NOTE: `mutate` is entered only after makeRequest() succeeded, which already required a non-nil
+        // NOTE: `mutate` is entered only after makeRequest succeeded, which already required a non-nil
         // identity; callers capture it before the credential await and pass it in so every comparison uses
         // the same pre-await value rather than one read after network work began.
         do {
             let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else { return .unavailableBackend }
-            // ONE guard, immediately after the transport returns and BEFORE any status branch. Every branch
+            // ONE guard, immediately after the transport returns and before any status branch. Every branch
             // below produces an account-specific result — applied membership, a conflict projection, an
             // ineligible/refused reason, or a token invalidation — so a reply from a superseded session must
             // be dropped regardless of its code. Per-branch guards previously left 403 and 422 unguarded,
@@ -327,7 +327,7 @@ final class VoiceSharingAccountClient {
             case 409:
                 // A conflict carries the current projection. Surfacing it is required so the caller can show
                 // the real state; auto-replaying against the newer revision is forbidden. Reconciling with a
-                // NEW GET (whose own token decides applicability) is the only way to adopt newer state.
+                // NEW get (whose own token decides applicability) is the only way to adopt newer state.
                 let current = Self.decodeProjection(data)
                 return .conflict(current: current, issuedUnder: issuedUnder)
             case 401:
@@ -349,7 +349,7 @@ final class VoiceSharingAccountClient {
         }
     }
 
-    /// Builds the request. Callers capture session identity BEFORE awaiting here, because the credential
+    /// Builds the request. Callers capture session identity before awaiting here, because the credential
     /// fetch is a suspension point where an account transition can land; this function never reads identity
     /// itself, so there is exactly one pre-await capture per operation.
     private func op_body(of operation: DeletionOperation) -> [String: Any] { operation.body }
@@ -428,7 +428,7 @@ final class VoiceSharingAccountClient {
         )
     }
 
-    /// Bounded decode diagnostic: names the FIRST field-level guard the body failed (reviewer 9642916c:
+    /// Bounded decode diagnostic: names the FIRST field-level guard the body failed (:
     /// log field identity, never raw body text). Returns nil when the body decodes cleanly.
     static func decodeRejectionReason(_ data: Data) -> String? {
         guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return "not-a-json-object" }

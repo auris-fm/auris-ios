@@ -2,27 +2,27 @@ import Foundation
 import Combine
 import PocketCastsUtils
 
-/// The Voice Sharing settings surface, BUILT DISABLED (round 69).
+/// The Voice Sharing settings surface, BUILT disabled (round 69).
 ///
 /// What this exists to make impossible: a settings screen that can turn collection on by itself.
 /// Every control here is either a local, non-authorizing preference or a read-only projection of
 /// the live policy. Specifically:
 ///
 /// - There is NO path from this view to `permitsCollection`. The remote switch, the lease and the
-///   account enrollment remain the only inputs to that decision (see `VoiceSharingSnapshot`), so a
-///   user toggling anything here cannot enable collection.
+/// account enrollment remain the only inputs to that decision (see `VoiceSharingSnapshot`), so a
+/// user toggling anything here cannot enable collection.
 /// - The delete control goes through the queue's owner-wide purge (the same fail-explicit path
-///   consent loss uses), so "delete my contributions" cannot silently succeed while storage is
-///   unreconciled — the outcome is reported back, not swallowed.
+/// consent loss uses), so "delete my contributions" cannot silently succeed while storage is
+/// unreconciled — the outcome is reported back, not swallowed.
 /// - The section is gated on a compiled constant that is `false`: nothing here renders in
-///   production until the owner approves activation, and flipping it is a deliberate source change
-///   reviewed like any other.
+/// production until the owner approves activation, and flipping it is a deliberate source change
+/// reviewed like any other.
 ///
 /// Numeric limits shown here are the COMPILED bounds, labelled as such; they are not activation
 /// values and are not editable.
 final class VoiceSharingSettingsModel {
     /// Compiled switch. `false` in every shipped build until the owner approves activation.
-    /// STAGING/DEBUG BUILDS ONLY (scope 2026-11-03, reviewer 02d45284 / spec 7dcb3a53 +
+    /// STAGING/DEBUG builds only (scope / +
     /// ec6b2151): the consented-recording staging verification needs the disclosure/opt-in
     /// surface, gated on the SAME `-D STAGING` condition the sync staging endpoints use —
     /// release/production builds compile `false` with no flip-back step to remember.
@@ -42,7 +42,7 @@ final class VoiceSharingSettingsModel {
             /// Known ready-to-upload count (queue coverage is known and the owner is not held).
             case knownReady(Int)
             /// Could not DETERMINE the count (listing/stat/read/durability failure). Not evidence
-            /// that a revocation failed (reviewer 8ae2b980).
+            /// that a revocation failed.
             case unknown
             /// The owner is HELD by an unproven revocation: stored recordings may survive because
             /// the revocation's barriers did not reconcile.
@@ -131,7 +131,7 @@ final class VoiceSharingSettingsModel {
 
     /// Deletes ALL retained contributions through the owner-wide purge. Never claims success it
     /// cannot prove: a refused or held purge reports `fullyRevoked == false`.
-    /// LOCAL scope, stated in the name: this deletes recordings held ON THIS DEVICE. It is not
+    /// LOCAL scope, stated in the name: this deletes recordings held ON THIS device. It is not
     /// account-wide deletion — accepted data on the server is a separate operation the client does
     /// not perform here (spec: local removal never stands for server completion).
     func deletePendingRecordingsOnThisDevice() -> DeleteResult {
@@ -149,7 +149,7 @@ final class VoiceSharingSettingsModel {
             return DeleteResult(disposition: .incomplete(removed: removed,
                                                          survivorsUnknown: retained))
         case .refused:
-            // Nothing could be enumerated: do NOT report 0 removed / 0 retained as if that were a
+            // Nothing could be enumerated: do not report 0 removed / 0 retained as if that were a
             // measurement of an empty device.
             return DeleteResult(disposition: .refused)
         }
@@ -168,14 +168,14 @@ final class VoiceSharingSettingsModel {
         return "Audio up to \(VoiceSharingUploadQueue.maxEntryAudioBytes / 1024) KB per contribution, "
             + "retained for at most \(days) \(days == 1 ? "day" : "days")."
     }
-    // MARK: - Recovery / stopped state (spec 62d39f8f, reviewer 8ae2b980)
+    // MARK: - Recovery / stopped state 
 
     /// Live-state dependencies the surface cannot guess.
     ///
     /// The previous version took plain Bools with `false` defaults, which silently INVENTED "the
     /// user turned it off" whenever a caller didn't wire them. These are now explicit: `nil` means
     /// the caller cannot determine it, and an undeterminable reason renders as `.unknown` rather
-    /// than as an accusation or an invented pause (reviewer 8ae2b980).
+    /// than as an accusation or an invented pause.
     struct LiveState: Equatable {
         /// Whether the live policy currently permits collection. `nil` = unknown.
         var policyPermits: Bool?
@@ -189,8 +189,8 @@ final class VoiceSharingSettingsModel {
         /// coverage was unknown/held, so a count can never be invented from a second read.
         var knownReadyCount: Int?
         /// The account+generation+lease generation all three reads were taken under. When the
-        /// stamps disagree the reads were NOT coherent, and every derived conclusion is unknown
-        /// rather than a mix of two moments (reviewer e40508a1).
+        /// stamps disagree the reads were not coherent, and every derived conclusion is unknown
+        /// rather than a mix of two moments.
         var coherence: Coherence = .incoherent
 
         enum Coherence: Equatable {
@@ -217,7 +217,7 @@ final class VoiceSharingSettingsModel {
             /// An unproven revocation: barriers did not reconcile, intent is still on disk. The
             /// local deletion path is the verified remedy (a successful purge retires the intent).
             case revocationInDoubt
-            /// The store could not be read/enumerated. NOT a revocation failure, and not something
+            /// The store could not be read/enumerated. not a revocation failure, and not something
             /// the user can fix by turning anything on or by deleting.
             case unreadable
         }
@@ -244,7 +244,7 @@ final class VoiceSharingSettingsModel {
         let action: String?
     }
 
-    // MARK: - The single published view state (reviewer 05aaaedc)
+    // MARK: - The single published view state 
 
     /// Everything the surface displays, derived from ONE coherent snapshot. The two UI parts cannot
     /// disagree because they read the same value, and a listener cannot be called with values from
@@ -274,7 +274,7 @@ final class VoiceSharingSettingsModel {
         }
     }
 
-    // MARK: - Change subscription (reviewer 8ae2b980)
+    // MARK: - Change subscription 
 
     private var changeObservers: [UUID: (SentLiveState) -> Void] = [:]
     private let changeLock = NSLock()
@@ -295,7 +295,7 @@ final class VoiceSharingSettingsModel {
         changeLock.lock(); changeObservers.removeValue(forKey: id); changeLock.unlock()
     }
 
-    /// Re-reads live state and notifies listeners ONLY when it actually changed. Called from the
+    /// Re-reads live state and notifies listeners only when it actually changed. Called from the
     /// production update paths (enrollment store mutations, queue purges) — a snapshot per render
     /// is not a subscription, and pretending otherwise was the reviewer's point.
     /// A published snapshot tagged with the sequence it was taken at. Consumers keep the highest
@@ -305,11 +305,11 @@ final class VoiceSharingSettingsModel {
         let state: LiveState
     }
 
-    /// Test seam: invoked INSIDE a refresh, right after its read and BEFORE the commit, so a
-    /// control can hold an older read open while a newer one completes (reviewer 31c7758f).
+    /// Test seam: invoked INSIDE a refresh, right after its read and before the commit, so a
+    /// control can hold an older read open while a newer one completes.
     var afterReadBeforeCommitForTesting: (() -> Void)?
 
-    // MARK: - Time-driven freshness (reviewer ffca9a27 / spec e3db4e30)
+    // MARK: - Time-driven freshness 
 
     /// Schedules the call that refreshes when TIME (not a mutation) makes the displayed state
     /// stale: an entry crossing the queue-age bound, or a lease lapsing. Without this the surface
@@ -317,11 +317,11 @@ final class VoiceSharingSettingsModel {
     /// silently stopped being served.
     var scheduleTimeDrivenRefresh: ((_ after: TimeInterval, _ body: @escaping () -> Void) -> Void)?
 
-    /// Seconds until the nearest time-caused transition that is still IN THE FUTURE: the next age
-    /// boundary, or the lease deadline. Generous +1s margin so the refresh lands AFTER the
+    /// Seconds until the nearest time-caused transition that is still IN THE future: the next age
+    /// boundary, or the lease deadline. Generous +1s margin so the refresh lands after the
     /// transition, never before it.
     ///
-    /// Transitions already in the past are EXCLUDED (reviewer 71088b91): an expired lease reports a
+    /// Transitions already in the past are EXCLUDED: an expired lease reports a
     /// negative delay, and turning that into a 50 ms delay re-armed the timer forever, once per
     /// fire. A past transition is not a reason to wake again — its refresh already happened.
     private func secondsUntilNextTimeTransition() -> TimeInterval? {
@@ -347,9 +347,9 @@ final class VoiceSharingSettingsModel {
 
     /// Arms from the LATEST accepted read.
     ///
-    /// NOT SAFE TO CALL WITH `changeLock` HELD — this method takes that lock itself and `NSLock` is
+    /// not safe to call with `changeLock` HELD — this method takes that lock itself and `NSLock` is
     /// not recursive, so a caller holding it would deadlock. Every caller unlocks first and passes
-    /// the sequence it accepted (reviewer 8b902371).
+    /// the sequence it accepted.
     func armTimeDrivenRefresh() {
         armTimeDrivenRefresh(afterAcceptedSequence: currentSequence)
     }
@@ -360,7 +360,7 @@ final class VoiceSharingSettingsModel {
         armTimeDrivenRefresh(afterAcceptedSequence: sequence)
     }
 
-    /// Arms the timer, FENCED BY THE READ SEQUENCE IT BELONGS TO (reviewer 5a4738ca). An accepted
+    /// Arms the timer, FENCED by the read sequence it belongs to. An accepted
     /// read used to release `changeLock` and arm afterwards, so it could pause between the two: a
     /// NEWER read would arm the correct deadline, then the older one would invalidate it and how
     /// long it happened to wait before pausing decided the schedule. The delay is therefore measured
@@ -371,7 +371,7 @@ final class VoiceSharingSettingsModel {
             changeLock.unlock()
             return
         }
-        // INVALIDATE FIRST, ALWAYS (reviewer 71088b91): even when nothing is due, any previously
+        // INVALIDATE first, always: even when nothing is due, any previously
         // armed timer must be superseded — otherwise a stale timer from an earlier, longer delay
         // keeps ownership and the newer deadline is never scheduled.
         pendingTimeRefreshToken &+= 1
@@ -387,7 +387,7 @@ final class VoiceSharingSettingsModel {
             let isCurrent = self.pendingTimeRefreshToken == token
             self.changeLock.unlock()
             guard isCurrent else { return }  // superseded: a newer timer owns the next refresh
-            // `refreshLiveState` is the SINGLE owner of arming (reviewer e48ebcc6): it re-arms on
+            // `refreshLiveState` is the SINGLE owner of arming: it re-arms on
             // both the published and the unchanged path, so calling `armTimeDrivenRefresh` here as
             // well queued two closures per fire.
             self.refreshLiveState()
@@ -397,7 +397,7 @@ final class VoiceSharingSettingsModel {
     func refreshLiveState() {
         // SERIALIZED: the comparison AND the commit of `lastPublishedState` happen under the same
         // lock as the observer list, so two concurrent refreshes cannot both decide to publish, and
-        // an out-of-order snapshot cannot overwrite a newer one (reviewer 05aaaedc). Observers are
+        // an out-of-order snapshot cannot overwrite a newer one. Observers are
         // called OUTSIDE the lock, so a listener that re-enters cannot deadlock.
         changeLock.lock()
         readSequence &+= 1
@@ -407,11 +407,11 @@ final class VoiceSharingSettingsModel {
         let state = liveState()
         afterReadBeforeCommitForTesting?()
 
-        // LAST WRITER WINS: a refresh whose read is OLDER than one already published is obsolete —
-        // it must not deliver, even if its read finished later (reviewer f62b19a4). Ordering is by
+        // LAST writer wins: a refresh whose read is OLDER than one already published is obsolete —
+        // it must not deliver, even if its read finished later. Ordering is by
         // the read that produced the state, not by the order callbacks happen to run.
         changeLock.lock()
-        // THE WATERMARK ADVANCES ON EVERY COMPLETED READ, CHANGE OR NOT (reviewer 31c7758f): a
+        // THE watermark advances on every completed read, CHANGE or not: a
         // refresh that found nothing new still proves every EARLIER read is obsolete, so a slow
         // older read must not publish afterwards. Advancing only when the state differed let a
         // stale read slip through behind an unchanged newer one.
@@ -421,7 +421,7 @@ final class VoiceSharingSettingsModel {
         }
         lastPublishedSequence = sequence
         guard state != lastPublishedState else {
-            // NO CHANGE IN DISPLAYED STATE, BUT THE DEADLINE MAY HAVE MOVED (reviewer e48ebcc6):
+            // NO CHANGE in displayed state, BUT the deadline may have moved:
             // a renewed or shortened lease changes the snapshot's stamp and its deadline while
             // permission, count and guidance stay identical. The timer must be re-armed even when
             // nothing is published, or the OLD deadline keeps ownership. This read is still the
@@ -439,7 +439,7 @@ final class VoiceSharingSettingsModel {
 
         let sent = SentLiveState(sequence: sequence, state: state)
         for observer in observers { observer(sent) }
-        // RE-ARM ON EVERY AUTHORITATIVE UPDATE (reviewer 71088b91): an initially empty visible
+        // RE-ARM on every authoritative update: an initially empty visible
         // queue schedules nothing, so the entry added right after it would never be given an expiry
         // timer, and a SHORTENED or newly installed lease could miss its deadline. Re-arming here
         // covers every source — queue, policy, enrollment — because they all refresh through here.
@@ -454,11 +454,11 @@ final class VoiceSharingSettingsModel {
 
     /// The model's ONE live snapshot: queue coverage plus whatever the two injected reads return.
     /// `nil` from a read is preserved as `unknown` — never coerced to `false`, which would accuse
-    /// the user of opting out (reviewer 8ae2b980).
+    /// the user of opting out.
     func liveState() -> LiveState {
-        // Stamp BEFORE and AFTER every read, INCLUDING the queue read: a hold transition or an
+        // Stamp before and after every read, INCLUDING the queue read: a hold transition or an
         // account/enrollment move between the queue coverage read and the first stamp used to be
-        // invisible (reviewer f62b19a4). No read happens outside the interval.
+        // invisible. No read happens outside the interval.
         let before = coherenceStamp()
         let fault: StoppedReason.StorageFault
         let readyCount: Int?
@@ -472,7 +472,7 @@ final class VoiceSharingSettingsModel {
         case .known(let entries):
             fault = .none
             // The serving authority's OWN count, so the displayed number can never disagree with
-            // what is served (reviewer ffca9a27).
+            // what is served.
             readyCount = entries.count
         }
         let permits = isCollectionPermitted()
@@ -516,7 +516,7 @@ final class VoiceSharingSettingsModel {
         let version: String?
         /// The policy's own lease generation and the queue's hold generation: these version the
         /// OTHER two authorities the snapshot reads, so a lease expiry/fence or a queue hold change
-        /// during the read is detected (reviewer 05aaaedc).
+        /// during the read is detected.
         let policyLease: Int
         let queueHold: Int
     }
@@ -679,9 +679,9 @@ final class VoiceSharingAccountModel: ObservableObject {
 
     /// Reads the projection as a PRECONDITION for a pending mutation, under the caller's fences.
     ///
-    /// Distinct from `refresh()`: this does not publish `.loading`, does not overwrite the caller's
+    /// Distinct from `refresh`: this does not publish `.loading`, does not overwrite the caller's
     /// status on success, and leaves a failure visible to the caller as `false` so it can decide. It
-    /// reuses `begin()`/`current(_:)`, so an account change or a newer intent landing mid-read discards
+    /// reuses `begin`/`current(_:)`, so an account change or a newer intent landing mid-read discards
     /// the reply exactly as it would for any other operation, and the mutation is then abandoned rather
     /// than sent against an unknown state.
     private func readProjectionForMutation() async -> Bool {
@@ -718,7 +718,7 @@ final class VoiceSharingAccountModel: ObservableObject {
         guard disclosureConfirmed else { membershipStatus = .confirmationRequired; return }
         guard let disclosureVersion else { membershipStatus = .disclosureUnavailable; return }
         guard !busy else { membershipStatus = .unavailable; return }
-        // GET-BEFORE-PUT (reviewer 67ecb11e item 2; spec e3cfc8ae). `If-Match` is required, so an intent
+        // GET-before-PUT. `If-Match` is required, so an intent
         // with no revision must READ first rather than refuse and leave the user's switch unexplained.
         // The read runs under THIS intent's stamp, so an account transition or a competing intent that
         // lands during it retires the read; if the read fails, nothing is sent and the switch stays off.
@@ -734,7 +734,7 @@ final class VoiceSharingAccountModel: ObservableObject {
         guard let sent = begin(), let operation = client.beginMembership(
             enrolled: true, acceptedDisclosureVersion: disclosureVersion,
             lastReadRevision: revision) else {
-            // Diagnostic (spec c3f8fcb4): name WHY enrollment could not begin — the two guards above
+            // Diagnostic: name WHY enrollment could not begin — the two guards above
             // are silent, and "unsupported_disclosure" from the server is indistinguishable from a
             // local precondition failure without this line.
             FileLog.shared.addMessage("[VoiceSharing] enrollment not begun: disclosureVersion=\(disclosureVersion) revision=\(store.currentAuthoritativeState?.membership.membershipRevision ?? "none")")
@@ -747,7 +747,7 @@ final class VoiceSharingAccountModel: ObservableObject {
         await performMutation(operation, under: sent)
     }
 
-    /// Never blocked by an enrollment/fetch in flight. Capture server preconditions BEFORE local stop.
+    /// Never blocked by an enrollment/fetch in flight. Capture server preconditions before local stop.
     func withdraw() async {
         storeChanged()
         let original = store.currentAuthoritativeState?.membership
@@ -764,7 +764,7 @@ final class VoiceSharingAccountModel: ObservableObject {
         updateMembership()
         membershipStatus = .withdrawalUnconfirmed
         guard let sent = begin() else { busy = false; return }
-        // GET-BEFORE-PUT for a withdrawal too (reviewer 67ecb11e item 2). LOCAL STOP ALREADY HAPPENED
+        // GET-before-PUT for a withdrawal too. LOCAL stop already happened
         // above and is never undone by a failed read: collection has stopped and the pending bytes are
         // purged, so the user's privacy decision holds regardless of what the server says next. What a
         // failed read costs is only the CONFIRMATION, which the status already reports as unconfirmed.
@@ -805,7 +805,7 @@ final class VoiceSharingAccountModel: ObservableObject {
                 if stamp == sent { mutation = nil; busy = false; membershipStatus = .unavailable }
                 return
             }
-            // NO PREFLIGHT (spec c2d2f7fe). `VoiceSharingAccountClient` already acquires the
+            // NO PREFLIGHT. `VoiceSharingAccountClient` already acquires the
             // credential inside request construction, dials nothing when it is unavailable, reports
             // that case as `.unavailableBackend`, and fences the account around its own await. A
             // separate check here duplicated that decision, and a separate one I wrote EARLIER also
@@ -845,7 +845,7 @@ final class VoiceSharingAccountModel: ObservableObject {
             mutation = nil // Never replay conflicted opt-in against a newer revision.
             membershipStatus = .conflict
         case .unauthorized:
-            // INCIDENT 2026-11-05 (reviewer e66c294a): a refused mutation used to keep `mutation`
+            // INCIDENT: a refused mutation used to keep `mutation`
             // alive, so any later resume re-sent it — under whatever credential existed then.
             // A refused intent is DROPPED: the user's next attempt begins a NEW operation.
             mutation = nil
@@ -876,9 +876,9 @@ final class VoiceSharingAccountModel: ObservableObject {
         storeChanged()
         guard deletionStatus != .sending, let operation = deletion else { return }
         // The operation is handed to the client unchanged, so its request ID and cutoff are
-        // preserved by construction. `performDeletion` fences on ownership AFTER its credential
+        // preserved by construction. `performDeletion` fences on ownership after its credential
         // await and reports a missing credential as `.unavailableBackend`, which keeps the
-        // operation pending for an identical retry instead of clearing it (reviewer 4546a238).
+        // operation pending for an identical retry instead of clearing it.
         await performDeletion(operation)
     }
 
@@ -886,7 +886,7 @@ final class VoiceSharingAccountModel: ObservableObject {
         guard session() == operation.originatingGeneration else { return }
         deletionStatus = .sending
         let result = await client.performDeletion(operation)
-        // FENCE EVERY BRANCH (reviewer 4546a238): `performDeletion` awaited a credential inside the
+        // FENCE every branch: `performDeletion` awaited a credential inside the
         // client, and a NEWER deletion may have replaced this one meanwhile. A stale completion must
         // not write status for an operation that is no longer current.
         guard session() == operation.originatingGeneration else { storeChanged(); return }
@@ -902,9 +902,9 @@ final class VoiceSharingAccountModel: ObservableObject {
 
     // MARK: - Control accessors
     //
-    // A READ-ONLY view of retry state, so a control can observe identity preservation and
+    // A READ-only view of retry state, so a control can observe identity preservation and
     // stale-completion fencing without asserting on private storage. There is deliberately NO
-    // state-setting helper (reviewer fa9db8e9): an earlier `beginDeletionForTesting()` manufactured
+    // state-setting helper: an earlier `beginDeletionForTesting` manufactured
     // `pending`/`unavailable` state directly and bypassed the public action's `.sending` guard, so a
     // control could replace an in-flight deletion the real button would refuse. Controls now drive
     // the public entry points only.

@@ -14,8 +14,8 @@ final class VoiceSharingUploadScheduler {
     enum PassOutcome {
         /// Nothing was eligible (empty, held, or every entry behind its not-before boundary).
         case idle
-        /// ANOTHER PASS OWNS THIS SCHEDULER, so this call attempted NOTHING. Distinct from `.idle`
-        /// (reviewer/spec a857340b): a refused pass reports "try again shortly", while `.idle` says
+        /// ANOTHER pass owns this scheduler, so this call attempted NOTHING. Distinct from `.idle`
+        ///: a refused pass reports "try again shortly", while `.idle` says
         /// "there was nothing to do". Conflating them let a foreground trigger be silently dropped
         /// whenever a drain was already running.
         case busy
@@ -23,7 +23,7 @@ final class VoiceSharingUploadScheduler {
         case drained([(entry: VoiceSharingUploadQueue.Entry, outcome: VoiceSharingUploader.Outcome)])
     }
 
-    /// DIAGNOSTIC (spec a857340b): the identity of the scheduler that most recently REFUSED a pass,
+    /// DIAGNOSTIC: the identity of the scheduler that most recently REFUSED a pass,
     /// so a competing pass can be attributed to a specific instance instead of assumed. Guarded by
     /// `passLock` — these are written from pass paths and read from tests.
     private var lastRefusedPassByDiagnosticStorage: (scheduler: ObjectIdentifier, at: Date)?
@@ -44,7 +44,7 @@ final class VoiceSharingUploadScheduler {
         queue.secondsUntilNextRetryBoundary()
     }
 
-    /// OWNER-COMPLETION SIGNAL (reviewer 280f4c52). A refused caller used to have no way to learn
+    /// OWNER-COMPLETION signal. A refused caller used to have no way to learn
     /// when the owner finished, so recovering from `.busy` meant polling. This is the atomic
     /// handshake: `registerOwnerCompletion` answers whether this caller already OWNS the scheduler,
     /// and if it does not, installs the callback under the SAME lock — so a completion that lands
@@ -79,7 +79,7 @@ final class VoiceSharingUploadScheduler {
         passLock.withLock { ownerCompletionWaiters.removeValue(forKey: id) }
     }
 
-    /// DETERMINISTIC RACE BARRIER (reviewer 2a570a0b #4): when set, the waiter-firing loop calls
+    /// DETERMINISTIC race barrier: when set, the waiter-firing loop calls
     /// this before EACH waiter and does not proceed until it returns — so a control can hold the
     /// exact moment a callback is about to be taken, mutate the trigger (e.g. cancel it), and then
     /// release, instead of guessing with sleeps. Invoked OUTSIDE `passLock`.
@@ -88,10 +88,10 @@ final class VoiceSharingUploadScheduler {
 
     private let queue: VoiceSharingUploadQueue
 
-    /// LIVE RETENTION (spec 05ff27d0, reviewer 34aae0fa item 3, reviewer 43f457ab finding 1): apply
+    /// LIVE retention: apply
     /// the age bound by removing expired recordings.
     ///
-    /// IT TAKES THE PASS OWNERSHIP. The comment on this method used to claim serialization it did
+    /// IT TAKES the pass ownership. The comment on this method used to claim serialization it did
     /// not have — it called the queue directly, so an expiry could delete an entry while a pass was
     /// mid-upload on it. Now it goes through the SAME `passInFlight` lock a drain takes: if a pass
     /// owns the scheduler, expiry is REFUSED (reported as `.busy`) and the next pass applies it,
@@ -102,7 +102,7 @@ final class VoiceSharingUploadScheduler {
             return 0 // a pass owns the scheduler; the next one expires
         }
         defer {
-            // THE SAME COMPLETION PATH AS A DRAIN (reviewer 23901ee6 finding 3). Releasing
+            // THE same completion path as A DRAIN. Releasing
             // `passInFlight` alone left every waiter a concurrent drain had registered un-fired: the
             // drain reported `.busy`, registered for the owner's completion, and expiry released the
             // slot without ever invoking it — so that drain never re-offered. Both owners must end
@@ -158,7 +158,7 @@ final class VoiceSharingUploadScheduler {
             return .busy
         }
         defer {
-            // THE OWNER IS DONE: fire every waiter so a refused caller can re-offer exactly once.
+            // THE owner is done: fire every waiter so a refused caller can re-offer exactly once.
             // Taken and cleared under the lock, then invoked outside it.
             let waiters: [() -> Void] = passLock.withLock {
                 passInFlight = false
@@ -181,7 +181,7 @@ final class VoiceSharingUploadScheduler {
         let discovery = queue.readyEntriesReportingUnknownCoverage()
         guard case .known(let ready) = discovery, !ready.isEmpty else {
             FileLog.shared.addMessage("[VoiceSharing] drain: no ready entries (discovery=\(discovery))")
-            // DIAGNOSTIC (reviewer 08e42a5a): `.idle` has two very different causes — an empty
+            // DIAGNOSTIC: `.idle` has two very different causes — an empty
             // served set versus a held one — and inferring between them from the outside was
             // wrong. Record what the decision actually saw.
             passLock.withLock {

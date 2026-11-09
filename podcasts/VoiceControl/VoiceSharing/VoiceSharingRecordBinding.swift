@@ -115,7 +115,7 @@ enum VoiceSharingRecordBinding {
         "schema_version", "capture_id", "wake_required", "enrollment_epoch", "platform", "app_version",
         "build", "capture_session_id", "audio", "models", "observations",
     ]
-    /// `links` is the only optional top-level group; feedback is intentionally NOT accepted
+    /// `links` is the only optional top-level group; feedback is intentionally not accepted
     /// (a record must hash identically before and after annotation).
     private static let optionalTopLevel: Set<String> = ["links"]
 
@@ -225,27 +225,27 @@ enum VoiceSharingRecordBinding {
 
     /// Reasons are ENUMERATED per stage. An arbitrary sentence is where stack traces and file paths
     /// enter the dataset, so a free-form reason is refused rather than stored.
-    /// Reasons valid at ANY non-completed state on every stage (spec delta 736d3180):
+    /// Reasons valid at any non-completed state on every stage:
     /// `observation_unavailable` states that normal execution supplied no trustworthy observation
-    /// by finalization. It is allowed ONLY with `state: "unknown"` — it asserts nothing about
+    /// by finalization. It is allowed only with `state: "unknown"` — it asserts nothing about
     /// whether the stage ran, so pairing it with a known outcome would attach a non-claim to a
     /// claim. The pairing rule is enforced below, not by mere membership here.
     private static let anyStateReasons: Set<String> = ["observation_unavailable"]
 
     /// A reason that names a REAL observed failure rather than an absence of observation (spec 9578b16,
-    /// reviewer 6c3fed9b). `detector_error` is what the wake detector actually reported when it failed, so
+    ///). `detector_error` is what the wake detector actually reported when it failed, so
     /// it must survive into the durable record — but only as the exact wake+failed pairing it describes.
     /// Attaching it to any other stage, or to `completed`, would assert a failure that did not happen.
     private static let detectorErrorReason = "detector_error"
 
-    /// A recognition that SUCCEEDED and produced no usable text (spec delta c6f3bdf7). This is the one
+    /// A recognition that SUCCEEDED and produced no usable text. This is the one
     /// reason that describes `completed`: the recogniser ran and returned nothing, which is a real result,
-    /// not a failure and not an absence of observation. It is valid ONLY on ASR, ONLY with `completed`, and
-    /// ONLY with both `text` and `router_input` absent — a stage that produced no text cannot have produced
+    /// not a failure and not an absence of observation. It is valid only on ASR, only with `completed`, and
+    /// only with both `text` and `router_input` absent — a stage that produced no text cannot have produced
     /// a router input, and carrying either would contradict the reason it is declaring.
-    /// The three reasons that describe translation being CORRECTLY SKIPPED (spec delta 4d10275f). They
+    /// The three reasons that describe translation being CORRECTLY skipped. They
     /// say why the stage did not run, so they are valid only with `state: not_run` — attaching one to a
-    /// failure or a cancellation would describe a decision that was never made (review b5fb69ef).
+    /// failure or a cancellation would describe a decision that was never made.
     private static let translationSkipReasons: Set<String> = [
         "source_language_unavailable", "backend_handles_translation", "translator_unavailable",
     ]
@@ -300,7 +300,7 @@ enum VoiceSharingRecordBinding {
 
     /// A settlement with this disposition is still ABOUT the prior classification, so the
     /// classification's predicted facts may carry into it. `executed`/`refused` conclude it;
-    /// `failed` is the executor's verdict ON the classified action (spec 012b19dd binding: a failed
+    /// `failed` is the executor's verdict ON the classified action ( binding: a failed
     /// turn names its classification); `pending` means the classification stands unconcluded. Only
     /// `not_run` is incompatible — the router declined, nothing was classified, and carrying a
     /// previous report's names would invent a classification that never happened.
@@ -364,11 +364,11 @@ enum VoiceSharingRecordBinding {
             guard let state = declared["state"] as? String, observationStates.contains(state) else {
                 throw BindingError.invalidField("\(stagePath).state", "enumerated state required")
             }
-            // SPEC DELTA f8: a COMPLETED stage carries no reason at all — success needs no explanation,
+            // SPEC delta f8: a COMPLETED stage carries no reason at all — success needs no explanation,
             // and a reason there is a narrative attached to a success. The single exception is ASR
             // completed/empty_result, where the reason IS the result.
             if state == "completed" {
-                // KEY PRESENCE, not value (review 2f8e5d90 taught this once and I repeated the bug):
+                // KEY presence, not value:
                 // `reason: null` states the field exists and is empty, so `!(reason is NSNull)` let the
                 // exact payload f8 forbids through. A present key is a reason being carried, whatever it
                 // holds.
@@ -390,8 +390,8 @@ enum VoiceSharingRecordBinding {
                 guard let reason = declared["reason"] as? String, !reason.isEmpty else {
                     throw BindingError.missingField("\(stagePath).reason")
                 }
-                // `observation_unavailable` is a non-claim: it is allowed ONLY with `state:
-                // "unknown"` (spec delta 736d3180). With any known outcome the stage keeps its
+                // `observation_unavailable` is a non-claim: it is allowed only with `state:
+                // "unknown"`. With any known outcome the stage keeps its
                 // specific reason, so the pair is refused rather than reinterpreted.
                 if anyStateReasons.contains(reason) {
                     guard state == "unknown" else {
@@ -417,13 +417,13 @@ enum VoiceSharingRecordBinding {
             }
 
             // Per-stage conditional rules. Found by running the real Worker intake: a completed ASR
-            // stage MUST carry its text, and a non-completed one must NOT — text present for a
+            // stage must carry its text, and a non-completed one must not — text present for a
             // stage that produced nothing is how an empty transcript becomes a silent success.
             if stage == "wake" {
-                // SERVER SCHEMA (record_schema.ts validateWake): the decision enum is
+                // SERVER schema (record_schema.ts validateWake): the decision enum is
                 // {detected, rejected}, and a COMPLETED wake stage must carry one — a decision-less
                 // completed wake is filed under request/ as if no wake decision was made (GO-review
-                // fixture refusal). KEY PRESENCE first (reviewer 40e69257): an `as? String` cast
+                // fixture refusal). KEY presence first: an `as? String` cast
                 // alone lets a present null or non-string value skip the enum check entirely.
                 if declared.keys.contains("decision") {
                     guard let decision = declared["decision"] as? String,
@@ -441,12 +441,12 @@ enum VoiceSharingRecordBinding {
             }
 
             if stage == "execution" {
-                // SERVER SCHEMA: the outcome enum is {success, failure, refused, cancelled}. The
-                // encoder carried routing's disposition tokens otherwise (reviewer 39ac0771 found
+                // SERVER schema: the outcome enum is {success, failure, refused, cancelled}. The
+                // encoder carried routing's disposition tokens otherwise ( found
                 // `executed`/`pending`/`failed` from settledDisposition reaching this member), so
                 // the binding must refuse any token the wire does not define. SPEC 21b5d822: every
                 // OBSERVED execution CARRIES an outcome, and an unknown one asserts none.
-                // KEY PRESENCE first (reviewer 40e69257): a present null or non-string outcome must
+                // KEY presence first: a present null or non-string outcome must
                 // be refused too, not silently skipped by the optional cast.
                 if declared.keys.contains("outcome") {
                     guard let wireOutcome = declared["outcome"] as? String,
@@ -469,7 +469,7 @@ enum VoiceSharingRecordBinding {
                 let text = declared["text"]
                 let hasText = !(text is NSNull) && text != nil
                 // `completed` needs its transcript — EXCEPT for a recognition that genuinely returned no
-                // usable text, which states `empty_result` and carries nothing (spec c6f3bdf7).
+                // usable text, which states `empty_result` and carries nothing.
                 let declaresEmptyResult = (declared["reason"] as? String) == emptyResultReason
                 if state == "completed", !hasText, !declaresEmptyResult {
                     throw BindingError.missingField("\(stagePath).text")
@@ -507,8 +507,8 @@ enum VoiceSharingRecordBinding {
                 } else if text == bleedSkipReason {
                     try assertBleedSkipPairing(stage: stage, state: state, path: "\(stagePath).reason")
                 } else if text == emptyResultReason {
-                    // `empty_result` is the ONLY reason a completed stage may carry, and only on ASR.
-                    // Asserted BEFORE the per-stage field rules below, which must then see an absent text.
+                    // `empty_result` is the only reason a completed stage may carry, and only on ASR.
+                    // Asserted before the per-stage field rules below, which must then see an absent text.
                     try assertEmptyResultPairing(stage: stage, state: state, declared: declared,
                                                  path: "\(stagePath).reason")
                 } else {
@@ -522,12 +522,12 @@ enum VoiceSharingRecordBinding {
 
     /// `detector_error` is a REAL observed failure, so it is a legitimate known outcome — but it names
     /// exactly one thing: the wake detector failed for this capture. Any other stage, or any state other
-    /// than `failed`, would publish a failure that did not happen (spec 9578b16, reviewer 6c3fed9b).
+    /// than `failed`, would publish a failure that did not happen.
     /// `empty_result` describes a SUCCESSFUL recognition with nothing usable in it, so it is valid only on
-    /// ASR with `completed` and with both `text` and `router_input` absent (spec c6f3bdf7). Any other
+    /// ASR with `completed` and with both `text` and `router_input` absent. Any other
     /// combination asserts something the capture cannot have done.
-    /// A translation skip reason states a DECISION NOT TO RUN the stage, so it is valid only on the
-    /// translation stage with `state: not_run` (spec 4d10275f, review b5fb69ef). A `failed` or
+    /// A translation skip reason states a DECISION not to run the stage, so it is valid only on the
+    /// translation stage with `state: not_run`. A `failed` or
     /// `cancelled` translation carrying one would claim a skip and a non-skip at once.
     private static func assertTranslationSkipPairing(stage: String, state: String, path: String) throws {
         guard stage == "translation" else {
@@ -540,7 +540,7 @@ enum VoiceSharingRecordBinding {
         }
     }
 
-    /// The bleed skip is a DECISION NOT TO RUN recognition. Only `asr` + `not_run` states it; a
+    /// The bleed skip is a DECISION not to run recognition. Only `asr` + `not_run` states it; a
     /// completed/failed/cancelled ASR carrying it would claim the recogniser ran and did not run at the
     /// same time. Recovery calls this same function, so a persisted record cannot adopt a pairing intake
     /// refuses.
@@ -564,7 +564,7 @@ enum VoiceSharingRecordBinding {
         guard state == "completed" else {
             throw BindingError.invalidField(path, "empty_result requires state completed, not \(state)")
         }
-        // ABSENT means the KEY IS NOT THERE (review 2f8e5d90). An explicit JSON `null` is present: it
+        // ABSENT means the KEY is not there. An explicit JSON `null` is present: it
         // states the field exists and is empty, which is not what this reason declares. Testing the VALUE
         // instead of the key let `text: null` and `router_input: null` through.
         if declared.keys.contains("text") {

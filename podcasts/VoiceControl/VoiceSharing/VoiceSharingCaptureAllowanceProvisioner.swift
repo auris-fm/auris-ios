@@ -1,7 +1,7 @@
 import Foundation
 import PocketCastsUtils
 
-/// The minimal CONNECTED capture entry (scope correction 2026-11-03): one real
+/// The minimal CONNECTED capture entry (scope correction): one real
 /// allowance request whose validated response becomes the collector's admission
 /// authority. Memory-only — absent a valid installed response there is no
 /// authority and capture fails closed through the existing admission path.
@@ -68,7 +68,7 @@ final class VoiceSharingCaptureAllowanceProvisioner {
     // MARK: - Persisted allocation request identity
 
     /// The identity of the CURRENT allocation request for this account and enrollment epoch. It is
-    /// deliberately NOT one request forever: exhaustion and a server-confirmed expired window discard
+    /// deliberately not one request forever: exhaustion and a server-confirmed expired window discard
     /// it. It is also deliberately not per-process: a restart must replay it.
     private func fileURL(account: String, epoch: String) -> URL {
         let digest = VoiceSharingCaptureAuthorization.digest(account + "\u{0}" + epoch)
@@ -97,7 +97,7 @@ final class VoiceSharingCaptureAllowanceProvisioner {
     }
 
     /// The single serialized identity decision: keep, advance, or mint. Returns the identity this device
-    /// will send, and the result is durable BEFORE the request leaves — a crash after the server charged
+    /// will send, and the result is durable before the request leaves — a crash after the server charged
     /// the request must never lose the identity that charge belongs to.
     ///
     /// Advancing happens here and only here: the current identity is replaced by a NEW one exactly when
@@ -112,7 +112,7 @@ final class VoiceSharingCaptureAllowanceProvisioner {
             else { return existing } // no proof of exhaustion: replay this identity
             log("capture allowance batch \(consumed) is exhausted in the durable ledger; advancing")
             discardRequestIDLocked(account: account, epoch: epoch)
-            // Deliberately does NOT clear the installation. The old batch is exhausted, so it can admit
+            // Deliberately does not clear the installation. The old batch is exhausted, so it can admit
             // nothing more either way, but clearing it here destroyed it before the replacement request
             // had even been sent: a 503 on the very next line then left the device with neither the old
             // batch nor a new one. The installation is replaced when a replacement actually installs.
@@ -162,7 +162,7 @@ final class VoiceSharingCaptureAllowanceProvisioner {
 
     /// True when an installed batch still has capacity its ledger recognises.
     ///
-    /// Deliberately NOT "an authorization exists": an exhausted installation is retained across a
+    /// Deliberately not "an authorization exists": an exhausted installation is retained across a
     /// failed replacement request (so a 503 cannot destroy it), and a pending replacement must still be
     /// retried. Judging this on the authorization alone let the retained exhausted installation suppress
     /// the retry of its own replacement, which left the device stuck on a spent batch until relaunch.
@@ -170,7 +170,7 @@ final class VoiceSharingCaptureAllowanceProvisioner {
     /// When the binding for the installed request is missing or belongs to a different request, the
     /// pending replacement is unproven, so no usable capacity is claimed and the retry proceeds.
     private func hasUsableInstallation() -> Bool {
-        // An installation past its own allowance deadline is NOT usable, even though it is present and
+        // An installation past its own allowance deadline is not usable, even though it is present and
         // its ledger still has capacity: nothing can be admitted under it. Short-circuiting here left
         // the expired installation in place, so the demand refresh the refusal wakes did nothing and
         // capture stayed closed until the next policy exchange.
@@ -307,7 +307,7 @@ final class VoiceSharingCaptureAllowanceProvisioner {
         discardRequestIDLocked(account: account, epoch: epoch)
     }
 
-    /// Clears the installation ONLY when it still belongs to the request that was just answered, and
+    /// Clears the installation only when it still belongs to the request that was just answered, and
     /// does the test and the clear under one hold of the lock.
     ///
     /// Comparing enrollment epochs is not enough: a delayed old-window refusal and the newer
@@ -376,7 +376,7 @@ final class VoiceSharingCaptureAllowanceProvisioner {
     }
 
     /// One real request. `issued` installs; `replayed` also admits (its ledger
-    /// reopens only if intact — reviewer 80ef8b5f.5). Every other outcome is
+    /// reopens only if intact — .5). Every other outcome is
     /// surfaced and installs nothing.
     func provision() async {
         // An installed authority with capacity left means there is nothing to do. An installed verdict

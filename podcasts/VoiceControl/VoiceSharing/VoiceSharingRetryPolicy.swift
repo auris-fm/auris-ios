@@ -5,17 +5,17 @@ import Foundation
 /// decision the uploader will call between attempts, kept independent so it can be pinned by
 /// controls before it is wired.
 ///
-/// Contract (spec-required full jitter, reviewer 97f76aa9):
-///   * Local component: FULL JITTER — uniform sample from 0 to
-///     `min(retryMaximumDelay, retryBaseDelay * 2^(attempt-1))`, `attempt` 1-based. There is no
-///     positive floor: the distribution starts at zero.
-///   * A valid server `Retry-After` (finite, > 0) is a MINIMUM delay: it is never jittered
-///     downward and never truncated by local bounds — `max(jitteredLocal, retryAfter)`. If a
-///     server demand outlasts queue age or execution constraints, deferral/termination is the
-///     CALLER's decision through its existing bounds; shortening the demand here would retry too
-///     early. Invalid values (zero, negative, NaN, infinite) are treated as absent — a malformed
-///     header must not manufacture an immediate retry.
-///   * Numeric values are compiled bounds, NOT owner-approved activation values.
+/// Contract:
+/// * Local component: FULL jitter — uniform sample from 0 to
+/// `min(retryMaximumDelay, retryBaseDelay * 2^(attempt-1))`, `attempt` 1-based. There is no
+/// positive floor: the distribution starts at zero.
+/// * A valid server `Retry-After` (finite, > 0) is a MINIMUM delay: it is never jittered
+/// downward and never truncated by local bounds — `max(jitteredLocal, retryAfter)`. If a
+/// server demand outlasts queue age or execution constraints, deferral/termination is the
+/// CALLER's decision through its existing bounds; shortening the demand here would retry too
+/// early. Invalid values (zero, negative, NaN, infinite) are treated as absent — a malformed
+/// header must not manufacture an immediate retry.
+/// * Numeric values are compiled bounds, not owner-approved activation values.
 struct VoiceSharingRetryPolicy {
     /// Compiled resource defaults (spec: `retry_initial_s` / `retry_max_s`, validated against
     /// compiled ceilings). Production assembly uses these; controls inject smaller ones.

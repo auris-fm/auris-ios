@@ -12,24 +12,24 @@ import PocketCastsUtils
 ///
 /// The four properties reviewers pinned, and which the controls name directly:
 ///
-///   * **Actual PCM is capped.** The collector appends the REAL samples the segmenter produced (byte-for-byte
-///     slices, not counts or placeholders) into its own buffer up to a ceiling, and reports the real retained
-///     count, truncation and dropped spans. In memory a Float sample is 4 bytes.
-///   * **Association is by argument.** The engine freezes an immutable `CaptureContext` at utterance-launch
-///     and every outcome carries it. A successor starting first cannot adopt a predecessor's callback, and
-///     "whatever is current inside the collector" is never consulted for matching.
-///   * **Handoff is bounded and non-blocking**, and queued work is INVALIDATED at dequeue: an event whose
-///     epoch or authorizing session died while waiting in the FIFO never reaches the sink.
-///   * **All retained identity state is bounded**: open capture (≤1), FIFO (≤ maxPendingSignals), and the
-///     refusal sets (pruned to a floor once they exceed maxTerminalHistoryIDs).
+/// * **Actual PCM is capped.** The collector appends the REAL samples the segmenter produced (byte-for-byte
+/// slices, not counts or placeholders) into its own buffer up to a ceiling, and reports the real retained
+/// count, truncation and dropped spans. In memory a Float sample is 4 bytes.
+/// * **Association is by argument.** The engine freezes an immutable `CaptureContext` at utterance-launch
+/// and every outcome carries it. A successor starting first cannot adopt a predecessor's callback, and
+/// "whatever is current inside the collector" is never consulted for matching.
+/// * **Handoff is bounded and non-blocking**, and queued work is INVALIDATED at dequeue: an event whose
+/// epoch or authorizing session died while waiting in the FIFO never reaches the sink.
+/// * **All retained identity state is bounded**: open capture (≤1), FIFO (≤ maxPendingSignals), and the
+/// refusal sets (pruned to a floor once they exceed maxTerminalHistoryIDs).
 final class VoiceSharingCollector {
 
     /// Ceiling on retained contribution audio for ONE capture, enforced as samples arrive. 60 s at 16 kHz.
-    /// This is a compiled ceiling, NOT an approved activation value — activation limits stay an owner decision.
+    /// This is a compiled ceiling, not an approved activation value — activation limits stay an owner decision.
     static let maxRetainedSamples = 16_000 * 60
 
     /// In-memory cost per retained sample (mono Float = 4 bytes). Any int16 conversion at queue time is the
-    /// queue's concern and is NOT claimed here.
+    /// queue's concern and is not claimed here.
     static let bytesPerInMemorySample = 4
 
     /// Events may queue before contribution work starts being dropped. FIFO, not fold-per-capture: folding
@@ -52,7 +52,7 @@ final class VoiceSharingCollector {
     /// capture, one for ring-held late-outcome audio, two for FIFO-held event audio (which includes the
     /// one transient COW copy made when a completed capture's buffer is shared between the ring entry
     /// and its event — arrays share storage until mutated, so accounting counts each owner, not raw
-    /// uniqueness). EXACT OWNERSHIP BOUNDARIES: a delivered event's bytes leave this budget when the
+    /// uniqueness). EXACT ownership boundaries: a delivered event's bytes leave this budget when the
     /// sink returns — from that point the sink/uploader is the owner and the budget cannot see it;
     /// a dropped event's bytes leave immediately; ring-held bytes stay counted until eviction or
     /// disposal. Exceeding the ceiling drops the NEWEST contribution work (same policy as the FIFO
@@ -69,7 +69,7 @@ final class VoiceSharingCollector {
         case started, completed, cancelled, rejectedBleed, rejectedWake
     }
 
-    /// The enumerated ASR reason stating an observed bleed decision skipped recognition (spec 1e79e5b4).
+    /// The enumerated ASR reason stating an observed bleed decision skipped recognition.
     /// Defined HERE because this is the site that actually made the decision.
     static let bleedSkipReason = "rejected_by_bleed"
 
@@ -109,7 +109,7 @@ final class VoiceSharingCollector {
         /// live dequeue check: their whole purpose is to report that consent ended, so gating them on the
         /// (now-closed) gate would drop the evidence of the drop.
         let isGateControl: Bool
-        /// What the ENGINE actually reported while this capture was open (review c48461e6): the stage
+        /// What the ENGINE actually reported while this capture was open: the stage
         /// observations carried on the event, so downstream claims describe observations that really
         /// happened rather than claims a caller supplied. Empty for legacy/gate-control events.
         var reportedStages: [String: VoiceSharingContributionEncoder.StageOutcome] = [:]
@@ -139,7 +139,7 @@ final class VoiceSharingCollector {
     private var outcomeDeadlines: [UUID: OutcomeDeadline] = [:]
     private let outcomeWaitLimit: OutcomeWaitLimit?
 
-    /// FIXED ANNOTATION DEADLINE (spec 4afc6e43): a segment released to the engine must eventually
+    /// FIXED annotation deadline: a segment released to the engine must eventually
     /// finalize even when a downstream stage never reports. This is an ordinary default, not an
     /// admission gate — its ABSENCE no longer refuses collection.
     static let defaultOutcomeWaitLimit = OutcomeWaitLimit(
@@ -173,7 +173,7 @@ final class VoiceSharingCollector {
         var wakeRequired = true
     }
 
-    /// ONE consent gate (spec 4afc6e43): the user's sharing choice under the ordinary session.
+    /// ONE consent gate: the user's sharing choice under the ordinary session.
     /// The policy snapshot no longer gates capture; the server re-checks enrollment at accept.
     private let isCollectionPermitted: () -> Bool
     private let membership: () -> VoiceSharingEnrollmentStore.State
@@ -199,15 +199,15 @@ final class VoiceSharingCollector {
     private var obsoleteCaptures = Set<UUID>()
     private(set) var overflowCount = 0
 
-    /// HIGH-WATER MARKS (spec a4b417fc). Retiring the in-process FIFO and sample budget as DROPPING
+    /// HIGH-WATER marks. Retiring the in-process FIFO and sample budget as DROPPING
     /// gates removed the only bound on retained in-memory work, so the exposure has to be visible
-    /// on a device rather than inferred. These record the PEAK FIFO depth and the PEAK retained
+    /// on a device rather than inferred. These record the PEAK fifo depth and the PEAK retained
     /// bytes and log ONE content-free line each time a new peak is reached — not per event, so the
     /// signal stays cheap and a log reader can see exactly how high pressure actually got.
     private(set) var peakPendingSignals = 0
     private(set) var peakRetainedSamples = 0
 
-    /// SPEC 05ff27d0 / incident 2026-11-07: SEGMENTS SEEN vs CAPTURES EMITTED, counted from the
+    /// SPEC 05ff27d0 / incident: SEGMENTS seen vs CAPTURES emitted, counted from the
     /// collector's own decisions. The simulator stopped turning utterances into captures at
     /// 10:00:21Z with no log line naming a decision, so the numbers had to be inferred from
     /// absence — which is exactly the evidence that could not be produced afterwards. These two
@@ -249,7 +249,7 @@ final class VoiceSharingCollector {
             "[VoiceSharing] capture decisions segments=\(segmentsSeenCount) "
                 + "captures=\(capturesEmittedCount) overflow=\(overflowCount)")
     }
-    /// Logs the peak FIFO depth and peak retained bytes when either sets a new high (spec a4b417fc).
+    /// Logs the peak FIFO depth and peak retained bytes when either sets a new high.
     /// Called with `lock` HELD, at the two enqueue points, so the peaks are exact rather than
     /// sampled. Content-free: counts only, no audio and no capture identifiers beyond the count.
     private func recordHighWaterLocked(capture: UUID) {
@@ -261,7 +261,7 @@ final class VoiceSharingCollector {
             advanced = true
         }
         guard advanced else { return }
-        // ONE line per NEW PEAK. `retained` is in samples so the floor on device memory is
+        // ONE line per NEW peak. `retained` is in samples so the floor on device memory is
         // `samples * 2` bytes (pcm_s16le), which is what an operator compares against a budget.
         FileLog.shared.addMessage(
             "[VoiceSharing] handoff high-water peak_fifo=\(peakPendingSignals) "
@@ -271,14 +271,14 @@ final class VoiceSharingCollector {
     /// Decision count as of the last progress line (rate-limit bookkeeping only).
     private var decisionsAtLastReport = 0
 
-    /// TEST ONLY. Delivery is asynchronous in production — that is the non-blocking property under review —
+    /// TEST only. Delivery is asynchronous in production — that is the non-blocking property under review —
     /// so content assertions use inline delivery instead of racing a scheduler. The held-sink and
     /// thread-identity controls keep real async delivery; that is where non-blocking is actually proven.
     var deliversSynchronouslyForTesting = false
 
     init(
         isCollectionPermitted: @escaping () -> Bool = {
-            // THE one consent decision, shared with upload (reviewer ee48cdfe).
+            // THE one consent decision, shared with upload.
             ServerSettings.userId != nil
                 && VoiceSharingEnrollmentStore.shared.consentAllowsCollection
         },
@@ -288,7 +288,7 @@ final class VoiceSharingCollector {
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: $0, execute: $1)
         },
         membership: @escaping () -> VoiceSharingEnrollmentStore.State = { VoiceSharingEnrollmentStore.shared.currentState },
-        // PROVENANCE, NOT PERMISSION (spec 1bb73eac): this epoch is stamped on the record the
+        // PROVENANCE, not permission: this epoch is stamped on the record the
         // account already holds. Gating it on `activeEnrollmentEpoch` made a cold-started app
         // unable to OPEN a capture until a projection round trip landed in this process.
         // Explicit opt-out and withdrawal still answer nil, so those stop capture immediately.
@@ -317,7 +317,7 @@ final class VoiceSharingCollector {
     /// Re-read at EVERY decision. Cached permission is exactly what the spec forbids.
     /// Called WITHOUT `lock` held.
     ///
-    /// CONSENT IS THE ONLY ADMISSION DECISION (spec 4afc6e43). The retired readiness gates are gone:
+    /// CONSENT is the only admission decision. The retired readiness gates are gone:
     /// a missing `outcomeWaitLimit` no longer refuses admission (the timeout is a fixed annotation
     /// deadline), and a missing enrollment epoch no longer refuses it either (the epoch is stamped on
     /// the record as PROVENANCE, never consulted to decide whether audio may be kept).
@@ -327,9 +327,9 @@ final class VoiceSharingCollector {
 
     /// The gate rule that stops an ALREADY-OPEN capture: "Unknown/stale must stop before another SEGMENT" is
     /// necessary but not sufficient — an open partial must also stop when the gate moves under it. Every
-    /// non-start signal passes through here. Does NOT take `lock`; callers hold it.
-    /// The epoch frozen into the capture is NOT compared here: a re-enrollment moves the server's
-    /// opaque epoch without invalidating what this account already captured (spec 4afc6e43). What
+    /// non-start signal passes through here. Does not take `lock`; callers hold it.
+    /// The epoch frozen into the capture is not compared here: a re-enrollment moves the server's
+    /// opaque epoch without invalidating what this account already captured. What
     /// must still hold is the ACCOUNT and the user's live consent.
     private func stillPermitted(for c: FrozenCapture) -> Bool {
         guard collectionPermitted() else { return false }
@@ -347,7 +347,7 @@ final class VoiceSharingCollector {
         logDecisionProgressLocked()
         lock.unlock()
         guard collectionPermitted() else {
-            // Capture-side refusal names its own reason (spec c83a92fa): "did the collector
+            // Capture-side refusal names its own reason: "did the collector
             // decline" and "was the utterance unbuildable" are different decisions and must not
             // look the same. Fixed vocabulary, no values.
             FileLog.shared.addMessage("[VoiceSharing] capture refused reason=collection-not-permitted")
@@ -359,10 +359,10 @@ final class VoiceSharingCollector {
             return nil
         }
         let session = sessionIdentity()
-        // PROVENANCE WITH NO PLACEHOLDER (spec 4afc6e43, @spec 48a928f0): every record must carry the
+        // PROVENANCE WITH NO PLACEHOLDER: every record must carry the
         // real epoch the account holds at capture time. When no epoch is available there is nothing
         // truthful to stamp, so the capture is not opened — ordinary record construction fails rather
-        // than writing an unsupported value the server refuses. This is NOT a readiness lifecycle: it
+        // than writing an unsupported value the server refuses. This is not a readiness lifecycle: it
         // is the same "cannot build a valid record" condition as any other.
         guard let epoch = epochProvider(), !epoch.isEmpty else {
             FileLog.shared.addMessage("[VoiceSharing] capture refused reason=no-enrollment-epoch")
@@ -371,7 +371,7 @@ final class VoiceSharingCollector {
             return nil
         }
         let stamp = VoiceSharingCaptureStamp(session: session, epoch: epoch, policyGeneration: 0)
-        // No capture allowance is requested before retaining audio (spec c74d7e30, "Actual upload
+        // No capture allowance is requested before retaining audio ("Actual upload
         // usage"): daily quota is metered from ACTUAL accepted bytes at the server, so there is
         // nothing to acquire here and nothing that can refuse local retention. The clip and
         // metadata ceilings are the compiled bounds, applied unconditionally.
@@ -406,7 +406,7 @@ final class VoiceSharingCollector {
         return context
     }
 
-    /// SYNCHRONOUS segmentation endpoint, called by the engine's onUtterance closure BEFORE it creates
+    /// SYNCHRONOUS segmentation endpoint, called by the engine's onUtterance closure before it creates
     /// the outcome Task: the segmenter has finished THIS segment, so its audio is frozen and detached
     /// HERE — before any successor can start and before any await. Without this, a completed capture
     /// still sitting in `current` would be turned into an audio-carrying cancel by B's start, and the
@@ -420,8 +420,8 @@ final class VoiceSharingCollector {
         }
         var done = c
         done.terminal = true
-        // A SEGMENT THAT ENDED HAS DOWNSTREAM STAGES STILL TO RUN (spec 2dcf8c5b, review 6fe6d773).
-        // The engine reaches this path from `segmenter.onUtterance`, i.e. BEFORE ASR, translation and
+        // A SEGMENT that ended has downstream stages still to run.
+        // The engine reaches this path from `segmenter.onUtterance`, i.e. before ASR, translation and
         // routing. Publishing here would emit a record that can never carry them, so the capture
         // stays ring-resident and the engine releases it via `finalizeDeferredCompletion`. Without
         // this stamp every real-engine capture is finalized into nothing and no durable record is
@@ -451,7 +451,7 @@ final class VoiceSharingCollector {
     /// Pointer metadata only; nil in production. Detects an accidental pre-admission PCM copy.
     var borrowedSampleAddressForTesting: ((UInt?) -> Void)?
 
-    /// Appends the REAL PCM the segmenter just produced. `samples` is authoritative; `reportedTotal` only
+    /// Appends the REAL pcm the segmenter just produced. `samples` is authoritative; `reportedTotal` only
     /// documents the segmenter's buffer size so the original duration can be stated.
     func appendSamples<Samples: Collection>(_ samples: Samples, reportedTotal: Int? = nil) where Samples.Element == Float {
         if let probe = borrowedSampleAddressForTesting {
@@ -466,7 +466,7 @@ final class VoiceSharingCollector {
         // every append would trigger a copy-on-write of the WHOLE buffer (O(n²) per segment). With `c`
         // uniquely owned, `append` writes in place. Restored before unlock.
         current = nil
-        // Reserve BEFORE growth: the open capture may not push the aggregate over budget even though
+        // Reserve before growth: the open capture may not push the aggregate over budget even though
         // its own per-capture cap still has room — otherwise open growth could exceed the budget and
         // wait for a later submit/evict to notice.
         let perCaptureRoom = c.clipSampleCeiling - c.retained.count
@@ -507,8 +507,8 @@ final class VoiceSharingCollector {
         }
     }
 
-    /// The ENGINE's own report about a stage it actually evaluated for this capture (review bc692f91).
-    /// Only the caller that made the decision may report it: receiving frames does NOT establish a wake
+    /// The ENGINE's own report about a stage it actually evaluated for this capture.
+    /// Only the caller that made the decision may report it: receiving frames does not establish a wake
     /// detection, so `appendSamples` must never infer one. A nil `context` means no capture was open and
     /// the report is dropped rather than attached to a successor.
     func engineReported(
@@ -517,7 +517,7 @@ final class VoiceSharingCollector {
     ) {
         var outcome = outcome
         if let decision { outcome = outcome.withDecision(decision) }
-        // SERVER SCHEMA (spec 21b5d822, reviewer 39ac0771): every OBSERVED execution carries the
+        // SERVER schema: every OBSERVED execution carries the
         // wire's outcome, in the schema's own enum — not routing's disposition tokens. The mapping
         // is applied HERE so every execution producer gets it by construction; a producer that
         // already stated an outcome keeps its stated value, and an unobserved execution (unknown,
@@ -529,16 +529,16 @@ final class VoiceSharingCollector {
         lock.lock()
         defer { lock.unlock() }
         guard let context else { return }
-        // The engine's decision can land AFTER segmentation ended but BEFORE the completion event is
+        // The engine's decision can land after segmentation ended but before the completion event is
         // emitted (a late outcome re-emits from the ring). Record it wherever the capture currently
         // lives — open, or ring-resident and not yet emitted — so the record that eventually leaves
         // carries it. A capture already emitted cannot be amended: its record is immutable, which is
         // the point of the digest.
-        // A stage can be reported MORE THAN ONCE (e.g. routing at classification time, then again at
+        // A stage can be reported MORE than once (e.g. routing at classification time, then again at
         // settlement with its terminal disposition). But a GENERIC carry-forward is unsafe across
-        // state changes (review 5f42fb0c): a completed report would inherit a previous reason, and
+        // state changes: a completed report would inherit a previous reason, and
         // an empty_result would inherit previous text/router_input — contradictions or schema
-        // refusals. Nil cannot always mean preserve. So: ONLY routing's classification facts
+        // refusals. Nil cannot always mean preserve. So: only routing's classification facts
         // (predicted names and disposition) are intentionally retained for settlement; every other
         // member comes from the new report alone, and a nil CLEARS.
         func merged(_ previous: VoiceSharingContributionEncoder.StageOutcome?,
@@ -547,10 +547,10 @@ final class VoiceSharingCollector {
             guard let previous else { return outcome }
             if stage == "routing",
                // Retention is constrained to the intended classification→settlement transition
-               // (review 83e0177b). The only INCOMPATIBLE settlement is not_run: the router
+               // . The only INCOMPATIBLE settlement is not_run: the router
                // declined, so nothing was classified and carrying names would invent a
                // classification that never happened. failed still concerns the classified action
-               // (its control, spec 012b19dd/78480a17, asserts a failed turn NAMES its
+               // (its control/78480a17, asserts a failed turn NAMES its
                // classification), and pending means the classification stands unconcluded.
                VoiceSharingRecordBinding
                    .routingDispositionCarriesClassification(outcome.routingDisposition) {
@@ -581,7 +581,7 @@ final class VoiceSharingCollector {
         }
     }
 
-    /// Completion matched against the CONTEXT THE ENGINE CAPTURED, not current state. A nil/unknown context
+    /// Completion matched against the CONTEXT the engine captured, not current state. A nil/unknown context
     /// (no capture was open when the utterance Task launched) refuses outright.
     func speechCompleted(_ samples: [Float], context: CaptureContext?, deferEmission: Bool = false) {
         if let context, deferEmission {
@@ -607,7 +607,7 @@ final class VoiceSharingCollector {
             abandonForGateMove(context: context)
             return
         }
-        // FINALIZE ONLY. Every sample of the segment was already delivered by the segmenter's deltas —
+        // FINALIZE only. Every sample of the segment was already delivered by the segmenter's deltas —
         // the confirmation prefix plus one delta per later call. Appending the utterance again would
         // duplicate (and, with an in-flight successor, reorder) the audio. `samples` is used solely to
         // state the original duration.
@@ -619,8 +619,8 @@ final class VoiceSharingCollector {
         aggregateAudioSamples -= c.retained.count
         markTerminal(c)                     // ring re-registers the (immutable, completed) capture
         if c.deferEmissionUntilFinalized {
-            // DOWNSTREAM STAGES STILL RUN (spec 2dcf8c5b, review 6fe6d773): ASR/translation/routing
-            // decisions happen AFTER the segment closes, so emitting here would publish a record that can
+            // DOWNSTREAM stages still run: ASR/translation/routing
+            // decisions happen after the segment closes, so emitting here would publish a record that can
             // never carry them. The capture stays ring-resident until the engine finalizes it.
             let deadline = registerOutcomeDeadlineLocked(for: c.id)
             lock.unlock()
@@ -641,7 +641,7 @@ final class VoiceSharingCollector {
         guard let context else { return }
         lock.lock()
         guard var rec = terminalRing[context.id], !rec.emitted else { lock.unlock(); return }
-        // MIRRORS emitLateOutcomeIfTerminal (review 859dac4c): this is the SAME promotion of a terminal
+        // MIRRORS emitLateOutcomeIfTerminal: this is the SAME promotion of a terminal
         // capture into a completed record, so it must honour every safeguard that path applies. Without
         // these checks a late finalize could resurrect a capture that was genuinely cancelled or withdrawn,
         // after a gate/identity move it no longer belongs to, or one that was never a deferred completion.
@@ -654,7 +654,7 @@ final class VoiceSharingCollector {
             lock.unlock()
             return
         }
-        // The ACCOUNT and live consent decide; the provenance epoch is not consulted (spec 4afc6e43).
+        // The ACCOUNT and live consent decide; the provenance epoch is not consulted.
         let sameConsent = (rec.capture.session == sessionIdentity())
             && isCollectionPermitted()
         guard sameConsent else { lock.unlock(); return }
@@ -670,7 +670,7 @@ final class VoiceSharingCollector {
     /// which is exactly one capture by construction.
     func speechCancelled() {
         lock.lock()
-        // THE OWNER OF THE CANCELLATION IS THE OPEN CAPTURE, and it is decided FIRST (review d3c39ae5).
+        // THE owner of the cancellation is the open capture, and it is decided FIRST.
         // A deferred ring entry belongs to a segment that already closed: if a successor is open, the
         // cancellation is about the SUCCESSOR, and consuming the predecessor instead would discard the
         // wrong capture while leaving the intended one live.
@@ -686,8 +686,8 @@ final class VoiceSharingCollector {
             return
         }
         // No open capture: the cancellation is about the capture the pipeline is still awaiting a finalize
-        // for (spec 2dcf8c5b). Without this a deferred capture would survive and a late finalize could
-        // revive it (review 859dac4c).
+        // for. Without this a deferred capture would survive and a late finalize could
+        // revive it.
         if var deferred = deferredRingEntryAwaitingCancellationLocked(preferring: nil) {
             deferred.capture = consumed(deferred.capture)
             cancelOutcomeDeadlineLocked(deferred.capture.id)
@@ -730,16 +730,16 @@ return }
         lock.unlock()
     }
 
-    /// The capture a cancellation is about. DICTIONARY ORDER IS NOT A BINDING (review 15900665): the ring is
+    /// The capture a cancellation is about. DICTIONARY order is not A BINDING: the ring is
     /// keyed by UUID, so iterating it picks an arbitrary deferred capture. Cancellation has two distinct
     /// meanings and both must bind deterministically:
-    ///   - an OPEN capture: the cancel is about `current`, exactly as before;
-    ///   - a captured-but-already-closed one: the engine cancels the capture whose context it froze, which
-    ///     is the capture it is still awaiting a finalize for.
+    /// - an OPEN capture: the cancel is about `current`, exactly as before;
+    /// - a captured-but-already-closed one: the engine cancels the capture whose context it froze, which
+    /// is the capture it is still awaiting a finalize for.
     /// With several deferred captures the most recent one is the one the pipeline is working on, so recency
     /// — never hashing — decides. A caller with a known context names it explicitly.
     private func deferredRingEntryAwaitingCancellationLocked(preferring context: CaptureContext?) -> TerminalRecord? {
-        // A NAMED context is a BINDING, not a hint (review bb404153). Falling through to "most recent
+        // A NAMED context is a BINDING, not a hint. Falling through to "most recent
         // unrelated capture" when the named one is stale, already emitted, or ineligible means a
         // cancellation for a capture that no longer exists silently consumes a DIFFERENT one that was
         // never cancelled. Named lookup therefore returns its own entry or nothing at all.
@@ -779,7 +779,7 @@ return }
         c.original = max(c.original ?? 0, samples)
         if samples > c.retained.count, c.droppedFrom == nil { c.droppedFrom = c.retained.count }
         c.terminal = true
-        // A REJECTION IS ITSELF THE TERMINAL OUTCOME: bleed/wake rejection carries no downstream
+        // A REJECTION is itself the terminal outcome: bleed/wake rejection carries no downstream
         // stage to wait for, so it is never deferred even when the segment has already ended (which
         // stamps the deferral flag for the ordinary ASR→routing path).
         c.deferEmissionUntilFinalized = false
@@ -816,7 +816,7 @@ return }
     /// effect at the next segmentation signal, and a stalled sink could hold stale work for the whole wait.
     func gateLost() {
         lock.lock()
-        // WITHDRAWAL DISPOSAL. Every retained byte dies here, synchronously:
+        // WITHDRAWAL disposal. Every retained byte dies here, synchronously:
         //   * queued events (each holds a full audio copy) — purged;
         //   * the open partial — terminal, ring-remembered for identity only, audio emptied;
         //   * terminal-ring history — audio emptied (no retained speech survives a withdrawal);
@@ -841,7 +841,7 @@ return }
         if let cancelEvent { submit(cancelEvent) }
     }
 
-    /// An account or session transition abandons whatever partial is open UNDER THE PREDECESSOR. Without this,
+    /// An account or session transition abandons whatever partial is open UNDER the predecessor. Without this,
     /// A's late completion would be finalized under B's identity.
     func invalidateForAccountTransition(expectedSession: String?) {
         speechCancelled()
@@ -879,7 +879,7 @@ return }
             deferredOrder: terminalSequence)
         while terminalRing.count > 32 || aggregateAudioSamples > Self.maxAggregateRetainedSamples {
             guard let oldest = terminalRing.first else { break }
-            // NO-SILENT-LOSS (spec defect d6580187): a record that is neither emitted nor
+            // NO-SILENT-LOSS: a record that is neither emitted nor
             // marked non-contribution is REAL work — evicting it used to cancel its outcome
             // deadline and discard its audio with no record and no log, so a capture could be
             // lost forever purely because newer captures pressed the ring. Such a record is
@@ -900,7 +900,7 @@ return }
                 // moves through the pending FIFO under the SAME caps as every other event — the
                 // aggregate still owns these bytes (added below, never decremented early), so a
                 // blocked worker cannot grow untracked PCM outside the ledger. Pressure is counted
-                // and logged but NEVER a reason to discard (spec 2741a0ca): the durable queue's
+                // and logged but never a reason to discard: the durable queue's
                 // record limit is the only admission gate. Withdrawal disposal drains this same
                 // FIFO at dequeue time.
                 let audioCount = event.audio.count
@@ -1022,11 +1022,11 @@ return }
         // Late attribution honors the CURRENT gate: if identity moved on (account transition rotated the
         // epoch) the predecessor's completion stays dropped, exactly as before. The reviewer's case — A
         // queued-not-executed while B starts under the SAME consent — is what this path exists for.
-        // The ACCOUNT and live consent decide; the provenance epoch is not consulted (spec 4afc6e43).
+        // The ACCOUNT and live consent decide; the provenance epoch is not consulted.
         let sameConsent = (rec.capture.session == sessionIdentity())
             && isCollectionPermitted()
         guard sameConsent else { lock.unlock(); return false }
-        // DEFER (spec 2dcf8c5b, review 6fe6d773): the capture's downstream stages (ASR, translation,
+        // DEFER: the capture's downstream stages (ASR, translation,
         // routing) have not run yet. Emitting now would publish an immutable record that can never carry
         // them — the engine finalizes instead. Reported as "handled" so callers do not fall through into
         // a second emission path.
@@ -1050,7 +1050,7 @@ return }
         abandoned.terminal = true
         current = nil
         // Correct the transfer: the open ownership is subtracted and the ring records identity
-        // ONLY (discarded), so the move neither double-charges nor strands the partial's bytes.
+        // only (discarded), so the move neither double-charges nor strands the partial's bytes.
         aggregateAudioSamples -= c.retained.count
         markTerminal(abandoned, discarded: true)
         let event = makeEvent(kind: .cancelled, from: abandoned)
@@ -1062,7 +1062,7 @@ return }
         terminalIDs.insert(c.id)
         obsoleteCaptures.insert(c.id)
         if discarded {
-            // A discarded terminal records IDENTITY ONLY: its audio left ownership at the dispose
+            // A discarded terminal records IDENTITY only: its audio left ownership at the dispose
             // site (the caller subtracted), and the ring never holds it — there is nothing to
             // resurrect and nothing to charge the budget for.
             var identityOnly = c
@@ -1107,7 +1107,7 @@ return }
 
     // MARK: - Bounded non-blocking handoff
 
-    /// Queues an event and schedules a drain. NEVER blocks the caller. When the bound is reached the NEWEST
+    /// Queues an event and schedules a drain. never blocks the caller. When the bound is reached the NEWEST
     /// contribution work is dropped and counted — dropping the oldest would strand a capture whose later
     /// signals had already been delivered.
     /// The collector OWNS its coordinator gate-loss registration: the token lives exactly as long as
@@ -1128,7 +1128,7 @@ return }
             deliverUnderSinkOwnership(event)
             return
         }
-        // NO IN-PROCESS CAP MAY DISCARD A CAPTURE (spec 2741a0ca). This used to refuse the event
+        // NO IN-PROCESS cap may discard A CAPTURE. This used to refuse the event
         // when the handoff FIFO or the retained-sample budget filled, and neither maps to an
         // allowed gate: the spec allows a recording to stop being collected when sharing is off,
         // and for no other reason. Both caps are therefore counted as pressure and logged, and the
@@ -1161,9 +1161,9 @@ return }
         let event = pending.removeFirst()
         // Dropped HERE (before the sink) means the bytes leave the budget immediately; delivered means
         // they stay counted IN FLIGHT until the sink returns (subtract after the call below).
-        // Live consent check at dequeue. The event's epoch is PROVENANCE and is NOT compared: an event
+        // Live consent check at dequeue. The event's epoch is PROVENANCE and is not compared: an event
         // queued before a re-enrollment carries the epoch it was captured under, and the server — not
-        // this hop — decides whether that epoch is still acceptable (spec 4afc6e43, @spec 48a928f0).
+        // this hop — decides whether that epoch is still acceptable.
         // A retired record may receive the ordinary server refusal; dropping it here would be silent
         // and would strand audio the user consented to contribute.
         let stillValid = event.isGateControl
@@ -1188,7 +1188,7 @@ return }
     }
 
     /// Delivers one event with explicit in-sink ownership: counted from before the call until the
-    /// sink RETURNS, then released from the ledger. This is the ONLY place the sink is invoked.
+    /// sink RETURNS, then released from the ledger. This is the only place the sink is invoked.
     private func deliverUnderSinkOwnership(_ event: SegmentEvent) {
         let n = event.audio.count
         lock.lock()

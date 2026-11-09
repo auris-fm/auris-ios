@@ -3,13 +3,13 @@ import Network
 import PocketCastsUtils
 
 /// The GUARDED production trigger for contribution uploads (task73 wiring): observes app
-/// lifecycle events and runs one bounded scheduler drain — ONLY when every gate permits.
+/// lifecycle events and runs one bounded scheduler drain — only when every gate permits.
 ///
 /// Gates, checked at EACH trigger:
 /// 1. `VoiceSharingSettingsModel.surfaceEnabled` — the compiled-off constant. While it is false
-///    this trigger does nothing at all; flipping it requires an owner-approved activation build.
+/// this trigger does nothing at all; flipping it requires an owner-approved activation build.
 /// 2. The live collection policy (`permitsCollection`) — re-read at trigger time, so a withdrawal
-///    between events stops uploads immediately.
+/// between events stops uploads immediately.
 ///
 /// This type performs NO activation: with today's compiled constant the drain is unreachable, and
 /// turning it on is an owner decision in a future build. It adds no locks around capture paths —
@@ -19,7 +19,7 @@ final class VoiceSharingUploadTrigger {
     private let scheduler: VoiceSharingUploadScheduler
     private let surfaceEnabled: () -> Bool
     private let isAuthorized: () -> Bool
-    /// The live drain task. ALL reads and writes go through `stateLock` (reviewer 4377e2bd): a
+    /// The live drain task. ALL reads and writes go through `stateLock`: a
     /// fast completion/re-offer re-assigns this handle while a test await or deinit may read it.
     private var drainTaskStorage: Task<Void, Never>?
     private var drainTask: Task<Void, Never>? {
@@ -30,7 +30,7 @@ final class VoiceSharingUploadTrigger {
     private let stateLock = NSLock()
     private var drainInFlight = false
     private var activeToken: UUID?
-    /// WORK THAT ARRIVED WHILE A DRAIN WAS RUNNING (reviewer 44d39ef8). Previously an event during
+    /// WORK that arrived while A DRAIN was running. Previously an event during
     /// a drain was dropped outright by the guard below, and a `.busy` refusal was "retried" with
     /// `Task.yield` — which does not await the owner, so both attempts could finish refused and the
     /// event was lost anyway. The flag is the handoff: whoever COMPLETES a drain re-offers once.
@@ -40,16 +40,16 @@ final class VoiceSharingUploadTrigger {
     /// Set when the current drain was refused, so its continuation re-offers rather than counting
     /// as a completed pass.
     private var drainWasRefused = false
-    /// THE ONE BOUNDED RETRY WAKE (spec defect d6580187). A pass that ends with every entry
+    /// THE one bounded retry wake. A pass that ends with every entry
     /// behind its not-before boundary used to leave the trigger idle forever — the scheduler
     /// contract delegates "retry boundary passing" to callers and no caller implemented it, so a
     /// 503 retry due at T never ran unless a lifecycle event happened to land later. One wake is
     /// armed per completed pass from the queue's earliest outstanding boundary; a real trigger
     /// (foreground, network, finalize) supersedes it.
     private var retryWakeTaskStorage: Task<Void, Never>?
-    /// CANCELLATION GENERATION (reviewer b8991889): bumped by every stop/cancel. A follow-up
+    /// CANCELLATION generation: bumped by every stop/cancel. A follow-up
     /// re-offer is admitted only if the generation that produced it is still current, checked
-    /// ATOMICALLY WITH SLOT ADMISSION — so a stop landing between a completion and its re-offer
+    /// ATOMICALLY with slot admission — so a stop landing between a completion and its re-offer
     /// cannot let the already-decided follow-up open a new era.
     private var stopGeneration = 0
 
@@ -79,7 +79,7 @@ final class VoiceSharingUploadTrigger {
         networkGate?.onChange = nil
         networkGate?.stopMonitoring()
         NotificationCenter.default.removeObserver(self)
-        // TEARDOWN UNDER ONE HOLD (reviewer 4377e2bd): the live registration is REMOVED from the
+        // TEARDOWN under one hold: the live registration is REMOVED from the
         // scheduler (so a completion can never fire into a dying object), the slot and pending
         // work are dropped, and the drain task is cancelled. The drain task body captures only
         // weak self plus the scheduler, so it cannot retain the trigger across an await.
@@ -115,18 +115,18 @@ final class VoiceSharingUploadTrigger {
         await task?.value
     }
 
-    /// DETERMINISTIC RACE SEAM (reviewer b8991889 #2): invoked by the completion callback after
-    /// the slot cleared but BEFORE its re-offer admission — the exact window where a stop() must
+    /// DETERMINISTIC race seam: invoked by the completion callback after
+    /// the slot cleared but before its re-offer admission — the exact window where a stop must
     /// refuse the already-decided follow-up via the cancellation generation.
     var preReofferHookForTesting: (() -> Void)?
 
-    /// DETERMINISTIC RACE SEAM (reviewer b4e8d566): invoked at the very start of the drain task
-    /// body, BEFORE the pre-entry cancellation check — a control can hold the task here, stop the
+    /// DETERMINISTIC race seam: invoked at the very start of the drain task
+    /// body, before the pre-entry cancellation check — a control can hold the task here, stop the
     /// trigger, and release, proving the check fires without depending on task scheduling order.
     var preDrainGateForTesting: (() -> Void)?
 
     /// Test seam: the live drain task handle, so a control can observe BOUNDED task completion
-    /// after releasing a gate (capturing BEFORE cancellation, which clears the storage).
+    /// after releasing a gate (capturing before cancellation, which clears the storage).
     var drainTaskForTesting: Task<Void, Never>? {
         stateLock.withLock { drainTaskStorage }
     }
@@ -146,7 +146,7 @@ final class VoiceSharingUploadTrigger {
     /// Read-only: it observes the trigger's own task instead of guessing with yields, so a control
     /// asserting "no foreign upload" knows the drain it was watching actually ran to completion.
     func awaitDrainCompletionForTesting() async {
-        // QUIESCENT = A DRAIN ACTUALLY FINISHED. The drain is published only after it begins, so a
+        // QUIESCENT = A DRAIN actually finished. The drain is published only after it begins, so a
         // single read can see "in flight, nothing published yet" — a drain in progress, not an idle
         // trigger. Awaiting the published task once is also not enough: the task clears the flags
         // inside its own body, so the caller can win the race between the task returning and that
@@ -170,10 +170,10 @@ final class VoiceSharingUploadTrigger {
         assertionFailure("awaitDrainCompletionForTesting: a drain never quiesced")
     }
 
-    /// CANCELLATION, exercised while the trigger is still alive (reviewer 280f4c52): drop any
+    /// CANCELLATION, exercised while the trigger is still alive: drop any
     /// pending completion registration, clear the slot, and refuse further work until cancelled
     /// tasks have drained. A cancelled trigger must neither send nor keep waking up.
-    /// PRODUCTION CANCELLATION (reviewer 4377e2bd/9d33f359): the app calls this when the feature's
+    /// PRODUCTION cancellation: the app calls this when the feature's
     /// preconditions vanish in a way that must stop all trigger activity — e.g. the surface is
     /// compiled off in a future build, or the owning coordinator tears down. Same semantics as the
     /// test seam: drop the registration, clear the slot, cancel the task.
@@ -229,7 +229,7 @@ final class VoiceSharingUploadTrigger {
             return
         }
         guard !drainInFlight else {
-            // A DRAIN IS ALREADY RUNNING: record that work arrived, and let its COMPLETION re-offer.
+            // A DRAIN is already running: record that work arrived, and let its COMPLETION re-offer.
             // Dropping the event here (the previous behaviour) meant new work waited for the next
             // lifecycle event, and a busy refusal was never retried at all.
             workPending = true
@@ -247,11 +247,11 @@ final class VoiceSharingUploadTrigger {
         startDrain(token: token)
     }
 
-    /// LIVE RETENTION SWEEP (spec 05ff27d0, reviewer 34aae0fa item 3): every permitted pass applies
+    /// LIVE retention sweep: every permitted pass applies
     /// the age bound by REMOVING expired recordings, so a resident process cannot hold them
     /// forever. Runs on the trigger rather than inside the scheduler because deletion holds the
     /// queue's state lock and must never be interleaved with a lease decision mid-pass; here it is
-    /// ordered strictly BEFORE the drain, so a pass never attempts work it is about to delete, and a
+    /// ordered strictly before the drain, so a pass never attempts work it is about to delete, and a
     /// never-drained idle queue still expires (this entry point is the periodic pass).
     ///
     /// Called only from the permitted gate path — a closed gate already purges wholesale, and
@@ -263,17 +263,17 @@ final class VoiceSharingUploadTrigger {
     /// One drain, then a COALESCED follow-up if work arrived while it ran or if the scheduler was
     /// owned by someone else.
     ///
-    /// NO POLLING (reviewer 280f4c52): a refused pass COMPLETES straight away with `.busy`, so
+    /// NO POLLING: a refused pass COMPLETES straight away with `.busy`, so
     /// re-offering from its own completion recurses for as long as another owner holds the
     /// scheduler. Instead the refusal registers with the scheduler for the owner's completion and
     /// stops; that callback (fired exactly once, under the same lock that decides ownership) is
     /// what re-offers. `Task.isCancelled` is checked at every transition so a cancelled trigger
     /// neither sends nor keeps a registration.
     private func startDrain(token: UUID) {
-        // TOKEN-BOUND PUBLICATION (reviewer 2a570a0b #3): the handle is stored under the lock and
+        // TOKEN-BOUND publication: the handle is stored under the lock and
         // only while this token still owns the slot, so a stale task's delayed setter cannot
-        // overwrite a successor's handle. The task body promotes self only AFTER the await, so
-        // nothing strong is retained across `drainOnce` (reviewer 2a570a0b #2).
+        // overwrite a successor's handle. The task body promotes self only after the await, so
+        // nothing strong is retained across `drainOnce`.
         stateLock.lock()
         guard activeToken == token else {
             stateLock.unlock()
@@ -282,9 +282,9 @@ final class VoiceSharingUploadTrigger {
         let scheduler = self.scheduler
         let task = Task { [weak self] in
             preDrainGateForTesting?()
-            // PRE-ENTRY CANCELLATION (reviewer b8991889): a stop() before this task first
+            // PRE-ENTRY cancellation: a stop before this task first
             // executes must prevent the drain from starting at all — the post-await check alone
-            // was too late and could still send. stop() has already cleared the slot, so an
+            // was too late and could still send. stop has already cleared the slot, so an
             // early return here leaves no bookkeeping behind.
             if Task.isCancelled { return }
             await self?.expireAgedOutRecordings()
@@ -307,8 +307,8 @@ final class VoiceSharingUploadTrigger {
 
     /// A refused pass: wait for the OWNER to finish, then re-offer once. Never recurses by itself.
     ///
-    /// PUBLICATION IS TOKEN-VALIDATED (reviewer 4377e2bd): the callback captures the drain's token
-    /// and re-checks it under the lock before touching ANY state, so a stale callback (one whose
+    /// PUBLICATION is token-VALIDATED: the callback captures the drain's token
+    /// and re-checks it under the lock before touching any state, so a stale callback (one whose
     /// drain was already superseded or cancelled) changes nothing. The registration ID is
     /// published under the same lock, and a cancellation that ran before publication still wins —
     /// the ID is checked against `activeToken`'s era, and a registration left over after the slot
@@ -318,10 +318,10 @@ final class VoiceSharingUploadTrigger {
             finishDrain(token: token, refused: false)
             return
         }
-        // NO LOST WAKEUP (reviewer 2a570a0b #1): the callback is made live BEFORE it can fire.
+        // NO LOST wakeup: the callback is made live before it can fire.
         // Publication happens first (ID stored under the lock, era re-validated), and only then is
         // the callback registered — so the scheduler can never invoke a callback whose identity is
-        // not yet visible. The callback validates on the ERA TOKEN alone, so even an
+        // not yet visible. The callback validates on the ERA token alone, so even an
         // already-consumed-or-cancelling window degrades to a correct no-op or a correct re-offer,
         // never to a stuck slot.
         let registrationID = UUID()
@@ -336,7 +336,7 @@ final class VoiceSharingUploadTrigger {
         let registration = scheduler.registerOwnerCompletion(id: registrationID) { [weak self] in
             guard let self else { return }
             self.stateLock.lock()
-            // THE TOKEN IS THE ERA: only the callback of the drain that still owns the slot may
+            // THE token is the era: only the callback of the drain that still owns the slot may
             // act. Superseded, completed, or cancelled drains are no-ops.
             guard self.activeToken == token else {
                 self.stateLock.unlock()
@@ -509,7 +509,7 @@ final class VoiceSharingUploadNetworkGate {
 
     func update(_ path: Path) {
         lock.lock()
-        // NIL ALLOWANCE = NO RESTRICTION beyond a satisfied path (spec 4afc6e43 happy path):
+        // NIL allowance = NO RESTRICTION beyond a satisfied path:
         // the previous `?? false` made a bare production gate refuse forever, which silently
         // blocked every drain. Restriction now requires an explicit allowance.
         let next = path.satisfied && (allowance.map {

@@ -2,7 +2,7 @@ import Foundation
 
 /// Client adapter for `POST /api/v1/account/voice-sharing/capture-allowance`
 /// (spec docs/specs/voice-recording-uploads.md, "Server-issued capture allowance").
-/// The body carries ONLY `request_id` and `enrollment_epoch` — no caller ever supplies
+/// The body carries only `request_id` and `enrollment_epoch` — no caller ever supplies
 /// capacity, account identity, accounting day or object keys.
 struct VoiceSharingCaptureAllowanceRequest: Equatable {
     let requestID: String
@@ -69,7 +69,7 @@ struct VoiceSharingCaptureAllowanceResponse: Equatable {
               object.count <= 24, json.count <= Self.maximumEnvelopeBytes else { return nil }
         func integer(_ key: String, min lower: Int, max upper: Int) -> Int? {
             guard let raw = object[key] else { return nil }
-            // JSON booleans must NOT pass as Int: NSNumber(value: 1) answers `is Bool` TRUE on
+            // JSON booleans must not pass as Int: NSNumber(value: 1) answers `is Bool` TRUE on
             // Apple platforms, so identity comes from CF type IDs, not Swift bridging.
             let typeID = CFGetTypeID(raw as CFTypeRef)
             guard typeID == CFNumberGetTypeID(), let number = raw as? NSNumber,
@@ -127,7 +127,7 @@ struct VoiceSharingCaptureAllowanceResponse: Equatable {
         return true
     }
 
-    /// Admission validity AGAINST THE ORIGINAL WINDOW: start <= now < deadline. A clock
+    /// Admission validity AGAINST the original window: start <= now < deadline. A clock
     /// reading before the original start (backward jump) cannot restore validity.
     func stillValid(monotonicNowMS: Int) -> Bool {
         guard monotonicNowMS >= 0, monotonicNowMS >= startMonotonicMS else { return false }
@@ -190,7 +190,7 @@ struct VoiceSharingCaptureAllowanceClient {
         var mintsNewAllocation: Bool { self == .windowExpired }
     }
 
-    /// Sends one request, capturing the monotonic request-start BEFORE any work. The response
+    /// Sends one request, capturing the monotonic request-start before any work. The response
     /// read is bounded at limit+1 bytes for every status (the connection stops consuming past
     /// the bound), so oversized delivery cannot buffer unbounded response bodies.
     func perform(_ request: VoiceSharingCaptureAllowanceRequest) async -> Outcome {
@@ -242,7 +242,7 @@ struct VoiceSharingCaptureAllowanceClient {
 
     enum TransportBound: Error { case oversizedOrIncomplete, cancelled }
 
-    /// Per-INVOCATION cancellation state, created BEFORE the task exists: a cancellation
+    /// Per-INVOCATION cancellation state, created before the task exists: a cancellation
     /// that arrives before binding is remembered and applied at bind time. No static
     /// state: cancelling A never touches B.
     final class Handle {
@@ -339,7 +339,7 @@ struct VoiceSharingCaptureAllowanceClient {
             resumeLock.lock()
             guard !finished else { resumeLock.unlock(); return }
             // Append only the REMAINING allowance up to limit+1: a single huge chunk is
-            // capped, never buffered whole. The status captured BEFORE the body still
+            // capped, never buffered whole. The status captured before the body still
             // classifies; the bounded body itself is only parsed for 200.
             let allowance = limit + 1 - data.count
             data.append(received.prefix(max(allowance, 0)))
@@ -374,7 +374,7 @@ struct VoiceSharingCaptureAllowanceClient {
 }
 
 /// Connection of a VALIDATED response to the REAL provisioning/admission path (reviewer
-/// 80ef8b5f.5): `issued` provisions the batch's ledger; `replayed` NEVER provisions — it can
+/// 80ef8b5f.5): `issued` provisions the batch's ledger; `replayed` never provisions — it can
 /// only reopen an intact existing ledger, so a lost/corrupt batch stays burned.
 enum VoiceSharingCaptureAllowanceInstallation {
     static func provisioningAuthority(account: String, response: VoiceSharingCaptureAllowanceResponse)

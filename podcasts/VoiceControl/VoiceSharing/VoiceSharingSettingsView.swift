@@ -1,12 +1,12 @@
 import SwiftUI
 
-/// Voice Sharing settings — BUILT DISABLED.
+/// Voice Sharing settings — BUILT disabled.
 ///
 /// Renders nothing unless `VoiceSharingSettingsModel.surfaceEnabled` is true (compiled `false`).
 /// No control here can enable collection: toggles that exist are local preferences, deletion routes
-/// through the queue's owner-wide purge, and every state value is a READ-ONLY projection.
+/// through the queue's owner-wide purge, and every state value is a READ-only projection.
 ///
-/// SCOPE (reviewer f92ff117 / spec): the delete control is LOCAL — recordings still waiting to
+/// SCOPE: the delete control is LOCAL — recordings still waiting to
 /// upload on this device. It is never labelled as account or server deletion, and its result text
 /// never implies that accepted data was removed from the service.
 struct VoiceSharingSettingsView: View {
@@ -43,7 +43,7 @@ struct VoiceSharingSettingsView: View {
                 liveState = model.liveState()
                 published = model.publishedViewState(for: liveState!)
                 stateObserver = model.addStateObserver { sent in
-                    // Two independent protections (reviewer f62b19a4): the main-actor hop for
+                    // Two independent protections: the main-actor hop for
                     // SwiftUI state, and a sequence check so a delivery that arrives LATE cannot
                     // overwrite a newer one — enqueue order alone does not preserve read order.
                     let apply: () -> Void = {
@@ -78,10 +78,10 @@ struct VoiceSharingSettingsView: View {
     private var content: some View {
         List {
             // WHY sharing is stopped and what the user can do about it, from the model's live
-            // projection (spec 62d39f8f). Present only when something is actually blocking.
+            // projection. Present only when something is actually blocking.
             // ONE snapshot for the whole render: the status read and the guidance both come from
             // this single LiveState, so the surface never mixes a cached permit with fresh reads
-            // (reviewer 8ae2b980). The snapshot is refreshed by the model's subscription, so the
+            // . The snapshot is refreshed by the model's subscription, so the
             // surface tracks real state changes instead of freezing the first read.
             let view = published ?? model.publishedViewState(for: model.liveState())
             let stopped = view.guidance
@@ -106,7 +106,7 @@ struct VoiceSharingSettingsView: View {
                     row(L10n.voiceSharingRowWaiting, value: "\(count)",
                         tint: count == 0 ? .secondary : .primary)
                 case .unknown:
-                    // NOT "0": we could not determine what is stored, and saying zero would be a
+                    // not "0": we could not determine what is stored, and saying zero would be a
                     // claim we cannot back.
                     row(L10n.voiceSharingRowWaiting, value: L10n.voiceSharingValueUnknown, tint: .orange)
                     Text(L10n.voiceSharingUnknownStorageExplainer)
@@ -161,7 +161,7 @@ struct VoiceSharingSettingsView: View {
     }
 
     /// Reports the purge's own disposition. Every branch states exactly what is known — in
-    /// particular a refusal is NOT rendered as "0 deleted", and durably-disqualified survivors are
+    /// particular a refusal is not rendered as "0 deleted", and durably-disqualified survivors are
     /// named rather than folded into a bare deletion count.
     private func deleteSummary(_ result: VoiceSharingSettingsModel.DeleteResult) -> String {
         switch result.disposition {
@@ -222,7 +222,7 @@ struct VoiceSharingAccountSections: View {
         }
     }
 
-    /// The simple sharing screen (spec `8bf536ad`, "Simple settings flow").
+    /// The simple sharing screen.
     ///
     /// ONE switch, its purpose sentence, the full disclosure, and a separate delete action.
     /// Plan rows, membership internals, queue counts and routine refresh/retry controls are
@@ -234,7 +234,7 @@ struct VoiceSharingAccountSections: View {
     /// server to withdraw — the switch alone never renders as server-confirmed.
     /// The sharing rows WITHOUT a List wrapper, so both surfaces compose them: the standalone
     /// screen wraps them in ONE List; the combined Voice Control screen embeds them as plain
-    /// sections in its own single List (reviewer on b61af2897: no nested Lists).
+    /// sections in its own single List.
     private var sectionsContent: some View {
         Group {
             // Remote pause must not hide the preference. When the server says sharing is
@@ -320,10 +320,10 @@ struct VoiceSharingAccountSections: View {
 
     /// The switch reflects the user's OWN preference, not the server projection.
     ///
-    /// These can legitimately disagree: `withdraw()` stops local collection immediately while the
+    /// These can legitimately disagree: `withdraw` stops local collection immediately while the
     /// server withdrawal is still in flight, so `voiceSharingEnrolled` remains `true` for a while.
     /// Reading only the projection made the switch spring back ON after the user turned it off,
-    /// and left no way to turn it on again through the binding (reviewer 042d5a69).
+    /// and left no way to turn it on again through the binding.
     ///
     /// `nil` = we have not read local preference yet. The toggle is then disabled and says so,
     /// rather than rendering an off switch that would state "you declined" when we were never told.

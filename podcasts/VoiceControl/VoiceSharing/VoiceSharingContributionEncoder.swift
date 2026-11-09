@@ -35,9 +35,9 @@ enum VoiceSharingContributionEncoder {
         let build: String
         var captureSessionID: String
         let models: Models
-        /// Conversion pipeline version for float→PCM s16le. Compiled, NOT an activation value.
+        /// Conversion pipeline version for float→PCM s16le. Compiled, not an activation value.
         ///
-        /// WIRE TYPE IS A STRING (spec ruling 2026-10-22): the Worker's record schema requires a
+        /// WIRE type is A STRING (spec ruling): the Worker's record schema requires a
         /// bounded nonempty string and Android already emits `"v1"`. An Int here produced a
         /// record the pinned intake rejected (`invalid_audio at audio.conversion_version`), caught
         /// only by running a REAL encoder fixture through the Worker.
@@ -60,7 +60,7 @@ enum VoiceSharingContributionEncoder {
         let targetLanguage: String?
         /// Routing's own enumerated field for what became of the routed turn.
         let routingDisposition: String?
-        /// ASR's language fact (spec 78480a17: the field exists in the owning schema; a site that
+        /// ASR's language fact (: the field exists in the owning schema; a site that
         /// observed the language states it). Nil leaves the member absent.
         let sourceLanguage: String?
         /// The exact text handed onward as the command input. Nil leaves the member absent.
@@ -117,9 +117,9 @@ enum VoiceSharingContributionEncoder {
                          outcome: wireOutcome, score: score, threshold: threshold)
         }
 
-        /// SERVER SCHEMA (spec 21b5d822 + alignment 553ec4a6, GO review): the execution stage's
+        /// SERVER schema: the execution stage's
         /// wire outcome is the schema's OWN enum — {success, failure, refused, cancelled} — reached
-        /// by a mapping DISTINCT from settledDisposition's routing tokens (reviewer 39ac0771: the
+        /// by a mapping DISTINCT from settledDisposition's routing tokens (: the
         /// routing tokens `executed`/`pending` leaked into this member at 9653836d3). Every
         /// OBSERVED execution carries an outcome. A REFUSAL is state `failed` with
         /// `client_refused` — matching Android — not a not_run. `unknown` observed nothing and
@@ -150,7 +150,7 @@ enum VoiceSharingContributionEncoder {
         /// A nonfinite sample (NaN/±inf) is malformed capture audio: REFUSED, never clamped into
         /// a fake value and never allowed to trap the process.
         case nonFiniteSample
-        /// The collector's own ceiling bounds one capture; exceeding it is refused BEFORE WAV
+        /// The collector's own ceiling bounds one capture; exceeding it is refused before wav
         /// capacity arithmetic and the UInt32 header sizes are computed.
         case sampleCountExceedsCeiling
     }
@@ -220,7 +220,7 @@ enum VoiceSharingContributionEncoder {
         append(UInt32(samples.count * 2))
         for sample in samples {
             // Round-nearest with FLOAT-domain clamping: finite out-of-range values pin to ±1
-            // BEFORE scaling, so ±1.0 maps to ±int16's representable bound and no finite input
+            // before scaling, so ±1.0 maps to ±int16's representable bound and no finite input
             // can overflow the integer conversion.
             let clampedSample = min(max(sample, -1), 1)
             let scaled = (clampedSample * 32768).rounded()

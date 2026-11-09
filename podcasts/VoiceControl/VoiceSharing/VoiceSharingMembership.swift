@@ -19,7 +19,7 @@ struct VoiceSharingMembership: Equatable {
 
     enum Plan: String { case free, pro }
     enum WithdrawalState: String {
-        // Explicit server wire values (fix 2026-11-03): implicit Swift rawValues are camelCase
+        // Explicit server wire values (fix): implicit Swift rawValues are camelCase
         // ("notEnrolled"), but the server publishes snake_case ("not_enrolled") — the mismatch
         // made every real projection fail strict decode, reading as "unknown state".
         case active = "active"
@@ -27,7 +27,7 @@ struct VoiceSharingMembership: Equatable {
         case notEnrolled = "not_enrolled"
     }
 
-    /// A missing/unknown projection is NOT enrolled: parsing failure yields this rather than throwing, so
+    /// A missing/unknown projection is not enrolled: parsing failure yields this rather than throwing, so
     /// callers cannot accidentally treat garbage as permission.
     static let unavailable = VoiceSharingMembership(
         membershipRevision: "",
@@ -47,7 +47,7 @@ enum VoiceSharingMutationOutcome: Equatable {
     /// the reply, which is exactly how an opted-out user gets re-enabled.
     case applied(membership: VoiceSharingMembership, issuedUnder: VoiceSharingEnrollmentStore.ProjectionToken)
     /// `409`: either `membership_conflict` (stale expected revision) or an idempotent-retry replay that
-    /// returned the original result. The client MUST NOT auto-replay a conflicted opt-in against the newer
+    /// returned the original result. The client must not auto-replay a conflicted opt-in against the newer
     /// revision; renewed opt-in requires fresh user intent.
     /// `409` with the server's current projection, again carrying the ISSUING fence for the same reason.
     case conflict(current: VoiceSharingMembership?, issuedUnder: VoiceSharingEnrollmentStore.ProjectionToken)
@@ -57,7 +57,7 @@ enum VoiceSharingMutationOutcome: Equatable {
     case unauthorized
     /// `503` or transport failure — retryable, and explicitly not a state change.
     case unavailableBackend
-    /// The operation's originating session no longer exists: the request is refused BEFORE transport (for
+    /// The operation's originating session no longer exists: the request is refused before transport (for
     /// mutations) or the reply is dropped without applying (for reads), so one account's intent can never be
     /// sent or consumed under another account's credential.
     case refusedStaleSession
