@@ -470,13 +470,13 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
             ])
         }
         let manifestObject: [String: Any] = [
-            // #3: name the recipe honestly. The ENCODER emitting these bytes is
-            // the one at ebdf40ee9 (the wire-v2 fix); the review-fix commit corrects mapping/binding
-            // and controls without changing emission, so the bytes are ebdf40ee9's and the recipe's
-            // review-fix head is recorded separately. R1's bytes remain preserved beside these.
+            // #3: name the recipe honestly. The encoder emitting these bytes is the one at
+            // ebdf40ee9 (the wire-v2 commit); later commits correct mapping and binding without
+            // changing emission, so the bytes are ebdf40ee9's and the newer head is recorded
+            // separately in client_head. R1's bytes remain preserved beside these.
             "client_head": "ebdf40ee9",
             "wire_revision": 2,
-            "recipe_note": "bytes emitted by the ebdf40ee9 encoder; review-fix head posted in #ios:8eb13b8b; test-supplied observations, not producer evidence",
+            "recipe_note": "bytes emitted by the byte-compatible encoder; test-supplied observations, not producer evidence",
             "r1_refusal": "execution.outcome used routing tokens and completed wake carried no decision; refused by server intake",
             "schema_version": 1,
             "scope": "encoder bytes with TEST-SUPPLIED observations; not engine output",
