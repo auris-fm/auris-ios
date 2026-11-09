@@ -1,3 +1,4 @@
+import CryptoKit
 import XCTest
 @testable import podcasts
 
@@ -49,12 +50,41 @@ final class UnresolvedSlotRepairTests: XCTestCase {
         let reason: String
     }
 
-    private func loadFixtures() throws -> [Fixture] {
+    /// The core commit the bundled copy was taken from. The file is authored there and copied here,
+    /// so nothing regenerates it: without a pin the two drift apart silently and this suite goes on
+    /// passing against a contract that no longer exists.
+    private static let fixtureCoreCommit = "233c5051"
+    private static let fixtureSHA256 =
+        "9ec72d55b2bf898242a06536ebdddfd03d9d038612814dfe00597906eaf13485"
+
+    private func fixtureData() throws -> Data {
         let url = try XCTUnwrap(
             Bundle(for: Self.self).url(
                 forResource: "unresolved_slot_repair", withExtension: "json"),
             "the shared fixture file must be bundled with the tests")
-        return try JSONDecoder().decode([Fixture].self, from: Data(contentsOf: url))
+        return try Data(contentsOf: url)
+    }
+
+    /// Guards the copy against silent drift from the shared set.
+    func test_theBundledFixturesMatchThePinnedCoreRevision() throws {
+        let digest = Self.sha256Hex(try fixtureData())
+        XCTAssertEqual(
+            digest, Self.fixtureSHA256,
+            "the bundled fixtures no longer match core \(Self.fixtureCoreCommit). If the shared set "
+                + "changed on purpose, re-copy it and update both this pin and the commit note in the "
+                + "same change; if it did not, the copy has been edited by hand and must be restored.")
+    }
+
+    /// `CryptoKit` is already linked for the app, so this avoids adding a dependency for a digest
+    /// the test source cannot import any other way.
+    private static func sha256Hex(_ data: Data) -> String {
+        var digest = SHA256()
+        digest.update(data: data)
+        return digest.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func loadFixtures() throws -> [Fixture] {
+        try JSONDecoder().decode([Fixture].self, from: fixtureData())
     }
 
     /// Renders the call the way the fixture spells it, so a mismatch reports what differed rather
