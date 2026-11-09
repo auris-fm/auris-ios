@@ -1145,7 +1145,7 @@ class VoiceControlService: ObservableObject {
                     tier: route.tier,
                     // The INPUT's preserved source utterance and actual detected language — not
                     // reconstructed from the route: the English routing translation must never
-                    // replace the original on the wire (core b6eafe25).
+                    // replace the original on the wire.
                     sourceTranscript: input.sourceTranscript,
                     sourceLanguage: input.sourceLanguage,
                     // REQUEST ownership: the captured utterance's identity travels with the turn.

@@ -43,7 +43,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         try? FileManager.default.removeItem(at: root)
     }
 
-    /// REVIEWER (`86360d9e1`): my missing-origin controls proved the ALLOWANCE CLIENT refuses without
+    /// REVIEWER (`86360d9e1`): my missing-origin controls proved the ALLOWANCE client refuses without
     /// an origin. They did not prove the thing that matters operationally — that ordinary Voice
     /// Control still works in a build with sharing unconfigured. The earlier revision returned nil
     /// from `buildVoiceControlService`, which disabled the whole feature (spec's own regression
@@ -112,12 +112,12 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         return (queue, scheduler)
     }
 
-    /// ACCOUNT-POLICY WITHDRAWAL through the PRODUCTION registry (spec task73 follow-on): a policy
+    /// ACCOUNT-POLICY withdrawal through the PRODUCTION registry (spec task73 follow-on): a policy
     /// refresh that observes withdrawal must fire the coordinator's real gate-lost fan-out, which is
     /// what (a) bumps the sink's revocation generation, (b) purges the durable queue, and (c) — via the
     /// same live policy reader every attempt consults — stops any further upload. This drives the
     /// production registry, not a hand-called purge.
-    /// REVIEWER 7318214c: drive the PRODUCTION handler (registered by the assembly's
+    ///: drive the PRODUCTION handler (registered by the assembly's
     /// installVoiceSharingGateLoss) — a completed file must SURVIVE a temporary loss and be
     /// CLEARED only by explicit withdrawal, through the actual wiring.
     func test_productionGateLossHandler_retainsOnTransientLoss_clearsOnWithdrawal() throws {
@@ -139,7 +139,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
             outcomeWaitLimit: .init(milliseconds: 1_000, ceilingMilliseconds: 1_000),
             sink: { _ in })
         let assembly = VoiceControlAssembly()
-        // CONSENT INTACT: temporary loss must retain.
+        // CONSENT intact: temporary loss must retain.
         var sessionAlive = true
         var consentGone = false
         assembly.installVoiceSharingGateLoss(
@@ -150,7 +150,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         coordinator.consentGateLostForTesting()
         XCTAssertEqual(chain.queue.readyEntries(), [entry],
                        "temporary gate loss must retain the completed recording")
-        // EXPLICIT WITHDRAWAL: the production handler must purge.
+        // EXPLICIT withdrawal: the production handler must purge.
         consentGone = true
         coordinator.consentGateLostForTesting()
         XCTAssertTrue(chain.queue.readyEntries().isEmpty,
@@ -184,7 +184,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         }
         defer { _ = subscription }
 
-        // SIMPLIFIED CONTRACT (spec 4afc6e43): a gate-loss fan-out must NOT purge the durable
+        // SIMPLIFIED contract: a gate-loss fan-out must not purge the durable
         // queue — the old production handler purged on every closure (policy flap included) and
         // silently destroyed recordings without delivery. Withdrawal's purge is the user's
         // explicit opt-out path (SettingsModel), not this fan-out.
@@ -200,7 +200,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         coordinator.consentGateLostForTesting()
 
         XCTAssertTrue(revocationSeen, "withdrawal must reach the sink's revocation through the registry")
-        // SIMPLIFIED CONTRACT (spec 4afc6e43): the gate-loss fan-out STOPS collection but never
+        // SIMPLIFIED contract: the gate-loss fan-out STOPS collection but never
         // purges durable recordings — even on withdrawal fan-out. The only purge is the user's
         // explicit opt-out (SettingsModel's queue.purgeAll()).
         XCTAssertEqual(queue.readyEntries().count, 1, "the durable entry must survive gate loss")
@@ -225,7 +225,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         return entry
     }
 
-    /// STRICT metadata extraction (reviewer aa84564a / spec 0414c13d): isolate the EXACT multipart
+    /// STRICT metadata extraction: isolate the EXACT multipart
     /// part named "metadata", parse the WHOLE envelope JSON, and read `record.capture_id` plus the
     /// envelope's `record_sha256`. No first-brace slicing, no fallbacks: anything unexpected
     /// throws, and callers XCTFail rather than manufacturing an identity.
@@ -323,7 +323,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
             isAuthorized: isAuthorized)
     }
 
-    /// PRODUCTION INVOCATION via the guarded trigger (spec 7dcf0b01/0414c13d): reached through
+    /// PRODUCTION invocation via the guarded trigger: reached through
     /// `triggerDrainIfPermitted()` — the lifecycle path — and asserted through SETTLEMENT.
     func test_productionTriggerDeliversAndSettlesWhenAllGatesPermit() async throws {
         let chain = makeChain(policyPermits: { true },
@@ -343,7 +343,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
                       "an accepted receipt must SETTLE the entry, not merely be sent")
     }
 
-    /// TWO SUCCESSIVE completed drains both run (reviewer aa84564a): a completed task must not
+    /// TWO successive completed drains both run: a completed task must not
     /// block the trigger for its lifetime.
     func test_successiveTriggersEachDrain() async throws {
         let chain = makeChain(policyPermits: { true },
@@ -450,7 +450,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         }
     }
 
-    /// THE REAL UPLOAD AUTH COMPOSITION (spec 2bb81b64 / reviewer c7da2dbe): an upload that gets
+    /// THE real upload auth composition: an upload that gets
     /// 401 reports the EXACT rejected credential to the provider, the credential refreshes, and the
     /// SAME immutable entry is retried and settles. No second entry is ever created for the retry.
     func test_upload401ReportsExactTokenRefreshesOnceThenRetriesSameEntry() async throws {
@@ -492,7 +492,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         _ = entry
     }
 
-    /// EPOCH RETIREMENT DURING REFRESH, through the PRODUCTION pin: the gate is
+    /// EPOCH retirement during refresh, through the PRODUCTION pin: the gate is
     /// `VoiceSharingUploadIdentityPin`, exactly the type the assembly uses. The older version of
     /// this control flipped a local flag that the chain never read — it asserted nothing.
     func test_epochRetirementDuringRefreshBlocksTheRetry() async throws {
@@ -505,7 +505,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         let chain = makeChain(policyPermits: { pin.isCurrent }, tokenProvider: tokens,
                               attemptLimits: .init(optionalCap: 4), now: { now })
         let entry = try makeReadyEntry(chain.queue)
-        // SHARED-STATE DISCIPLINE (the cause of the intermittent full-suite failure): the
+        // SHARED-STATE discipline (the cause of the intermittent full-suite failure): the
         // intercepted session runs on URLSession's own threads, so a fixture that mutates its
         // state from the responder and then OBSERVES it on the test thread is racing. Both sides
         // take the host lock, which is what makes the post-drain assertion meaningful instead of
@@ -525,7 +525,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
             return Self.acceptedReceiptResponder()(request)
         }
         defer { AssemblyIntercept.responder = nil }
-        // SYNCHRONOUS PROBE BEFORE THE AWAIT (diagnostic): distinguishes "the pass never had a
+        // SYNCHRONOUS probe before the await (diagnostic): distinguishes "the pass never had a
         // servable entry" from "it had one and the attempt produced no request".
         let readyBefore = chain.queue.readyEntries().count
         let heldBefore = String(describing: chain.queue.readyEntriesReportingUnknownCoverage())
@@ -575,13 +575,13 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         store.setLocalOptIn(true)
     }
 
-    /// AUTH CHAIN FED BY REAL IDENTITY (spec 65fc3c75): the retry decision must consult what the
-    /// REAL authorization path folds on — the account scope plus the server-issued enrollment
+    /// AUTH chain fed by real identity: the retry decision must consult what the
+    /// REAL authorization path folds on the account scope plus the server-issued enrollment
     /// epoch, as held by `VoiceSharingEnrollmentStore` — not an injected boolean only the fixture
     /// understands.
     ///
     /// Sequence: attempt 1 gets a 401 and the entry is retained; the account's epoch then moves
-    /// BEFORE the back-off elapses; the next pass must not send the retained entry.
+    /// before the back-off elapses; the next pass must not send the retained entry.
     func test_retryIsBlockedAfterTheAccountEpochMoves() async throws {
         let suite = "auth-chain-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
@@ -639,7 +639,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         }
         defer { AssemblyIntercept.responder = nil }
 
-        // SYNCHRONOUS PROBE, taken BEFORE any await (diagnostic for the intermittent full-suite
+        // SYNCHRONOUS probe, taken before any await (diagnostic for the intermittent full-suite
         // failure): if the pass below reports `.idle` with a ready entry, this says whether the
         // refusal came from a live authorization signal or from the queue's own view of the entry.
         var readyBeforePass = -1
@@ -684,7 +684,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
                       "the entry is retained: neither sent nor dropped")
     }
 
-    /// THE PRODUCTION PIN (spec 724577f3): `VoiceSharingUploadIdentityPin` is the type the assembly
+    /// THE production pin: `VoiceSharingUploadIdentityPin` is the type the assembly
     /// now uses. It must invalidate on an epoch move, on an account switch, and stay invalid when no
     /// epoch is known — and it must do so by itself, with no fixture-supplied closure.
     func test_identityPinInvalidatesOnEpochMoveAndAccountSwitch() {
@@ -711,7 +711,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         XCTAssertFalse(unknown.isCurrent, "an empty epoch cannot authorize uploads")
     }
 
-    /// CREDENTIAL-AWAIT WINDOW (reviewer 78f23dca / ee5b4547): the identity is intact at the
+    /// CREDENTIAL-AWAIT window: the identity is intact at the
     /// uploader's launch fence, then moves WHILE the REAL transport is acquiring the credential.
     /// The transport must re-fence at that boundary with THIS attempt's admitted snapshot and
     /// emit no request — a post-response refusal cannot repair the disclosure.
@@ -729,8 +729,8 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
             baseURLProvider: { "https://unit.test" },
             tokenProvider: SuspendingTokenProvider {
                 // The move lands INSIDE the credential await, provably. It must be an ACCOUNT move:
-                // per spec 4afc6e43 an epoch-only move for the SAME owner is a re-enrollment and is
-                // deliberately NOT fenced, so an epoch-only move here asserts nothing.
+                // per an epoch-only move for the SAME owner is a re-enrollment and is
+                // deliberately not fenced, so an epoch-only move here asserts nothing.
                 box.current = VoiceSharingUploadIdentity(
                     accountScope: "acct-B", enrollmentEpoch: "epoch-2")
             },
@@ -749,7 +749,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
             request: request, admittedIdentity: admitted.identity,
             identityFence: { box.current })
 
-        // THE MOVE HAPPENED (the control's premise): the token provider ran and moved the ACCOUNT.
+        // THE move happened (the control's premise): the token provider ran and moved the ACCOUNT.
         XCTAssertEqual(box.current?.accountScope, "acct-B",
                        "the credential await really moved the account — otherwise this proves nothing")
         print("DIAG7 result=\(result) count=\(AssemblyIntercept.requestCount) box=\(String(describing: box.current))")
@@ -763,8 +763,8 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
                       "the entry is retained for its owning identity")
     }
 
-    /// FINAL PRE-LAUNCH WINDOW (reviewer 1244fd5e / 376a2518): the transport's own
-    /// baseURLProvider/endpoint resolution runs AFTER the credential-boundary check. Flipping the
+    /// FINAL pre-LAUNCH window: the transport's own
+    /// baseURLProvider/endpoint resolution runs after the credential-boundary check. Flipping the
     /// identity inside baseURLProvider lands the move between the credential fence and the
     /// launch; the FINAL fence (after request building, before receive) must stop it.
     func test_identityChangeInsideBaseURLProviderEmitsNoRequest() async throws {
@@ -809,13 +809,13 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         XCTAssertTrue(owned.readyEntries().contains { $0.name == entry.name })
     }
 
-    /// ASSEMBLED CREDENTIAL-WINDOW CONTROL (reviewer 1244fd5e): the direct-send test above proves
+    /// ASSEMBLED credential-WINDOW control: the direct-send test above proves
     /// the transport check; this one drives the PRODUCTION path — assembly-built uploader and
     /// transport, real admission, real fence forwarding — with the move inside the token await.
-    /// THE CONTRACT: a credential-window move to a DIFFERENT ACCOUNT must stop the upload before a
-    /// byte leaves (spec 4afc6e43 — the account is what binds an entry).
+    /// THE contract: a credential-window move to a DIFFERENT account must stop the upload before a
+    /// byte leaves.
     ///
-    /// Corrected per spec 6e4f77c5. The earlier version moved only the ENROLLMENT EPOCH
+    /// Corrected per . The earlier version moved only the ENROLLMENT epoch
     /// (`acct-A/epoch-1` → `acct-A/epoch-2`) and demanded `.revoked`; the transport's fences compare
     /// `accountScope`, so an epoch move is a re-enrollment by the SAME owner and is correctly
     /// allowed through — the test was asserting a rule the spec deliberately removed. Moving the
@@ -860,15 +860,15 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         guard case .revoked = outcome else {
             return XCTFail("an ACCOUNT move during the credential await must revoke the attempt, got \(outcome)")
         }
-        // THE PROPERTY THAT MATTERS: A's bytes never left under B's authority.
+        // THE property that matters: A's bytes never left under B's authority.
         XCTAssertEqual(AssemblyIntercept.requestCount, 0,
                        "no request was emitted for a cross-account move")
         XCTAssertTrue(queue.readyEntries().contains { $0.name == entry.name },
                       "the entry is retained for its owning identity")
     }
 
-    /// THE COMPLEMENT, so the fence is not over-strict: a RE-ENROLLMENT of the same account moves
-    /// the epoch, and that must NOT block the owner's own upload — it proceeds to the wire.
+    /// THE complement, so the fence is not over-strict: a RE-ENROLLMENT of the same account moves
+    /// the epoch, and that must not block the owner's own upload — it proceeds to the wire.
     func test_assembledUploadProceedsWhenOnlyTheEpochMovesDuringCredentialAwait() async throws {
         let sharedRoot = root!
         let box = IdentityBox(VoiceSharingUploadIdentity(
@@ -879,7 +879,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
 
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [AssemblyIntercept.self]
-        // PROVE THE WIRE IS LIVE FIRST (reviewer b4d5eb71): a count of zero is also what a fixture
+        // PROVE the wire is live first: a count of zero is also what a fixture
         // that never reaches the wire produces, so this control asserts the intercept works before
         // asserting the epoch move does not suppress it.
         let probeTransport = VoiceSharingUploadTransport(
@@ -924,7 +924,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         defer { AssemblyIntercept.responder = nil }
 
         let outcome = await uploader.upload(entry)
-        // THE PROPERTY, asserted ON THE WIRE (reviewer b4d5eb71): "not revoked" would also accept an
+        // THE property, asserted ON THE wire: "not revoked" would also accept an
         // unavailable outcome, so the request itself must be observed reaching the intercept.
         if case .revoked = outcome {
             return XCTFail("an epoch-only change must not revoke the SAME account's own upload")
@@ -1070,8 +1070,8 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         XCTAssertTrue(ready.isEmpty, "delivered entries leave the serving set")
     }
 
-    /// CONSTRUCTED UPLOADER → REAL LOCAL HTTP → VALIDATED RECEIPT → SETTLEMENT (spec 18:06Z ask).
-    /// Unlike the URLProtocol controls elsewhere in this file, this drives a REAL TCP connection to a
+    /// CONSTRUCTED uploader → REAL LOCAL HTTP → VALIDATED receipt → SETTLEMENT (spec 18:06Z ask).
+    /// Unlike the URLProtocol controls elsewhere in this file, this drives a REAL tcp connection to a
     /// local listener. The server parses the multipart body it actually received, recomputes the record
     /// digest from those bytes, and only then replies with a receipt — so delivery cannot be faked by a
     /// stubbed response, and the client's settlement is accepted against a receipt the server derived
@@ -1096,7 +1096,7 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
             acceptedConnections.store(connection)
             connection.stateUpdateHandler = { [weak connection] state in
                 guard case .ready = state, let connection else { return }
-                // ACCUMULATE the whole request: a single receive() returns as soon as ANY bytes arrive,
+                // ACCUMULATE the whole request: a single receive() returns as soon as any bytes arrive,
                 // which truncates a multipart upload. Read until the declared Content-Length is met.
                 var accumulated = Data()
                 func drain() {
@@ -1252,8 +1252,8 @@ final class VoiceSharingAssemblyWiringTests: XCTestCase {
         return response
     }
 
-    /// REVOCATION mid-pass with a LATE SUCCESSFUL response (spec 7980bf44): the withdrawal lands
-    /// while a valid 201 receipt is in flight — the late success must NOT complete the entry, the
+    /// REVOCATION mid-pass with a LATE successful response: the withdrawal lands
+    /// while a valid 201 receipt is in flight — the late success must not complete the entry, the
     /// pass stops, and a successor instance cannot borrow the attempt either.
     func test_lateSuccessCannotCompleteARevokedEntry() async throws {
         var permitted = true
@@ -1420,7 +1420,7 @@ private final class AssemblyIntercept: URLProtocol {
     override func stopLoading() {}
 
     /// URLSession strips `httpBody` and hands URLProtocol an `httpBodyStream`. Fixtures parse the
-    /// body, so it is drained here and re-attached (reviewer aa84564a's strict-parse controls
+    /// body, so it is drained here and re-attached ('s strict-parse controls
     /// depend on seeing the real multipart bytes).
     static func materialized(_ request: URLRequest) -> URLRequest {
         guard request.httpBody == nil, let stream = request.httpBodyStream else { return request }
@@ -1440,7 +1440,7 @@ private final class AssemblyIntercept: URLProtocol {
     }
 }
 
-// MARK: - The REAL trigger's follow-up handoff (reviewer 44d39ef8)
+// MARK: - The REAL trigger's follow-up handoff
 
 /// These drive `VoiceSharingUploadTrigger` itself — the production consumer — with a scheduler pass
 /// held open from the outside. The held pass is what makes "would-be immediate retries" provably
@@ -1517,7 +1517,7 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         return (queue, scheduler, trigger)
     }
 
-    /// NEW WORK DURING THE TRIGGER'S OWN PASS. The trigger is fired while its own drain is held, so
+    /// NEW work during the trigger'S OWN pass. The trigger is fired while its own drain is held, so
     /// the event reaches the trigger's guard (not the scheduler) — the exact gap the reviewer named.
     /// After release, the automatic follow-up must serve the work with NO manual drain.
     func test_newWorkDuringTheTriggersOwnDrainIsServedByTheAutomaticFollowUp() async throws {
@@ -1528,7 +1528,7 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         chain.trigger.triggerDrainIfPermitted()
         XCTAssertEqual(transport.waitForFirstAttempt(), .success, "the first pass is in flight")
 
-        // WORK ARRIVES while the trigger's drain is running: this hits the trigger's own guard.
+        // WORK arrives while the trigger's drain is running: this hits the trigger's own guard.
         _ = try AudioFixture.makeReadyEntry(in: chain.queue)
         chain.trigger.triggerDrainIfPermitted()
 
@@ -1545,7 +1545,7 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
                                     + "via the automatic follow-up, without another manual drain")
     }
 
-    /// A SCHEDULER PASS HELD FROM OUTSIDE (not by this trigger): the trigger's first attempt is
+    /// A SCHEDULER pass held from outside (not by this trigger): the trigger's first attempt is
     /// refused with `.busy`, and the follow-up must still deliver once the owner releases.
     ///
     /// The held work runs on its OWN plain thread, not the cooperative pool: the transport blocks
@@ -1587,7 +1587,7 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
                                     "the busy refusal must be recovered by the follow-up, not dropped")
     }
 
-    /// NO UNBOUNDED RETRY WHILE THE OWNER STAYS HELD (reviewer 280f4c52). With the owner held for a
+    /// NO UNBOUNDED retry while the owner stays held. With the owner held for a
     /// long, fixed interval, the trigger must settle into a WAIT, not a re-offer loop: total
     /// attempts stay at the owner's single one for the whole hold, and the trigger is not spinning.
     func test_aRefusedTriggerWaitsInsteadOfPollingWhileTheOwnerStaysHeld() async throws {
@@ -1663,7 +1663,7 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
                        "a cancelled trigger must not run its follow-up")
     }
 
-    /// A STALE COMPLETION CALLBACK CHANGES NOTHING (reviewer 2a570a0b #4): the barrier holds the
+    /// A STALE completion callback changes nothing: the barrier holds the
     /// scheduler at the EXACT moment the callback is about to be taken; the trigger is cancelled in
     /// that window; releasing the gate then fires the callback into a dead era. It must be a no-op.
     /// No sleeps stand in for the race.
@@ -1708,8 +1708,8 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         try await Task.sleep(nanoseconds: 150_000_000) // let the refusal register
         transport.stopHolding()
         transport.releaseHeldPass()
-        // ORDER (reviewer b8991889): wait for the CALLBACK to be taken first (ownerHeld can only
-        // fire AFTER the gate releases, since the owner's defer is blocked in the gate), then
+        // ORDER: wait for the CALLBACK to be taken first (ownerHeld can only
+        // fire after the gate releases, since the owner's defer is blocked in the gate), then
         // cancel inside the window, then release.
         XCTAssertEqual(callbackAboutToFire.wait(timeout: .now() + 20), .success,
                        "the barrier proves the callback is taken, not guessed")
@@ -1725,10 +1725,10 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         XCTAssertFalse(chain.trigger.isDrainingForTesting, "and the slot stays released")
     }
 
-    /// STOP BETWEEN COMPLETION AND RE-OFFER (reviewer b8991889 #2): the completion callback
+    /// STOP between completion and re-OFFER: the completion callback
     /// clears the slot under the lock, unlocks, THEN re-offers. A stop in that window must
     /// refuse the follow-up via the cancellation generation read atomically with slot clearing.
-    /// The fire gate holds the callback BEFORE it runs; we stop the trigger while it is held
+    /// The fire gate holds the callback before it runs; we stop the trigger while it is held
     /// (bumping the generation), then release: the callback's era check makes it a no-op, and
     /// even a callback that passed its era check would be refused at re-offer admission.
     func test_aStopBetweenCompletionAndItsReofferRefusesTheFollowUp() async throws {
@@ -1789,7 +1789,7 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         XCTAssertFalse(chain.trigger.isDrainingForTesting, "and no new era may open")
     }
 
-    /// A callback whose drain was SUPERSEDED must not clobber the newer state (reviewer 4377e2bd):
+    /// A callback whose drain was SUPERSEDED must not clobber the newer state:
     /// after a cancellation, a fresh era must work independently of the old registration.
     func test_aSupersededCallbacksFiringDoesNotClobberTheNewerDrain() async throws {
         let transport = HeldTransport()
@@ -1821,7 +1821,7 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         XCTAssertEqual(ownerHeld.wait(timeout: .now() + 30), .success)
         XCTAssertTrue(ownerHeldSignalled, "the owner thread's drain must have returned, not timed out")
         chain.trigger.triggerDrainIfPermitted()
-        // THE GUARANTEE IS NO OVERLAP, NOT AN ATTEMPT TALLY (spec 1ec319b7). The slot releases at
+        // THE guarantee is no overlap, not an attempt tally. The slot releases at
         // cancellation, so the scheduler's `passLock` — not the trigger's slot — is what keeps one
         // upload at a time. Attempt counts drift with registration bookkeeping; concurrent uploads
         // cannot.
@@ -1834,7 +1834,7 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
                        "no two uploads ever overlapped: the scheduler serialises passes")
     }
 
-    /// PUBLICATION PRECEDES REGISTRATION (reviewer 2a570a0b #1): by the time the busy refusal has
+    /// PUBLICATION precedes registration: by the time the busy refusal has
     /// returned, the trigger's registration identity is already published, so the scheduler can
     /// never invoke a callback whose identity is not yet visible.
     func test_theRegistrationIdentityIsPublishedBeforeTheOwnerCanFire() async throws {
@@ -1870,7 +1870,7 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(transport.attemptCount, 2, "and the wakeup is not lost")
     }
 
-    /// THE EXACT RE-OFFER WINDOW (reviewer b8991889 #2, isolated): the callback runs with a live
+    /// THE exact re-OFFER window: the callback runs with a live
     /// era, clears the slot, and is paused immediately before re-offer admission. A stop() inside
     /// that window bumps the generation, and the already-decided follow-up must be refused.
     func test_aStopInTheReofferWindowRefusesTheAlreadyDecidedFollowUp() async throws {
@@ -1928,7 +1928,7 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
     }
 
     /// A completion signal observed with a genuine bounded wait: the side task signals when the
-    /// observed task finishes, and the caller's `wait` bound is the ONLY thing that ends the wait.
+    /// observed task finishes, and the caller's `wait` bound is the only thing that ends the wait.
     /// No task-group scope, so a stuck await cannot outlive the bound structurally.
     nonisolated static func awaitBoundedCompletion(of task: Task<Void, Never>,
                                                    within seconds: Int) -> Bool {
@@ -1940,7 +1940,7 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         return completed.wait(timeout: .now() + TimeInterval(seconds)) == .success
     }
 
-    /// THE HELPER ITSELF IS UNDER TEST (reviewer 86d0b6db): a permanently stalled task (its body
+    /// THE helper itself is under test: a permanently stalled task (its body
     /// held in a gate that is never released until cleanup) must make the bounded helper return
     /// FALSE within its bound — measured, not assumed.
     func test_theBoundedCompletionHelperReturnsFalseForAStalledTaskWithinItsBound() async throws {
@@ -1971,8 +1971,8 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         XCTAssertLessThan(elapsed, 5,
                           "the helper must return within its bound, measured (took \(elapsed)s)")
 
-        // CLEAN EXIT (reviewer 61efc007): the timeout answer alone leaves the stalled task alive
-        // to wander into the transport and queue after teardown. Cancel BEFORE releasing the
+        // CLEAN exit: the timeout answer alone leaves the stalled task alive
+        // to wander into the transport and queue after teardown. Cancel before releasing the
         // gate, release every external hold, then prove bounded completion of the captured task.
         chain.trigger.cancelForTesting()
         transport.stopHolding()
@@ -1984,7 +1984,7 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
                        "and it must have exited without ever reaching the transport")
     }
 
-    /// STOP BEFORE THE TASK BODY STARTS (reviewer b8991889 #1): a cancelled task must not enter
+    /// STOP before the task body starts: a cancelled task must not enter
     /// drainOnce at all — the pre-entry check, not the post-await one, prevents the send.
     func test_aStopBeforeTheTaskBodyStartsPreventsTheDrain() async throws {
         let transport = HeldTransport()
@@ -2012,13 +2012,13 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         // The task body is HELD before its cancellation check: the stop cannot race the check.
         XCTAssertEqual(bodyEntered.wait(timeout: .now() + 30), .success,
                        "the barrier proves the body is held before the check")
-        // Capture the live handle BEFORE cancellation (which clears the storage), so completion
+        // Capture the live handle before cancellation (which clears the storage), so completion
         // of the released body can be observed rather than assumed from a sleep.
         let capturedTask = chain.trigger.drainTaskForTesting
         chain.trigger.cancelForTesting()
         releaseBody.signal()
-        // BOUNDED COMPLETION PROOF (reviewer f39bc70d/86d0b6db): the released body must actually
-        // finish. The wait is a semaphore on a completion signal — it does NOT structurally join
+        // BOUNDED completion proof: the released body must actually
+        // finish. The wait is a semaphore on a completion signal — it does not structurally join
         // a hung await the way a task group's scope would, so even a stalled task cannot hang the
         // test past the bound.
         if let capturedTask {
@@ -2034,7 +2034,7 @@ final class VoiceSharingTriggerFollowUpTests: XCTestCase {
         XCTAssertFalse(chain.trigger.isDrainingForTesting, "and the slot stays released")
     }
 
-    /// AUTHORIZATION IS RE-READ AT THE FOLLOW-UP: revocation between the arrival and the follow-up
+    /// AUTHORIZATION is re-READ at the follow-UP: revocation between the arrival and the follow-up
     /// must prevent the second pass.
     func test_theFollowUpRechecksAuthorization() async throws {
         let transport = HeldTransport()

@@ -19,10 +19,10 @@ extension UIFont {
     /// However if you specified 18 as the default size, then its scale, from .large, would be: 18, 20, 22, and 23 at the largest size category `.accessibilityExtraExtraExtraLarge`
     ///
     /// - Parameters:
-    ///   - size: The base font size to use for the font
-    ///   - scalingStyle: The `UIFont.TextStyle` to scale the font with
-    ///   - weight: The `UIFont.Weight` to use
-    ///   - maxSize: When the `maxSize` category is set, the max font size will be limited to this category.
+    /// - size: The base font size to use for the font
+    /// - scalingStyle: The `UIFont.TextStyle` to scale the font with
+    /// - weight: The `UIFont.Weight` to use
+    /// - maxSize: When the `maxSize` category is set, the max font size will be limited to this category.
     static func font(ofSize size: CGFloat,
                      weight: UIFont.Weight = .regular,
                      scalingWith style: UIFont.TextStyle,

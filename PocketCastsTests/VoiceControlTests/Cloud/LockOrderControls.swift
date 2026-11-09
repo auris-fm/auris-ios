@@ -1,7 +1,7 @@
 import XCTest
 @testable import podcasts
 
-/// LOCK-ORDER CONTROL (review 086c0172/5fa6e007/92de14ea/47328768): one real-path control on the
+/// LOCK-ORDER control: one real-path control on the
 /// shared production capture operation `captureRoutingOrigin`.
 ///
 /// The control parks the off-main capture INSIDE the operation, after its grace reads and before its
@@ -35,7 +35,7 @@ final class LockOrderControls: XCTestCase {
                       "the control requires a LISTENING service; without it stop() guard-returns and "
                           + "the control is vacuous")
 
-        // Park the capture AFTER its reads, BEFORE its acquisition. The barrier itself blocks the
+        // Park the capture after its reads, before its acquisition. The barrier itself blocks the
         // capture thread on a semaphore; the test releases it — an explicit park/release handoff.
         let parked = DispatchSemaphore(value: 0)
         let release = DispatchSemaphore(value: 0)
@@ -50,7 +50,7 @@ final class LockOrderControls: XCTestCase {
         captureThread.start()
 
         // Bounded wait for the park, WITHOUT blocking the main thread (the capture's reads
-        // main.sync onto main only BEFORE the barrier; while parked it makes no main requests,
+        // main.sync onto main only before the barrier; while parked it makes no main requests,
         // but we stay non-blocking on principle and to keep the pump live).
         let isParked = await Task.detached { parked.wait(timeout: .now() + 5) == .success }.value
         XCTAssertTrue(isParked, "the capture must park between its grace reads and its lock acquisition")
@@ -73,7 +73,7 @@ final class LockOrderControls: XCTestCase {
         service.captureBeforeAcquisitionBarrierForTesting = nil
     }
 
-    /// STOPPED-CAPTURE REFUSAL, through the REAL enqueue entry (review 47328768/ece440bc):
+    /// STOPPED-CAPTURE refusal, through the REAL enqueue entry:
     /// drives `asrEngine.onRoutingInput` — the callback the ASR engine actually invokes — so the
     /// control exercises `enqueueRoutingInput`'s `guard let capture else { return false }` guard,
     /// not the capture operation in isolation. The stop/restart race is deterministic: the
@@ -83,7 +83,7 @@ final class LockOrderControls: XCTestCase {
     /// `isListening` recheck the enqueue would fall through to read TRUE. With the guard present
     /// the enqueue refuses on the nil capture (returns false). Deleting the guard falls through
     /// to that true recheck, the late callback whose origin reads ran while stopped is admitted,
-    /// and the control fails. No restart-timing luck is involved: the restart completes BEFORE
+    /// and the control fails. No restart-timing luck is involved: the restart completes before
     /// the parked enqueue reaches the guard.
     @MainActor
     func testAStopRestartBetweenCaptureAndLockCheckRefusesTheLateCallback() async throws {
@@ -102,7 +102,7 @@ final class LockOrderControls: XCTestCase {
         await waitUntilListening(timeout: 5) { service.isListening }
         XCTAssertTrue(service.isListening, "premise: the control needs a listening service")
 
-        // The restart mechanism is proven BEFORE it is needed: the gate republishes .listening
+        // The restart mechanism is proven before it is needed: the gate republishes .listening
         // when the monitored context flips, and `start(in:)` runs against the SucceedingCapture.
         service.stop()
         conditionMonitor.context = .none
@@ -114,8 +114,8 @@ final class LockOrderControls: XCTestCase {
         XCTAssertTrue(service.isListening, "premise: the context flip must deterministically restart the service")
         service.stop()
 
-        // Park the REAL enqueue AFTER the capture returns (nil — the service is stopped) and
-        // BEFORE the nil-capture guard, holding no lock. The park result is RECORDED, not
+        // Park the REAL enqueue after the capture returns (nil — the service is stopped) and
+        // before the nil-capture guard, holding no lock. The park result is RECORDED, not
         // discarded: a timeout means the capture never reached the barrier and every later
         // assertion would be vacuous, so it is asserted before the restart.
         let parked = DispatchSemaphore(value: 0)
@@ -128,8 +128,8 @@ final class LockOrderControls: XCTestCase {
             // the false-green window this control must not have.
             gateOutcomes.recordRelease(release.wait(timeout: .now() + 10))
         }
-        // UNCONDITIONAL CLEANUP: the gate is released, the seam cleared and the service stopped
-        // on EVERY exit path, so a failed assertion cannot leave a parked enqueue or a listening
+        // UNCONDITIONAL cleanup: the gate is released, the seam cleared and the service stopped
+        // on every exit path, so a failed assertion cannot leave a parked enqueue or a listening
         // service behind for subsequent tests.
         defer {
             release.signal()
@@ -158,7 +158,7 @@ final class LockOrderControls: XCTestCase {
                            + "within the bound; a timeout means the control's window never opened")
         guard parkedOutcome == .success else { return }
 
-        // THE RESTART, while the enqueue is parked between its capture and its guard: the
+        // THE restart, while the enqueue is parked between its capture and its guard: the
         // lock-time listening recheck the guard protects against will read TRUE.
         conditionMonitor.context = .none
         conditionMonitor.context = .appInForeground
@@ -168,7 +168,7 @@ final class LockOrderControls: XCTestCase {
         }
         XCTAssertTrue(service.isListening, "the deterministic restart must land while the late callback is parked")
 
-        // RELEASE the gate BEFORE the bounded completion wait (the defer is cleanup for failure
+        // RELEASE the gate before the bounded completion wait (the defer is cleanup for failure
         // paths only): the guard must refuse on the nil capture regardless of the
         // restart-made-true lock-time listening state, and the refusal must arrive through the
         // released gate, not the gate's own 10s timeout.
@@ -197,7 +197,7 @@ final class LockOrderControls: XCTestCase {
         func store(_ v: Bool) { lock.lock(); storedValue = v; lock.unlock() }
     }
 
-    /// Lock-protected record of the test gate's own wait outcome (review 50e0f8db).
+    /// Lock-protected record of the test gate's own wait outcome.
     private final class GateOutcomes: @unchecked Sendable {
         private let lock = NSLock()
         private var releaseOutcome: DispatchTimeoutResult?

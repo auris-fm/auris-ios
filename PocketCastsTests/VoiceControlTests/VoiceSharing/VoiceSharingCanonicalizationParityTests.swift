@@ -80,7 +80,7 @@ final class VoiceSharingCanonicalizationParityTests: XCTestCase {
     /// reproduced from the same inputs. The Worker computed `recordSha256` independently, so
     /// agreeing on this value is interoperability evidence rather than self-consistency.
     ///
-    /// PHASE 2 DEVIATION, stated rather than papered over: clients now MUST send `wake_required`, so this
+    /// PHASE 2 DEVIATION, stated rather than papered over: clients now must send `wake_required`, so this
     /// captured record is no longer one a client may send — it is the SERVER's authority on
     /// canonicalization only, and the captured digest therefore pins the canonicalizer, not the current
     /// record shape. The shape is pinned by `VoiceSharingNameSchemaControls` (which binds through the
@@ -170,7 +170,7 @@ final class VoiceSharingCanonicalizationParityTests: XCTestCase {
         ]
     }
 
-    /// Authorization is checked BEFORE the record is hashed, not only during recovery: arguments
+    /// Authorization is checked before the record is hashed, not only during recovery: arguments
     /// that reach the immutable record cannot be removed afterwards without invalidating the digest
     /// the Worker recomputes.
     func test_unauthorizedRoutingArgumentsAreRefusedBeforeFinalization() throws {
@@ -181,7 +181,7 @@ final class VoiceSharingCanonicalizationParityTests: XCTestCase {
             // phase-2 member the client must send rather than inheriting the captured Worker record.
             record["wake_required"] = false
             var observations = try XCTUnwrap(record["observations"] as? [String: Any])
-            // WIRE REVISION 2: the current shape carries the wake decision and the execution
+            // WIRE revision 2: the current shape carries the wake decision and the execution
             // outcome (GO review); the routing rules under test need a record that first binds.
             observations["wake"] = ["state": "completed", "decision": "detected"]
             observations["execution"] = ["state": "not_run", "reason": "precondition_failed"]
@@ -222,7 +222,7 @@ final class VoiceSharingCanonicalizationParityTests: XCTestCase {
         XCTAssertNoThrow(try bind(withArguments: nil, intent: "unreviewed.intent"))
     }
 
-    /// RFC 8785 §3.2.3 sorts by UTF-16 code units, which is NOT locale-aware string ordering: an
+    /// RFC 8785 §3.2.3 sorts by UTF-16 code units, which is not locale-aware string ordering: an
     /// uppercase key precedes the lowercase one, and a prefix precedes its extension.
     func test_keysSortByUTF16CodeUnits() throws {
         let input: [String: Any] = ["b": 1, "a": 2, "A": 3, "ab": 4, "": 5]

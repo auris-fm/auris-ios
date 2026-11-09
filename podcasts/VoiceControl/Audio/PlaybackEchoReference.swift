@@ -86,7 +86,7 @@ final class PlaybackEchoReference {
     }
 
     /// Appends emitted PCM and returns the reference index the block LANDS at, in ONE
-    /// critical section (PR #49 review comment 4305981485 — the pair of findings this serves).
+    /// critical section.
     ///
     /// The old producer pattern was `let rangeStart = streamIndex` followed by `append`: two
     /// separate lock acquisitions, so a concurrent producer could append between them and the
@@ -128,7 +128,7 @@ final class PlaybackEchoReference {
         return samples
     }
 
-    /// ONE consistent observation (PR50 review r4357901593): the retained audio, its audible-end
+    /// ONE consistent observation: the retained audio, its audible-end
     /// offset, and the render anchor, all read under a SINGLE lock acquisition. The filter path
     /// needs all three to agree: `snapshot` and `audibleEndOffsetInRetainedWindow` were
     /// separate acquisitions, so an `append` landing between them shifted the window the offset

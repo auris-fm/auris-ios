@@ -32,10 +32,10 @@ struct ABTestProvider: ABTestProviding {
 
     /// Reload the `ExPlat` instance
     /// - Parameters:
-    ///   - platform: A given platform name
-    ///   - oAuthToken: a WP Auth Token
-    ///   - userAgent: A user agent
-    ///   - anonId: The anonymous id
+    /// - platform: A given platform name
+    /// - oAuthToken: a WP Auth Token
+    /// - userAgent: A user agent
+    /// - anonId: The anonymous id
     func reloadExPlat(platform: String, oAuthToken: String? = nil, userAgent: String? = nil, anonId: String? = nil) {
         ExPlat.configure(platform: platform, oAuthToken: oAuthToken, userAgent: userAgent, anonId: anonId)
     }

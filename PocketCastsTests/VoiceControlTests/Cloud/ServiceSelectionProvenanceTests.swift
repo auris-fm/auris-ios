@@ -47,14 +47,14 @@ final class TranscribingAsrBackend: AsrBackend {
     func release() {}
 }
 
-/// The CALLER-level provenance control: a wake during ACTIVE GRACE must reach the sink as
+/// The CALLER-level provenance control: a wake during ACTIVE grace must reach the sink as
 /// `.wakeWord`, driven through the service's REAL assembly, start path and input registration.
 ///
 /// This is the control the manager-level case explicitly cannot be — the manager is handed an
 /// explicit selection, so it never exercises where the service derives one.
 final class ServiceSelectionProvenanceTests: XCTestCase {
     /// ISOLATED cloud configuration: `isConfigured()` is `{ !CloudConfig.shared.baseUrl.isEmpty }`,
-    /// and it is checked BEFORE the origin gate and before the client is built, so without a base
+    /// and it is checked before the origin gate and before the client is built, so without a base
     /// URL a routed turn is refused before reaching the transport. An own defaults suite keeps this
     /// from affecting other cases, and teardown restores it.
     private var suiteName: String!
@@ -69,7 +69,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
     }
 
     override func tearDown() {
-        // STOP EVERY SERVICE THIS CLASS STARTED (diagnosis of the intermittent families).
+        // STOP every service this class started (diagnosis of the intermittent families).
         //
         // 21 cases start a service and only one ever stopped it, so each case left a live
         // `VoiceControlService` with its ASR callbacks, mic gate and serial chain still running.
@@ -111,15 +111,15 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         )
         return monitor
     }
-    /// The PRODUCTION FALLBACK repair, covered on its own.
+    /// The PRODUCTION fallback repair, covered on its own.
     ///
-    /// The PRODUCTION FALLBACK repair, covered on its own: the input's own provenance is honoured
+    /// The PRODUCTION fallback repair, covered on its own: the input's own provenance is honoured
     /// when the caller passes no parameter. Separate from the registered-callback case on purpose —
     /// converting that case to the registered path removed the only coverage this repair had, and
     /// coverage has to be added to, not moved.
     @MainActor
     func testTheInputProvenanceIsHonouredWhenTheParameterIsAbsent() async throws {
-        // The REAL LFM model never loads in this environment; the suite's own seeded pattern supplies a ready router.
+        // The REAL lfm model never loads in this environment; the suite's own seeded pattern supplies a ready router.
         let inference = FakeLfmInference()
         inference.classifyLabel = "cloud_route:"
         inference.generateResult =
@@ -159,7 +159,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
     /// traversed them all.
     @MainActor
     func testTheRegisteredInputCarriesItsProvenanceToTheSink() async throws {
-        // The REAL LFM model never loads in this environment; the suite's own seeded pattern supplies a ready router.
+        // The REAL lfm model never loads in this environment; the suite's own seeded pattern supplies a ready router.
         let inference = FakeLfmInference()
         inference.classifyLabel = "cloud_route:"
         inference.generateResult =
@@ -177,7 +177,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         XCTAssertGreaterThan(capture.startCount, 0, "the real start path did not begin capture")
         try await waitForRouter(service: service)
 
-        // A window is ALREADY OPEN before the wake arrives, so a live read and the input's
+        // A window is ALREADY open before the wake arrives, so a live read and the input's
         // provenance would disagree — without this the case proves nothing.
         service.gracePeriodSignalForTesting.onWakeWordDetected()
         XCTAssertTrue(service.gracePeriodSignalForTesting.isActive, "the window did not open")
@@ -201,7 +201,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             delivered,
             "the registered input produced no turn even though every prerequisite is supplied"
         )
-        // The window was ALREADY OPEN when the audio arrived, so a wake-free registered input is
+        // The window was ALREADY open when the audio arrived, so a wake-free registered input is
         // a FOLLOW-UP, not a wake — the provenance this case exists to carry.
         XCTAssertEqual(
             delivered, .followUp,
@@ -212,7 +212,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
     /// Delivers audio through the capture so the REAL registered path runs — the only input the
     /// registered case uses.
     private func driveRegisteredCallback(capture: FakeAudioCapture) async {
-        // ONE FRAME PER CALL: `minSpeechFrames` (5) counts CALLS, not samples, so a single large
+        // ONE frame per call: `minSpeechFrames` (5) counts CALLS, not samples, so a single large
         // buffer is one frame and speech is never confirmed.
         let frameSize = 1_600                                              // 100 ms at 16 kHz
         // The audio's classification is supplied by the injected classifier, not by its shape.
@@ -259,7 +259,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
     /// The ASR wake callback the SERVICE installs must actually open the grace window.
     ///
     /// `VoiceControlService` wires this link in production:
-    ///     asrEngine.onWakeWordDetected = { self?.gracePeriodSignal.onWakeWordDetected(); … }
+    /// asrEngine.onWakeWordDetected = { self?.gracePeriodSignal.onWakeWordDetected(); … }
     /// but every existing case calls `gracePeriodSignalForTesting.onWakeWordDetected()` DIRECTLY,
     /// so the wiring itself was never driven. Breaking that closure — or leaving it nil — would
     /// leave every case green while the app never opened a window on a wake.
@@ -267,7 +267,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
     /// This case fires the callback the engine holds, through the real assembly and start path.
     @MainActor
     func testTheASRWakeCallbackInstalledByTheServiceOpensTheGraceWindow() async throws {
-        // The REAL LFM model never loads in this environment; the suite's own seeded pattern supplies a ready router.
+        // The REAL lfm model never loads in this environment; the suite's own seeded pattern supplies a ready router.
         let inference = FakeLfmInference()
         inference.classifyLabel = "cloud_route:"
         inference.generateResult =
@@ -307,7 +307,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
     /// deterministically, without waiting on a real transcript from synthetic audio.
     ///
     /// `VoiceControlService` installs `asrEngine.onRoutingInput`, and that closure is where the
-    /// turn's provenance is captured — BEFORE the serial Task queues. The existing registered-input
+    /// turn's provenance is captured — before the serial Task queues. The existing registered-input
     /// case drove synthetic audio through the capture and then skipped, because no transcript ever
     /// emerged, so the path was never exercised. This case fires the callback the engine actually
     /// holds, which is the same seam the production ASR uses and removes the dependence on a
@@ -317,7 +317,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
     /// selection stamped on the input must survive to the sink.
     @MainActor
     func testTheRegisteredASRInputCarriesItsProvenanceToTheSink() async throws {
-        // The REAL LFM model never loads in this environment; the suite's own seeded pattern supplies a ready router.
+        // The REAL lfm model never loads in this environment; the suite's own seeded pattern supplies a ready router.
         let inference = FakeLfmInference()
         inference.classifyLabel = "cloud_route:"
         inference.generateResult =
@@ -372,7 +372,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         )
     }
 
-    /// The ASR substitution is ON THE LOADING PATH: the engine's `preloadBackend()` calls
+    /// The ASR substitution is ON THE loading path: the engine's `preloadBackend()` calls
     /// `backend.ensureReady()`, so a substituted backend is invoked during a real service start and
     /// no real model is loaded. This case is what keeps the seam alive and falsifiable.
     @MainActor
@@ -398,7 +398,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         )
     }
 
-    /// THE SERVICE-OWNED BINDING: a wake must reach the MANAGER the sink uses, so a routed turn is
+    /// THE service-OWNED binding: a wake must reach the MANAGER the sink uses, so a routed turn is
     /// admitted at the origin gate. This is the production admission defect: a binding stored in the
     /// assembly's `cancellables` is cancelled when the build call returns, so the manager never
     /// learns a window opened and every turn is refused.
@@ -439,13 +439,13 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         )
     }
 
-    /// THE SERVICE SUBMISSION POSITIVE: the routed request must reach the CONTROLLED TRANSPORT.
+    /// THE service submission positive: the routed request must reach the CONTROLLED transport.
     ///
     /// Admission order matters: `isConfigured()` runs first, so the base URL comes from the isolated
     /// fixture configuration; then the origin gate; only then is the client built and the request
     /// sent. The client factory is injected per-assembly, and the recorder observes the SUBMITTED
     /// text rather than the pre-guard sink entry.
-    /// DIALOG COMPLETION, ACTUAL LOCAL PATH (spec 0443b70, reviewer 71c153eb): utterance A begins
+    /// DIALOG completion, ACTUAL local path: utterance A begins
     /// a dialog (local, no wire turn), then utterance B — the real `new_command` control — closes
     /// it. B's own admitted id is what any turn B dispatches would carry; the dialog origin never
     /// substitutes, and A performs no wire dispatch of its own.
@@ -491,7 +491,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             testInputBarrier: { input in
                 // The REPROCESSED value arrives as a fresh turn; the model now answers it with a
                 // cloud route — the completion's own dispatch. Swapped at the barrier, which runs
-                // BEFORE classification, so the swap is deterministic.
+                // before classification, so the swap is deterministic.
                 if input.routerTranscript == "what did the host say about the merger" {
                     reprocessedSelectionObserved = input.selection
                     inference.classifyLabel = "cloud_route:route"
@@ -602,8 +602,8 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         )
     }
 
-    /// ROUTER LOAD LIFECYCLE (spec 6b45a5d2, reviewer 0b5b4222): the LFM router load is armed at
-    /// the FIRST-ARM boundary (`startIfAllowed`), NOT at construction. Building the service must
+    /// ROUTER load lifecycle: the LFM router load is armed at
+    /// the FIRST-ARM boundary (`startIfAllowed`), not at construction. Building the service must
     /// perform zero `inference.load` calls; the load happens once the lifecycle arms.
     @MainActor
     func test_routerLoadIsArmedAtFirstArmNotAtConstruction() async throws {
@@ -644,7 +644,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         )
     }
 
-    /// SELECTION PRESERVATION THROUGH REPROCESS (reviewer 8cb24f13): a fresh WAKE capture that
+    /// SELECTION preservation through reprocess: a fresh WAKE capture that
     /// completes a dialog keeps its wakeWord selection through the reprocessed dispatch — the
     /// wire mode is create, not the live-state resume a dropped selection would fall back to.
     @MainActor
@@ -704,7 +704,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         service.gracePeriodSignalForTesting.onWakeWordDetected()
         let generation = service.gracePeriodSignalForTesting.currentGeneration()
 
-        // A begins the dialog; B is a FRESH WAKE capture during the live window that completes
+        // A begins the dialog; B is a FRESH wake capture during the live window that completes
         // it with new_command.
         let aId = "3e91c40b-27af-4d5e-8c16-0b2f7a4d9e83"
         await service.handleRoutingInput(
@@ -748,7 +748,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         )
     }
 
-    /// MODEL-CHOSEN DISPATCH IDENTITY (reviewer c48e1d98): a turn the model genuinely ROUTES
+    /// MODEL-CHOSEN dispatch identity: a turn the model genuinely ROUTES
     /// (not an escalation) must also dispatch under the hour's admitted utterance id. The routed
     /// path is the one the escalation path is only a fallback for.
     @MainActor
@@ -823,7 +823,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         )
     }
 
-    /// DIALOG-TO-WIRE IDENTITY (spec 0443b70): with a dialog begun by an earlier utterance (A)
+    /// DIALOG-TO-WIRE identity (spec 0443b70): with a dialog begun by an earlier utterance (A)
     /// pending, the turn B that is routed while that dialog is open dispatches under B's OWN
     /// admitted ID. A is dialog-origin correlation, never a replacement dispatch identity.
     @MainActor
@@ -923,7 +923,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
 
         let fakeBackend = FakeAsrBackend()
 
-        // The fixture's OWN defaults, injected as the PRODUCTION READER's configuration — writing
+        // The fixture's OWN defaults, injected as the PRODUCTION reader's configuration — writing
         // an unconsumed suite would leave `CloudConfig.shared` blind to it.
         let suite = "service_submission_\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -931,7 +931,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         let fixtureConfig = CloudConfig(defaults: defaults)
         defer { defaults.removePersistentDomain(forName: suite) }
 
-        // Capture the INJECTED CLIENT'S OWN task and frame, rather than a shared static recorder: a
+        // Capture the INJECTED client'S OWN task and frame, rather than a shared static recorder: a
         // static (and a substring search over it) cannot attribute a submission to THIS turn.
         var injectedTask: StubWebSocketTask?
         var factoryInvocations = 0
@@ -965,7 +965,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         service.gracePeriodSignalForTesting.onWakeWordDetected()
         let liveGeneration = service.gracePeriodSignalForTesting.currentGeneration()
 
-        // ASSERT THE EXACT PREDICATE before dispatch, so a refusal here is attributed to it.
+        // ASSERT the exact predicate before dispatch, so a refusal here is attributed to it.
         XCTAssertFalse(
             fixtureConfig.baseUrl.isEmpty,
             "the injected configuration must make the sink's own predicate true; baseUrl=\(fixtureConfig.baseUrl)"
@@ -998,7 +998,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             frame,
             "EFFECT: the injected client must SUBMIT this turn's frame — no shared recorder is used"
         )
-        // THIS TURN'S identity, compared against the identity the sink PREPARED — UUID syntax
+        // THIS turn'S identity, compared against the identity the sink PREPARED — UUID syntax
         // alone is not an identity comparison.
         let requestId = try XCTUnwrap(body["request_id"] as? String, "the frame carries a request_id")
         XCTAssertNotNil(UUID(uuidString: requestId), "request_id is client-assigned")
@@ -1018,17 +1018,17 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         let conversationId = try XCTUnwrap(body["conversation_id"] as? String)
         let conversationMode = try XCTUnwrap(body["conversation_mode"] as? String)
         XCTAssertEqual(conversationId, prepared?.conversationId)
-        // PREPARED-MODE EQUALITY: not merely "one of the two values" — the mode the sink PREPARED.
+        // PREPARED-MODE equality: not merely "one of the two values" — the mode the sink PREPARED.
         XCTAssertEqual(
             conversationMode, prepared?.mode,
             "the submitted conversation_mode must be the mode the sink PREPARED for this turn"
         )
-        // FRAME TYPE: the submission is an authenticate frame, not some other message shape.
+        // FRAME type: the submission is an authenticate frame, not some other message shape.
         XCTAssertEqual(
             body["type"] as? String, "authenticate",
             "the submitted frame must be the authenticate frame"
         )
-        // EXACT ROUTED TEXT: the request the user's turn carried, not a paraphrase.
+        // EXACT routed text: the request the user's turn carried, not a paraphrase.
         XCTAssertEqual(
             body["request"] as? String,
             "what did the host mean by that remark",
@@ -1040,15 +1040,15 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         )
     }
 
-    /// ESCALATION PROVENANCE: a turn carrying a caller-supplied selection must reach the
+    /// ESCALATION provenance: a turn carrying a caller-supplied selection must reach the
     /// routing-failure escalation with THAT selection, not whatever the live window would derive by
     /// the time the fallback dispatches.
     ///
-    /// WHAT THIS DRIVES, stated so it is not mistaken for more: this calls `handleRoutingInput`
-    /// DIRECTLY with an explicit `selection:`. It does NOT exercise an installed callback, nor the
+    /// WHAT this drives, stated so it is not mistaken for more: this calls `handleRoutingInput`
+    /// DIRECTLY with an explicit `selection:`. It does not exercise an installed callback, nor the
     /// closure in `VoiceControlService` that stamps `capturedSelection` — so it shows the escalation
     /// CARRIES a supplied selection through to the sink, not that the installed callback SUPPLIES the
-    /// right one. (The installed closure's stamping is the `c6654fa49` caller-level control's subject.)
+    /// right one.
     ///
     /// `preparedObserver` is the observable seam: it fires only for a turn the sink ADMITS, so its
     /// value carries the intent's provenance as the sink received it.
@@ -1131,7 +1131,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         XCTAssertFalse(value.requestId.isEmpty, "the escalated turn carries a request identity")
 
         // PROVENANCE: the sink records the selection the INTENT carried, before its guards, so this
-        // shows what the escalation actually passed on — the turn's own `.followUp`, not a
+        // shows what the escalation actually passed on the turn's own `.followUp`, not a
         // live-derived value.
         let carried = await MainActor.run { sink.lastSelectionForTesting }
         XCTAssertEqual(
@@ -1141,7 +1141,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         )
     }
 
-    /// ESCALATION PROVENANCE, through the INSTALLED callback: a turn the service's own
+    /// ESCALATION provenance, through the INSTALLED callback: a turn the service's own
     /// `asrEngine.onRoutingInput` closure stamps must reach the routing-failure escalation carrying
     /// THAT selection, not whatever the live window would derive by the time the fallback dispatches.
     ///
@@ -1212,13 +1212,13 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
                 + "live derivation, which for an active window would say .followUp"
         )
     }
-    /// INSTALLED INPUT CAPTURE -> QUEUE -> RETIRE / OPEN -> RELEASE.
+    /// INSTALLED input capture -> QUEUE -> RETIRE / OPEN -> RELEASE.
     ///
-    /// MEASURED TRACE (the precondition this case depends on actually holds):
-    ///     queuechk task created for origin=1  ->  resumed; cancelled=false   (the held turn runs)
-    ///     queuechk task created for origin=2  ->  resumed; cancelled=true    (the queued turn DROPS)
+    /// MEASURED trace (the precondition this case depends on actually holds):
+    /// queuechk task created for origin=1 -> resumed; cancelled=false (the held turn runs)
+    /// queuechk task created for origin=2 -> resumed; cancelled=true (the queued turn DROPS)
 
-    /// QUEUED INSTALLED INPUT — the acknowledgement is COMPLETION, not preparation.
+    /// QUEUED installed input — the acknowledgement is COMPLETION, not preparation.
     ///
     /// Arrangement, per the assigned contract: a preceding turn is HELD on its socket, so input A
     /// QUEUES behind it; A's window is then RETIRED and a fresh window B opened, with
@@ -1228,10 +1228,10 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
     /// A preparation observer would not do: it fires before routing completes, so it cannot say
     /// whether the turn went on to act.
     ///
-    /// WHICH ROUTING PATH THIS EXERCISES, measured rather than assumed: the router reports
+    /// WHICH routing path this exercises, measured rather than assumed: the router reports
     /// `finalOutcome=outcomeNoIntent`, `failedStage=stageMapperDialog`,
     /// `reason=mapper_or_dialog_failed`, so the turn takes the **no-match / fallback ESCALATION**
-    /// path (`RouteFailureEscalationPolicy` -> `claimDispatchOwnership`), NOT a model-chosen
+    /// path (`RouteFailureEscalationPolicy` -> `claimDispatchOwnership`), not a model-chosen
     /// `cloud_route`. Both paths share the same intent and executor by construction, so the
     /// retirement and allowance rules are the same; this case pins the escalation one.
     @MainActor
@@ -1325,19 +1325,19 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         )
 
         // RETIRE A's window and OPEN a fresh one. The epoch is deliberately UNCHANGED: the subject is
-        // A's CAPTURED GENERATION, and advancing the epoch would refuse A for a different reason.
+        // A's CAPTURED generation, and advancing the epoch would refuse A for a different reason.
         signal.onAppBackgrounded()
         signal.onWakeWordDetected()
         let windowB = signal.currentGeneration()
         XCTAssertNotEqual(windowA, windowB, "B must be a different window from A, or staleness is untestable")
 
-        // B IS A FRESH WINDOW THAT OWNS A CLAIMABLE ALLOWANCE, proven WITHOUT consuming it: exactly
+        // B IS A FRESH window that owns A CLAIMABLE allowance, proven WITHOUT consuming it: exactly
         // one allowance is outstanding, and it belongs to B. Consuming it here would refuse A by
-        // B's SPENT BUDGET rather than by A's OWN RETIRED GENERATION — the two are then
+        // B's SPENT budget rather than by A's OWN retired generation — the two are then
         // indistinguishable and the case would pass for the wrong reason.
         // B's freshness is established by the SEQUENCE, not by consuming its allowance: B was opened
         // after A was retired, and `isActive` is true for it. Claiming the allowance here would
-        // refuse A by B's SPENT BUDGET instead of by A's OWN retired generation, making the two
+        // refuse A by B's SPENT budget instead of by A's OWN retired generation, making the two
         // indistinguishable. B's allowance stays UNSPENT until after A has been acknowledged.
         XCTAssertTrue(signal.isActive, "B's window must be OPEN, so the refusal is not 'no window'")
         XCTAssertGreaterThan(
@@ -1372,7 +1372,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
                 + "be reading a state the case does not control. Finished inputs seen: \(finishedInputs)"
         )
 
-        // ONLY NOW, with A acknowledged: B's window is STILL its own. (Dispatch ownership is per
+        // only now, with A acknowledged: B's window is STILL its own. (Dispatch ownership is per
         // request — owner delta 3484cbc/5eca874 — so the observable is the window identity, not a
         // window budget.)
         XCTAssertTrue(signal.isActive, "B's window is still open after A completed")
@@ -1382,7 +1382,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
                 + "means A re-armed the successor"
         )
 
-        // ONLY NOW: A submitted nothing.
+        // only now: A submitted nothing.
         XCTAssertEqual(
             turnsBuilt, 1,
             "A, queued when its window retired, must submit nothing; a second client means it acted "
@@ -1490,7 +1490,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         )
     }
 
-    /// MODEL-CHOSEN ROUTING: a turn the ROUTER PARSES into `cloud_route` (not an escalation) is
+    /// MODEL-CHOSEN routing: a turn the ROUTER parses into `cloud_route` (not an escalation) is
     /// stamped with the window it was dispatched under, and its completion must be judged against
     /// THAT window. If the window is retired while the turn is in flight, the completion must not
     /// re-arm the window that replaced it.
@@ -1574,7 +1574,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
                 + "did not, the router did not MAP a cloud route and this is not the parsed path"
         )
 
-        // PRIVACY CLOSE, then a SUCCESSOR window. The successor is its OWN window with its own
+        // PRIVACY close, then a SUCCESSOR window. The successor is its OWN window with its own
         // generation; a stale completion must not reset it (owner delta 3484cbc/5eca874: dispatch
         // ownership is per request, so the observable is the successor's window identity, not a
         // window budget).
@@ -1601,9 +1601,9 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
     }
 
 
-    /// CAPTURED-ORIGIN ADMISSION, isolated from debounce.
+    /// CAPTURED-ORIGIN admission, isolated from debounce.
     ///
-    /// A per-input barrier in the installed serial chain holds A BEFORE classification, so the test
+    /// A per-input barrier in the installed serial chain holds A before classification, so the test
     /// can retire A's window and open B while A waits, then release it. Debounce never enters the
     /// picture because A is the FIRST cloud route in this test — the assertion is about
     /// captured-origin admission, not about the debounce guard.
@@ -1661,7 +1661,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
                 }
             },
             testInputBarrier: { input in
-                // Hold ONLY A, before classification, so its window can be retired while it waits.
+                // Hold only A, before classification, so its window can be retired while it waits.
                 // The wait PROPAGATES its outcome: the barrier is THROWING, so a cancellation or a
                 // refusal STOPS the serial chain instead of letting routing resume below it.
                 guard input.routerTranscript.contains("A question") else { return }
@@ -1702,7 +1702,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         signal.onWakeWordDetected()
         let windowA = signal.currentGeneration()
         installed?(IntentRoutingInput.english(transcript: "A question", selection: .wakeWord, utteranceId: "u-200"))
-        // AWAIT THE EVENT, do not sleep and hope: the arrival acknowledgement is what makes "held"
+        // AWAIT the event, do not sleep and hope: the arrival acknowledgement is what makes "held"
         // observable, and a fixed sleep asserts a timing rather than a fact.
         let arrived = await withTaskGroup(of: Bool.self) { group -> Bool in
             group.addTask {
@@ -1739,7 +1739,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         XCTAssertNotEqual(windowA, successor, "the successor must be a different window from A")
         XCTAssertTrue(signal.isActive, "the successor window must be OPEN")
 
-        // RELEASE, then await A's TERMINAL acknowledgement. NOT the routing-attempted hook: a turn
+        // RELEASE, then await A's TERMINAL acknowledgement. not the routing-attempted hook: a turn
         // refused before routing never fires that one, so awaiting it here would hang until the
         // timeout — which is exactly why the terminal outcome exists.
         gate.release()
@@ -1759,7 +1759,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             "A must report a TERMINAL outcome; without it the assertions below read a state the case "
                 + "does not control. Terminals seen: \(terminals)"
         )
-        // EXPLICIT ENUM ASSERTION, per input and BEFORE executor dispatch: the router PARSED this
+        // EXPLICIT enum assertion, per input and before executor dispatch: the router PARSED this
         // input into a `CloudRouteIntent` whose `origin` is the `.modelCall` CASE — not the
         // `origin:` Int? generation that reaches `routeToCloud`, which is a different value.
         let parsed = try XCTUnwrap(
@@ -1772,7 +1772,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             "the parsed intent's ORIGIN ENUM must be .modelCall — the model-chose-it case — rather "
                 + "than .routingFailure; saw \(parsed.origin)"
         )
-        // SEPARATELY, AFTER STAMPING: the observer fires on the RAW classified intent, so its
+        // SEPARATELY, after stamping: the observer fires on the RAW classified intent, so its
         // generation is nil there by construction; the captured window is verified from the SINK's
         // pre-guard record, which is the stamped dispatch. Asserting it on `parsed` would be asserting
         // a value that does not exist at that point.
@@ -1791,7 +1791,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         )
 
         // MEASURED, and it corrected an assumption of mine: the retired input settles as `.routed`,
-        // NOT as `.barrierRefused`. The barrier RELEASES normally here — the refusal happens later,
+        // not as `.barrierRefused`. The barrier RELEASES normally here — the refusal happens later,
         // when `prepare` refuses the turn's live-origin check. `.routed` therefore means "routing was
         // ATTEMPTED", which is true and is not the same claim as "an action ran"; the no-action part
         // is asserted separately by `turnsBuilt == 0`.
@@ -1807,7 +1807,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
                 + "narrower signal stays narrower than the terminal one. Finished: \(finishedInputs)"
         )
 
-        // REFUSED ADMISSION: A completed and took NO action.
+        // REFUSED admission: A completed and took NO action.
         XCTAssertEqual(
             turnsBuilt, 0,
             "a parsed model-chosen input whose window retired while it waited must be refused "
@@ -1905,7 +1905,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         // below compares against the turn's own window rather than a live read.
         let admittedWindow = service.gracePeriodSignalForTesting.currentGeneration()
         installed?(IntentRoutingInput.english(transcript: "A question", selection: .wakeWord, utteranceId: "u-200"))
-        // AWAIT THE EVENT rather than sleeping: arrival is what makes "held" a fact.
+        // AWAIT the event rather than sleeping: arrival is what makes "held" a fact.
         let arrived = await withTaskGroup(of: Bool.self) { group -> Bool in
             group.addTask {
                 for await _ in arrivalWait.stream { return true }
@@ -1928,7 +1928,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         )
         XCTAssertEqual(turnsBuilt, 0, "A must be held at the barrier and have taken no action")
 
-        // NOTHING is retired. Release and await TERMINAL SETTLEMENT — the every-exit outcome, which is
+        // NOTHING is retired. Release and await TERMINAL settlement — the every-exit outcome, which is
         // the acknowledgement that this input's task returned.
         gate.release()
         let completion = await withTaskGroup(of: Bool.self) { group -> Bool in
@@ -1959,7 +1959,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             "an UNRETIRED held model-chosen input must be admitted and reach the transport; if it "
                 + "does not, the refusal case above cannot be attributed to retirement"
         )
-        // EXPLICIT ENUM ASSERTION, the positive half of the pair, per input and BEFORE dispatch.
+        // EXPLICIT enum assertion, the positive half of the pair, per input and before dispatch.
         let parsed = try XCTUnwrap(
             parsedIntents.first as? CloudRouteIntent,
             "the admitted input must have been parsed into a CloudRouteIntent; saw: "
@@ -1970,7 +1970,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             "the parsed intent's ORIGIN ENUM must be .modelCall, the model-chose-it case; saw "
                 + "\(parsed.origin)"
         )
-        // SEPARATELY, AFTER STAMPING (see the refusal case): the observation is of the RAW
+        // SEPARATELY, after stamping (see the refusal case): the observation is of the RAW
         // classified intent, so its generation is nil there; the captured window is verified from the
         // stamped dispatch.
         XCTAssertNil(
@@ -1988,7 +1988,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         )
     }
 
-    /// CANCELLATION YIELDS NO SUBMISSION OR ACTION, and is reported as an event DISTINCT from
+    /// CANCELLATION yields no submission or action, and is reported as an event DISTINCT from
     /// arrival and from routing completion.
     ///
     /// The input is held at the barrier, then the serial chain is cancelled (as `stop()` does). The
@@ -2071,7 +2071,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         // Submit A; it arrives at the barrier and waits.
         service.gracePeriodSignalForTesting.onWakeWordDetected()
         installed?(IntentRoutingInput.english(transcript: "A question", selection: .wakeWord, utteranceId: "u-200"))
-        // AWAIT THE EVENT: a fixed sleep would assert a timing rather than the fact that A is held.
+        // AWAIT the event: a fixed sleep would assert a timing rather than the fact that A is held.
         let arrived = await withTaskGroup(of: Bool.self) { group -> Bool in
             group.addTask {
                 for await _ in arrivalWait.stream { return true }
@@ -2091,7 +2091,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         XCTAssertEqual(arrivals, [.arrived], "A must have ARRIVED at the barrier")
         XCTAssertEqual(turnsBuilt, 0, "A must have taken no action while held")
 
-        // CLASSIFIER COUNT BEFORE TERMINAL SETTLEMENT: A is HELD at the barrier, which sits BEFORE
+        // CLASSIFIER count before terminal settlement: A is HELD at the barrier, which sits before
         // classification, so it must not have been classified yet. Recorded here and compared after
         // settlement, so "the cancellation changed no classifier state" is observed rather than
         // assumed from the absence of clients.
@@ -2100,7 +2100,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         // CANCEL the serial chain, then open the gate so the wait can observe the cancellation.
         service.stop()
         gate.release()
-        // AWAIT THE TERMINAL ACKNOWLEDGEMENT rather than sleeping and inferring from absence: every
+        // AWAIT the terminal acknowledgement rather than sleeping and inferring from absence: every
         // exit reports how the task ended, so settlement is observed, not assumed.
         let settled = await withTaskGroup(of: Bool.self) { group -> Bool in
             group.addTask {
@@ -2124,19 +2124,19 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
                 + "from arrival and from an action having run. Seen: \(terminals)"
         )
 
-        // CANCELLATION IS ITS OWN EVENT, and distinct from arrival and from routing completion.
+        // CANCELLATION is its own event, and distinct from arrival and from routing completion.
         XCTAssertEqual(
             arrivals, [.arrived, .cancelled],
             "the cancelled input must be reported CANCELLED at the barrier, not silently skipped; "
                 + "arrival and cancellation are separate events. Seen: \(arrivals)"
         )
-        // NO SUBMISSION OR ACTION.
+        // NO SUBMISSION or action.
         XCTAssertEqual(
             turnsBuilt, 0,
             "a CANCELLED held input must submit nothing; a client here means the chain resumed "
                 + "routing after the barrier was cancelled"
         )
-        // CLASSIFIER COUNT AFTER TERMINAL SETTLEMENT: unchanged, because a turn cancelled at the
+        // CLASSIFIER count after terminal settlement: unchanged, because a turn cancelled at the
         // barrier never reaches classification. A rise here would mean the chain resumed past the
         // barrier — the very thing the throwing barrier exists to prevent.
         //
@@ -2146,14 +2146,14 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         // same violation. That is all this records; it is not a claim that every conceivable
         // violation reachable here also moves the terminal outcome. (XCTest reports every failed
         // assertion in a case, so this is about the violations being the same one, not about
-        // execution stopping early.) Kept because it names the classifier state explicitly; NOT
+        // execution stopping early.) Kept because it names the classifier state explicitly; not
         // cited as separate coverage.
         XCTAssertEqual(
             inference.classifyCount, classifyCountAtBarrier,
             "a turn cancelled at the barrier must not have been classified; the count moved from "
                 + "\(classifyCountAtBarrier) to \(inference.classifyCount)"
         )
-        // NO ROUTING COMPLETION for that input: cancellation is not completion.
+        // NO ROUTING completion for that input: cancellation is not completion.
         XCTAssertFalse(
             finishedInputs.contains("A question"),
             "a cancelled input must NOT report routing completion; that would conflate cancellation "

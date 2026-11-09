@@ -1,11 +1,11 @@
 import XCTest
 @testable import podcasts
 
-/// EVENT-ONLY producer controls (reviewer 9be75bf0 — labelled so they are not mistaken for a durable path).
+/// EVENT-only producer controls.
 ///
 /// These drive the REAL engine — real segmenter, real capture callback, real collector — and STOP at the
 /// segment event the collector emitted, captured in a closure. No sink, no queue, no file. They prove the
-/// PRODUCER reports the value; they do NOT prove it survives into stored bytes.
+/// PRODUCER reports the value; they do not prove it survives into stored bytes.
 ///
 /// Durable coverage lives in `VoiceSharingEndToEndEngineToDurableQueueTests` (`test_durableRecord*`): the
 /// same engine driven through the production sink to a ready queue entry, read back off disk and bound.
@@ -180,7 +180,7 @@ final class VoiceSharingProductionPathControls: XCTestCase {
         XCTAssertFalse(start.wakeRequired, "grace is active, so no wake word was required at segment start")
     }
 
-    /// REVIEWER 0628d185 / 13f80de6 FORWARD CONTROL: a wake REJECTION with grace FALSE must reach the
+    /// / 13f80de6 FORWARD control: a wake REJECTION with grace FALSE must reach the
     /// collector through the REAL engine path and produce a capture.
     ///
     /// This closes the question the incident forensics left open. The stuck build's `drop (no grace)`
@@ -215,7 +215,7 @@ final class VoiceSharingProductionPathControls: XCTestCase {
                        "with a collector attached, no segment completes unattributed")
     }
 
-    /// SPEC 13f80de6: the nil-collector counter. Every capture call site is `contributionCollector?.…`,
+    ///: the nil-collector counter. Every capture call site is `contributionCollector?.…`,
     /// so a missing collector would skip collection with NO log line. The engine counts such segments
     /// separately from segments seen — the signal that would have named the incident's failure shape.
     func test_aSegmentDeliveredWithNoCollectorIsCountedAndLogged() async {

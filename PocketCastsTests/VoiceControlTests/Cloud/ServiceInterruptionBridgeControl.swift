@@ -1,26 +1,26 @@
 import XCTest
 @testable import podcasts
 
-/// SERVICE-LEVEL INTERRUPTION BRIDGE CONTROL
-/// (`docs/specs/cloud-assistant.md` → Interruption at pinned `9e309cc1`; spec 4162e87f/bdebbe2f;
-/// reviewer ff00457c/cf5017be).
+/// SERVICE-LEVEL interruption bridge control
+/// (`docs/specs/cloud-assistant.md` → Interruption at pinned `9e309cc1`; /bdebbe2f;
+/// /cf5017be).
 ///
-/// WHY THIS EXISTS. `InterruptionOrderingControl` drives `CloudRouteSink` DIRECTLY. That proves the
-/// sink's own ordering but NOT the bridge from "the acknowledgement released the follow-up" to "the
+/// WHY this exists. `InterruptionOrderingControl` drives `CloudRouteSink` DIRECTLY. That proves the
+/// sink's own ordering but not the bridge from "the acknowledgement released the follow-up" to "the
 /// service submitted it": the sink control never executes `VoiceControlService`'s call sites. Both
-/// @spec and @reviewer require this control separately, and it already earned its keep — the sink
+/// and require this control separately, and it already earned its keep — the sink
 /// controls could not see that `submitRetainedFollowUpIfAny` was wired into only one of three
 /// `executor.execute` paths.
 ///
-/// WHAT MAKES IT DETERMINISTIC. The service runs routing inputs through a SERIAL CHAIN
+/// WHAT makes it deterministic. The service runs routing inputs through a SERIAL chain
 /// (`enqueueRoutingInput` → `transcriptSerialTask`) and reports `onInputTerminal` for every turn.
 /// So:
-///   - turn 1 is parked in its OWN receive, which keeps it in flight;
-///   - turn 2 is enqueued behind it and cannot race it;
-///   - the test delivers turn 1's terminal deliberately, then awaits the terminal signal.
+/// - turn 1 is parked in its OWN receive, which keeps it in flight;
+/// - turn 2 is enqueued behind it and cannot race it;
+/// - the test delivers turn 1's terminal deliberately, then awaits the terminal signal.
 /// No polls decide correctness; the bounded waits only bound FAILURE.
 ///
-/// EVERY CASE ASSERTS THE BRIDGE WAS REACHED. An earlier version of this file passed five times
+/// every case asserts the bridge was reached. An earlier version of this file passed five times
 /// while the bridge never ran at all (gate never listening; then both turns ran to completion; then
 /// the park woke only on retirement and the prior turn ended in a REFUSAL; then the park swallowed
 /// the terminal; then the interrupt stopped firing). The premises below are hard failures, never
@@ -63,7 +63,7 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
             lock.lock(); entries.append((id, outcome)); lock.unlock()
         }
         var all: [String] { lock.lock(); defer { lock.unlock() }; return entries.map(\.id) }
-        /// HOW EACH LINK ENDED, per utterance. Two tasks can carry the same utterance id (the
+        /// HOW each link ended, per utterance. Two tasks can carry the same utterance id (the
         /// queued link and the bridge's recursive dispatch), so a count of ids alone cannot say
         /// whether both settled — the dispositions can.
         func outcomes(for id: String) -> [VoiceControlService.InputTerminalOutcome] {
@@ -103,7 +103,7 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
         Self.startedServices.removeAll()
         VoiceControlTestObservers.dispatchOwnership = nil
         VoiceControlTestObservers.followUpTaken = nil
-        // UNCONDITIONAL RELEASE: a case that fails mid-way must not leave a turn parked forever
+        // UNCONDITIONAL release: a case that fails mid-way must not leave a turn parked forever
         // and wedge later cases in this file.
         firstTurnLatch.release()
         CloudRouteTestURLProtocol.reset()
@@ -180,7 +180,7 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
                         // Two traps measured here, both of which produced green-but-vacuous runs:
                         // `holdUntilReleased(_ gate:)` wakes only when the socket is RETIRED, so
                         // the turn ended `connection_lost` (a refusal, never the acknowledgement);
-                        // `holdUntilReleased(_ latch:)` parks EVERY receive, so the terminal was
+                        // `holdUntilReleased(_ latch:)` parks every receive, so the terminal was
                         // never reached.
                         if index == 1 {
                             task.holdFirstReceiveUntilReleased(firstTurnLatch)
@@ -236,7 +236,7 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
         return service
     }
 
-    /// Speak a turn through the SERVICE'S OWN ENTRY POINT.
+    /// Speak a turn through the SERVICE'S OWN entry point.
     ///
     /// This used to call `handleRoutingInput` directly, which is the DISPATCH function — it skips
     /// `enqueueRoutingInput` and therefore the serial chain and every admission-time step with it.
@@ -274,17 +274,17 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
         XCTAssertTrue(interruptFrames().isEmpty, "an ordinary turn interrupts nothing")
     }
 
-    // MARK: - THE PREMISE spec required: a live barge-in is reachable at all
+    // MARK: - THE premise spec required: a live barge-in is reachable at all
 
-    /// TURN 2 CAN INTERRUPT A STILL-LIVE TURN 1 — asserted on the TRANSPORT's own boundaries.
+    /// TURN 2 CAN interrupt A STILL-LIVE turn 1 — asserted on the TRANSPORT's own boundaries.
     ///
     /// The serial chain makes this the whole question: a successor cannot run until its
     /// predecessor completes, so without the eager admission step no interrupt can ever be sent
     /// while the predecessor socket is open. Every claim below is read from the transport, not
     /// inferred from elapsed time:
-    ///   - `receiveEntered` — the predecessor's receiver is live;
-    ///   - `terminalWithheld` — its scripted terminal is PARKED, so the turn is genuinely in flight;
-    ///   - `sentInterrupt` — the interrupt left on THAT socket.
+    /// - `receiveEntered` — the predecessor's receiver is live;
+    /// - `terminalWithheld` — its scripted terminal is PARKED, so the turn is genuinely in flight;
+    /// - `sentInterrupt` — the interrupt left on THAT socket.
     /// The bounded premise wait FAILS if the predecessor is not parked; it never waits out an
     /// acknowledgement timeout and calls the result live.
     func testBargeInReachesTheWireWhileThePredecessorIsStillLive() async throws {
@@ -292,9 +292,9 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
         let sink = service.executorForTesting.cloudRouteSinkForTesting
 
         speak(service, "first question", "u-prior")
-        // BOUNDED PREMISE WAIT: fail if turn 1 never parks. A timeout here is a premise failure,
+        // BOUNDED premise wait: fail if turn 1 never parks. A timeout here is a premise failure,
         // not evidence of a live predecessor.
-        // GENEROUS PREMISE WAIT UNDER LOAD (measured): 5s was not enough in a 128-test run — the
+        // GENEROUS premise wait under load (measured): 5s was not enough in a 128-test run — the
         // service must reach listening, acquire a route, dial and park, and under full-suite load
         // that exceeded the bound, failing the premise rather than the behaviour. 20s is a bound,
         // not a wait: a healthy run returns as soon as the park exists.
@@ -327,7 +327,7 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
             (priorSocket.sentTextFrames.first { $0.contains("\"interrupt\"") } ?? "").contains("u-prior"),
             "the interrupt must name the live predecessor: \(priorSocket.sentTextFrames)"
         )
-        // THE POINT, read from the transport: still withheld, so still in flight.
+        // THE point, read from the transport: still withheld, so still in flight.
         XCTAssertTrue(
             priorSocket.terminalWithheld && !priorSocket.terminalReleased,
             "the interrupt must be sent BEFORE the predecessor's terminal is released"
@@ -340,7 +340,7 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
 
     // MARK: - The bridge
 
-    /// ACKNOWLEDGEMENT FIRST — the follow-up is submitted once, and only after the acknowledgement.
+    /// ACKNOWLEDGEMENT first — the follow-up is submitted once, and only after the acknowledgement.
     ///
     /// The earlier version of this case returned as soon as the FIRST successor auth appeared. That
     /// snapshot cannot distinguish "exactly once" from "the first of two": A's recursive bridge and
@@ -370,7 +370,7 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
             "nothing may be submitted before the acknowledgement; frames=\(allFrames())"
         )
 
-        // DELIVER TURN 1'S REAL TERMINAL — this is the acknowledgement.
+        // DELIVER turn 1'S REAL terminal — this is the acknowledgement.
         firstTurnLatch.release()
 
         // A's link settles FIRST, and it is what triggers the bridge. Awaiting it separately keeps
@@ -381,7 +381,7 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
             "A's queued link must reach a terminal after the acknowledgement; terminals=\(self.terminals.all)"
         )
 
-        // THE BRIDGE, OBSERVED DIRECTLY. The reviewer's point stands: `onInputTerminal` fires in
+        // THE bridge, OBSERVED directly. The reviewer's point stands: `onInputTerminal` fires in
         // the ENQUEUE task's defer, so a recursive `handleRoutingInput` from the bridge produces no
         // second terminal entry — a count of terminals cannot show whether the bridge ran. These
         // read the bridge's own take instead.
@@ -396,7 +396,7 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
             + "owner; measured=\(bridgeTakes.all)"
         )
 
-        // ONE EXECUTION PATH, EXPLICITLY CHOSEN (reviewer ca629c34). The bridge owns B once it has
+        // ONE execution path, EXPLICITLY chosen. The bridge owns B once it has
         // taken it; B's queued link must be RETIRED before classification, so no second dispatch is
         // even ATTEMPTED. Pinning "the duplicate is observed" would enshrine dedup as the mechanism;
         // the requirement is that ownership was transferred, and dedup never had to fire.
@@ -425,7 +425,7 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
             + "here would mean it still executed; measured=\(terminals.outcomes(for: "u-barge"))"
         )
 
-        // THE OUTBOUND CLAIM, counted after both terminals and both dispatches.
+        // THE outbound claim, counted after both terminals and both dispatches.
         XCTAssertEqual(
             authFrames(for: "u-barge").count, 1,
             "the follow-up must be submitted EXACTLY once; frames=\(allFrames()) "
@@ -439,7 +439,7 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
 
     // SinglePredecessorInterruptionControl covers final zero-auth disposal with one A/B pair.
 
-    /// REFUSAL FIRST — a refused interruption never submits its retained utterance.
+    /// REFUSAL first — a refused interruption never submits its retained utterance.
     ///
     /// Asserted at the state boundary the contract names, because driving the ordering through the
     /// full service is not deterministic with a shared fixture: the refusal terminal can arrive
@@ -488,9 +488,9 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
         )
     }
 
-    // MARK: - Buffered playback after `done` (reviewer eaa8c06a item 4)
+    // MARK: - Buffered playback after `done`
 
-    /// AN ORDINARY TURN THAT SETTLES WITH BUFFERED AUDIO OWES A REPORT ONLY IF INTERRUPTED.
+    /// AN ORDINARY turn that settles with buffered audio owes A REPORT only if interrupted.
     ///
     /// The report could not be recorded at `done`: `done` says the server finished sending and
     /// audio remains, not that the user ever stops the remainder. And gating it on an
@@ -522,7 +522,7 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
         )
         XCTAssertFalse(state.hasPendingReport, "still nothing owed")
 
-        // THE OWNER STOPPED SHORT: the report is created exactly here.
+        // THE owner stopped short: the report is created exactly here.
         let interrupted = state.takeBufferedPlayback(ifOwnedBy: owner)
         XCTAssertEqual(interrupted?.requestId, "u-settled")
         XCTAssertEqual(interrupted?.playbackPositionMs, 4200)
@@ -535,7 +535,7 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
         )
     }
 
-    /// AUDIO THAT DRAINS ON ITS OWN OWES NOTHING.
+    /// AUDIO that drains on its own owes nothing.
     func testBufferedPlaybackThatDrainsProducesNoReport() async {
         let state = CloudInterruptionState()
         let owner = NSObject()
@@ -550,7 +550,7 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
         XCTAssertFalse(state.hasPendingReport)
     }
 
-    // MARK: - Retained input preserves the COMPLETE admitted capture (reviewer b8af462e)
+    // MARK: - Retained input preserves the COMPLETE admitted capture
 
     /// Selection alone does not establish complete-input preservation, so the retained record
     /// carries the original source transcript, language and translation regime — and the release
@@ -582,7 +582,7 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
         )
     }
 
-    /// AN UNDELIVERED INTERRUPT SUPPRESSES ITS UTTERANCE (reviewer eaa8c06a item 1).
+    /// AN UNDELIVERED interrupt suppresses its utterance.
     ///
     /// The eager path used to return nil here without suppressing, which left the input queued
     /// with nothing stopping it: it went on to authenticate as an ordinary question, asserting a

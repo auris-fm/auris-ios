@@ -67,7 +67,7 @@ final class OperationJournalTests: XCTestCase {
 
     /// The case the durable store exists for: a claim written before the mutation, seen again
     /// by a later process. The effect is not knowable, so the answer is `unknown` and the
-    /// operation is NOT executed again.
+    /// operation is not executed again.
     func test_anOperationLeftInProgress_isReconstructedAsUnknownAndNotReExecuted() {
         let store = InMemoryOperationRecordStore()
         let first = OperationJournal(store: store)
@@ -120,7 +120,7 @@ final class OperationJournalTests: XCTestCase {
     // MARK: - the result contract
 
     /// `preventsReExecution` answers one question: may this operation be executed again?
-    /// Every outcome stops it — including `unknown`, whose whole point is that it must NOT be
+    /// Every outcome stops it — including `unknown`, whose whole point is that it must not be
     /// re-run. It says nothing about whether the effect is known, which is why `unknown` stops
     /// re-execution while still not being a success.
     func test_everyOutcomePreventsReExecution() {
@@ -217,7 +217,7 @@ final class OperationJournalTests: XCTestCase {
     }
 
     func test_theFileBackedStore_recoversFromUnreadableContent() {
-        // Unreadable durable history now FAILS CLOSED (PR #49 review): every claim is refused
+        // Unreadable durable history now FAILS closed (PR #49 review): every claim is refused
         // with .persistenceUnavailable instead of silently starting from empty history — an
         // operation that could not be exactly-once recorded must never reach its effect.
         let url = makeFileURL()

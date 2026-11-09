@@ -71,7 +71,7 @@ final class GracePeriodSignalTests: XCTestCase {
         cancellable?.cancel()
     }
 
-    /// RETIREMENT AT THE SIGNAL: a generation that a privacy close RETIRED must be REFUSED by
+    /// RETIREMENT at the signal: a generation that a privacy close RETIRED must be REFUSED by
     /// `recognizeCommandIfCurrentWindow`, so a caller holding a stale generation cannot reset the
     /// allowance while a successor window is live.
     ///
@@ -79,8 +79,8 @@ final class GracePeriodSignalTests: XCTestCase {
     /// calls `recognizeCommandIfCurrentWindow` directly and constructs NO service, NO engine callback,
     /// and NO `CloudRouteIntent` — so it shows the SIGNAL refuses a retired generation, not that any
     /// installed path passes the right generation to it. That carriage is a separate subject.
-    /// OWNER DELTA 8fe04cd/0aa4480, CORRECTED (spec 3893cd55 / reviewer 724db1e8): a hold alone
-    /// does NOT preserve the window through foreground loss — preservation requires an
+    /// OWNER delta 8fe04cd/0aa4480, CORRECTED: a hold alone
+    /// does not preserve the window through foreground loss — preservation requires an
     /// INDEPENDENT playback context (an eligible episode). Grace must not self-sustain.
     @MainActor
     func testForegroundLossWithRealPlaybackContextPreservesTheWindow() async throws {
@@ -102,7 +102,7 @@ final class GracePeriodSignalTests: XCTestCase {
         XCTAssertNotEqual(signal.currentGeneration(), generation, "the ended window's generation is retired")
     }
 
-    /// CONTEXT ALONE is not preservation either (reviewer 0c546ce5 item 1): preservation is
+    /// CONTEXT alone is not preservation either: preservation is
     /// hold AND context. Backgrounding with a paused episode but NO live hold ends the window —
     /// there is no held work to preserve, and context must not keep an empty window alive.
     @MainActor
@@ -120,8 +120,8 @@ final class GracePeriodSignalTests: XCTestCase {
         )
     }
 
-    /// PRODUCTION-BINDING CONTROL (reviewer 0c546ce5 item 2): the last genuine context is lost
-    /// WHILE ALREADY BACKGROUNDED through the REAL publisher path — the playback notification
+    /// PRODUCTION-BINDING control: the last genuine context is lost
+    /// WHILE already backgrounded through the REAL publisher path — the playback notification
     /// re-samples the provider, the gate resolves `.none`, and the monitor retires the grace
     /// window. No lifecycle notification fires. After retirement: the live origin is cleared,
     /// a late completion is refused, and a later context RECOVERY cannot restore the old grace.
@@ -226,7 +226,7 @@ final class GracePeriodSignalTests: XCTestCase {
         let stamped = signal.currentGeneration()
         XCTAssertTrue(signal.isActive, "the window must be open when the turn stamps it")
 
-        // PRIVACY CLOSE: backgrounding retires everything stamped under that window.
+        // PRIVACY close: backgrounding retires everything stamped under that window.
         signal.onAppBackgrounded()
         XCTAssertFalse(signal.isActive, "backgrounding must end the window")
         let afterRetirement = signal.currentGeneration()
@@ -244,7 +244,7 @@ final class GracePeriodSignalTests: XCTestCase {
         XCTAssertTrue(signal.isActive, "the new window must be OPEN so isActive cannot be the refuser")
         XCTAssertNotEqual(stamped, live, "the new window's generation must differ from the retired one")
 
-        // THE ASSERTIONS: the retired generation is refused WHILE a window is live; the live one is
+        // THE assertions: the retired generation is refused WHILE a window is live; the live one is
         // accepted. Both directions, or the refusal would pass even if the gate refused everything.
         XCTAssertFalse(
             signal.recognizeCommandIfCurrentWindow(stamped),

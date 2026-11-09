@@ -4,7 +4,7 @@ import XCTest
 @testable import PocketCastsUtils
 @testable import podcasts
 
-/// KNOWN-OUTCOME RETRY CONTROLS (reviewer 2ba0220e, 4546a238, fa9db8e9).
+/// KNOWN-OUTCOME retry controls.
 ///
 /// The retry paths were the defect surface: a resume that suspends on a credential, then decides
 /// what to do with an operation whose outcome is UNKNOWN. These controls drive only the PUBLIC
@@ -112,7 +112,7 @@ final class VoiceSharingDelayedCredentialRetryControls: XCTestCase {
         return URLSession(configuration: configuration)
     }
 
-    /// EVERY identity reader follows the live session (reviewer b4d5eb71). Pinning the client's
+    /// every identity reader follows the live session. Pinning the client's
     /// `sessionIdentity` to a constant made an account move invisible to the client's own token
     /// fence, which is exactly the fence this control is meant to exercise.
     @MainActor
@@ -212,10 +212,10 @@ final class VoiceSharingDelayedCredentialRetryControls: XCTestCase {
     /// its completion. The suspension is real; the transition is a genuine account move through the
     /// store, not a manufactured status.
     ///
-    /// What this control is careful NOT to claim: the earlier version expected `.sending` and failed
+    /// What this control is careful not to claim: the earlier version expected `.sending` and failed
     /// with `.unavailable`, because the model's own `storeChanged()` (an observer hop, not the
     /// completion path) already adjusted the status when the transition landed. The property that
-    /// matters is that the STALE COMPLETION wrote nothing: the durable operation was retired with
+    /// matters is that the STALE completion wrote nothing: the durable operation was retired with
     /// the old session, and the returned result never touched it.
     @MainActor
     func test_anAccountTransitionDuringTheCredentialAwaitDoesNotApplyTheStaleCompletion() async throws {
@@ -229,7 +229,7 @@ final class VoiceSharingDelayedCredentialRetryControls: XCTestCase {
             let inflight = Task { await model.deleteAcceptedData(confirmed: true) }
             while !tokens.hasStarted() { await Task.yield() }
 
-            // THE TRANSITION lands inside the await: the LIVE session moves to another account.
+            // THE transition lands inside the await: the LIVE session moves to another account.
             ServerSettings.userId = "acct-2"
             store.transitionToAccount(signedIn: true)
             tokens.release("tok")
@@ -237,12 +237,12 @@ final class VoiceSharingDelayedCredentialRetryControls: XCTestCase {
 
             XCTAssertNil(model.pendingDeletionRequestIDForTesting,
                          "the operation belonged to the retired session and was not resurrected")
-            // NO RETIRED DELETE REACHED THE WIRE: the client's token fence must have refused it,
+            // NO RETIRED delete reached the wire: the client's token fence must have refused it,
             // not merely the model's state.
             let deletes = Wire.deletionBodies()
             XCTAssertTrue(deletes.isEmpty,
                           "the retired session's DELETE must not be sent: \(deletes)")
-            // The STALE COMPLETION specifically: the retired attempt returned `.unavailableBackend`
+            // The STALE completion specifically: the retired attempt returned `.unavailableBackend`
             // (its session moved), which RETAINS an operation. If that branch were applied, the
             // retired deletion would still be pending now. It must not be.
             XCTAssertEqual(model.deletionStatus, .idle,

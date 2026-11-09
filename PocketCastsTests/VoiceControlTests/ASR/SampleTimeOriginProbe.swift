@@ -1,7 +1,7 @@
 import AVFoundation
 import XCTest
 
-/// VERIFIED SAMPLE-TIME ORIGIN EXPERIMENT.
+/// VERIFIED sample-TIME origin experiment.
 ///
 /// The player renders control file A (pure tone, L_A frames) scheduled at nil, then impulse file B
 /// (frame 0 = impulse) scheduled at `AVAudioTime(sampleTime: L_A, atRate: R)` in the PLAYER's own
@@ -10,8 +10,8 @@ import XCTest
 ///
 /// The tap on the PLAYER node reports each callback's sampleTime T, frames N, and the impulse's
 /// sub-index j. The two hypotheses predict B's origin differently:
-///   END   predicts origin = T - N + j
-///   START predicts origin = T + j
+/// END predicts origin = T - N + j
+/// START predicts origin = T + j
 /// Comparing each against the scheduled L_A is the discrimination, all in one recorded domain.
 final class SampleTimeOriginProbe: XCTestCase {
 
@@ -67,7 +67,7 @@ final class SampleTimeOriginProbe: XCTestCase {
 
         try engine.start()
         player.scheduleFile(controlFile, at: nil)
-        // THE SCHEDULED ORIGIN: impulse frame 0 at player sample L_A.
+        // THE scheduled origin: impulse frame 0 at player sample L_A.
         player.scheduleFile(impulseFile, at: AVAudioTime(sampleTime: AVAudioFramePosition(controlFrames), atRate: rate))
         player.play()
 

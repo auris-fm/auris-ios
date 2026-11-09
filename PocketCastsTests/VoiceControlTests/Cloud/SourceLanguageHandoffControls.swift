@@ -1,16 +1,16 @@
 import XCTest
 @testable import podcasts
 
-/// ACTUAL-ASR → SERVICE HANDOFF → REAL AUTHENTICATE controls (core b6eafe25, reviewer 4feb0e39).
+/// ACTUAL-ASR → SERVICE handoff → REAL authenticate controls.
 ///
 /// These drive the REAL service dispatch paths — `VoiceControlService.handleRoutingInput` through
 /// the router, executor, and sink into a REAL `CloudRouteClient` whose Authenticate frame is
 /// captured — not a `client.route` call that bypasses the handoffs. Two paths, both required:
 ///
-///   - SELECTED (model-chosen `cloud_route`): the router classifies cloud_route and the service
-///     stamps the input's preserved source fields into the reconstructed intent.
-///   - FALLBACK (routing-failure escalation): the router fails, and the escalation constructs the
-///     dispatch intent directly from the input.
+/// - SELECTED (model-chosen `cloud_route`): the router classifies cloud_route and the service
+/// stamps the input's preserved source fields into the reconstructed intent.
+/// - FALLBACK (routing-failure escalation): the router fails, and the escalation constructs the
+/// dispatch intent directly from the input.
 ///
 /// Each case asserts the exact wire facts: the wake-trimmed source utterance is the runtime
 /// `request` when one exists, the actual ASR LID rides `source_language` (yue stays yue), an
@@ -205,7 +205,7 @@ final class SourceLanguageHandoffControls: XCTestCase {
         }
     }
 
-    /// LOCAL-ENGLISH control (reviewer 4af8d2d5 + 9d6dc5a7): an English utterance whose router
+    /// LOCAL-ENGLISH control: an English utterance whose router
     /// classification is a LOCAL action (1) actually executes locally — the recording playback
     /// manager observes the real pause invocation and the parsed-intent observer sees the
     /// PlaybackIntent the English routing input produced — and (2) never dispatches to the cloud
@@ -277,7 +277,7 @@ final class SourceLanguageHandoffControls: XCTestCase {
         // Bounded settle: a cloud dispatch would open a socket within this window.
         try await Task.sleep(nanoseconds: 1_500_000_000)
 
-        // ACTUAL CLASSIFICATION INPUT: the router consumed the ENGLISH protocol text "pause
+        // ACTUAL classification input: the router consumed the ENGLISH protocol text "pause
         // playback" (the recorded tokenized routing input contains it verbatim).
         XCTAssertTrue(
             inference.tokenizedTexts.contains { $0.contains("pause playback") },
@@ -285,7 +285,7 @@ final class SourceLanguageHandoffControls: XCTestCase {
                 + "\(inference.tokenizedTexts)"
         )
 
-        // ACTUAL LOCAL EXECUTION: the English router input produced a local pause intent and the
+        // ACTUAL local execution: the English router input produced a local pause intent and the
         // playback manager REALLY received the pause.
         let intents = intentBox.intents
         XCTAssertTrue(
@@ -297,7 +297,7 @@ final class SourceLanguageHandoffControls: XCTestCase {
             "the local pause must ACTUALLY execute against the playback sink"
         )
 
-        // ZERO CLOUD: routing stayed local.
+        // ZERO cloud: routing stayed local.
         XCTAssertTrue(
             box.tasks.isEmpty,
             "a local action must never dispatch to the cloud — \(box.tasks.count) auth frames observed"
@@ -309,7 +309,7 @@ final class SourceLanguageHandoffControls: XCTestCase {
     }
 
     /// Standalone LfmInference that records the exact texts reaching tokenization — the
-    /// observable classification input (reviewer 9a336798). `FakeLfmInference` is final, so this
+    /// observable classification input. `FakeLfmInference` is final, so this
     /// is its own conformer: same stub behaviour, plus the recorded routing text.
     final class RecordingLfmInference: LfmInference {
         private(set) var tokenizedTexts: [String] = []
@@ -335,7 +335,7 @@ final class SourceLanguageHandoffControls: XCTestCase {
         func release() {}
     }
 
-    /// Records ACTUAL local playback invocations (reviewer 9d6dc5a7).
+    /// Records ACTUAL local playback invocations.
     final class RecordingPlaybackSink: VoicePlaybackSink {
         private(set) var pauseCalls = 0
         var isPlaying = false

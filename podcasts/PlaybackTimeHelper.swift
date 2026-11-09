@@ -8,7 +8,7 @@ struct PlaybackTimeHelper {
     }
 
     /// This returns the total seconds of `playedUpTo` for episodes played in the last 7 days
-    /// This DOES NOT return the accurate playtime from the last 7 days.
+    /// This DOES not return the accurate playtime from the last 7 days.
     func playedUpToSumInLastSevenDays() -> Double {
         let query = "lastPlaybackInteractionDate IS NOT NULL AND lastPlaybackInteractionDate > 0 ORDER BY lastPlaybackInteractionDate DESC LIMIT 1000"
 

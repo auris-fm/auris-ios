@@ -1,9 +1,9 @@
 //
-//  PlusLabel.swift
-//  podcasts
+// PlusLabel.swift
+// podcasts
 //
-//  Created by Brandon Titus on 1/11/24.
-//  Copyright © 2024 Shifty Jelly. All rights reserved.
+// Created by Brandon Titus on 1/11/24.
+// Copyright © 2024 Shifty Jelly. All rights reserved.
 //
 
 import SwiftUI

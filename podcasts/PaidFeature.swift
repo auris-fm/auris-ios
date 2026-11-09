@@ -44,9 +44,9 @@ class PaidFeature: ObservableObject {
 
     /// Creates a new paid feature with a minimum tier
     /// - Parameters:
-    ///   - tier: The minimum tier required to unlock
-    ///   - betaTier: The minimum tier required when running in the app beta
-    ///   - inEarlyAccess: Whether this feature is in its early access period or not.
+    /// - tier: The minimum tier required to unlock
+    /// - betaTier: The minimum tier required when running in the app beta
+    /// - inEarlyAccess: Whether this feature is in its early access period or not.
     init(tier: SubscriptionTier,
          betaTier: SubscriptionTier? = nil,
          inEarlyAccess: Bool = false,

@@ -113,18 +113,18 @@ open class EarconPlayer {
         // The mixer BUS this player feeds, and its format, read from the live graph.
         //
         // Why not the obvious probes (each was tried and failed for an AVFoundation reason):
-        //   * `engine.inputNode.inputFormat(forBus: 0)` reported 0.0. This player never touches
-        //     the input node, so that answer describes capture, not the earcon graph.
-        //   * `player.inputFormat(forBus: 0)` raised an ObjC NSRangeException ("index 0 beyond
-        //     bounds for empty array") on a node with no incoming connection. Not a Swift error,
-        //     so it cannot be caught; it aborts the test host outright.
-        //   * `player.numberOfInputs` is 0 here BY DESIGN: `init` connects the player only
-        //     OUTGOING (`connect(player, to: mainMixerNode, format:)`). Any guard that asks
-        //     whether something feeds the player is therefore guaranteed to answer "no", which
-        //     is why an earlier version of this probe returned nil even when the code under test
-        //     was correct. A probe that can only fail measures nothing.
-        //   * `AVAudioEngine.connectionPoints(forInputNode:)`, `AVAudioMixerNode.inputBuses` and
-        //     `AVAudioMixerNode.inputConnectionPoint(for:)` do not exist; each failed to compile.
+        // * `engine.inputNode.inputFormat(forBus: 0)` reported 0.0. This player never touches
+        // the input node, so that answer describes capture, not the earcon graph.
+        // * `player.inputFormat(forBus: 0)` raised an ObjC NSRangeException ("index 0 beyond
+        // bounds for empty array") on a node with no incoming connection. Not a Swift error,
+        // so it cannot be caught; it aborts the test host outright.
+        // * `player.numberOfInputs` is 0 here BY DESIGN: `init` connects the player only
+        // OUTGOING (`connect(player, to: mainMixerNode, format:)`). Any guard that asks
+        // whether something feeds the player is therefore guaranteed to answer "no", which
+        // is why an earlier version of this probe returned nil even when the code under test
+        // was correct. A probe that can only fail measures nothing.
+        // * `AVAudioEngine.connectionPoints(forInputNode:)`, `AVAudioMixerNode.inputBuses` and
+        // `AVAudioMixerNode.inputConnectionPoint(for:)` do not exist; each failed to compile.
         //
         // `inputConnectionPoint(for:inputBus:)` on the ENGINE is the accessor this codebase
         // already uses for the same question (EpisodeOutputTap's feeder search). It returns a

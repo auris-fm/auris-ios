@@ -29,9 +29,9 @@ extension UIViewController {
 
     /// Dismisses the presented controller if there is one, then calls the completion block
     /// - Parameters:
-    ///   - sourceController: The source controller to dismiss from. This defaults to `self` if its nil.
-    ///   - animated: Whether to animate the dismiss or not
-    ///   - completion: The optional completion block to call after the view is dismissed.
+    /// - sourceController: The source controller to dismiss from. This defaults to `self` if its nil.
+    /// - animated: Whether to animate the dismiss or not
+    /// - completion: The optional completion block to call after the view is dismissed.
     func dismissIfNeeded(sourceController: UIViewController? = nil, animated: Bool = true, completion: (() -> Void)? = nil) {
         let sourceController = sourceController ?? self
 

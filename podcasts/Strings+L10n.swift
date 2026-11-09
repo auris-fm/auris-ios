@@ -23,7 +23,7 @@ extension L10n {
     /* Support request screen title for opening a request for support (instead of providing feedback) */
     static let support = "Support"
 
-    /// When localizing  this text should be transitioned to use `L10n.cancel`
+    /// When localizing this text should be transitioned to use `L10n.cancel`
     static let supportCancel = "Cancel"
 
     /* Persistent prompt on the support request screen for the user to enter a description about their request */
@@ -53,7 +53,7 @@ extension L10n {
     /* Title for the display field that shows the attached meta data */
     static let supportLogsMetaData = "Meta Data:"
 
-    /// When localizing  this text should be transitioned to use `L10n.podcastsPlural + ":"`
+    /// When localizing this text should be transitioned to use `L10n.podcastsPlural + ":"`
     static let supportLogsPodcasts = "Podcasts:"
 
     /* Title for the display field that shows the attached tags */
@@ -68,7 +68,7 @@ extension L10n {
     /* Placeholder in the name text box */
     static let supportNamePlaceholder = "Enter your name"
 
-    /// When localizing  this text should be transitioned to use `L10n.ok`
+    /// When localizing this text should be transitioned to use `L10n.ok`
     static let supportOK = "Ok"
 
     /* Prompt to submit a service request. */

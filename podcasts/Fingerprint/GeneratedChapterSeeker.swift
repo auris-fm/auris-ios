@@ -24,10 +24,10 @@ enum GeneratedChapterSeeker {
     /// Resolve `chapter` to its real playback position and seek there.
     ///
     /// - `willBeginResolving` / `didEndResolving` bracket the async fingerprint
-    ///   resolve so callers can show a spinner. Neither fires on the
-    ///   already-resolved cache hit, which seeks synchronously.
+    /// resolve so callers can show a spinner. Neither fires on the
+    /// already-resolved cache hit, which seeks synchronously.
     /// - `startPlayback` matches each call site's existing behaviour: the chapters
-    ///   list starts playback on a tap, the player's skip buttons don't.
+    /// list starts playback on a tap, the player's skip buttons don't.
     ///
     /// Must be called on the main queue.
     static func seek(

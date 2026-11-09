@@ -2,7 +2,7 @@ import XCTest
 import AVFoundation
 @testable import podcasts
 
-/// Contract (@spec, 2026-10-18): queue emptiness is NOT proof that scheduled audio finished
+/// Contract (): queue emptiness is not proof that scheduled audio finished
 /// rendering, and must not trigger a stop/rotation that discards still-pending audible work. The
 /// rendering incarnation stays alive until MEASURED render progress drains its scheduled frames —
 /// or an explicit stop/reset. Recorded emitted ranges are historical evidence for THAT incarnation;

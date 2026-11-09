@@ -1247,11 +1247,11 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
     /// `referenceTime` — the window always starts at or after it.
     ///
     /// - Warm (`estimatedPlayback` from an existing mapping): center on the
-    ///   estimate, allowing it to be earlier (a smaller offset earlier in the
-    ///   episode) by up to `onDemandSeekBackwardMaxSeconds` and later (more
-    ///   intervening ads) by up to `onDemandSeekForwardBudgetSeconds`.
+    /// estimate, allowing it to be earlier (a smaller offset earlier in the
+    /// episode) by up to `onDemandSeekBackwardMaxSeconds` and later (more
+    /// intervening ads) by up to `onDemandSeekForwardBudgetSeconds`.
     /// - Cold (no mapping — the common case): search forward from the raw
-    ///   reference time up to `onDemandSeekColdBudgetSeconds`.
+    /// reference time up to `onDemandSeekColdBudgetSeconds`.
     static func searchWindow(referenceTime: Double, estimatedPlayback: Double?) -> (start: Double, end: Double) {
         if let estimate = estimatedPlayback {
             let start = max(referenceTime, estimate - FingerprintConstants.onDemandSeekBackwardMaxSeconds)
@@ -1941,12 +1941,12 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
     /// `driftBootstrapCount` consecutive rate-≈1 candidates in a row.**
     ///
     /// - Fast path: candidate is in-trend with `filterLastTrusted` → commit
-    ///   immediately, flush any pooled candidates as rejections (a prior jump
-    ///   attempt that didn't pan out turned out to be noise).
+    /// immediately, flush any pooled candidates as rejections (a prior jump
+    /// attempt that didn't pan out turned out to be noise).
     /// - Slow path: candidate goes into `filterCandidatePool`. Once the pool's
-    ///   tail is `driftBootstrapCount` consecutive consistent entries, commit
-    ///   them all and drop anything before as rejections. Otherwise evict the
-    ///   oldest and keep rolling.
+    /// tail is `driftBootstrapCount` consecutive consistent entries, commit
+    /// them all and drop anything before as rejections. Otherwise evict the
+    /// oldest and keep rolling.
     ///
     /// This is the same rule for the initial bootstrap (no `lastTrusted` yet)
     /// and for post-trusted jumps, so a single lucky pair can never admit an
@@ -2166,8 +2166,8 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
     ///
     /// - `.downloaded` is a complete file — the existing read-to-EOF loop handles it.
     /// - `.streaming` points at the AVPlayer-written buffer, which may be absent at
-    ///   call time or still growing. The grow-loop waits for it to appear and
-    ///   polls for new bytes.
+    /// call time or still growing. The grow-loop waits for it to appear and
+    /// polls for new bytes.
     private enum AudioSource {
         case downloaded(URL)
         case streaming(URL)

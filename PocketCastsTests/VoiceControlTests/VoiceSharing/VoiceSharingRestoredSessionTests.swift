@@ -2,7 +2,7 @@ import XCTest
 
 @testable import podcasts
 
-/// Projection refresh controls for the SIMPLIFIED contract (spec `4afc6e43`).
+/// Projection refresh controls for the SIMPLIFIED contract.
 ///
 /// The whole restored-session settlement machinery — identity digests, owner-readiness polling,
 /// retry ticks, generation provenance — is deleted. What remains of the coordinator's server
@@ -80,7 +80,7 @@ final class VoiceSharingRestoredSessionTests: XCTestCase {
         await coordinator.refreshProjectionFromServer(accountClient: makeClient(store))
 
         // Consent still stands (the user asked to share; a failed GET is not a decision for them),
-        // but no ACCOUNT AUTHORITY is invented: nothing was learned from the server.
+        // but no ACCOUNT authority is invented: nothing was learned from the server.
         XCTAssertFalse(store.currentEffectiveEnrolled, "a failed fetch grants nothing")
         XCTAssertNil(store.expectedMembershipRevision,
                      "and no revision is advertised for outbound mutations")

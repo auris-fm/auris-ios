@@ -6,8 +6,8 @@ class WhatsNewMessageViewController: PCHostingController<WhatsNewMessageView> {
     private let viewModel: WhatsNewMessageViewModel
 
     /// - Parameters:
-    ///   - hasResponded: Whether the account has already answered the message's poll, if it asks one.
-    ///   - onRespond: Called with the option the user answered the poll with.
+    /// - hasResponded: Whether the account has already answered the message's poll, if it asks one.
+    /// - onRespond: Called with the option the user answered the poll with.
     init(message: WhatsNewMessage,
          hasResponded: Bool = false,
          onRespond: ((WhatsNewPoll, WhatsNewPoll.Option) -> Void)? = nil) {

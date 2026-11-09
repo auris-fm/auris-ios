@@ -2,7 +2,7 @@
 import XCTest
 
 /// Controls for the capture telemetry that makes "no wake word" attributable
-/// (#core:25b91a1b `98ba5c48`).
+/// ().
 ///
 /// The observed problem was not a missing feature but a missing OBSERVATION: after `First buffer`
 /// (logged once per process) and the VAD's emit-only `vad ~` line, the log reported nothing about
@@ -22,7 +22,7 @@ final class CaptureTelemetryControl: XCTestCase {
         var telemetry = CaptureTelemetry()
         let start = Date()
 
-        // The first buffer alone must NOT report: `First buffer` already covers it, and a single
+        // The first buffer alone must not report: `First buffer` already covers it, and a single
         // buffer is not evidence of a healthy stream. This call also starts the interval clock.
         telemetry.record(rms: 0.004)
         XCTAssertNil(

@@ -1,17 +1,17 @@
 import AVFoundation
 import XCTest
 
-/// EXPLICIT-SCHEDULE ORIGIN EXPERIMENT (corrected setup).
+/// EXPLICIT-SCHEDULE origin experiment (corrected setup).
 ///
 /// A file whose FIRST sample is a marker is scheduled at an explicit HOST time, so the marker's
 /// render instant is stated by the schedule itself. The setup is established first (asserted
 /// target-ahead at submission, an audible control, synchronized polling, cleanup before start);
 /// only then are the two interpretations compared:
-///   START: the callback's buffer begins at its sampleTime, so the marker sits at (T + j)/rate
-///          after the buffer start → its host instant is hostTime-derived from the same event.
-///   END:   the callback's buffer ends at its sampleTime, so the buffer start is T - N and the
-///          marker sits at (T - N + j) → the marker's host instant is one buffer later in the
-///          START reading than in the END reading, a difference of N/rate seconds.
+/// START: the callback's buffer begins at its sampleTime, so the marker sits at (T + j)/rate
+/// after the buffer start → its host instant is hostTime-derived from the same event.
+/// END: the callback's buffer ends at its sampleTime, so the buffer start is T - N and the
+/// marker sits at (T - N + j) → the marker's host instant is one buffer later in the
+/// START reading than in the END reading, a difference of N/rate seconds.
 /// The comparison is between the marker's expected host instant (from the schedule) and the
 /// callback's own hostTime adjusted by the marker's index under each reading.
 final class ExplicitScheduleOriginProbe: XCTestCase {
@@ -72,7 +72,7 @@ final class ExplicitScheduleOriginProbe: XCTestCase {
         let secondsPerTick = Double(ti.numer) / Double(ti.denom) / 1_000_000_000.0
         let ticksPerSecond = 1.0 / secondsPerTick
 
-        // CLEANUP BEFORE START.
+        // CLEANUP before start.
         defer { engine.stop() }
         engine.prepare()
         try engine.start()
@@ -88,7 +88,7 @@ final class ExplicitScheduleOriginProbe: XCTestCase {
         }
         print("PROBE controlPeak=\(controlPeak)")
 
-        // TARGET COMPUTED AND ASSERTED IMMEDIATELY AT SUBMISSION.
+        // TARGET computed and asserted immediately at submission.
         let nowHost = mach_absolute_time()
         let target = nowHost + UInt64(0.5 * ticksPerSecond)
         let aheadSeconds = Double(target - mach_absolute_time()) * secondsPerTick
@@ -99,7 +99,7 @@ final class ExplicitScheduleOriginProbe: XCTestCase {
         player.scheduleFile(markerFile, at: AVAudioTime(hostTime: target))
         let targetSeconds = Double(target) * secondsPerTick
 
-        // SYNCHRONIZED POLL for the marker.
+        // SYNCHRONIZED poll for the marker.
         deadline = Date().addingTimeInterval(8)
         var marker: (sampleTime: Double, frames: Int, j: Int, hostSeconds: Double, rate: Double)? = nil
         while Date() < deadline {
@@ -118,13 +118,13 @@ final class ExplicitScheduleOriginProbe: XCTestCase {
         let m = try XCTUnwrap(marker, "the marker was never observed; the setup did not render it")
         print("PROBE marker T=\(m.sampleTime) N=\(m.frames) j=\(m.j) callbackHostSeconds=\(m.hostSeconds) targetSeconds=\(targetSeconds)")
         // Both readings expressed as the marker's own elapsed time from the schedule target.
-        // HOST-DOMAIN COMPARISON, no node-frame origin invented. The marker sits at SOURCE-FILE
+        // HOST-DOMAIN comparison, no node-frame origin invented. The marker sits at SOURCE-FILE
         // offset 0 (asserted below), so its expected host instant is the asserted schedule target.
         // Callback host instant H, marker index j, buffer length N, callback rate R:
-        //   START predicts the marker at H + j/R   (the buffer begins at H)
-        //   END   predicts the marker at H + (j-N)/R (the buffer ends at H)
+        // START predicts the marker at H + j/R (the buffer begins at H)
+        // END predicts the marker at H + (j-N)/R (the buffer ends at H)
         XCTAssertEqual(markerIndex, 0, "the marker must be at source offset 0 for this expected instant")
-        // R FROM THE CALLBACK BUFFER FORMAT, not the file rate: the comparison is only exact if R is
+        // R FROM the callback buffer format, not the file rate: the comparison is only exact if R is
         // the rate the reported sample times are counted in.
         let callbackRate = m.rate
         XCTAssertGreaterThan(callbackRate, 0, "the callback reported no rate")
@@ -139,7 +139,7 @@ final class ExplicitScheduleOriginProbe: XCTestCase {
         print("PROBE END   prediction=\(endPrediction) error=\(endError)")
         print("PROBE ONE_BUFFER=\(Double(m.frames) / callbackRate) (the gap between the predictions)")
 
-        // THE DISCRIMINATION, asserted. EXPECTED_PLACEMENT: sampleTime labels the buffer's START.
+        // THE discrimination, asserted. EXPECTED_PLACEMENT: sampleTime labels the buffer's START.
         // The START error must be within a small tolerance of the asserted schedule instant while
         // the END error is a full buffer away — a gap far outside any jitter seen here.
         XCTAssertLessThan(

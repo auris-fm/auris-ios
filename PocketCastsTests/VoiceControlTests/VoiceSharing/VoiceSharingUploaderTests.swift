@@ -90,7 +90,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         return try! JSONSerialization.data(withJSONObject: object)
     }
 
-    /// ATTEMPT-LIFETIME FENCE (spec 67dd62d7): the account/epoch moves WHILE the request is on the
+    /// ATTEMPT-LIFETIME fence: the account/epoch moves WHILE the request is on the
     /// wire, so a late 2xx arrives for an identity the entry no longer belongs to. It must not
     /// settle: the outcome is revoked, and the entry is retained rather than delivered.
     func test_identityChangeDuringFlightStopsALateSuccessFromSettling() async throws {
@@ -106,8 +106,8 @@ final class VoiceSharingUploaderTests: XCTestCase {
             currentIdentity: { box.current },
             endpoint: { URL(string: "https://unit.test/api/v1/contributions") },
             transport: { _, _, _ in
-                // A DIFFERENT ACCOUNT takes over while this request is in flight. A same-account
-                // re-enrollment is explicitly NOT this case (spec 4afc6e43): the epoch is
+                // A DIFFERENT account takes over while this request is in flight. A same-account
+                // re-enrollment is explicitly not this case: the epoch is
                 // provenance, so it must not settle or refuse anything.
                 box.current = VoiceSharingUploadIdentity(
                     accountScope: "acct-B", enrollmentEpoch: "epoch-1")
@@ -122,7 +122,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
                       "the entry is retained: not delivered under another account")
     }
 
-    /// LAUNCH FENCE (reviewer ee5b4547): the identity moves AFTER admission but BEFORE the
+    /// LAUNCH fence: the identity moves after admission but before the
     /// request is handed to the transport. No request may be built and sent: the outcome is
     /// revoked and the transport is never called. Post-response refusal cannot repair a
     /// disclosure, so the fence must sit before the wire, not after it.
@@ -133,8 +133,8 @@ final class VoiceSharingUploaderTests: XCTestCase {
         queue = owned
         let entry = try makeReadyEntryOwned(owned)
         var transportCalls = 0
-        // THE PRE-LAUNCH WINDOW (reviewer ee5b4547): `endpoint` is injected and called AFTER
-        // admission but BEFORE the launch fence, so flipping the identity inside it lands the
+        // THE pre-LAUNCH window: `endpoint` is injected and called after
+        // admission but before the launch fence, so flipping the identity inside it lands the
         // move exactly in the admission→fence interval — deterministically, no races.
         let uploader = VoiceSharingUploader(
             queue: owned, retryPolicy: retryPolicy(),
@@ -258,7 +258,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         XCTAssertTrue(after.contains(entry))
     }
 
-    /// Revocation while the request is in flight: the late 2xx does NOT complete the entry.
+    /// Revocation while the request is in flight: the late 2xx does not complete the entry.
     func test_revocationDuringFlightBeatsALateReceipt() async throws {
         let entry = try makeReadyEntry()
         let identity = try queue.boundIdentity(of: entry)
@@ -340,7 +340,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         }
     }
 
-    /// DURABLE QUOTA FLOOR (spec c74d7e30): a 429 quota_exceeded with a SHORT server hint must
+    /// DURABLE quota floor: a 429 quota_exceeded with a SHORT server hint must
     /// publish the next-UTC-midnight boundary INSIDE the queue's settlement transaction — visible
     /// in the queue's persisted not-before record and enforced by a RESTARTED queue before the
     /// boundary. The arithmetic controls in VoiceSharingQuotaRetryFloorTests pin the helper; this
@@ -404,7 +404,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         XCTAssertFalse(after.contains(entry))
     }
 
-    /// Authorization is checked BEFORE any request is issued.
+    /// Authorization is checked before any request is issued.
     func test_noRequestWithoutAuthorization() async throws {
         let entry = try makeReadyEntry()
         var sent = false
@@ -416,7 +416,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         XCTAssertFalse(sent, "no bytes may leave without live authorization")
     }
 
-    // MARK: - reviewer 7dd1e357 findings
+    // MARK: - findings
 
     /// 401 is AUTHENTICATION, not a verdict: the entry is retained and retried, never deleted.
     func test_unauthorizedRetainsTheEntryForRetry() async throws {
@@ -434,7 +434,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         XCTAssertTrue(after.contains(entry), "a 401 must not destroy a valid recording")
     }
 
-    /// PRODUCTION REFRESH-ONCE (spec e134fa36): two 401s for the SAME rejected bearer must cost
+    /// PRODUCTION refresh-ONCE: two 401s for the SAME rejected bearer must cost
     /// exactly ONE refresh — the rejected-bearer guard in `CloudAuthTokenProvider.handleUnauthorized`
     /// makes the second rejection of an already-replaced token a no-op, so a burst of N 401s (two
     /// requests in flight carrying the same stale token, or a retry racing the refresh) cannot
@@ -467,7 +467,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
     }
 
     /// An unrecognized 4xx has NO owning disposition: unknown means RETAIN and retry, never
-    /// delete (spec dc6a00ab: only the owning table's codes are terminal).
+    /// delete.
     func test_unrecognized4xxPreservesTheEntry() async throws {
         let entry = try makeReadyEntry()
         let uploader = makeUploader(transport: { _, _, _ in
@@ -484,7 +484,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
     }
 
     /// The owning table's terminal codes exactly: each abandons; the ones just outside it
-    /// (402, 404, 407, 451 — NOT in the table) retain.
+    /// (402, 404, 407, 451 — not in the table) retain.
     func test_terminalTableIsExactlyTheOwningCodes() async throws {
         let terminal: [(Int, String)] = [
             (400, "invalid_request"), (409, "capture_conflict"), (410, "record_gone"),
@@ -513,7 +513,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         }
     }
 
-    /// SPEC 1a0d3ffb: a real 400 invalid_request body DELETES the entry from the queue at
+    ///: a real 400 invalid_request body DELETES the entry from the queue at
     /// once — directory gone from disk, absent from every serving list and from a fresh
     /// reconstruction — instead of the superseded quarantine retention. Disposable
     /// production-path control.
@@ -527,11 +527,11 @@ final class VoiceSharingUploaderTests: XCTestCase {
         guard case .abandoned(let reason) = outcome, reason.contains("400") else {
             return XCTFail("400 invalid_request must delete (abandon), got \(outcome)")
         }
-        // DELETED AT ONCE: the entry directory leaves the disk.
+        // DELETED at once: the entry directory leaves the disk.
         XCTAssertFalse(FileManager.default.fileExists(
             atPath: root.appendingPathComponent(entry.name).path),
             "spec 1a0d3ffb: the refused entry is deleted, not kept")
-        // NOT served by any listing, present or reconstructed.
+        // not served by any listing, present or reconstructed.
         guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("coverage known")
         }
@@ -542,12 +542,12 @@ final class VoiceSharingUploaderTests: XCTestCase {
         }
         XCTAssertFalse(rebornReady.contains(entry),
                        "reconstruction must not resurrect the refused entry")
-        // CAPACITY FREED: a fresh recording is admitted (the queue always drains).
+        // CAPACITY freed: a fresh recording is admitted (the queue always drains).
         XCTAssertNoThrow(try makeReadyEntryOwned(reborn),
                          "after deletion the queue admits new recordings")
     }
 
-    /// DISPOSABLE REQUEST FIXTURE (spec 9917823a): ONE valid bound record through the REAL
+    /// DISPOSABLE request fixture: ONE valid bound record through the REAL
     /// production makeRequest/multipartBody; dumps the exact wire body + SAFE headers (no
     /// credential, no owner data — synthetic WAV/metadata) for Cloud to feed the deployed
     /// handler locally. No owner queue, no live upload.
@@ -576,7 +576,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
             .appendingPathComponent("vs-fixture-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try body.write(to: dir.appendingPathComponent("body.bin"))
-        // SAFE HEADERS ONLY: every value is content-free by construction EXCEPT Authorization and
+        // SAFE headers only: every value is content-free by construction EXCEPT Authorization and
         // Idempotency-Key, which are replaced with shape-preserving placeholders.
         var safeHeaders: [String: String] = [:]
         for (key, value) in request.allHTTPHeaderFields ?? [:] {
@@ -585,7 +585,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
                 safeHeaders[key] = parts.count == 2
                     ? "\(parts[0]) <redacted-bearer-shape-only>" : "<redacted>"
             } else {
-                // Idempotency-Key stays EXACT (spec 58ca7059): the synthetic capture ID is not a
+                // Idempotency-Key stays EXACT: the synthetic capture ID is not a
                 // secret, and a placeholder could itself trigger validation in the handler.
                 safeHeaders[key] = value
             }
@@ -597,8 +597,8 @@ final class VoiceSharingUploaderTests: XCTestCase {
         print("FIXTURE_BODY_BYTES: \(body.count)")
     }
 
-    /// RECONCILIATION CONTROL (reviewer 016bb90b / 46971967): the pending quarantine journal is
-    /// constructed FOR REAL — an injected lease-removal-barrier failure leaves the exact pending
+    /// RECONCILIATION control: the pending quarantine journal is
+    /// constructed FOR real — an injected lease-removal-barrier failure leaves the exact pending
     /// state on disk — and the recorded lease is then REAPPLIED to completion. A second fixture
     /// from the same construction with the entry directory gone proves the pending quarantine
     /// REFUSES instead of claiming success. The receipt complement still goes through the
@@ -610,7 +610,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         ) async throws -> (generation: String, owner: Int32) {
             // Injected fault: in the quarantine settle path the entry-directory barrier is
             // synced TWICE — disqualify's marker publication (call 1) and the lease-removal
-            // barrier (call 2). Failing ONLY call 2 lands the real pending window: journal
+            // barrier (call 2). Failing only call 2 lands the real pending window: journal
             // pending, marker durable, lease file already removed.
             var directoryBarrierCalls = 0
             var lastWasRootBarrier = false
@@ -628,7 +628,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
                     try VoiceSharingUploadQueue.testSynchronizer(path: path, isDirectory: isDirectory)
                 })
             queue = faulted
-            // SPEC 1a0d3ffb: the uploader no longer settles 400s as quarantine, so the pending
+            //: the uploader no longer settles 400s as quarantine, so the pending
             // QUARANTINE journal is constructed through the queue's own durable outcome — the
             // same lease-validated settlement the legacy path used — with the identical
             // entry-barrier fault landing the real pending window.
@@ -636,7 +636,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
             XCTAssertThrowsError(try faulted.applyAttemptResult(
                 entry, lease: lease, outcome: .quarantined),
                 "the injected barrier fault must surface")
-            // ASSERTED PRECONDITIONS, read from disk (never assumed):
+            // ASSERTED preconditions, read from disk (never assumed):
             let journalURL = root.appendingPathComponent(
                 VoiceSharingUploadQueue.settlementRecordName(for: entry.name))
             let directory = root.appendingPathComponent(entry.name)
@@ -695,7 +695,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
             }
         }
 
-        // RECEIPT COMPLEMENT through the uploader (not direct settlement): a delivered upload of
+        // RECEIPT complement through the uploader (not direct settlement): a delivered upload of
         // a FRESH entry removes it — the delivered path is intact next to quarantine.
         let fresh = try makeReadyEntry()
         let bound = try XCTUnwrap(try queue.boundIdentity(of: fresh))
@@ -718,7 +718,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
             "a delivered receipt removes the entry")
     }
 
-    /// Holds survive TWO consecutive fresh initializations (reviewer 8ba9c45f): recovery must not
+    /// Holds survive TWO consecutive fresh initializations: recovery must not
     /// delete the durable evidence it just read.
     func test_retryHoldSurvivesTwoRestarts() throws {
         let entry = try makeReadyEntry()
@@ -734,8 +734,8 @@ final class VoiceSharingUploaderTests: XCTestCase {
         XCTAssertThrowsError(try failing.applyAttemptResult(
             entry, lease: admitted.lease, outcome: .retryableFailure,
             retryNotBefore: Date().addingTimeInterval(60)))
-        // AMENDED BY SPEC cdeba18e: this marker gates NEITHER serving NOR admission. What must
-        // survive the restart is the DURABLE RECORD of the owed retry — asserted directly — while
+        // AMENDED by: this marker gates NEITHER serving NOR admission. What must
+        // survive the restart is the DURABLE record of the owed retry — asserted directly — while
         // the queue keeps serving and admitting. An unprovable schedule is resolved per entry.
         let obligation = root.appendingPathComponent(
             VoiceSharingUploadQueue.obligationPrefix + entry.name)
@@ -762,7 +762,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         }
         XCTAssertEqual(delay, 120, "503's server minimum must be preserved")
 
-        // A COMPLETELY FRESH queue instance (the restart/reclaim case) is refused until due.
+        // A COMPLETELY fresh queue instance (the restart/reclaim case) is refused until due.
         let listed = try FileManager.default.contentsOfDirectory(atPath: root.path)
         let stampFile = listed.first { $0.hasPrefix("attempt.notbefore.") }
         XCTAssertNotNil(stampFile, "the policy delay must be PERSISTED")
@@ -793,7 +793,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         let fresh = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         // A delay was stamped, so an immediate fresh attempt is refused.
         XCTAssertThrowsError(try fresh.admitAttempt(entry)) { error in
-            // NOT-YET-DUE, not "someone owns it": the refusal names the schedule (r70l).
+            // not-YET-DUE, not "someone owns it": the refusal names the schedule (r70l).
             guard case .notYetDue = (error as? VoiceSharingUploadQueue.PrepareError) else {
                 return XCTFail("expected the schedule to refuse, got \(error)")
             }
@@ -850,7 +850,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         }
     }
 
-    // MARK: - reviewer ce001b9a: authoritative settlement transaction
+    // MARK: -: authoritative settlement transaction
 
     /// A STALE writer cannot publish a boundary into a successor's future: applyAttemptResult
     /// validates the lease first, so the stale settlement is refused and the successor's stamp —
@@ -866,7 +866,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         XCTAssertThrowsError(try queue.applyAttemptResult(
             entry, lease: admitted.lease, outcome: .retryableFailure,
             retryNotBefore: later.addingTimeInterval(60)))
-        // The boundary was NOT written by the stale owner.
+        // The boundary was not written by the stale owner.
         let stamps = try FileManager.default.contentsOfDirectory(atPath: root.path)
             .filter { $0.hasPrefix(VoiceSharingUploadQueue.notBeforePrefix) }
         XCTAssertTrue(stamps.isEmpty, "a stale owner must not publish any boundary")
@@ -876,7 +876,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
     /// FRESH instance re-derives the hold from disk.
     func test_failedBarrierEngagesADurableHold() throws {
         let entry = try makeReadyEntry()
-        // An injected failureRecordWriter that fails ONLY for not-before stamps.
+        // An injected failureRecordWriter that fails only for not-before stamps.
         let failing = VoiceSharingUploadQueue(
             rootDirectory: root,
             failureRecordWriter: { url, data in
@@ -889,7 +889,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         XCTAssertThrowsError(try failing.applyAttemptResult(
             entry, lease: admitted.lease, outcome: .retryableFailure,
             retryNotBefore: Date().addingTimeInterval(60)))
-        // AMENDED BY SPEC d720ab6c / reviewer 066e2a70 item 2. The stamp write failed, so the
+        // AMENDED by / The stamp write failed, so the
         // DELAY is honoured from the durable obligation instead of from a stamp that never landed —
         // and the refusal is `.notYetDue` with the right instant, not `.accountingUnavailable`.
         // That distinction is the whole point: the recording is paused for its 60 seconds, so the
@@ -932,7 +932,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         }
     }
 
-    /// An unknown 4xx (511) is NOT in the terminal table: retained and retried, never deleted.
+    /// An unknown 4xx (511) is not in the terminal table: retained and retried, never deleted.
     func test_unknown4xxIsRetainedNotAbandoned() async throws {
         let entry = try makeReadyEntry()
         let uploader = makeUploader(transport: { _, _, _ in
@@ -949,7 +949,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
     }
 
     /// Legacy serving adopts the retry hold: a failed barrier pauses readyEntries() too.
-    /// AMENDED BY SPEC d720ab6c / reviewer 4f98b831: a retry hold does NOT hold serving. It used
+    /// AMENDED by /: a retry hold does not hold serving. It used
     /// to, and that meant an unreadable retry record withheld the whole queue from the drain — the
     /// gate 066e2a70 item 2 removed everywhere else. What the hold still does is refuse NEW
     /// ADMISSIONS, and the recording still serves and still reaches the transport.
@@ -968,21 +968,21 @@ final class VoiceSharingUploaderTests: XCTestCase {
         XCTAssertThrowsError(try failing.applyAttemptResult(
             entry, lease: admitted.lease, outcome: .retryableFailure,
             retryNotBefore: Date().addingTimeInterval(60)))
-        // SERVING IS NOT HELD: the recording must remain available to the drain.
+        // SERVING is not held: the recording must remain available to the drain.
         XCTAssertEqual(failing.readyEntries().count, 1,
                        "a retry hold may not withhold the recording from serving")
         // Recovery happens at construction, so the probe is a NEWLY constructed instance.
         let fresh = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         XCTAssertEqual(fresh.readyEntries().count, 1,
                        "a fresh instance still serves it: the hold is not a serving gate")
-        // AND ADMISSION IS NOT REFUSED (spec cdeba18e): this marker is internal write-ahead
+        // AND admission is not refused: this marker is internal write-ahead
         // bookkeeping for an unpublishable not-before stamp, not the sharing-off intent and not a
         // server backoff, so it is not on the allowed admit gate list. A new clip goes on disk.
         XCTAssertTrue(fresh.hasAdmissionAllowance(),
                       "a retry hold is not an admission gate")
     }
 
-    // MARK: - reviewer 3814f4be: status+body agreement, hold reconciliation, transport lifetime
+    // MARK: -: status+body agreement, hold reconciliation, transport lifetime
 
     /// A terminal-looking status with the WRONG body code is not proof: unrelated 403s and
     /// malformed 409s RETAIN. Only status+code pairs agreeing with the owning table abandon.
@@ -1031,19 +1031,19 @@ final class VoiceSharingUploaderTests: XCTestCase {
         }
     }
 
-    /// SPEC 219d3bb6: A 409 AFTER A 5xx FOR THE SAME CAPTURE IS A SERVER BUG, NOT A DELETION.
+    ///: A 409 after A 5xx FOR the same capture is A SERVER bug, not A DELETION.
     /// The 5xx is retryable and leaves the entry in the queue; the retry then draws a conflict.
     /// The server may have half-landed the record, and the client cannot re-create the audio, so
     /// the entry is retained and logged rather than deleted. RED before this change: the 409
     /// branch abandoned it on the spot.
     /// A conflict that follows a server failure is TERMINAL once Cloud reopens failed captures
-    /// (spec commit 8637a0fd, per spec 418d3d05). This control replaces the earlier retain; it pins
+    ///. This control replaces the earlier retain; it pins
     /// the new contract so the old hold cannot quietly come back.
-    /// REVIEWER 307d0bde item 1 / spec a4b417fc ruling 2: an entry the CLIENT cannot bind must still
-    /// REACH THE SERVER. Retained-but-never-sent is still a hold, and a log line is not a path. This
+    /// /: an entry the CLIENT cannot bind must still
+    /// REACH the server. Retained-but-never-sent is still a hold, and a log line is not a path. This
     /// walks the real path: locally invalid metadata → authenticated attempt → scripted final
     /// refusal → the server's verdict removes the files.
-    /// REVIEWER 307d0bde item 2: a diagnostic count-write failure must not stop an upload. The
+    ///: a diagnostic count-write failure must not stop an upload. The
     /// attempt count spaces retries and reports; a disk that cannot record it is exactly when the
     /// recording matters most, so the attempt proceeds and the count is kept in memory.
     func test_anAttemptCountWriteFailureStillUploads() async throws {
@@ -1071,7 +1071,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         }
     }
 
-    /// REVIEWER 066e2a70 item 3: a capture whose audio is a READABLE pair but not the documented
+    ///: a capture whose audio is a READABLE pair but not the documented
     /// representation must still reach the transport. RED before the fix: `isServedEntryLocked`
     /// excluded `.invalidAudio`/`.audioSizeMismatch`/`.audioSampleCountMismatch`, so a malformed WAV
     /// sat in the queue forever, held on a local verdict the ruling forbids. The corrupted-JSON
@@ -1106,7 +1106,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
                        "the final refusal deletes the capture")
     }
 
-    /// REVIEWER 066e2a70 item 2: a malformed `attempts.json` made `isAttemptableLocked` THROW, so
+    ///: a malformed `attempts.json` made `isAttemptableLocked` THROW, so
     /// the upload died before admission — the count-write fallback never got a chance to run. The
     /// count spaces retries; it is not a gate.
     func test_malformedAttemptRecordStillUploads() async throws {
@@ -1132,7 +1132,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         }
     }
 
-    /// REVIEWER 4f98b831: an UNREADABLE delay record must not refuse the WITHHOLDING of a
+    ///: an UNREADABLE delay record must not refuse the WITHHOLDING of a
     /// recording. `refuseIfNotYetDueLocked` used to throw `leaseHeld` for an unparseable stamp and
     /// for a NaN obligation, which is the last surviving form of the retry gate on the path the
     /// UPLOADER calls. Unknown retry state is due now; only a READABLE future deadline refuses.
@@ -1164,7 +1164,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         }
     }
 
-    /// REVIEWER 4f98b831, the sibling half: a failed stamp write for ONE entry must not stop a
+    ///, the sibling half: a failed stamp write for ONE entry must not stop a
     /// HEALTHY entry from taking its scheduled retry. Per-entry, never owner-wide.
     func test_aFailedStampWriteDoesNotStopAHealthySiblingsRetry() async throws {
         let unhealthy = try makeReadyEntry()
@@ -1209,7 +1209,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         queue = owned
         let entry = try makeReadyEntryOwned(owned)
         let directory = root.appendingPathComponent(entry.name, isDirectory: true)
-        // Corrupt the metadata AFTER the entry is durable: the audio is intact, so this is a
+        // Corrupt the metadata after the entry is durable: the audio is intact, so this is a
         // capture the client can no longer bind but the server could still judge.
         try Data("not-json".utf8).write(to: directory.appendingPathComponent("metadata.json"))
 
@@ -1238,7 +1238,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
                        "the server's final refusal removes the files")
     }
 
-    /// REVIEWER 616555f7: the wake must use `isServedEntryLocked`, not `isCompleteEntryLocked`.
+    ///: the wake must use `isServedEntryLocked`, not `isCompleteEntryLocked`.
     /// A readable capture that the client can no longer BIND still earns a retryable server
     /// response, and it must come back on its own — without another utterance or a restart. This
     /// exercises the SCHEDULER seam directly: no uploader, no trigger, just the boundary reader.
@@ -1265,8 +1265,8 @@ final class VoiceSharingUploaderTests: XCTestCase {
                 + "should depend on the client still being able to bind its own record")
     }
 
-    /// REVIEWER 616555f7, second half: the boundary loop skipped unreadable/oversized stamps
-    /// BEFORE reaching the "unknown means due" helper, so one corrupt delay record suppressed that
+    ///, second half: the boundary loop skipped unreadable/oversized stamps
+    /// before reaching the "unknown means due" helper, so one corrupt delay record suppressed that
     /// entry's retry wake entirely — the queue-wide gate fixed per entry.
     func test_theWakeSchedulesAnEntryWhoseDelayRecordIsUnreadable() throws {
         let entry = try makeReadyEntry()
@@ -1305,7 +1305,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
     }
 
     /// Fault → two restarts held → bounded reconciliation lifts → uploads resume, with the
-    /// original boundary minimum preserved (spec c3175492).
+    /// original boundary minimum preserved.
     func test_retryHoldReconcilesAfterFaultAndRestarts() throws {
         let entry = try makeReadyEntry()
         let failing = VoiceSharingUploadQueue(
@@ -1320,7 +1320,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         XCTAssertThrowsError(try failing.applyAttemptResult(
             entry, lease: admitted.lease, outcome: .retryableFailure,
             retryNotBefore: Date().addingTimeInterval(60)))
-        // AMENDED BY SPEC cdeba18e: the durable hold survives restarts, but it is not a serving or
+        // AMENDED by: the durable hold survives restarts, but it is not a serving or
         // admission gate. Serving and admissions continue; the owed boundary is what persists.
         for _ in 0..<2 {
             let reopened = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
@@ -1357,14 +1357,14 @@ final class VoiceSharingUploaderTests: XCTestCase {
             to: root.appendingPathComponent(stampName), options: .atomic)
         let reconciler = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         XCTAssertFalse(reconciler.reconcileRetryHold(), "unprovable state keeps the hold")
-        // AMENDED BY SPEC d720ab6c: keeping the HOLD is not the same as refusing to SERVE. The
+        // AMENDED by: keeping the HOLD is not the same as refusing to SERVE. The
         // hold refuses new admissions; the recording stays available to the drain. A garbage stamp
         // is an unreadable delay, hence due now.
         XCTAssertEqual(reconciler.readyEntries().count, 1,
                        "an unprovable retry state may not withhold the recording from serving")
     }
 
-    /// Reviewer a29e62a2's exact scenario: the STAMP writer fails but the write-ahead obligation
+    /// 's exact scenario: the STAMP writer fails but the write-ahead obligation
     /// carries the original 600s server minimum. Two restarts hold; reconciliation cannot lift it
     /// into an early retry; the entry stays refused until the boundary passes.
     func test_stampFailureKeepsTheOriginalMinimumThroughReconciliation() throws {
@@ -1386,7 +1386,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         XCTAssertTrue(rootListing.contains { $0.hasPrefix(VoiceSharingUploadQueue.obligationPrefix) },
                       "obligation file must exist; got \(rootListing)")
         let fresh1 = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
-        // AMENDED BY SPEC d720ab6c: the stamp write failed, so what refuses is the DURABLE
+        // AMENDED by: the stamp write failed, so what refuses is the DURABLE
         // OBLIGATION, not an owner-wide accounting hold. The obligation is the per-entry record of
         // the server's minimum, and it survives the restart — which is the property this control
         // exists to prove. (The old `.accountingUnavailable` was the owner-wide hold, and it was
@@ -1403,7 +1403,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         // Reconciliation may lift the owner-wide marker (state is provable)...
         let reconciler = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         _ = reconciler.reconcileRetryHold()
-        // ...but the ORIGINAL MINIMUM still refuses early attempts.
+        // ...but the ORIGINAL minimum still refuses early attempts.
         XCTAssertThrowsError(try reconciler.admitAttempt(entry)) { error in
             // Reconciliation must not convert a 600s minimum into an early retry.
             guard case .notYetDue(let retryAt) =
@@ -1432,7 +1432,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         XCTAssertThrowsError(try stampFails.applyAttemptResult(
             entry, lease: admitted.lease, outcome: .retryableFailure,
             retryNotBefore: settleTime.addingTimeInterval(600)))
-        // A clock AFTER the obligation passes, on a FRESH owner: no live lease exists here.
+        // A clock after the obligation passes, on a FRESH owner: no live lease exists here.
         let later = VoiceSharingUploadQueue(rootDirectory: root, clock: { settleTime.addingTimeInterval(601) })
         _ = later.reconcileRetryHold()
         let readmitted = try XCTUnwrap(try later.admitAttempt(entry),
@@ -1440,7 +1440,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         XCTAssertEqual(readmitted.attemptNumber, 2, "the retry is the SECOND attempt")
     }
 
-    /// Discovery FAILURE during reconciliation retains the hold (reviewer c9416bf7): an
+    /// Discovery FAILURE during reconciliation retains the hold: an
     /// unreadable root is never read as "no intent".
     func test_reconciliationKeepsTheHoldWhenDiscoveryFails() throws {
         let entry = try makeReadyEntry()

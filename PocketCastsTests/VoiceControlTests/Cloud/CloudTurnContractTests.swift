@@ -6,7 +6,7 @@ import XCTest
 /// Field names/semantics are pinned against `docs/specs/cloud-assistant.md`
 /// ("Turn control fields").
 final class CloudTurnContractTests: XCTestCase {
-    // MARK: - source-first runtime request + optional source_language (core b6eafe25)
+    // MARK: - source-first runtime request + optional source_language
 
     /// The runtime `request` carries the complete wake-trimmed SOURCE utterance when one is
     /// available; the English routing translation never replaces the original on the wire.
@@ -80,7 +80,7 @@ final class CloudTurnContractTests: XCTestCase {
         XCTAssertNotEqual(a.requestId, b.requestId)
     }
 
-    /// The pin @spec asked for: a duplicate transport attempt of the SAME
+    /// The pin asked for: a duplicate transport attempt of the SAME
     /// logical turn must present the same `request_id`, so the server admits one
     /// turn rather than two. (A turn recorded under a server-assigned id must
     /// never be auto-retried at all — there is no client retry loop.)
@@ -315,7 +315,7 @@ final class CloudTurnContractTests: XCTestCase {
     /// A send that TRANSMITS and then fails is reported as an ordinary transport failure.
     ///
     /// The distinction that matters is preserved even though the never-submitted case is gone: a
-    /// frame that left the client is NOT treated as one that never did, so nothing may re-drive it.
+    /// frame that left the client is not treated as one that never did, so nothing may re-drive it.
     /// The assertion is that the failure is surfaced at all and the frame is recorded as sent —
     /// there is no separate "never submitted" outcome for a transmitted frame to be misclassified
     /// into, which is the stronger position.
@@ -346,7 +346,7 @@ final class CloudTurnContractTests: XCTestCase {
     /// so a turn could not begin. (Startup is the observed requirement; "every suspended send
     /// fails" was not measured and is not claimed.)
     ///
-    /// This case deliberately does NOT inject `webSocketTaskFactory`: injecting it bypasses the
+    /// This case deliberately does not inject `webSocketTaskFactory`: injecting it bypasses the
     /// default path, which is exactly how the missing resume survived the entire suite. It drives
     /// the real factory and reads the state of the task that factory produced.
     func testTheProductionWebSocketTaskIsNotLeftSuspended() async {

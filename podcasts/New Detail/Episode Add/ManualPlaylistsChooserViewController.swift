@@ -145,7 +145,7 @@ class ManualPlaylistsChooserViewController: PCViewController {
             let uuids = dataManager.manualPlaylistUUIDs(for: episode.uuid)
             initialSelectedPlaylists = Set(uuids)
         } else {
-            // For bulk episodes, find playlists that contain ALL selected episodes
+            // For bulk episodes, find playlists that contain all selected episodes
             var playlistsContainingAllEpisodes: Set<String> = []
             for playlist in allManualPlaylists {
                 let allEpisodesInPlaylist = episodes.allSatisfy { episode in

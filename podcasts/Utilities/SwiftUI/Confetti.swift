@@ -185,9 +185,9 @@ extension ConfettiView {
 
     /// Adds an instance of ConfettiView to the specified view
     /// - Parameters:
-    ///   - view: the view where to add the ConfettiView
-    ///   - frame: optional frame for ConfettiView
-    ///   - onAnimationCompletion: optional closure to be executed when the animation ends
+    /// - view: the view where to add the ConfettiView
+    /// - frame: optional frame for ConfettiView
+    /// - onAnimationCompletion: optional closure to be executed when the animation ends
     /// - Returns: the newly created instance of ConfettiView
     static func add(on view: UIView,
                     frame: CGRect? = nil,

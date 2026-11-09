@@ -4,9 +4,9 @@ import Foundation
 ///
 /// Usage:
 ///
-///     class MyListViewModel: ListViewModel<MyCustomModel> {
-///         ...
-///     }
+/// class MyListViewModel: ListViewModel<MyCustomModel> {
+/// ...
+/// }
 ///
 @MainActor
 class ListViewModel<Model: Identifiable>: ObservableObject {

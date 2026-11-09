@@ -3,17 +3,17 @@ import XCTest
 
 /// Task 3, part 2: the collector's bounded, fail-closed behaviour.
 ///
-/// Reviewer 6094b9ef blocked the first cut on three specific points, and each is now a control that names the
+/// blocked the first cut on three specific points, and each is now a control that names the
 /// thing it actually measures:
 ///
-///   1. Counting and flagging proved nothing about allocation. The controls assert the **real retained sample
-///      count**, the truncation flag and the dropped spans — and that recognition still sees every original
-///      sample.
-///   2. A synchronous sink blocked the producer. Handoff is now folded into one slot per capture and drained on
-///      the collector's own queue, so a **held sink** cannot stall the caller and overflow is counted.
-///   3. Mutable open state let a late callback for segment A charge itself to B. Capture identity is **frozen**
-///      at start, and an account transition between A's start and A's completion means A is never finalized
-///      under B.
+/// 1. Counting and flagging proved nothing about allocation. The controls assert the **real retained sample
+/// count**, the truncation flag and the dropped spans — and that recognition still sees every original
+/// sample.
+/// 2. A synchronous sink blocked the producer. Handoff is now folded into one slot per capture and drained on
+/// the collector's own queue, so a **held sink** cannot stall the caller and overflow is counted.
+/// 3. Mutable open state let a late callback for segment A charge itself to B. Capture identity is **frozen**
+/// at start, and an account transition between A's start and A's completion means A is never finalized
+/// under B.
 final class VoiceSharingCollectorTests: XCTestCase {
 
     private var events: [VoiceSharingCollector.SegmentEvent] = []
@@ -49,7 +49,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
     /// Builds a collector with DETERMINISTIC delivery. Production hands off asynchronously (that property is
     /// proven separately by `test_heldSink_doesNotBlockTheProducer`); these controls assert content, so they
     /// use the test-only inline mode rather than racing a scheduler.
-    /// THE consent gate for these controls (spec 4afc6e43): the closure IS the gate, so tests
+    /// THE consent gate for these controls: the closure IS the gate, so tests
     /// toggle `gateOpen` instead of driving the deleted policy snapshot.
     var gateOpen = true
 
@@ -66,7 +66,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         return collector
     }
 
-    /// SIMPLIFIED CONTRACT (spec 4afc6e43): the collector's single admission decision is the consent
+    /// SIMPLIFIED contract: the collector's single admission decision is the consent
     /// closure the assembly passes in. These helpers open and close exactly that closure.
     private final class LockedBox {
         private let lock = NSLock()
@@ -102,7 +102,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
 
     func test_policyOff_retainsZeroSamplesAndEvents() {
         let collector = makeCollector()
-        enrolledState(true)                       // membership fine; CONSENT GATE closed
+        enrolledState(true)                       // membership fine; CONSENT gate closed
         gateOpen = false
 
         collector.speechStarted(confirmationFrameSamples: 320)
@@ -122,7 +122,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
     }
 
     func test_unknownMembership_neverClosesTheConsentGate() {
-        // SIMPLIFIED CONTRACT: membership/projection state is NOT a capture gate — the consent
+        // SIMPLIFIED contract: membership/projection state is not a capture gate — the consent
         // closure is. Unknown projection is transient; the server re-checks at accept.
         activateLease()
         let collector = makeCollector()
@@ -154,10 +154,10 @@ final class VoiceSharingCollectorTests: XCTestCase {
     }
 
 
-    /// NO PLACEHOLDER EPOCH (spec 4afc6e43, @spec 48a928f0): a record must carry the real epoch the
+    /// NO PLACEHOLDER epoch: a record must carry the real epoch the
     /// account holds. With none available there is nothing truthful to stamp and ordinary record
     /// construction fails — it is not replaced by `""`, which the deployed schema refuses
-    /// (`invalid_enrollment_epoch`). This is a record-validity condition, NOT a collection-readiness
+    /// (`invalid_enrollment_epoch`). This is a record-validity condition, not a collection-readiness
     /// lifecycle: consent remains the only admission DECISION, and the control below shows the same
     /// path collecting as soon as a real epoch exists.
     func test_missingEpoch_producesNoRecordRatherThanAPlaceholder() {
@@ -180,7 +180,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
 
     // MARK: - Real bounded PCM retention (blocker 1)
 
-    /// Retention is capped in BYTES HELD, not in a counter: past the ceiling the collector keeps nothing more,
+    /// Retention is capped in BYTES held, not in a counter: past the ceiling the collector keeps nothing more,
     /// reports the actual retained count, marks truncation, and states the dropped span explicitly.
     func test_appendSamples_capsActualRetainedPCM_andReportsDroppedSpan() {
         activateLease()
@@ -331,7 +331,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         let entered = DispatchSemaphore(value: 0)
         var delivered: [VoiceSharingCollector.SegmentEvent] = []
         let deliverLock = NSLock()
-        // Withdrawal is modeled by REVOKING this closure (spec e1529db9: explicit withdrawal stops and
+        // Withdrawal is modeled by REVOKING this closure (: explicit withdrawal stops and
         // purges). An earlier version of this control modeled withdrawal by nil-ing the epoch, which
         // only worked while `drainNext` compared epochs — an admission gate that no longer exists.
         // The epoch is provenance; the live consent closure is the dequeue refusal.
@@ -370,7 +370,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
 
     /// Aggregate identity state stays bounded across MANY segments: open capture ≤ 1, FIFO ≤ its bound, and
     /// the refusal history pruned to its floor. Capping only the open buffer would let the sets grow forever.
-    /// SPEC a4b417fc: retiring the FIFO and sample budget as DROPPING gates removed the only bound
+    ///: retiring the FIFO and sample budget as DROPPING gates removed the only bound
     /// on retained in-memory work, so the peak has to be OBSERVABLE. The collector records the
     /// high-water mark of both the FIFO depth and the retained samples, so a device report can say
     /// how high pressure actually got instead of it being inferred from absence.
@@ -427,7 +427,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         XCTAssertEqual(agg.openCaptures, 0, "every segment closed")
         XCTAssertLessThanOrEqual(agg.terminalHistory, VoiceSharingCollector.maxTerminalHistoryIDs + 8,
                                  "refusal history is pruned to its floor, not grown for the session lifetime")
-        // AMENDED BY SPEC 2741a0ca: queued work is no longer dropped at the cap. The identity
+        // AMENDED by: queued work is no longer dropped at the cap. The identity
         // state this control is really about (open captures, refusal history) stays bounded; the
         // FIFO does not, and its pressure is counted rather than silently discarded.
         XCTAssertEqual(agg.openCaptures, 0, "the FIFO-drain property is unchanged")
@@ -444,7 +444,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
     /// THE reviewer's scheduling control: A is QUEUED but not yet executed when B starts, then A finally
     /// runs. A must complete under A. With the context read inside the async body ("what is current"), A
     /// would find B and be refused — or worse, adopted B. The engine now freezes context synchronously in
-    /// `onUtterance` BEFORE creating the Task; this drives that exact ordering.
+    /// `onUtterance` before creating the Task; this drives that exact ordering.
     func test_queuedUtteranceStartingLate_keepsItsOwnFrozenContext() {
         activateLease()
         let collector = makeCollector()
@@ -679,7 +679,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         enrolledState(true)
         assertPremisesOpen()
 
-        // EVERY event is held: the sink stalls until the final gate opens, so the FIFO genuinely
+        // every event is held: the sink stalls until the final gate opens, so the FIFO genuinely
         // saturates and the aggregate budget — not the transient drain — is what bounds ownership.
         let hold = DispatchSemaphore(value: 0)
         let entered = DispatchSemaphore(value: 0)
@@ -711,7 +711,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
             collector.speechStarted(confirmationFrameSamples: 320)
             collector.appendSamples(segment, reportedTotal: segment.count)
             collector.speechCompleted(segment, context: collector.currentCaptureContextForTesting)
-            // AMENDED BY SPEC 2741a0ca: the budget is GENUINELY retired as a dropping gate. A
+            // AMENDED by: the budget is GENUINELY retired as a dropping gate. A
             // recording may stop being collected only when sharing is off, so neither this budget
             // nor the FIFO cap may discard; both are counted pressure. Retained audio can now
             // EXCEED the constant — that is the ruled behaviour, and it is why the ledger is
@@ -810,7 +810,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
     }
 
     /// THE segmentation-endpoint control: the engine detaches completed A synchronously (via
-    /// `segmentationEnded`, before the outcome Task), so B's start does NOT emit an audio-carrying
+    /// `segmentationEnded`, before the outcome Task), so B's start does not emit an audio-carrying
     /// cancel for A, and A's outcome later emits exactly ONCE from the ring.
     func test_segmentationEndpoint_detachesCompletedA_andOutcomeEmitsOnce() {
         activateLease()
@@ -863,13 +863,13 @@ final class VoiceSharingCollectorTests: XCTestCase {
         XCTAssertEqual(got.last?.audio.count, 0, "the cancel record is content-free")
         clearEvents(collector)
 
-        // A late outcome for the discarded partial must NOT contribute — not even as a rejection.
+        // A late outcome for the discarded partial must not contribute — not even as a rejection.
         collector.speechCompleted([Float](repeating: 1, count: 640), context: ctxA)
         collector.segmentRejected(kind: .rejectedWake, samples: 640, context: ctxA)
         XCTAssertEqual(snapshot().count, 0, "a discarded partial never becomes a contribution record")
     }
 
-    /// Open growth RESERVES against the aggregate BEFORE appending: with the FIFO saturated, the
+    /// Open growth RESERVES against the aggregate before appending: with the FIFO saturated, the
     /// open capture cannot push total ownership over budget even though its per-capture cap has room.
     func test_appendSamples_reservesAgainstAggregateBudget() {
         activateLease()
@@ -913,7 +913,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         collector.speechStarted(confirmationFrameSamples: 320)
         collector.appendSamples([Float](repeating: 1, count: 100_000), reportedTotal: 100_000)
         let breakdown = collector.actualRetainedAudioBreakdownForTesting
-        // AMENDED BY SPEC 2741a0ca: the budget no longer DISCARDS, so retained audio may exceed it
+        // AMENDED by: the budget no longer DISCARDS, so retained audio may exceed it
         // — that is the ruled behaviour, and the high-water-mark log is how it is seen on device.
         // What still holds, and is the real invariant, is that the LEDGER equals the actual buffers.
         XCTAssertGreaterThan(breakdown.open + breakdown.fifo + breakdown.ring + breakdown.inFlight, 0,
@@ -1117,7 +1117,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
             "over-bound submissions are dropped and counted")
         XCTAssertLessThanOrEqual(collector.overflowCount, 15,
             "the drop count stays inside the eviction-emission bound")
-        // AMENDED BY SPEC 2741a0ca. The handoff FIFO no longer DROPS at its cap: pressure is
+        // AMENDED by . The handoff FIFO no longer DROPS at its cap: pressure is
         // counted and logged, and the capture is still queued, because the only allowed admission
         // gate is the durable queue's record limit. The FIFO can therefore exceed the cap — this
         // asserts the RULED behaviour, and the bound is replaced by a counted, observable pressure
@@ -1152,7 +1152,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
 
         clearEvents(collector)
         collector.segmentRejected(kind: .rejectedWake, samples: 8_000, context: ctxA)
-        // A was superseded while OPEN — a genuine cancel discarded it, and a discarded partial NEVER
+        // A was superseded while OPEN — a genuine cancel discarded it, and a discarded partial never
         // contributes: no record at all, and certainly none attributed to B.
         XCTAssertEqual(snapshot(), [], "a discarded partial's late rejection contributes nothing")
         XCTAssertEqual(collector.currentCaptureIDForTesting, secondID, "and must not disturb B's state")
@@ -1165,7 +1165,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         XCTAssertEqual(snapshot().last!.captureID, secondID)
     }
 
-    /// An account transition between A's start and A's completion means A is NEVER finalized under B.
+    /// An account transition between A's start and A's completion means A is never finalized under B.
     func test_accountTransitionMidSegment_preventsFinalizingPredecessorUnderSuccessor() {
         activateLease()
         let collector = makeCollector()
@@ -1300,10 +1300,10 @@ final class VoiceSharingCollectorTests: XCTestCase {
         XCTAssertEqual(collector.retainedSampleCountForTesting, 0, "and nothing is held for it afterwards")
     }
 
-    /// The CONSENT CLOSURE is load-bearing on its own: with everything else open, only the closure
+    /// The CONSENT closure is load-bearing on its own: with everything else open, only the closure
     /// can veto. Without this control a closed consent is caught redundantly by identity checks and
     /// never exercised.
-    /// REVIEWER ea2964b3 (2): ring-pressure emission must move through the bounded, accounted
+    /// (2): ring-pressure emission must move through the bounded, accounted
     /// handoff. With the sink worker BLOCKED, evictions fill the pending FIFO to its cap and
     /// then DROP (counted and logged); retained audio stays inside the ledger, and withdrawal
     /// disposal purges the queued work so nothing is delivered afterwards.
@@ -1328,7 +1328,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         }
         // Give the work queue a bounded moment to block inside the first delivery.
         Thread.sleep(forTimeInterval: 0.5)
-        // AMENDED BY SPEC 2741a0ca: a blocked worker no longer makes the FIFO DROP work. This
+        // AMENDED by: a blocked worker no longer makes the FIFO drop work. This
         // fixture stays UNDER both caps (40 events x 3200 samples), so no pressure is counted —
         // the point is that all 40 are queued and retained rather than discarded, and that
         // WITHDRAWAL still disposes of them. Retained work is not bounded here; the ledger is what
@@ -1349,7 +1349,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
             "queued eviction work is disposed, not delivered after withdrawal")
     }
 
-    /// SPEC DEFECT d6580187, fix 2 (no-silent-loss): unemitted contributionable records under
+    ///, fix 2 (no-silent-loss): unemitted contributionable records under
     /// ring pressure used to be discarded by the eviction loop — deadline cancelled, audio
     /// dropped, no record, no log. A capture could be lost forever purely because newer
     /// captures pressed the ring. The fix EMITS such records through the normal sink path at

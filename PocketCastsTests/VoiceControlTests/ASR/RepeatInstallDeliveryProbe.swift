@@ -2,7 +2,7 @@ import AVFoundation
 import XCTest
 @testable import podcasts
 
-/// SYNCHRONIZED TRACE (repeat-install work): establishes WHEN callbacks arrive, WHEN blocks are
+/// SYNCHRONIZED trace (repeat-install work): establishes WHEN callbacks arrive, WHEN blocks are
 /// dequeued/delivered into the reference, and in what ORDER — rather than inferring a stop-flush
 /// mechanism from two snapshots taken at different instants.
 ///
@@ -47,7 +47,7 @@ final class RepeatInstallDeliveryProbe: XCTestCase {
 
         let tap = EpisodeOutputTap(engine: engine)
         tap.handoff = handoff
-        // COUNT CALLBACK ARRIVAL THROUGH THE TAP'S OWN CLOSURE: CoreAudio refuses a second tap on
+        // COUNT callback arrival through the tap'S OWN closure: CoreAudio refuses a second tap on
         // the same bus, so the observer wraps the closure install() captured rather than adding
         // another tap. The wrapper runs the production closure and counts the arrival.
         // Per-attempt installation identity: each install's admitted identity is recorded, so a
@@ -65,7 +65,7 @@ final class RepeatInstallDeliveryProbe: XCTestCase {
         try engine.start()
         defer { engine.stop() }
 
-        // The LIFECYCLE TEST's exact size (44 100): with the strict full-count acknowledgment the
+        // The LIFECYCLE test's exact size (44 100): with the strict full-count acknowledgment the
         // repeat-install case measured a PARTIAL delivery (3 200 of ~16 000), so the trace must
         // use the same shape to see where it stalls.
         let count = 44_100
@@ -95,7 +95,7 @@ final class RepeatInstallDeliveryProbe: XCTestCase {
         trace.record("scheduled source frames=\(count) expectedPipelineSamples=\(Int(Double(count) * 16_000.0 / 44_100.0))")
 
         engine.stop()
-        // RECORDED IMMEDIATELY AT RETURN: placing later callbacks relative to this boundary is
+        // RECORDED immediately at return: placing later callbacks relative to this boundary is
         // only valid if the event is stamped before anything else runs.
         trace.record("stop() returned")
         // Stage the wait: sample the reference count over time so a STALL is visible as a

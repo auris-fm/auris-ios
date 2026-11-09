@@ -102,7 +102,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
     /// it was issued under. Completing after a privacy close and a new wake must
     /// not reset whatever window is current — that would re-arm a session this
     /// turn never belonged to.
-    /// QUIET DUPLICATES (reviewer 0c546ce5 item 4): a duplicate of an utterance the executor
+    /// QUIET duplicates: a duplicate of an utterance the executor
     /// already completed — the joined or settled copy the sink hands back — observes completion
     /// WITHOUT repeating the owner's effects. The grace renewal happens exactly once (the
     /// duplicate cannot restore a spent allowance), the duplicate's response renders nothing,
@@ -124,7 +124,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         XCTAssertEqual(mockCloudRouteSink.claimObservedBeforeDispatch, [true],
                        "effect ownership is claimed BEFORE the dispatch — a joiner cannot win it")
         // Re-arm the observable: the owner's renewal cleared the refusal-tone claim, so holding
-        // it again gives the duplicate a detectable renewal to (NOT) perform.
+        // it again gives the duplicate a detectable renewal to (not) perform.
         XCTAssertTrue(gracePeriodSignal.claimRefusalTone(), "the re-armed refusal is announced")
 
         // The duplicate: identical captured intent (same utterance id + generation).
@@ -147,7 +147,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         )
     }
 
-    /// CROSS-GENERATION INTERLEAVING (reviewer 39beabc7): completions can interleave — A(gen1)
+    /// CROSS-GENERATION interleaving: completions can interleave — A(gen1)
     /// completes, B(gen2) completes, then a DELAYED A duplicate completes. Effects are granted
     /// by the request owner at dispatch, not inferred from a generation change, so A's late
     /// duplicate cannot replay A's effects, and it cannot disturb B's.
@@ -466,7 +466,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         XCTAssertTrue(gracePeriodSignal.isActive)
     }
 
-    /// REVIEW 8bc80b2b regression control: the verdict path must ride the ONE shared execution
+    /// regression control: the verdict path must ride the ONE shared execution
     /// path — the first cut duplicated the dispatch switch and silently skipped the shared
     /// post-execute effects (analytics.recordCommand, grace restore). The grace effect is the
     /// observable half asserted here; the verdict must not cost the turn its side effects.
@@ -544,7 +544,7 @@ private final class MockPlaybackSink: VoicePlaybackSink {
     var lastSeekToPosition: Int?
     var nextEpisodeResponse: VoiceResponse = .earcon(.nextEpisode)
 
-    /// Pause is idempotent success (spec 32305c22): the fact is completed in both worlds —
+    /// Pause is idempotent success: the fact is completed in both worlds —
     /// stated at the sink, not inferred from the earcon.
     func pause() -> VoiceResponse { pauseCalled = true; return .earcon(.success) }
     func pauseWithFact() -> (response: VoiceResponse, fact: SinkActionFact?) {
@@ -555,7 +555,7 @@ private final class MockPlaybackSink: VoicePlaybackSink {
     /// action's own decision (`skipResult` non-nil models the manager's
     /// `.played` outcome; nil models `.declined`). The real manager contract —
     /// earlier candidate title vs declined action, shuffle attribution — is
-    /// pinned separately in PlaybackManagerSinkTests (reviewer 50103ef9).
+    /// pinned separately in PlaybackManagerSinkTests.
     var skipResult: String? = "Episode A"
     func nextEpisode() -> VoiceResponse { nextEpisodeWithFact().response }
     func nextEpisodeWithFact() -> (response: VoiceResponse, fact: SinkActionFact?) {
@@ -726,7 +726,7 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
     /// (stand-in for the real sink's once-per-utterance claim), with `effectOwnerForTesting`
     /// overriding for the duplicate controls.
     var effectOwnerForTesting: ((String?) -> Bool)?
-    /// ORDER EVIDENCE (reviewer 39beabc7): was the effect claim taken BEFORE the dispatch began?
+    /// ORDER evidence: was the effect claim taken before the dispatch began?
     /// Effects must be granted by the owner at dispatch time, not after the await — otherwise a
     /// joiner the dispatch awaits can win them. The claim records whether routeToCloud had
     /// already run; the control asserts this stayed true.

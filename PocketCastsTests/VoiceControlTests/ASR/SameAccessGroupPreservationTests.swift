@@ -1,14 +1,14 @@
 import XCTest
 import Security
 
-/// DISPOSABLE SAME-ACCESS-GROUP PRESERVATION CONTROL (synthetic only).
+/// DISPOSABLE same-ACCESS-GROUP preservation control (synthetic only).
 ///
 /// Two roles, both in the supported test-host context, both using the SAME measured effective group
 /// (`6LL2R2A55F.fm.auris`):
-///   * a WRITER establishes a synthetic canary in that group plus a container sentinel file;
-///   * a READER (the helper's scoped read shape: presence + access-group attribution, no value
-///     returned) confirms the canary is present under that group;
-///   * afterwards the canary and the sentinel are verified INTACT.
+/// * a WRITER establishes a synthetic canary in that group plus a container sentinel file;
+/// * a READER (the helper's scoped read shape: presence + access-group attribution, no value
+/// returned) confirms the canary is present under that group;
+/// * afterwards the canary and the sentinel are verified INTACT.
 ///
 /// No production credential service or account is queried, no secret value is exported: the service
 /// is a synthetic constant, the value is a synthetic token, and the reader returns ATTRIBUTES only.
@@ -26,7 +26,7 @@ final class SameAccessGroupPreservationTests: XCTestCase {
         URL(fileURLWithPath: "/tmp/scratch-preservation-sentinel.txt")
     }
 
-    /// READ-ONLY POST-READ VERIFICATION: run AFTER the external helper has read the canary. It writes
+    /// READ-only post-READ verification: run after the external helper has read the canary. It writes
     /// nothing, so it checks the SAME item and bytes the helper saw, rather than replacing them. The
     /// expected value is supplied from outside (the writer records what it wrote), so a match here is
     /// a real comparison against the preset bytes, not a self-consistent round trip.
@@ -58,7 +58,7 @@ final class SameAccessGroupPreservationTests: XCTestCase {
         XCTAssertEqual(attributed, group, "the canary is no longer attributed to the shared group")
         XCTAssertEqual(bytes, expected, "the canary bytes changed across the helper read")
 
-        // THE CONTAINER SENTINEL is verified here too, against the value recorded when it was created,
+        // THE container sentinel is verified here too, against the value recorded when it was created,
         // so "intact" covers the container as well as the keychain item rather than the canary alone.
         let expectedSentinelFile = URL(fileURLWithPath: "/tmp/scratch-expected-sentinel.txt")
         let expectedSentinel = (try? String(contentsOf: expectedSentinelFile, encoding: .utf8))?
@@ -72,7 +72,7 @@ final class SameAccessGroupPreservationTests: XCTestCase {
     }
 
     func testSyntheticCanaryAndContainerSentinelSurviveAScopedRead() throws {
-        // THE SHARED GROUP both products are configured to declare for this control. Pointed
+        // THE shared group both products are configured to declare for this control. Pointed
         // explicitly at the shared synthetic group so the writer and the helper request an identical
         // group; the measured default (`6LL2R2A55F.fm.auris`) is what a product gets otherwise.
         let group = "6LL2R2A55F.fm.auris.scratchshared"
@@ -150,7 +150,7 @@ final class SameAccessGroupPreservationTests: XCTestCase {
         print("PRESERVE postRead sentinelIntact=\(sentinelAfter == sentinelContents)")
         XCTAssertEqual(sentinelAfter, sentinelContents, "the container sentinel was modified")
 
-        // NO CLEANUP IN THIS RUN: the canary must SURVIVE the test so the separately-installed helper
+        // NO CLEANUP in this run: the canary must SURVIVE the test so the separately-installed helper
         // app can perform the cross-app read afterwards, and so the writer can verify it is intact
         // after that read. The canary is synthetic (fm.auris.SCRATCH*) and is removed by a later run
         // when the coordination file is absent; the sentinel likewise stays for the same reason.

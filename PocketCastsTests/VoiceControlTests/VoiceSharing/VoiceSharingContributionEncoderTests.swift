@@ -27,7 +27,7 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
 
     /// A stage-claim set the caller (pipeline) supplies — every non-completed stage states an
     /// enumerated reason; nothing is fabricated by the encoder.
-    // MARK: - detector_error is a REAL observed failure (spec 9578b16, reviewer 6c3fed9b)
+    // MARK: - detector_error is a REAL observed failure
 
     /// The exact pairing the detector produces must ENCODE and reach a durable-ready record. Before this
     /// rule existed the known failure was refused by the binding, so a real engine detector error could
@@ -46,7 +46,7 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
             envelope: encoded.metadataEnvelope, audio: encoded.wav))
     }
 
-    /// REJECTION MATRIX: `detector_error` names the wake detector's failure and nothing else. Every other
+    /// REJECTION matrix: `detector_error` names the wake detector's failure and nothing else. Every other
     /// stage/state pairing is refused — including `wake` + `completed`, which would publish a failure that
     /// did not happen, and `wake` + `unknown`, which would turn an observed failure into non-observation.
     func test_detectorErrorIsRefusedForEveryPairingOtherThanWakeFailed() throws {
@@ -55,7 +55,7 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
             let states = stage == "wake" ? otherStates : otherStates + ["failed"]
             for state in states {
                 var claims = observations
-                // ASR's completed state independently requires text; supply it so the ONLY rule that can
+                // ASR's completed state independently requires text; supply it so the only rule that can
                 // reject this pair is the detector_error pairing (proven by the asserted message).
                 claims[stage] = .init(state: state, reason: "detector_error",
                                       text: stage == "asr" && state == "completed" ? "hello" : nil)
@@ -148,7 +148,7 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
                        SHA256.hash(data: encoded.wav).map { String(format: "%02x", $0) }.joined())
     }
 
-    /// SERVER SCHEMA (GO review, spec 3ea6d5c5 + reviewer 39ac0771): the wire's execution-outcome
+    /// SERVER schema: the wire's execution-outcome
     /// enum is {success, failure, refused, cancelled}, and a COMPLETED wake stage must carry
     /// `decision` {detected, rejected}. Enumerated in the LOCAL binding so a routing token such as
     /// `succeeded`/`executed`, or a decision-less completed wake, cannot self-validate here and
@@ -219,7 +219,7 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
         decisionLess["wake"] = .init(state: "completed", score: 0.931, threshold: 0.8)
         try expectRefusal("completed wake without decision", decisionLess,
                           path: "observations.wake.decision")
-        // NEGATIVE: a completed execution without an outcome — spec 21b5d822: every observed
+        // NEGATIVE: a completed execution without an outcome —: every observed
         // execution carries one.
         var bare = detectedWake
         bare["execution"] = .init(state: "completed")
@@ -238,7 +238,7 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
         try expectRefusal("unenumerated wake decision", unenumerated,
                           path: "observations.wake.decision")
 
-        // RAW-RECORD negatives (reviewer 40e69257): a present null or NON-STRING value must be
+        // RAW-RECORD negatives: a present null or NON-STRING value must be
         // refused too — the optional-cast form would skip the enum check for exactly these. Built
         // by mutation against the production canonicalizer, so the DIGEST is not what refuses.
         func rawBindingRefusal(
@@ -361,10 +361,10 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
     }
 
 
-    /// PHASE 2 WIRE FIXTURE for cross-client parity (spec 94bf23b0), WIRE REVISION 2. Revision 1
+    /// PHASE 2 WIRE fixture for cross-client parity, WIRE revision 2. Revision 1
     /// was REFUSED by the server: execution.outcome carried the routing token `succeeded` instead of
     /// the wire enum's `success`, and the completed wake stage carried no `decision`, so the server
-    /// filed the case under request/ instead of wake-request/ (GO review, spec 3ea6d5c5). R2 carries
+    /// filed the case under request/ instead of wake-request/. R2 carries
     /// the schema's own values and a NEW capture session so the refused set cannot be mistaken for
     /// this one.
     ///
@@ -436,7 +436,7 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
         ]
 
         let base = URL(fileURLWithPath: NSTemporaryDirectory() + "/auris-phase2-wire-fixtures")
-        // A fresh directory every run (reviewer 9be75bf0: a stale fixture must never be mistaken for a
+        // A fresh directory every run (: a stale fixture must never be mistaken for a
         // freshly captured one). Absent on the first run, so the removal is best-effort.
         if FileManager.default.fileExists(atPath: base.path) {
             try FileManager.default.removeItem(at: base)
@@ -448,7 +448,7 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
             let encoded = try VoiceSharingContributionEncoder.encode(
                 event: capture(value.id, wakeRequired: value.wakeRequired),
                 provenance: phase2Provenance, observations: value.observations)
-            // SELF-CONSISTENCY GATE: the fixture must bind through this client's production validator.
+            // SELF-CONSISTENCY gate: the fixture must bind through this client's production validator.
             let bound = try VoiceSharingRecordBinding.bind(
                 envelope: encoded.metadataEnvelope, audio: encoded.wav)
             XCTAssertFalse(bound.recordSHA256.isEmpty)
@@ -470,7 +470,7 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
             ])
         }
         let manifestObject: [String: Any] = [
-            // REVIEWER 40e69257 #3: name the recipe honestly. The ENCODER emitting these bytes is
+            // #3: name the recipe honestly. The ENCODER emitting these bytes is
             // the one at ebdf40ee9 (the wire-v2 fix); the review-fix commit corrects mapping/binding
             // and controls without changing emission, so the bytes are ebdf40ee9's and the recipe's
             // review-fix head is recorded separately. R1's bytes remain preserved beside these.
@@ -490,9 +490,9 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
         try data.write(to: base.appendingPathComponent("manifest.json"))
     }
 
-    /// The PINNED f8 WIRE fixtures (spec 35da2677). SCOPE, stated exactly: these are ENCODER fixtures
+    /// The PINNED f8 WIRE fixtures. SCOPE, stated exactly: these are ENCODER fixtures
     /// whose observations are TEST-SUPPLIED, not engine/branch producer output — they pin the bytes
-    /// the encoder emits for the f8 stage-claim combinations, including ALL THREE translation skip
+    /// the encoder emits for the f8 stage-claim combinations, including all three translation skip
     /// reasons, and one emitted-byte NEGATIVE (a completed stage carrying a reason) that both the
     /// production binding and the pinned intake must refuse. Producer provenance is separate work.
     /// Always written to a fixed runner-temporary location (host env does not reach the simulator).
@@ -504,7 +504,7 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
                   originalSampleCount: nil, audio: samples, isGateControl: false)
         }
         let cases: [String: (String, [String: VoiceSharingContributionEncoder.StageOutcome])] = [
-            // Full happy path AS THE ENCODER EMITS IT: completed stages carry NO reason; routing
+            // Full happy path AS THE encoder emits it: completed stages carry NO reason; routing
             // carries its structured disposition. NOTE: StageOutcome has no members for asr's
             // source_language/router_input, routing's predicted_intent/tool/validation, or
             // execution's outcome — if the pinned intake requires any of those, this fixture is
@@ -526,8 +526,8 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
                  "translation": .init(state: "not_run", reason: "no_text"),
                  "routing": .init(state: "not_run", reason: "no_candidates"),
                  "execution": .init(state: "not_run", reason: "precondition_failed")]),
-            // The backend-translation skip: translation NOT RUN for a reason that is a DECISION,
-            // while asr still carries its own text facts (spec 4d10275f).
+            // The backend-translation skip: translation not run for a reason that is a DECISION,
+            // while asr still carries its own text facts.
             "f8-translation-backend-handles": (
                 "44444444-2222-3333-4444-555555555555",
                 ["wake": .init(state: "completed", decision: "detected"),
@@ -536,7 +536,7 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
                  "translation": .init(state: "not_run", reason: "backend_handles_translation"),
                  "routing": .init(state: "completed", routingDisposition: "pending"),
                  "execution": .init(state: "unknown", reason: "observation_unavailable")]),
-            // The two remaining translation skips (spec 4d10275f): the source language could not
+            // The two remaining translation skips: the source language could not
             // be established, and a translator existed but was unavailable.
             "f8-translation-source-unavailable": (
                 "55555555-2222-3333-4444-555555555555",
@@ -556,7 +556,7 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
                  "execution": .init(state: "completed", outcome: "success")]),
         ]
         // Emitted-byte NEGATIVE (f8): a completed stage carrying a reason. The production binding
-        // MUST refuse it, and the pinned intake must refuse the bytes too.
+        // must refuse it, and the pinned intake must refuse the bytes too.
         let negatives: [String: String] = [
             "f8-negative-completed-with-reason": "77777777-2222-3333-4444-555555555555",
         ]
@@ -639,7 +639,7 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
     }
 
     func test_nonFiniteSamplesAreRefusedNotClampedAndNeverTrap() throws {
-        // Reviewer 9fbb9d24: NaN/±inf must throw BEFORE any Float→Int conversion; a large finite
+        //: NaN/±inf must throw before any Float→Int conversion; a large finite
         // value must clamp in the float domain without trapping.
         for bad: [Float] in [[.nan], [.infinity], [-.infinity], [0.5, .nan]] {
             XCTAssertThrowsError(
@@ -684,11 +684,11 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
         }
     }
 
-    // MARK: observation_unavailable parity (spec delta 736d3180)
+    // MARK: observation_unavailable parity
 
     /// An unobserved stage is stated as `state: "unknown"` + `observation_unavailable`: the client
     /// does not claim the stage ran, failed, was cancelled or timed out. The record must round-trip
-    /// through the same binding the queue applies, on EVERY stage.
+    /// through the same binding the queue applies, on every stage.
     func test_observationUnavailableWithUnknownStateIsAcceptedOnEveryStage() throws {
         for stage in ["wake", "bleed", "asr", "translation", "routing", "execution"] {
             var claim = observations
@@ -729,7 +729,7 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
                     // validator that merely lacks the reason would also throw here for the wrong
                     // reason and leave this control green (found by mutation: removing the pairing
                     // check left this test passing).
-                    // f8 refuses ANY reason on a completed stage before the pairing rule is reached, so
+                    // f8 refuses any reason on a completed stage before the pairing rule is reached, so
                     // for completed pairs the stronger rule is the one that correctly fires. Asserting
                     // the rule that applies keeps this from silently accepting an unrelated refusal.
                     let expected = state == "completed"
@@ -742,7 +742,7 @@ final class VoiceSharingContributionEncoderTests: XCTestCase {
         }
     }
 
-    /// Parity with the Worker's strict intake (Cloud `c569b319`): the same reason on the same stage
+    /// Parity with the Worker's strict intake: the same reason on the same stage
     /// is accepted on one state and refused on the others — the accept-any-state mutant must fail.
     func test_theAcceptAnyStateMutantFailsThePairingRule() throws {
         var accepted = observations

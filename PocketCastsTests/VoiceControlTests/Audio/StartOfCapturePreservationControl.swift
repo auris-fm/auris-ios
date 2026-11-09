@@ -1,10 +1,10 @@
 @testable import podcasts
 import XCTest
 
-/// CONTROLS FOR START-OF-CAPTURE PRESERVATION (#core:25b91a1b; requested in review after the
+/// CONTROLS for start-OF-CAPTURE preservation (; requested in review after the
 /// Silero coverage measurements showed Sherpa's emitted segments omit input samples).
 ///
-/// WHY THIS EXISTS, AND WHAT IT ACTUALLY FOUND. The concern was that `NativeVadSegmenter` might
+/// WHY this exists, AND what it actually found. The concern was that `NativeVadSegmenter` might
 /// discard the opening of a command that begins at the very first sample of capture, because speech is
 /// only *confirmed* after `minSpeechFrames` (default 5) consecutive energetic frames and the
 /// not-yet-confirmed path calls `buffer.removeAll()`.
@@ -18,12 +18,12 @@ import XCTest
 /// that is interrupted by a quiet frame before reaching `minSpeechFrames` is dropped. That is a
 /// different property from start-of-capture clipping, and it is the one worth pinning.
 ///
-/// So the pre-roll requirement from review does NOT need to protect the first sample of a
+/// So the pre-roll requirement from review does not need to protect the first sample of a
 /// speech-covered capture start. It remains necessary for what Silero's segments omit — but the
 /// justification cannot be "our segmenter drops the opening", because it does not.
 final class StartOfCapturePreservationControl: XCTestCase {
 
-    /// THE PROPERTY: a command present from the very first sample survives in the emitted utterance.
+    /// THE property: a command present from the very first sample survives in the emitted utterance.
     ///
     /// Speech starts at sample 0 — no lead-in silence, as when a microphone opens onto a user who is
     /// already speaking. PASSES on current code: above-threshold frames are buffered before the
@@ -92,7 +92,7 @@ final class StartOfCapturePreservationControl: XCTestCase {
         )
     }
 
-    /// A command that starts AFTER leading silence must be unaffected: confirmation consumes only
+    /// A command that starts after leading silence must be unaffected: confirmation consumes only
     /// sub-threshold lead-in, which carries no command content.
     func testCommandAfterLeadingSilenceIsUnaffected() {
         let segmenter = NativeVadSegmenter(silenceTimeoutMs: -1)

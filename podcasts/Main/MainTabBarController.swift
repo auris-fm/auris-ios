@@ -1079,8 +1079,8 @@ private extension MainTabBarController {
 private extension MainTabBarController {
     /// Tracks when a tab is switched to.
     /// - Parameters:
-    ///   - tab: Which tab we're switching to
-    ///   - isInitial: Whether this is the tab that is being loaded on first launch
+    /// - tab: Which tab we're switching to
+    /// - isInitial: Whether this is the tab that is being loaded on first launch
     func trackTabOpened(_ tab: Tab, isInitial: Bool = false) {
         let event: AnalyticsEvent
         switch tab {

@@ -30,7 +30,7 @@ final class FakeLfmInference: LfmInference {
 
     var lastError: String { lastErrorMessage }
 
-    /// LIFECYCLE OBSERVER (spec 6b45a5d2): counts real `inference.load` calls so a control can
+    /// LIFECYCLE observer: counts real `inference.load` calls so a control can
     /// pin WHEN the router load happens (first arm, not construction).
     private(set) var loadCount = 0
 

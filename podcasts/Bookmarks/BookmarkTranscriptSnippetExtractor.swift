@@ -53,8 +53,8 @@ struct BookmarkTranscriptSnippetExtractor {
     /// The passage surrounding the given playback time, or why one couldn't be found.
     ///
     /// - Parameter referenceTime: The bookmark's already-resolved reference time, if any.
-    ///   It's preferred over resolving again, both to save the work and because the
-    ///   original capture had the warmest mapping.
+    /// It's preferred over resolving again, both to save the work and because the
+    /// original capture had the warmest mapping.
     func capture(forTime time: TimeInterval, referenceTime: TimeInterval?, episode: BaseEpisode) async -> Result<BookmarkTranscriptSnippet, BookmarkPassageFailureReason> {
         let transcriptManager = TranscriptManager(episodeUUID: episode.uuid, podcastUUID: episode.parentIdentifier())
         guard let model = try? await transcriptManager.loadTranscript() else {
@@ -150,7 +150,7 @@ struct BookmarkTranscriptSnippetExtractor {
     /// text anywhere in the transcript.
     ///
     /// - Parameter location: The passage's captured start within `attributedText`, or `nil`
-    ///   for bookmarks made before the location was recorded.
+    /// for bookmarks made before the location was recorded.
     static func passageRange(for passage: String, at location: Int?, in attributedText: NSAttributedString) -> NSRange? {
         // The transcript side of the match collapses whitespace, so the passage collapses
         // the same way — lining up passages stored flattened by earlier versions and

@@ -59,7 +59,7 @@ final class EarconPlayerTests: XCTestCase {
 
 
 
-    // MARK: - Rate split (review thread 4237185302, follow-up S5)
+    // MARK: - Rate split
 
     /// **The graph connects at the assets' authored rate, not the echo pipeline's.**
     ///

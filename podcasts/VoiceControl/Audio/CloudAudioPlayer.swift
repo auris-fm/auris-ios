@@ -529,7 +529,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// tap). The cloud producer appends its own audio directly (it is not on a real-time
     /// callback), but it publishes its render positions THROUGH the handoff, so a position is
     /// mapped against the block that contains it rather than assumed to equal one block
-    /// (PR #49 review comment 4305981528). Nil in builds/tests without a handoff, where the
+    ///. Nil in builds/tests without a handoff, where the
     /// player falls back to its own last-appended range.
     weak var echoReferenceHandoff: EchoReferenceHandoff?
     /// Test-visible view of the wiring above. The handoff is `weak` because the assembly owns it
@@ -1040,7 +1040,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // and it is the only correct origin for a position inside it. An interleaved producer's
         // appends sit between this producer's frames, so no per-producer offset maps them — and
         // reading `streamIndex` before a separate `append` let an interleaved append shift the
-        // recorded origin after the read (PR #49 review comment 4305981485).
+        // recorded origin after the read.
         let rangeStart = reference.appendReturningOrigin(resampled)
 
         // Publishes the position through the shared handoff when one is wired, so it is matched
@@ -1141,7 +1141,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // producer's. The producers that run on a deadline callback (the episode tap and the
         // earcon) submit both halves instead.
         appendToEmittedReference(pcmBuffer, node: node)
-        // SCHEDULE after the publish, deliberately (PR #49 review comment 4305981528): the
+        // SCHEDULE after the publish, deliberately: the
         // position published above is the node's ACTUAL rendered state — it excludes this
         // buffer if the node has not reached it yet. That is the honest anchor, and it is what
         // keeps the reference aligned with what the microphone can hear rather than with what

@@ -28,7 +28,7 @@ extension PlayerContainerViewController: UIGestureRecognizerDelegate {
         case .ended, .cancelled:
             // If pan ended, decide it we should close or reset the view
             // based on the final position and the speed of the gesture
-            // (https://stackoverflow.com/a/47339617)
+            //
             // If the swipe is too quick, we dismiss
             let translation = sender.translation(in: view)
             let velocity = sender.velocity(in: view)

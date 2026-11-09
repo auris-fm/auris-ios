@@ -21,7 +21,7 @@ final class AcceptanceRemovalControlTests: XCTestCase {
         )
     }
 
-    /// THE CONTROL @reviewer ASKED FOR: the same NUMERIC code in a DIFFERENT domain is NOT a not-found.
+    /// THE control asked for: the same NUMERIC code in a DIFFERENT domain is not a not-found.
     /// A code-only check would have said "no prior export" and run on with a stale file present.
     func testSameCodeInAnotherDomainIsRefused() {
         XCTAssertEqual(

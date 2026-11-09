@@ -25,7 +25,7 @@ final class FingerprintEpisodeFixture {
     }
 
     /// - Parameter duration: the episode's duration as the database knows it.
-    ///   Preparation refuses to run without one.
+    /// Preparation refuses to run without one.
     init(duration: Double) {
         episode = Episode()
         episode.uuid = "fingerprint-tests-\(UUID().uuidString)"

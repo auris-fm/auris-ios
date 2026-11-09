@@ -1,7 +1,7 @@
 import XCTest
 @testable import podcasts
 
-/// STAGING-SCHEME SEMANTICS (review 4371027569): the staging scheme builds the Debug
+/// STAGING-SCHEME semantics: the staging scheme builds the Debug
 /// configuration since StagingDebug was retired (61a1bf1bd). That configuration must carry
 /// `-D STAGING`, or the app compiles ServerSyncManager.production() == true and syncs against
 /// the production Pocket Casts hosts, and CrashLoggingDataProvider reports the wrong build

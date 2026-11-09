@@ -97,8 +97,8 @@ final class IntentRoutingInputTests: XCTestCase {
         XCTAssertEqual(unroutable, 1)
     }
 
-    /// ONE IDENTITY FROM ADMISSION (spec delta3b1def9). The id is minted at utterance admission
-    /// and carried on EVERY routing input the engine emits; two independent utterances carry
+    /// ONE identity from admission. The id is minted at utterance admission
+    /// and carried on every routing input the engine emits; two independent utterances carry
     /// different identities. (The trim itself is exercised elsewhere; what this pins is that the
     /// admitted identity, not a freshly minted one, is what the input carries.)
     func test_admittedUtteranceIdSurvivesTrimAndDiffersAcrossUtterances() async throws {
@@ -138,10 +138,10 @@ final class IntentRoutingInputTests: XCTestCase {
 
     // MARK: - Task #78: NON-CONTENT ASR OUTPUT
 
-    /// PRODUCTION-ENTRY REJECTION (task #78, spec 77eacc9b). A transcript with no Unicode letter or
-    /// number is discarded SILENTLY after wake trim and before ANY downstream work — no routing
+    /// PRODUCTION-ENTRY rejection. A transcript with no Unicode letter or
+    /// number is discarded SILENTLY after wake trim and before any downstream work — no routing
     /// input, no translation, no unroutable feedback, no wake-only callback. The rule is
-    /// content-based, NOT length-based: short meaningful utterances still route.
+    /// content-based, not length-based: short meaningful utterances still route.
     func test_nonContentTranscriptIsSilentlyDiscardedBeforeAnyDownstreamWork() async throws {
         let backend = QueueingAsrBackend(results: [
             AsrResult(text: ".", detectedLanguage: "en"),
@@ -181,7 +181,7 @@ final class IntentRoutingInputTests: XCTestCase {
         )
     }
 
-    /// PRODUCTION-ENTRY WAKE TRIM × NON-CONTENT (task #78 reviewer round): a WAKE-POSITIVE
+    /// PRODUCTION-ENTRY wake trim × NON-CONTENT (task #78 reviewer round): a WAKE-POSITIVE
     /// capture whose permitted trim leaves a non-content remainder is discarded SILENTLY —
     /// the wake phrase never leaks to routing, and CLEANUP means no translation-stage work,
     /// no unroutable feedback, and no wake-only confirmation for the junk remainder.
@@ -196,7 +196,7 @@ final class IntentRoutingInputTests: XCTestCase {
                 ]
             ),
             // The NEXT capture on the SAME running engine must work normally: the discard
-            // left no wedged pipeline state (reviewer f03b9cf1).
+            // left no wedged pipeline state.
             AsrResult(
                 text: "hey auris pause",
                 detectedLanguage: "en",
@@ -242,7 +242,7 @@ final class IntentRoutingInputTests: XCTestCase {
             "CLEANUP: the discard did not RENEW the same window — the scheduled expiry is untouched"
         )
 
-        // CLEANUP, part 2: the engine is STILL HEALTHY — the next meaningful capture routes
+        // CLEANUP, part 2: the engine is STILL healthy — the next meaningful capture routes
         // normally on the same instance, with its own admitted identity.
         await engine.processUtterance(Array(repeating: Float(0.01), count: 16000))
 
@@ -252,10 +252,10 @@ final class IntentRoutingInputTests: XCTestCase {
         XCTAssertEqual(wakeOnly, 0, "the follow-up is routable, not wake-only")
     }
 
-    /// PERMITTED WAKE RESET vs EXTRA TEXT-DRIVEN RENEWAL (reviewer eaf401cf): the SERVICE-composed
-    /// wake callback (`onWakeWordDetected` → `gracePeriodSignal.onWakeWordDetected()`) is the ONLY
+    /// PERMITTED wake reset vs EXTRA text-DRIVEN renewal: the SERVICE-composed
+    /// wake callback (`onWakeWordDetected` → `gracePeriodSignal.onWakeWordDetected()`) is the only
     /// legitimate renewal path around a discarded capture. A wake-positive junk capture fires it
-    /// EXACTLY ONCE (new window, one reset); a subsequent WAKE-NEGATIVE junk capture fires nothing
+    /// EXACTLY once (new window, one reset); a subsequent WAKE-NEGATIVE junk capture fires nothing
     /// and must leave generation AND the scheduled expiry untouched — the discard itself performs
     /// no renewal. A forbidden in-generation reset (`onCommandRecognized`-style) in the discard
     /// path moves the fire date and is caught by the last assertion.
@@ -289,7 +289,7 @@ final class IntentRoutingInputTests: XCTestCase {
         let translation = StubTranslationStage(ensureReady: .success(()), translateResult: "unused")
         let engine = makeEngine(backend: backend, translation: translation, wake: wakeStub)
 
-        // THE PERMITTED COMPOSITION: exactly what VoiceControlService wires in production.
+        // THE permitted composition: exactly what VoiceControlService wires in production.
         var wakeCallbacks = 0
         engine.onWakeWordDetected = { [weak engine] in
             wakeCallbacks += 1
@@ -368,7 +368,7 @@ final class IntentRoutingInputTests: XCTestCase {
         XCTAssertEqual(translation.ensureReadyCalls, 0, "no translation work for a wake-only capture")
     }
 
-    /// WAKE-POSITIVE trim reaching routing carries ONLY the command remainder, under the
+    /// WAKE-POSITIVE trim reaching routing carries only the command remainder, under the
     /// admitted utterance's identity.
     func test_wakePositiveTrimRoutesOnlyTheCommandRemainderUnderTheAdmittedIdentity() async throws {
         let backend = StubAsrBackend(
@@ -401,8 +401,8 @@ final class IntentRoutingInputTests: XCTestCase {
     /// and any digit survive, while punctuation/whitespace alone do not.
     func test_contentRulePreservesShortMeaningfulUtterancesAcrossScripts() {
         // Includes NUMBERS in the non-decimal categories: "²" (No), "½" (No) and "Ⅻ" (Nl) are
-        // Unicode N and must NOT be discarded — only Nd would have been, had the predicate used
-        // `CharacterSet.decimalDigits` (reviewer 68afef6f).
+        // Unicode N and must not be discarded — only Nd would have been, had the predicate used
+        // `CharacterSet.decimalDigits`.
         for meaningful in ["yes", "停", "嗯", "3", "ok", "No.", "3分", "بلى", "네", "²", "½", "Ⅻ", "٣", "⑩"] {
             XCTAssertFalse(
                 VoiceAsrEngine.isNonContent(meaningful),

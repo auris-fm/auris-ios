@@ -65,8 +65,8 @@ final class VoiceSharingSettingsModelTests: XCTestCase {
         XCTAssertEqual(count, 0)
     }
 
-    /// Reviewer f92ff117 + 8ae2b980: neither unknown case may render as a zero count, and they are
-    /// NOT the same state — an unretired revocation intent is a HELD owner, an unlistable root is
+    /// + 8ae2b980: neither unknown case may render as a zero count, and they are
+    /// not the same state — an unretired revocation intent is a HELD owner, an unlistable root is
     /// merely unknown.
     func test_unknownCoverageRendersUnknownNotEmpty() throws {
         // A durable revocation intent the queue could not retire → owner HELD.
@@ -76,7 +76,7 @@ final class VoiceSharingSettingsModelTests: XCTestCase {
 
         // Independently: an unlistable root is unknown, not zero — and not a revocation claim.
         // Its own directory: the case above left a revocation intent in `root`, which correctly
-        // holds ANY queue pointed at that root (that is the point of the durable marker).
+        // holds any queue pointed at that root (that is the point of the durable marker).
         let otherRoot = root.appendingPathComponent("unlistable-owner")
         let unlistable = VoiceSharingUploadQueue(
             rootDirectory: otherRoot, clock: Date.init,
@@ -154,7 +154,7 @@ final class VoiceSharingSettingsModelTests: XCTestCase {
     func test_compiledBoundsDescriptionMatchesTheQueueConstants() {
         let text = model().compiledBoundsDescription
         XCTAssertTrue(text.contains("\(VoiceSharingUploadQueue.maxEntryAudioBytes / 1024) KB"))
-        // SPEC 05ff27d0: the bound is stated in DAYS, and the copy must match the constant.
+        //: the bound is stated in DAYS, and the copy must match the constant.
         XCTAssertTrue(text.contains("\(Int(VoiceSharingUploadQueue.maxEntryAge / (24 * 60 * 60))) days"))
     }
 }
@@ -181,15 +181,15 @@ enum VoiceSharingSettingsFixture {
         return true
     }
 }
-// MARK: - Stopped / recovery projection (spec 62d39f8f, reviewer 8ae2b980)
+// MARK: - Stopped / recovery projection
 
 /// Every branch of the stopped/recovery projection over EXPLICIT live state:
 ///
-///  * an undetermined read (`nil`) is `unknown`, never an invented opt-out;
-///  * a known-unenrolled account is NOT reported as the user turning sharing off;
-///  * an unreadable store is NOT reported as a failed revocation, and offers no remedy;
-///  * a held owner (revocation in doubt) names the one VERIFIED remedy — local deletion — and
-///    only that.
+/// * an undetermined read (`nil`) is `unknown`, never an invented opt-out;
+/// * a known-unenrolled account is not reported as the user turning sharing off;
+/// * an unreadable store is not reported as a failed revocation, and offers no remedy;
+/// * a held owner (revocation in doubt) names the one VERIFIED remedy — local deletion — and
+/// only that.
 final class VoiceSharingRecoveryGuidanceTests: XCTestCase {
     private var root: URL!
     private var queue: VoiceSharingUploadQueue!
@@ -233,7 +233,7 @@ final class VoiceSharingRecoveryGuidanceTests: XCTestCase {
         XCTAssertNotNil(guidance(permits: false, optedIn: false).action)
     }
 
-    /// Server-side non-enrollment must NOT read as a local action.
+    /// Server-side non-enrollment must not read as a local action.
     func test_notEnrolledIsNotReportedAsALocalAction() {
         let result = guidance(permits: false, enrolled: false, optedIn: true)
         XCTAssertEqual(result.reason, .notEnrolled)
@@ -310,10 +310,10 @@ final class VoiceSharingRecoveryGuidanceTests: XCTestCase {
     }
 }
 
-// MARK: - Change subscription (reviewer 8ae2b980)
+// MARK: - Change subscription
 
 /// A snapshot per render is not a subscription. These controls drive the PRODUCTION change source
-/// (the enrollment store) and require the surface's snapshot to update — and require it NOT to
+/// (the enrollment store) and require the surface's snapshot to update — and require it not to
 /// publish when nothing changed, so a listener is not spammed by identical reads.
 final class VoiceSharingSettingsSubscriptionTests: XCTestCase {
     private var root: URL!
@@ -397,7 +397,7 @@ final class VoiceSharingSettingsSubscriptionTests: XCTestCase {
     }
 }
 
-// MARK: - Coherent snapshot + origin re-derivation (reviewer e40508a1)
+// MARK: - Coherent snapshot + origin re-derivation
 
 final class VoiceSharingSnapshotCoherenceTests: XCTestCase {
     private var root: URL!
@@ -456,7 +456,7 @@ final class VoiceSharingSnapshotCoherenceTests: XCTestCase {
     }
 }
 
-// MARK: - Single published view state + serialized publication (reviewer 05aaaedc)
+// MARK: - Single published view state + serialized publication
 
 final class VoiceSharingPublishedStateTests: XCTestCase {
     private var root: URL!
@@ -536,7 +536,7 @@ private final class PublishCounter: @unchecked Sendable {
     var value: Int { lock.lock(); defer { lock.unlock() }; return count }
 }
 
-// MARK: - Ordered publication + production change hooks (reviewer f62b19a4 / spec fc93e27a)
+// MARK: - Ordered publication + production change hooks
 
 final class VoiceSharingChangeHookTests: XCTestCase {
     private var root: URL!
@@ -593,7 +593,7 @@ final class VoiceSharingChangeHookTests: XCTestCase {
     }
 }
 
-// MARK: - Publication watermark (reviewer 31c7758f)
+// MARK: - Publication watermark
 
 final class VoiceSharingWatermarkTests: XCTestCase {
     private var root: URL!
@@ -653,7 +653,7 @@ final class VoiceSharingWatermarkTests: XCTestCase {
 }
 
 
-// MARK: - Every ready-set mutation is versioned and announced (reviewer 31c7758f)
+// MARK: - Every ready-set mutation is versioned and announced
 
 final class VoiceSharingReadySetHookTests: XCTestCase {
     private var root: URL!
@@ -668,7 +668,7 @@ final class VoiceSharingReadySetHookTests: XCTestCase {
         try? FileManager.default.removeItem(at: root)
     }
 
-    /// UPLOAD REMOVAL: the entry leaves the ready set, so the count changes — versioned + announced.
+    /// UPLOAD removal: the entry leaves the ready set, so the count changes — versioned + announced.
     func test_removalOfAUploadedEntryVersionsAndAnnounces() throws {
         let queue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         try VoiceSharingDeletionFixture.seed(in: queue)
@@ -712,7 +712,7 @@ final class VoiceSharingReadySetHookTests: XCTestCase {
     }
 }
 
-// MARK: - Time-driven freshness: no mutation, no UI read (reviewer ffca9a27 / spec e3db4e30)
+// MARK: - Time-driven freshness: no mutation, no UI read
 
 final class VoiceSharingTimeDrivenRefreshTests: XCTestCase {
     private var root: URL!
@@ -804,7 +804,7 @@ final class VoiceSharingTimeDrivenRefreshTests: XCTestCase {
     }
 }
 
-// MARK: - Timer lifecycle gaps (reviewer 71088b91)
+// MARK: - Timer lifecycle gaps
 
 final class VoiceSharingTimerLifecycleTests: XCTestCase {
     private var root: URL!
@@ -905,7 +905,7 @@ final class VoiceSharingTimerLifecycleTests: XCTestCase {
     }
 }
 
-// MARK: - Re-arm with unchanged displayed state (reviewer e48ebcc6)
+// MARK: - Re-arm with unchanged displayed state
 
 final class VoiceSharingDeadlineMoveTests: XCTestCase {
     private var root: URL!
@@ -982,7 +982,7 @@ final class VoiceSharingDeadlineMoveTests: XCTestCase {
                        "the superseded read must not queue another timer")
     }
 
-    /// PAUSED BETWEEN ACCEPTANCE AND ARMING (reviewer 5a4738ca). An accepted read used to release
+    /// PAUSED between acceptance and arming. An accepted read used to release
     /// the lock and arm afterwards, so it could pause there while a NEWER read armed the correct
     /// deadline — then the older read would invalidate it. Here the older read is fully accepted
     /// first, pauses, the newer read completes and arms the short deadline, and only then does the

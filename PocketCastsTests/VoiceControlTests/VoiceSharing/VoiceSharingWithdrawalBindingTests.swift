@@ -1,7 +1,7 @@
 import XCTest
 @testable import podcasts
 
-/// Focused control for the sharing switch binding (reviewer 042d5a69 finding 2, @spec a98e—
+/// Focused control for the sharing switch binding ( finding 2, a98e—
 /// request "pending-withdrawal check"): withdrawal stops LOCAL collection while the server
 /// projection can remain enrolled, so a switch bound to `voiceSharingEnrolled` springs back on
 /// after withdrawal and cannot be re-enabled. The binding reads `locallyOptedIn`; this control
@@ -46,7 +46,7 @@ final class VoiceSharingWithdrawalBindingTests: XCTestCase {
         XCTAssertNotNil(m.membership?.membershipRevision, "precondition: authoritative projection")
     }
 
-    /// THE BINDING PROPERTY: after a local withdrawal with NO confirmed server reply, the local
+    /// THE binding property: after a local withdrawal with NO confirmed server reply, the local
     /// preference is OFF while the projection still reads enrolled. The switch must read OFF, and
     /// the model must still expose the enrolled projection so the surface can render PENDING —
     /// neither a confirmed-on nor a confirmed-off state.

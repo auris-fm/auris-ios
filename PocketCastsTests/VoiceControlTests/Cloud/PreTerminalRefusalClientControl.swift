@@ -1,32 +1,32 @@
 import XCTest
 @testable import podcasts
 
-/// PRE-TERMINAL REFUSAL, named for exactly what it establishes (client review e03f3ecc).
+/// PRE-TERMINAL refusal, named for exactly what it establishes.
 ///
-/// The contract (`docs/specs/cloud-assistant.md` → Interruption; @spec ruling c9bfa2e9) says a
-/// refused interrupt before any terminal acknowledgement is a TERMINAL FAILURE: discard the
+/// The contract (`docs/specs/cloud-assistant.md` → Interruption; ) says a
+/// refused interrupt before any terminal acknowledgement is a TERMINAL failure: discard the
 /// retained next utterance, report local generic failure, terminate the old transport, retain the
 /// pending interruption report, never treat refusal as settlement, never auto-submit the held
 /// utterance.
 ///
-/// **SCOPE LIMITS, stated first because an earlier version of this control overclaimed them**
-/// (client review 26d5e8b9):
+/// **SCOPE limits, stated first because an earlier version of this control overclaimed them**
+///:
 ///
-///   1. It drives `CloudRouteSink.routeToCloud` DIRECTLY — not `VoiceIntentExecutor.execute`. The
-///      executor's outcome switch is a separate layer; the outcome VALUE asserted here is what
-///      that switch consumes, but this control does not execute it.
-///   2. It creates NO interruption state: no active predecessor turn, no held successor utterance,
-///      no pending interruption report. The iOS client has no such machinery (barge-in supersedes
-///      locally via `CloudTurnToken` and never sends an `interrupt` frame), so held-follow-up
-///      DISCARD and pending-report RETENTION are not observable here and are NOT claimed. That
-///      half of the ruling is a missing production path, reconciled separately with @spec.
-///   3. What it does establish, and only this: a served pre-terminal error classifies as a FAILED
-///      turn (never `completed` — the value the executor reads to decide whether the grace window
-///      may open, so misreporting it would let a refusal settle the turn); the user hears locally
-///      resolved feedback rather than the server's free-form message; the turn submits exactly the
-///      frames it sent (a refused turn issues NO additional submission of its own — counted, not
-///      inferred from an outcome); and the transport is cancelled at the terminal, so no later
-///      `done` can arrive on it.
+/// 1. It drives `CloudRouteSink.routeToCloud` DIRECTLY — not `VoiceIntentExecutor.execute`. The
+/// executor's outcome switch is a separate layer; the outcome VALUE asserted here is what
+/// that switch consumes, but this control does not execute it.
+/// 2. It creates NO interruption state: no active predecessor turn, no held successor utterance,
+/// no pending interruption report. The iOS client has no such machinery (barge-in supersedes
+/// locally via `CloudTurnToken` and never sends an `interrupt` frame), so held-follow-up
+/// DISCARD and pending-report RETENTION are not observable here and are not claimed. That
+/// half of the ruling is a missing production path, reconciled separately with .
+/// 3. What it does establish, and only this: a served pre-terminal error classifies as a FAILED
+/// turn (never `completed` — the value the executor reads to decide whether the grace window
+/// may open, so misreporting it would let a refusal settle the turn); the user hears locally
+/// resolved feedback rather than the server's free-form message; the turn submits exactly the
+/// frames it sent (a refused turn issues NO additional submission of its own — counted, not
+/// inferred from an outcome); and the transport is cancelled at the terminal, so no later
+/// `done` can arrive on it.
 final class PreTerminalRefusalClientControl: SocketCapturingTestCase {
     private var playback: RefusalPlaybackSink!
     private var mapper: EmptyFingerprintMap!
@@ -126,7 +126,7 @@ final class PreTerminalRefusalClientControl: SocketCapturingTestCase {
         XCTAssertEqual(code, "invalid_request", "the refusal's own code must survive to the outcome")
     }
 
-    /// "NO AUTOMATIC SUBMISSION" AS A COUNT, not an inference from an outcome (review 26d5e8b9).
+    /// "NO AUTOMATIC submission" AS A COUNT, not an inference from an outcome.
     ///
     /// A refused turn must produce no outbound submission beyond its own. The earlier version
     /// re-dispatched with a call of its own and checked only "not completed" — which a second
@@ -148,7 +148,7 @@ final class PreTerminalRefusalClientControl: SocketCapturingTestCase {
             utteranceId: "u-refused-count"
         )
 
-        // LIMIT OF THIS ASSERTION, stated so it cannot be read as more than it is: a SocketStub
+        // LIMIT of this assertion, stated so it cannot be read as more than it is: a SocketStub
         // records frames per SOCKET, so this counts submissions on the refusal's own transport.
         // A hypothetical follow-up opened on a NEW socket with a NEW sink would not appear here,
         // and this client has no retained utterance that could produce one — so the count is a

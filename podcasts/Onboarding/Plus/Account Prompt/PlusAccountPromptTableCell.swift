@@ -3,7 +3,7 @@ import UIKit
 import PocketCastsUtils
 
 class PlusAccountPromptTableCell: ThemeableCell {
-//    static let reuseIdentifier: String = "PlusAccountPromptTableCell"
+// static let reuseIdentifier: String = "PlusAccountPromptTableCell"
 
     private weak var model: PlusAccountPromptViewModel?
 

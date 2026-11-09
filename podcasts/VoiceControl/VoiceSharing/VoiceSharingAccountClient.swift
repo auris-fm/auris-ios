@@ -408,10 +408,10 @@ final class VoiceSharingAccountClient {
         }
 
         // Consistency rules — an impossible combination is unknown state, never permission:
-        //  * active withdrawal_state with enrolled=false contradicts itself;
-        //  * enrollment without an epoch cannot authorize collection (records key on the epoch);
-        //  * an ACTIVE enrollment must carry the disclosure version it accepted;
-        //  * withdrawn/not_enrolled must not still claim enrollment.
+        // * active withdrawal_state with enrolled=false contradicts itself;
+        // * enrollment without an epoch cannot authorize collection (records key on the epoch);
+        // * an ACTIVE enrollment must carry the disclosure version it accepted;
+        // * withdrawn/not_enrolled must not still claim enrollment.
         if withdrawal == .active && !enrolled { return nil }
         if enrolled && epoch == nil { return nil }
         if enrolled && withdrawal == .withdrawn { return nil }

@@ -8,15 +8,15 @@ import XCTest
 /// local-feedback and cloud-answer renderers into the shared emitted-PCM reference and
 /// demonstrate, with capture active, that:
 ///
-///   * answer-only playback produces **no** accepted speech, wake/reset, request or
-///     allowance spend, and
-///   * **simultaneous** user speech retains its onset and interrupts output.
+/// * answer-only playback produces **no** accepted speech, wake/reset, request or
+/// allowance spend, and
+/// * **simultaneous** user speech retains its onset and interrupts output.
 ///
 /// Scope follows the owning clause, which distinguishes route classes rather than
 /// being an Exposed-only flag:
-///   * built-in loudspeaker — aligned playback cross-correlation against the reference;
-///   * external routes — delay tracking, *not* the built-in correlation window;
-///   * isolated route — reduced exposure, but **not** proof that echo is absent.
+/// * built-in loudspeaker — aligned playback cross-correlation against the reference;
+/// * external routes — delay tracking, *not* the built-in correlation window;
+/// * isolated route — reduced exposure, but **not** proof that echo is absent.
 ///
 /// The engine-level cases drive the engine's consumed seam, never `SignalFilter`
 /// directly: a test that constructs `SignalFilter` and calls `isPlaybackBleed` passes
@@ -305,11 +305,11 @@ final class EchoReferenceWiringTests: XCTestCase {
         XCTAssertEqual(converted[319], frame[478] + (frame[479] - frame[478]) * 0.5, accuracy: 0.0001)
     }
 
-      /// A route change must retire the reference IN BOTH DIRECTIONS.
+      /// A route change must retire the reference IN BOTH directions.
       ///
       /// Retiring only when the incoming route stops correlating left external -> built-in
       /// reusing audio from the old output path as though it were an aligned reference for the
-      /// new one. The production rule (`setEchoFilterRoute`) retires on EVERY transition; this
+      /// new one. The production rule (`setEchoFilterRoute`) retires on every transition; this
       /// case now pins both halves of that claim, so the name matches the coverage.
       ///
       /// **What the assertion can distinguish:** retirement drops all but the acoustic tail,
@@ -339,7 +339,7 @@ final class EchoReferenceWiringTests: XCTestCase {
         harness.engine.updatePlaybackBuffer([Float](repeating: 0.7, count: 16_000))
         XCTAssertEqual(harness.reference.snapshot().count, 16_000)
 
-        // Read the tail BEFORE the next transition: leg 1's built-in->external retirement has
+        // Read the tail before the next transition: leg 1's built-in->external retirement has
         // already trimmed this reference to the acoustic tail, so re-reading it after that call
         // would compare a 400-sample write against an already-truncated window. This is the
         // FULL-LENGTH built-in-path state that leg 2 must retire.
@@ -366,7 +366,7 @@ final class EchoReferenceWiringTests: XCTestCase {
         //
         // A numeric position proof does not belong here. `updatePlaybackBuffer` calls
         // `invalidate()` before appending, and `invalidate()` clears samples/anchor/tally but
-        // NOT `startTime`; the following `append` then re-stamps `startTime = clock.now()`.
+        // not `startTime`; the following `append` then re-stamps `startTime = clock.now()`.
         // The harness reference runs on the default `SystemMonotonicClock`, so every start
         // instant in this test is real wall-clock time and any accuracy assertion measures
         // scheduling drift between two calls instead of retirement arithmetic. (Observed: a
@@ -809,13 +809,13 @@ final class EchoReferenceWiringTests: XCTestCase {
             "the retained audio is near-silent, so the earcon's samples were not published"
         )
         // A previous bound here asserted `retainedPeak <= sourcePeak + 0.05`. That CANNOT
-        // fail (review thread 4237304934): `PlaybackResampler.toPipelineRate` returns convex
+        // fail: `PlaybackResampler.toPipelineRate` returns convex
         // combinations of adjacent source samples (`result[i] = a + (b - a) * fraction`), so
         // a resampled value never exceeds the largest input by construction — it held for any
         // interpolating resampler, correct or wrong. Removed per that finding; replaced below
         // by assertions that DO fail on the defects they name.
         //
-        // CONTENT PIN, as the thread suggested: the handoff appends this block to an empty
+        // CONTENT pin, as the thread suggested: the handoff appends this block to an empty
         // reference, so output i sits at retained[i]. The 3:2 ratio puts output 2 exactly on
         // source 3 (integer position, fraction 0) and output 1 halfway between sources 1 and
         // 2. A path that published a different buffer — silence, zeros, or another producer's
@@ -830,7 +830,7 @@ final class EchoReferenceWiringTests: XCTestCase {
             retained[1], sourceSamples[1] + (sourceSamples[2] - sourceSamples[1]) * 0.5, accuracy: 0.0001,
             "output 1 must be the midpoint interpolation of sources 1 and 2 at step 1.5"
         )
-        // RATE PIN: the tone is low enough that resampling preserves its zero-crossing count,
+        // RATE pin: the tone is low enough that resampling preserves its zero-crossing count,
         // while a wrong rate changes it. Amplitude bounds are untouched by correct AND
         // incorrect interpolation alike — which is precisely why the removed bound proved
         // nothing and this comparison does.
@@ -934,7 +934,7 @@ final class EchoReferenceWiringTests: XCTestCase {
     /// the lock whose copy-on-write copy lands later, possibly outside it). It hands off to a serial queue the way `NativeAudioCapture`
     /// already does, and the reference is updated off the real-time thread.
     ///
-    /// These cases fix the three properties @spec required: capacity, overflow behaviour,
+    /// These cases fix the three properties required: capacity, overflow behaviour,
     /// and ownership across stop/restart.
     func testHandoffDeliversBlocksToTheReference() {
         let reference = PlaybackEchoReference()
@@ -1002,7 +1002,7 @@ final class EchoReferenceWiringTests: XCTestCase {
         let handoff = EchoReferenceHandoff(reference: reference, capacity: 4)
 
         // Removes the block from pending, then the reset runs, then the append happens.
-        // The hook is assigned BEFORE the submit that enqueues the delivery. Assigning it
+        // The hook is assigned before the submit that enqueues the delivery. Assigning it
         // afterwards races the queue: `submit` dispatches `deliver()` asynchronously, so the
         // contract's own mid-flight interleaving would depend on the hook winning a race it
         // has no ordering against. With this order the interleaving is structural.
@@ -1028,7 +1028,7 @@ final class EchoReferenceWiringTests: XCTestCase {
         )
     }
 
-    /// A reset moves the session on but does NOT clear the reference, and that is what makes
+    /// A reset moves the session on but does not clear the reference, and that is what makes
     /// the delivery/reset interleaving unobservable: whether a block is appended just before or
     /// just after a reset, the reference ends up holding the same samples at the same scan
     /// position. `deliver()` re-checks the generation inside the same critical section that
@@ -1226,7 +1226,7 @@ final class EchoReferenceWiringTests: XCTestCase {
             sinkIds.isEmpty,
             "the sink never ran, so the thread contract was not exercised"
         )
-        // THE CONTRACT: no recorded sink execution happened on the submitting thread.
+        // THE contract: no recorded sink execution happened on the submitting thread.
         let submitId = try XCTUnwrap(submittingThreadId, "the barrier body never ran, so the control measured nothing")
         XCTAssertTrue(
             sinkIds.allSatisfy { $0 != submitId },
@@ -1510,7 +1510,7 @@ final class EchoReferenceWiringTests: XCTestCase {
     }
 
     /// The helper's own narrower property, kept: given a handoff, the helper installs a real
-    /// tap on the output node. This is the half that does NOT establish the start path uses it,
+    /// tap on the output node. This is the half that does not establish the start path uses it,
     /// which is why the case above exists — and the two are kept apart deliberately.
     func testInstallHelperInstallsTheTapOnTheOutputNode() {
         let handoff = EchoReferenceHandoff(reference: PlaybackEchoReference(), capacity: 4)
@@ -1586,7 +1586,7 @@ final class EchoReferenceWiringTests: XCTestCase {
     /// A port this client does not recognise must not acquire the built-in speaker's alignment.
     ///
     /// `forOutput` gives `.builtInSpeaker` the correlation window, which is justified by that
-    /// route's bounded local latency. A USB DAC, car head unit or hearing aid has codec latency
+    /// route's bounded local latency. A USB dac, car head unit or hearing aid has codec latency
     /// this client has not measured, so classifying it as the built-in speaker would apply the
     /// window where its premise does not hold. The fallback is `.unknown`, which maps to
     /// `.external` — the scope for a route whose behaviour has not been established.
@@ -1598,7 +1598,7 @@ final class EchoReferenceWiringTests: XCTestCase {
 
         // A missing port and an unrecognised port type take the same branch, and that branch
         // must not be the built-in speaker: its correlation window is justified by a bounded
-        // local latency that a USB DAC, car head unit or hearing aid does not have.
+        // local latency that a USB dac, car head unit or hearing aid does not have.
         XCTAssertEqual(
             monitor.classifyOutputForTesting(nil), .unknown,
             "a missing port was not classified as unknown"
@@ -2015,7 +2015,7 @@ final class EchoReferenceWiringTests: XCTestCase {
     ///
     /// **Scope, so this is not read as more than it is:** the case supplies the anchor
     /// itself, so it states the CONSUMER's requirement — what index space an anchor must be
-    /// in — and cannot see which producer violates it. Coverage of a producer has to go
+    /// in and cannot see which producer violates it. Coverage of a producer has to go
     /// through that producer's path (`test_handoffRecordsAnAnchor...` did, and was withdrawn
     /// with the fix it was written for). A future fix needs its own case on the real path.
     ///
@@ -2080,13 +2080,13 @@ final class EchoReferenceWiringTests: XCTestCase {
     /// Two things this pins that the arithmetic cases cannot, because they drive one
     /// producer at a time and supply the anchor themselves:
     ///
-    ///   * a producer whose blocks are separated by ANOTHER producer's appends occupies no
-    ///     contiguous reference range, so its anchor must follow the append points rather
-    ///     than a fixed origin. Here the earcon appends between every cloud block, and a
-    ///     per-producer offset would drift by the interleaved amount each round.
-    ///   * the anchor must reflect the producer's RENDERED position, not the block's length
-    ///     and not the append tail. A producer that has rendered less than it has queued
-    ///     must place its audio earlier than the stream's submitted end.
+    /// * a producer whose blocks are separated by ANOTHER producer's appends occupies no
+    /// contiguous reference range, so its anchor must follow the append points rather
+    /// than a fixed origin. Here the earcon appends between every cloud block, and a
+    /// per-producer offset would drift by the interleaved amount each round.
+    /// * the anchor must reflect the producer's RENDERED position, not the block's length
+    /// and not the append tail. A producer that has rendered less than it has queued
+    /// must place its audio earlier than the stream's submitted end.
     func test_interleavedProducersPlaceEachAnchorInItsOwnReferenceRange() {
         let reference = PlaybackEchoReference()
         let handoff = EchoReferenceHandoff(reference: reference, capacity: 64)
@@ -2160,7 +2160,7 @@ final class EchoReferenceWiringTests: XCTestCase {
     /// This drives `publish` directly with a time whose sample position is known, so the
     /// assertion is about what the tap hands over rather than about `installTap` — a case
     /// built on a real tap would depend on the node actually rendering.
-    /// START SEMANTICS AT THE PRODUCTION TAP: the tap's `sampleTime` labels the buffer's FIRST
+    /// START semantics at the production tap: the tap's `sampleTime` labels the buffer's FIRST
     /// sample (measured in ExplicitScheduleOriginProbe: the marker's host instant matches H + j/R
     /// within ~0.6 ms and misses H + (j-N)/R by a full buffer). The submitted producer range must
     /// therefore be [sampleTime, sampleTime + frameLength) — not one buffer earlier — and a render
@@ -2206,7 +2206,7 @@ final class EchoReferenceWiringTests: XCTestCase {
             "a position inside the submitted range matched no block: the range was not [start, start + frames)"
         )
 
-        // And a position one buffer EARLIER than the block start must NOT match: that is where the
+        // And a position one buffer EARLIER than the block start must not match: that is where the
         // old end-of-buffer derivation put the block.
         let beforeStart = start - 10
         let probe = PlaybackEchoReference()
@@ -2292,10 +2292,10 @@ final class EchoReferenceWiringTests: XCTestCase {
     /// means a change to one caller cannot silently diverge from the other.
     ///
     /// The cases fix the two mistakes that were actually made:
-    ///   * treating the producer's count as if it were already a reference index, which
-    ///     places second-turn audio at the wrong origin;
-    ///   * using the block's length rather than the producer's progress, which claims the
-    ///     block has played when it has only been submitted.
+    /// * treating the producer's count as if it were already a reference index, which
+    /// places second-turn audio at the wrong origin;
+    /// * using the block's length rather than the producer's progress, which claims the
+    /// block has played when it has only been submitted.
     func test_producerPositionIsConvertedIntoTheBlocksReferenceRange() {
         let rangeStart = 40_000
 
@@ -2391,7 +2391,7 @@ final class EchoReferenceWiringTests: XCTestCase {
     /// is the node's render position read before the schedule — this case measures that read on
     /// the real node and records why it cannot serve.
     ///
-    /// Both scenarios @spec named are exercised. The assertion is deliberately about what the
+    /// Both scenarios named are exercised. The assertion is deliberately about what the
     /// read IS, not about a threshold it happens to satisfy: an earlier draft asserted a bounded
     /// drift and passed while the read was nil (drift computed as infinity only in the failure
     /// path), which would have certified an origin that does not exist.
@@ -2726,7 +2726,7 @@ final class EchoReferenceWiringTests: XCTestCase {
         //
         // Submitted with its range directly: the earcon no longer reports a scheduling origin it
         // cannot establish, so its own publishes carry no range and nothing could be matched
-        // under ANY identity — the case would then fail for a reason unrelated to the token.
+        // under any identity — the case would then fail for a reason unrelated to the token.
         player.play(.listeningStart)
         handoff.drain()
         handoff.submit(
@@ -2927,10 +2927,10 @@ final class EchoReferenceWiringTests: XCTestCase {
         )
     }
 
-    /// A retired incarnation is refused BEFORE range lookup, within one generation — and a
+    /// A retired incarnation is refused before range lookup, within one generation — and a
     /// current observation at the same local range is accepted.
     ///
-    /// DRIVEN THROUGH THE PRODUCER'S REAL RESET: the earcon's `stop()` rotates its token and
+    /// DRIVEN through the producer'S REAL reset: the earcon's `stop()` rotates its token and
     /// reports the rotation to the handoff. The case never constructs an identity or calls
     /// `rotateIncarnation` itself — deleting the report from `stop()` fails this case, which
     /// is the property the hand-supplied version could not test.
@@ -2958,7 +2958,7 @@ final class EchoReferenceWiringTests: XCTestCase {
         // Incarnation 0: a block spanning local 0..<400, submitted with its range so the
         // mapping has something to convert through. Submitted directly rather than through the
         // earcon: the earcon no longer reports a scheduling origin it cannot establish, so its
-        // blocks carry no range and an observation under ANY incarnation would be refused for
+        // blocks carry no range and an observation under any incarnation would be refused for
         // that reason. Driving the range here is what keeps this case about the boundary.
         handoff.submit(
             Array(repeating: 0.25, count: 400),
@@ -2972,7 +2972,7 @@ final class EchoReferenceWiringTests: XCTestCase {
         let firstPublishEnd = reference.streamIndex
         XCTAssertGreaterThan(firstPublishEnd, 0, "the first publish recorded nothing")
 
-        // The identity in force BEFORE the reset, captured so the post-restart expectation can
+        // The identity in force before the reset, captured so the post-restart expectation can
         // be derived from it rather than supplied: the reset must advance the incarnation by
         // exactly one, and the case fails if it does not.
         let identityBefore = player.currentIdentity
@@ -3037,7 +3037,7 @@ final class EchoReferenceWiringTests: XCTestCase {
     }
 
 
-    /// The boundary's original scenario, built as @spec specified: BOTH identities'
+    /// The boundary's original scenario, built as specified: BOTH identities'
     /// range-bearing blocks retained in the SAME generation, with overlapping producer-local
     /// ranges and resident PCM, then the late old observation delivered after the producer's
     /// own reset notification.

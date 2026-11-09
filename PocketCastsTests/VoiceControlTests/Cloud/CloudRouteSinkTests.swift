@@ -274,8 +274,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
         let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-10")
 
-        // This case is about the ERROR PATH's buffer/seek rollback. The remote `message` is never
-        // spoken (spec 961fab07) and `rate_limited` has no local template, so the user hears the
+        // This case is about the ERROR path's buffer/seek rollback. The remote `message` is never
+        // spoken and `rate_limited` has no local template, so the user hears the
         // error earcon; the subject here is the buffer/seek/pause outcome below, not the wording.
         XCTAssertEqual(response.response, .earcon(.error))
         XCTAssertTrue(playback.calls.contains(.seekTo(110)))
@@ -363,7 +363,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(rejection?.reason, OperationReason.malformedSeekTarget)
     }
 
-    /// An unmapped reference target is NOT converted by assumption. Reference time is not
+    /// An unmapped reference target is not converted by assumption. Reference time is not
     /// playback time: falling back to the raw value seeks somewhere the server never asked for
     /// on a mapped episode, and nothing downstream can tell that apart from a correct seek. The
     /// operation is refused instead, and no position changes.
@@ -408,7 +408,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(unavailable?.reason, OperationReason.referenceMappingUnavailable)
     }
 
-    // MARK: Seek-refusal surfacing (PR #49 review 4305981598)
+    // MARK: Seek-refusal surfacing
 
     /// A recording consumer injected as the sink's result consumer. The wire contract
     /// (`app_operation_result`, rev da327e624) names this the production surface: a refusal the
@@ -420,7 +420,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         }
     }
 
-    /// Optional cancellation-insensitive park installed on the stub task BEFORE the client is
+    /// Optional cancellation-insensitive park installed on the stub task before the client is
     /// constructed, so the producer's FIRST receive parks — no race with stream end.
     private var pendingProducerHold: HoldLatch?
     /// How many wires the sink actually dialled — the OWNERSHIP observable for request controls.
@@ -434,7 +434,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     private var pendingDeclaredPark: HoldLatch?
     private var pendingDeclaredParkAfterFrames: Int?
 
-    /// REQUEST OWNERSHIP (owner delta 3484cbc/5eca874, reviewer 724db1e8): while a dispatch for
+    /// REQUEST ownership: while a dispatch for
     /// an utterance is genuinely HELD in flight, a duplicate invocation for the SAME utterance
     /// joins it — no second wire request is sent — and both callers observe the identical
     /// result once the held dispatch settles: the held-dispatch control. An INDEPENDENT
@@ -455,7 +455,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let joiner = Task { await sink.routeToCloud(
             request: "same", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
             selection: nil, utteranceId: shared) }
-        // An independent utterance must NOT be blocked by the held one.
+        // An independent utterance must not be blocked by the held one.
         let independent = Task { await sink.routeToCloud(
             request: "other", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
             selection: nil, utteranceId: "utterance-independent") }
@@ -480,7 +480,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         )
     }
 
-    /// RETENTION BOUNDARY (reviewer 39beabc7): the sink's settled results are retained for the
+    /// RETENTION boundary: the sink's settled results are retained for the
     /// whole WINDOW — no cap. More than 16 settled utterances, then a RETAINED id is delivered
     /// again: it must be served from the retained result with NO new client, NO new admission
     /// and NO predecessor cancellation. An evicting cache would re-enter the owner path here.
@@ -511,11 +511,11 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertNotNil(replayed.response, "the retained result is returned")
     }
 
-    /// HELD OWNER + JOINER ACROSS A WINDOW CLOSE (reviewer a2723c92): an owner is held in
+    /// HELD owner + JOINER across A WINDOW close: an owner is held in
     /// flight with a duplicate JOINER parked on it, then the window RETIRES (close) and a new
-    /// window opens, all before the owner completes. The retirement must NOT discard the held
+    /// window opens, all before the owner completes. The retirement must not discard the held
     /// joiner: releasing the old owner settles the JOINER with that owner's result, and the late
-    /// owner's completion must NOT publish into the new window's map (the next dispatch for the
+    /// owner's completion must not publish into the new window's map (the next dispatch for the
     /// SAME id in the new window is a fresh OWN, not a replay of the stale result).
     @MainActor
     func testHeldJoinerIsSettledByItsOwnerEvenAfterTheWindowRetires() async throws {
@@ -545,9 +545,9 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             joinerResult, ownerResult,
             "the held joiner is settled by ITS owner even though the window retired mid-flight"
         )
-        // The late owner must NOT have published into the NEW window: the SAME utterance id in
+        // The late owner must not have published into the NEW window: the SAME utterance id in
         // the new window is a FRESH dispatch (a new owner), not a replay of the stale result —
-        // it must NOT return the stale owner's result. The new window is a live origin again.
+        // it must not return the stale owner's result. The new window is a live origin again.
         manager.registerLiveOrigin(cloudTestOrigin)
         let clientsBefore = clientCreationCount
         _ = await sink.routeToCloud(
@@ -561,14 +561,14 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         )
     }
 
-    /// THE EXACT BOUNDARY (reviewer b2c09394). Owner A obtains its ownership token, then is held
-    /// BEFORE its dispatch entry. Duplicate B arrives while A is held, and the WINDOW CHANGES
+    /// THE exact boundary. Owner A obtains its ownership token, then is held
+    /// before its dispatch entry. Duplicate B arrives while A is held, and the WINDOW changes
     /// (a real production transition: the live origin moves and the sink retires) before A is
     /// released. Requirements asserted:
-    ///   - exactly ONE owner's immutable request reaches the wire (B never starts A's turn);
-    ///   - B is refused/joined, never admitted as a second owner;
-    ///   - the stale A does not admit a turn after the window changed; and
-    ///   - every waiter is settled (nothing is abandoned).
+    /// - exactly ONE owner's immutable request reaches the wire (B never starts A's turn);
+    /// - B is refused/joined, never admitted as a second owner;
+    /// - the stale A does not admit a turn after the window changed; and
+    /// - every waiter is settled (nothing is abandoned).
     @MainActor
     func testOwnerHeldBetweenClaimAndDispatchIsNotPreemptedByADuplicateAcrossAWindowChange() async throws {
         let manager = testConversationManager()
@@ -576,11 +576,11 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         sink.retireRetainedDispatchesIfWindowChanged(to: cloudTestOrigin)
 
         let shared = "utterance-race"
-        // A obtains its token and is held BEFORE dispatch entry.
+        // A obtains its token and is held before dispatch entry.
         let aOwnership = sink.beginDispatch(utteranceId: shared, origin: cloudTestOrigin)
         XCTAssertTrue(aOwnership.ownsDispatch, "A's admission owns the dispatch")
 
-        // B arrives while A holds the token but has not entered dispatch: it must NOT own.
+        // B arrives while A holds the token but has not entered dispatch: it must not own.
         let bOwnership = sink.beginDispatch(utteranceId: shared, origin: cloudTestOrigin)
         XCTAssertFalse(bOwnership.ownsDispatch, "a duplicate never obtains ownership of A's turn")
         if case .join = bOwnership {} else { XCTFail("B must JOIN the held owner, got \(bOwnership)") }
@@ -601,7 +601,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertNotNil(freshInstance, "the new window owns its own record")
 
         // A NOW re-enters with its STALE token, while a DIFFERENT record (the new window's) owns
-        // this utterance id. A must NOT run its request: the INSTANCE fence is what separates the
+        // this utterance id. A must not run its request: the INSTANCE fence is what separates the
         // two owners. Observable at the sink boundary — the stale owner never mints a wire client.
         let wiresBeforeStale = sink.wireDispatchCountForTesting
         _ = await sink.routeToCloud(
@@ -630,11 +630,11 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         )
     }
 
-    /// JOINER BOUND TO ITS OWN ADMISSION ACROSS A REAL CLOSE/REOPEN (reviewer 8501bd91). A joiner
+    /// JOINER bound to its own admission across A REAL close/REOPEN. A joiner
     /// obtains `.join(token)` for owner A, PAUSES before dispatch, the window retires and the
     /// successor reuses the SAME utterance id, then the joiner resumes. It must resolve against
-    /// COHERENT ADMISSION with an EXPLICIT INTERLEAVING BARRIER (review 5fa6e007): the admission
-    /// is paused INSIDE the coherent block, before its liveness read; AT THAT MOMENT — mid-decision
+    /// COHERENT admission with an EXPLICIT interleaving barrier: the admission
+    /// is paused INSIDE the coherent block, before its liveness read; AT THAT moment — mid-decision
     /// — the window moves and the origin retires. The resumed decision must observe the retirement
     /// and REFUSE. A pre-block snapshot implementation fails this control: its cached liveness
     /// would still admit. The discriminator is the admission outcome, not a timeout, and the whole
@@ -667,7 +667,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
 
 
-    /// COHERENT ADMISSION (review 086c0172): a retirement that lands between a pre-lock snapshot
+    /// COHERENT admission: a retirement that lands between a pre-lock snapshot
     /// and publication must not admit the stale origin. `beginDispatch` now decides and publishes
     /// in ONE main-queue block, so a retirement preceding the block is OBSERVED by the decision:
     /// an origin retired before admission runs is refused even though an earlier read of the live
@@ -687,7 +687,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertTrue(disposition.isRefused, "an origin retired before the admission block runs is refused, got \(disposition)")
     }
 
-    /// ADMISSION ENTERED FROM A DETACHED TASK (review 086c0172/47328768/7443c3ea). The sink class
+    /// ADMISSION entered from A DETACHED task. The sink class
     /// is `@MainActor`-annotated, so its `routeToCloud` witness is MAIN-ISOLATED: a detached caller
     /// suspends and the body runs on main. There is no off-main admission branch to exercise, and
     /// this control does not claim one. What it verifies is what a remote caller sees: entering from
@@ -702,8 +702,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         manager.registerLiveOrigin(cloudTestOrigin)
 
         // 1. A genuinely nonisolated task enters through the NONISOLATED witness (the concrete
-        //    type's witness — not the @MainActor-concrete convenience) with a fresh utterance; the
-        //    dispatch must complete (the stub consumer settles it) and leave an owned record.
+        // type's witness — not the @MainActor-concrete convenience) with a fresh utterance; the
+        // dispatch must complete (the stub consumer settles it) and leave an owned record.
         self.pendingFixture =
             """
             event: done
@@ -723,7 +723,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertNotNil(witnessInstance, "the witness admission published its record")
 
         // 2. The window moves; an admission against the RETIRED origin is refused by the coherent
-        //    decision (called on main, where that decision lives).
+        // decision (called on main, where that decision lives).
         manager.registerLiveOrigin(cloudTestOrigin + 1)
         sink.retireRetainedDispatchesIfWindowChanged(to: cloudTestOrigin + 1)
         let refused: CloudDispatchOwnership = await Task.detached { @MainActor in
@@ -732,7 +732,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertTrue(refused.isRefused, "a witness admission against a retired origin is refused, got \(refused)")
     }
 
-    /// ITS OWN admitted record, never the successor's — the token carries the instance precisely
+    /// ITS own admitted record, never the successor's — the token carries the instance precisely
     /// so a reused id cannot be mistaken for the same owner.
     @MainActor
     func testAHeldJoinerResolvedAgainstItsOwnAdmissionNotASuccessorThatReusedTheId() async throws {
@@ -770,7 +770,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             request: "owner request", tier: .free, context: sampleContext(),
             origin: cloudTestOrigin, selection: nil, utteranceId: shared, ownership: aOwnership
         )
-        // The owner's settlement is recorded ON ITS OWN record instance — not on the successor's.
+        // The owner's settlement is recorded ON ITS own record instance — not on the successor's.
         XCTAssertEqual(
             sink.tokenRecordInstanceForTesting(token: aOwnershipToken(aOwnership)), joinToken.instance,
             "premise: the owner and the joiner are bound to the SAME record"
@@ -796,9 +796,9 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         )
     }
 
-    /// NO IMMORTAL SECOND MAP (reviewer be89233d) AND NO PRETENDED REFCOUNT (reviewer f3492082).
+    /// NO IMMORTAL second map and no pretended refcount.
     /// (a) A completed utterance is DETACHED from the live map on a window change — not retained
-    /// forever. (b) LIFETIME IS ARC: once the retiring detaches the map entry and EVERY reference
+    /// forever. (b) LIFETIME is arc: once the retiring detaches the map entry and every reference
     /// to the record is gone, the record is DEALLOCATED — proved with a weak handle, not inferred
     /// from a counter. The `admitAndResolve` helper guarantees its token locals are dead before the
     /// assertion (Swift may keep frame locals alive to scope end, so the tokens live in a callee).
@@ -1030,7 +1030,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     }
 
     /// LEGACY refusal case (explicit, per the runtime gate): an identity-less cloud mutation
-    /// does NOT execute and sends NO result frame (there is no server identity to tie it to);
+    /// does not execute and sends NO result frame (there is no server identity to tie it to);
     /// the refusal is recorded for the executor surface.
     func testLegacyIdentitylessMutationRefusesWithoutExecutingAndWithoutAResultFrame() async throws {
         // LEGACY_ACTION marker: the fixture-boundary injector skips it, so this fixture stays a
@@ -1081,9 +1081,9 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         throw XCTSkip("no result frame arrived") // replaced by a hard failure below
     }
 
-    /// FULL TYPED REPLAY control: the same server-issued operation_id delivered across two turns
+    /// FULL typed replay control: the same server-issued operation_id delivered across two turns
     /// is answered from the durable journal on the second delivery — the recorded outcome rides
-    /// the real socket, and the effect does NOT run twice. Success replays with the ACTUAL
+    /// the real socket, and the effect does not run twice. Success replays with the ACTUAL
     /// resulting state (wire contract §3): a replayed success is not a bare outcome.
     func testRedeliveredIdentifiedOperationReplaysTheRecordedOutcomeWithoutReExecution() async throws {
         // seek_to, not pause: the turn's own auto-duck also pauses, which would
@@ -1123,7 +1123,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let sinkB = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
         _ = await sinkB.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-23")
         _ = try await awaitResultFrame(operationId: "op-unrelated-b")
-        // T: unrelated live drift AFTER A settled.
+        // T: unrelated live drift after A settled.
         playback.setPositionMs(9999_000)
 
         // Turn 3: the SAME operation_id A redelivered through a FRESH sink AND a FRESH journal
@@ -1144,7 +1144,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(replayFrame["outcome"] as? String, "succeeded", "the recorded outcome replays")
         let replayState = try XCTUnwrap(replayFrame["state"] as? [String: Any], "a replayed success carries A's SETTLED state")
         XCTAssertEqual(replayState["position_seconds"] as? Int, 77, "A's SETTLED position S, not the live drift T")
-        // SAME CAPTURED ENVELOPE: the first send, the settled record, and the fresh-store replay
+        // SAME captured envelope: the first send, the settled record, and the fresh-store replay
         // all carry ONE captured state — no second live snapshot at send or replay time.
         XCTAssertEqual(firstState["position_seconds"] as? Int, replayState["position_seconds"] as? Int,
                        "the first send is the settled envelope, not a second snapshot")
@@ -1153,7 +1153,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(playback.calls.filter { if case .seekTo = $0 { return true }; return false }.count, 1, "the effect never runs twice")
     }
 
-    /// ACTION-OUTCOME PROPAGATION: an unknown action under the runtime gate is a REFUSAL
+    /// ACTION-OUTCOME propagation: an unknown action under the runtime gate is a REFUSAL
     /// (unsupported_operation) with nothing executed and no fabricated success — the server
     /// reads an honest outcome for an operation it identified.
     func testUnknownIdentifiedActionIsRefusedUnsupportedOperationNotFabricatedSuccess() async throws {
@@ -1191,8 +1191,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
     /// Waits (bounded) for the app_operation_result frame named by `operationId` on the current
     /// captured transport.
-        /// REAL PRECONDITION (review 5295572f): with NO current episode (zero duration), the
-    /// system seek wrapper early-returns and its silent response is NOT a success — the honest
+        /// REAL precondition: with NO current episode (zero duration), the
+    /// system seek wrapper early-returns and its silent response is not a success — the honest
     /// durable outcome is a refusal, and no seek is attempted.
     func testSeekToWithNoCurrentEpisodeIsRefusedStalePrecondition() async throws {
         self.pendingFixture = """
@@ -1224,8 +1224,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         }
     }
 
-    /// REAL PRECONDITION, reference form: seek_to reference_target ALSO refuses when no episode
-    /// is available (it was bypassed before review fa03b7f9) — no mapping attempt, no seek.
+    /// REAL precondition, reference form: seek_to reference_target ALSO refuses when no episode
+    /// is available — no mapping attempt, no seek.
     func testSeekToReferenceFormWithNoEpisodeIsRefusedBeforeMapping() async throws {
         self.pendingFixture = """
             event: action
@@ -1244,7 +1244,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(playback.calls.filter { if case .seekTo = $0 { return true }; return false }.count, 0)
     }
 
-    /// REAL PRECONDITION: resume with NO current episode refuses — PlaybackManager.play
+    /// REAL precondition: resume with NO current episode refuses — PlaybackManager.play
     /// early-returns on no episode, so the silent wrapper would be a no-op dressed as success.
     func testResumeWithNoEpisodeIsRefusedStalePrecondition() async throws {
         self.pendingFixture = """
@@ -1265,7 +1265,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(refusals.first?.result.reason, OperationReason.stalePrecondition)
     }
 
-    /// PRODUCTION DEFAULT availability (review 0846e993): with NO injected availability closure
+    /// PRODUCTION default availability: with NO injected availability closure
     /// and the REAL manager reporting no current episode, the reference-form seek refuses on the
     /// production path (existing-episode-with-unknown-duration would be AVAILABLE — duration is
     /// not availability — but the test host has no episode, which is the absent branch).
@@ -1291,7 +1291,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(refusals.first?.result.reason, OperationReason.stalePrecondition)
     }
 
-    /// STOP-COMPLETION ORDER (review 24f236de): an error terminal WITH pending owned audio
+    /// STOP-COMPLETION order: an error terminal WITH pending owned audio
     /// releases the host playback only after the ACTUAL stop the cancel requested — the resume
     /// never overlaps the un-stopped cloud output.
     func testErrorTerminalReleasesHostPlaybackOnlyAfterTheConfirmedStop() async throws {
@@ -1354,7 +1354,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         await MainActor.run { sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting(nil) }
     }
 
-    /// PER-ACTION TRUE RESULT: play_quote WITHOUT its reference target refuses
+    /// PER-ACTION true result: play_quote WITHOUT its reference target refuses
     /// (malformed target) and settles durably — it is never reported as a success.
     func testPlayQuoteWithoutReferenceIsRefusedAndDurablySettled() async throws {
         self.pendingFixture = """
@@ -1381,7 +1381,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         }
     }
 
-    /// PER-ACTION TRUE RESULT: stop_quote with NO saved position (no prior play_quote) refuses
+    /// PER-ACTION true result: stop_quote with NO saved position (no prior play_quote) refuses
     /// (stale precondition) — there is nothing to restore, and silence is not a success.
     func testStopQuoteWithoutASavedPositionIsRefusedStalePrecondition() async throws {
         self.pendingFixture = """
@@ -1451,7 +1451,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     }
 
     /// Per-turn state: a `stop_quote` in a turn that issued no `play_quote`
-    /// must NOT seek to a previous turn's captured pre-quote position.
+    /// must not seek to a previous turn's captured pre-quote position.
     func testStopQuoteWithoutPlayQuoteInLaterTurnDoesNotUseStalePosition() async {
         // RecordingFingerprintMapper is a struct — configure it before the sink copies it.
         mapper.playbackSecondsForReference = [500.0: 510.0]
@@ -1508,7 +1508,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertNil(body["route_hint"], "free-text turns carry no hint")
     }
 
-    /// MISSING-ID BOUNDARY (reviewer c580c42b item 4): a dispatch with NO admitted utterance
+    /// MISSING-ID BOUNDARY: a dispatch with NO admitted utterance
     /// identity is refused with NO wire frame, NO consumed result, and NO successor-state
     /// contamination — the next admitted id dispatches as a clean first turn.
     func testSinkRefusesAnUnidentifiedDispatchWithNoWireFrameAndCleanSuccessorState() async throws {
@@ -1563,9 +1563,9 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
     // MARK: - Helpers
 
-    /// Under the strict runtime gate (wire contract rev da327e624), valid cloud app operations
+    /// Under the strict runtime gate, valid cloud app operations
     /// carry the server-issued `operation_id` and `capability_version`. Fixtures are upgraded AT
-    /// THE SOCKET BOUNDARY so every valid-operation case exercises the identified envelope; the
+    /// THE socket boundary so every valid-operation case exercises the identified envelope; the
     /// explicit legacy/malformed refusal cases opt out with the `LEGACY_ACTION` marker.
     static func injectOperationIdentity(_ fixture: String) -> String {
         guard fixture.contains("event: action"), !fixture.contains("LEGACY_ACTION") else { return fixture }
@@ -1674,7 +1674,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-41")
         // The client surfaces a truncated stream as an explicit transport failure, so the
         // outcome may be `failed(connection_lost)` rather than a bare early close. What
-        // must hold either way is that it is NOT a completion: an ended stream that never
+        // must hold either way is that it is not a completion: an ended stream that never
         // sent `done` must not restore the allowance as though the model answered.
         XCTAssertNotEqual(
             result.outcome, .completed,
@@ -1726,10 +1726,10 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
 
     /// ACTUAL held-work owning-Task cancellation boundary with production prompt cleanup:
-    /// cancellation is delivered ONLY by cancelling the real owning Task; the sink's own
+    /// cancellation is delivered only by cancelling the real owning Task; the sink's own
     /// `withTaskCancellationHandler` retires the ORIGINAL registration synchronously while the
-    /// consumer is suspended. Asserted: live original registration BEFORE cancel, actual socket
-    /// cancellation BEFORE hold release, zero effects after release, and mandatory THIRD-store
+    /// consumer is suspended. Asserted: live original registration before cancel, actual socket
+    /// cancellation before hold release, zero effects after release, and mandatory THIRD-store
     /// persisted settled unknown with no in-progress id.
     func testHeldWorkOwnerCancellationMidOperationNeverExecutesAfterRelease() async throws {
         self.pendingFixture = """
@@ -1743,18 +1743,18 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("journal-\(UUID().uuidString).json")
         let journal = OperationJournal(store: FileOperationRecordStore(url: url))
-        // TRANSPORT PARK, INSTALLED AT CREATION. It engages after the two scripted frames (auth
+        // TRANSPORT park, INSTALLED at creation. It engages after the two scripted frames (auth
         // send + the action frame carrying the claim), so the turn reaches the claim/effect
         // boundary first and the park then holds the transport while the consumer is suspended
         // in the effect hold. Measured earlier design defect: arming this from `effectEntered`
         // meant the transport had already served its frames, so the park never engaged and the
         // "retirement woke the park" assertion could not be true. The park must therefore exist
-        // BEFORE the frames, and `declaredParkDidPark` below proves it actually engaged.
+        // before the frames, and `declaredParkDidPark` below proves it actually engaged.
         let receivePark = HoldLatch()
         pendingDeclaredPark = receivePark
         pendingDeclaredParkAfterFrames = 2
         let sink = makeSinkWithConsumer(RecordingResultConsumer(), operationJournal: journal)
-        // CANCELLATION-INSENSITIVE effect hold: no cancellation handler of any kind. ONLY
+        // CANCELLATION-INSENSITIVE effect hold: no cancellation handler of any kind. only
         // `release.release()` frees it, so owner cancellation cannot open it.
         let release = HoldLatch()
         // Bounded entry signal: set the moment the OWNER is actually inside the awaited hold, so
@@ -1809,7 +1809,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertFalse(heldInsideGate, "the owner must still be held inside the awaited gate")
         // Cancel the REAL owning task — the only cancellation mechanism here.
         ownerRef.cancel()
-        // ACTUAL RETIREMENT BEFORE RELEASE: the production onCancel path retires the ORIGINAL
+        // ACTUAL retirement before release: the production onCancel path retires the ORIGINAL
         // registration synchronously while the owner remains suspended in the held work.
         let retiredBeforeRelease = await capturedTask?.awaitCancellation(timeout: 1.0) ?? false
         XCTAssertTrue(retiredBeforeRelease,
@@ -1821,7 +1821,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertFalse(release.released, "effect hold must remain parked until explicit test release")
         release.release()
         let outcome = await owner.value
-        // MANDATORY EXACT OUTCOME: the owner cancelled mid-operation must surface exactly
+        // MANDATORY exact outcome: the owner cancelled mid-operation must surface exactly
         // `earlyClose` — not a bare failure, not a completion. The width of this assertion is the
         // point: any other outcome means the cancelled turn was misclassified on its way out.
         guard case .earlyClose = outcome.outcome else {
@@ -1883,7 +1883,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let effectPauses = pauses.dropFirst()
         XCTAssertLessThanOrEqual(effectPauses.count, 1, "the identified effect executes at most once")
         if case .alreadyRun = journal.claim("op-owner-cancel") {
-            // The turn completed before cancellation: the effect MUST have executed exactly once.
+            // The turn completed before cancellation: the effect must have executed exactly once.
             XCTAssertEqual(effectPauses.count, 1, "a completed operation's effect ran exactly once")
         }
         if journal.claim("op-owner-cancel") == OperationClaim.inProgress {
@@ -1913,7 +1913,7 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
         // Deterministic premise WITHOUT a verification-side claim: wait until the durable store
         // itself shows the operation's record (in progress or already finished), so the cancel
         // always lands at a known-observed point. The recreated record's state decides the
-        // expectation below; a mid-effect retirement claim is NOT made here (held-work control
+        // expectation below; a mid-effect retirement claim is not made here (held-work control
         // is separately assigned).
         let durable = FileOperationRecordStore(url: url)
         let observed = await Task.detached {
@@ -1999,7 +1999,7 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
         let journal = OperationJournal(store: store)
         XCTAssertEqual(journal.claim("op-settle-fail"), OperationClaim.claimed)
         XCTAssertFalse(journal.complete("op-settle-fail", result: .succeeded(state: ["position_seconds": .int(0)])), "failed settlement must be reported")
-        // Live-memory observation: the record did NOT publish as finished-succeeded.
+        // Live-memory observation: the record did not publish as finished-succeeded.
         XCTAssertNil(journal.result(for: "op-settle-fail"), "failed settlement must not publish success")
         XCTAssertEqual(journal.claim("op-settle-fail"), OperationClaim.inProgress, "unsettled operation stays in progress, never replayable")
         // Recreated-store observation through the same write path:
@@ -2021,7 +2021,7 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
         XCTAssertEqual(journal.claim("op-y"), .persistenceUnavailable, "bogus-outcome history must refuse, not re-claim")
     }
 
-    /// RESTART RECOVERY, production shape: an operation a previous process left in progress is
+    /// RESTART recovery, production shape: an operation a previous process left in progress is
     /// reconstructed as persisted `unknown` (the assembly does this at launch), and the sink then
     /// replays that recorded unknown through the bound transport WITHOUT re-executing the effect.
     func testRestartReconstructedUnknownReplaysThroughTransportWithoutReExecution() async throws {
@@ -2045,7 +2045,7 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
         let sink = makeSinkWithConsumer(consumer, operationJournal: journal)
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-48")
 
-        // The effect must NOT have run: no seek reached playback.
+        // The effect must not have run: no seek reached playback.
         XCTAssertFalse(
             playback.calls.contains { if case .seekTo = $0 { return true }; return false },
             "a reconstructed-unknown operation must never re-execute its effect"
@@ -2071,8 +2071,8 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
         }
     }
 
-    /// AN ORDINARY TURN THAT SETTLES WITH BUFFERED AUDIO BINDS OWNERSHIP, AND A SUCCESSOR'S STOP
-    /// CREATES ITS REPORT — executed through the real turn lifecycle, not by poking state.
+    /// AN ORDINARY turn that settles with buffered audio binds ownership, AND A SUCCESSOR'S STOP
+    /// CREATES its report — executed through the real turn lifecycle, not by poking state.
     ///
     /// The state-only controls this replaces asserted the read-and-clear helpers directly, so the
     /// production sequence (done -> audio still playing -> successor stops it -> report) was never
@@ -2087,7 +2087,7 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
     }
 
     private func checkBufferedPlaybackNextAuth(drainBeforeFollowUp: Bool) async throws {
-        // A REAL OUTPUT IS REQUIRED for the binding to exist at all: with no available output the
+        // A REAL output is required for the binding to exist at all: with no available output the
         // player consumes frames silently, `hasPendingAudio` is false, and `done` correctly binds
         // nothing (measured — the first version of this control failed for exactly that reason and
         // was reporting on the silent-consume case, not the buffered-playback one).
@@ -2110,7 +2110,7 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
         }
         _ = await turn.value
 
-        // THE PRODUCTION CONSEQUENCE: `done` with audio still outstanding binds the owner. An
+        // THE production consequence: `done` with audio still outstanding binds the owner. An
         // ordinary turn has NO interruption id, which is why gating the binding on one left this
         // case with no producer at all.
         let bound = await MainActor.run {
@@ -2300,7 +2300,7 @@ private final class RecordingAnalytics: AnalyticsService {
 /// A second turn (double wake / barge-in) supersedes the first: the older turn
 /// must stop consuming its stream and must not touch playback state, analytics,
 /// or late actions after the new turn takes over.
-/// Independent completion flag for bounded completion probes (review 9fc2603e).
+/// Independent completion flag for bounded completion probes.
 private final class ProbeCompletionFlag: @unchecked Sendable {
     private let lock = NSLock()
     private var done = false
@@ -2417,7 +2417,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         }
     }
 
-    /// OWNER-CANCEL STOP ORDERING (review dee03708/fa03b7f9, reworked for 14f66b72): a
+    /// OWNER-CANCEL stop ordering: a
     /// superseded turn with NO pending playback owes no await — it returns earlyClose, never
     /// restores (the successor owns the window), and the successor's single resume is intact.
     func testSupersededTurnAwaitsItsOwnedStopAndLeavesTheReleaseToTheSuccessor() async throws {
@@ -2449,7 +2449,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertEqual(cancels, 0, "no stop was REQUESTED: nothing was pending at supersession")
     }
 
-    /// ADMISSION AWAITS PREDECESSOR QUIESCENCE (review 14f66b72): B's retire only QUEUES a
+    /// ADMISSION awaits predecessor quiescence: B's retire only QUEUES a
     /// runner stop, so B must not admit (or even build) its stream until A's stop is CONFIRMED.
     /// A's producer is parked after its audio frames (all enqueued, A still running); B
     /// supersedes; with the retire stop's confirmation withheld, B has neither built its client
@@ -2464,7 +2464,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":1}}
 
             """
-        // A's frames are held IN THE BUFFER (drain-hold parks dequeue without consuming), so
+        // A's frames are held IN THE buffer (drain-hold parks dequeue without consuming), so
         // "A owns playback output" is deterministic, not a race against the engine.
         self.nextTurnAudioPayloads = (0..<40).map { Data([UInt8($0)]) }
         let aGate = DispatchSemaphore(value: 0)
@@ -2515,7 +2515,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // the queued retire stop (and issue its notification) before anything can confirm.
         await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(false) }
         try await Task.sleep(nanoseconds: 150_000_000)
-        // Deliver the retire stop: B proceeds, admits ITS OWN audio, and completes. The capture
+        // Deliver the retire stop: B proceeds, admits ITS own audio, and completes. The capture
         // hook is uninstalled first so B's OWN drain stop delivers normally.
         await MainActor.run {
             sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting(nil)
@@ -2542,8 +2542,8 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         }
     }
 
-    /// SUCCESS-PATH OWNERSHIP (review 4fc59e2c / spec dbf71ccf): the scoped rollback defer must
-    /// fire ONLY on early return. On a successful A-retire, B keeps its active ownership,
+    /// SUCCESS-PATH ownership: the scoped rollback defer must
+    /// fire only on early return. On a successful A-retire, B keeps its active ownership,
     /// playback ownership, and admitted hold through its live stream and drain — snapshot at
     /// B's first frame (exactly one hold end: A's transfer) and after B completes (two).
     func testSuccessfulRetireKeepsBOwnershipAndHoldThroughStreamAndDrain() async throws {
@@ -2593,7 +2593,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             """
         self.nextTurnAudioPayloads = (40..<80).map { Data([UInt8($0)]) }
         firstFrameActionForNextBuild = { [holdCounters] in
-            // Snapshot BEFORE B's done: exactly one end (A's at the transfer) must have
+            // Snapshot before B's done: exactly one end (A's at the transfer) must have
             // fired — an early-return-style rollback here would be a second.
             Self.successSnapshot.bump(holdCounters?.end.value ?? -1)
         }
@@ -2611,7 +2611,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertEqual(bResult.outcome, .completed, "B completes after a successful retire")
         _ = await a.value
         // A's own end may legitimately fire once its drain stop confirms — the invariant is
-        // that B's OWN hold ends exactly once AFTER its first frame: n2 == n1 + 1. Under the
+        // that B's OWN hold ends exactly once after its first frame: n2 == n1 + 1. Under the
         // rollback bug the scoped defer ends B's hold at admission and the real end no-ops
         // (heldPlaybackToken already cleared), so n2 == n1 there.
         let endsAtFirstFrame = Self.successSnapshot.value
@@ -2634,7 +2634,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         var value: Int { lock.lock(); defer { lock.unlock() }; return v }
     }
 
-    /// ROLLBACK HOLD RESPONSIBILITY (review 8eb9fb44): when a TIMED-OUT admission rolls back,
+    /// ROLLBACK hold responsibility: when a TIMED-OUT admission rolls back,
     /// it is still the active owner and its hold is the LAST live one over the predecessor's
     /// still-unconfirmed output — ending it at rollback would re-arm the allowance mid-flight.
     /// The hold must stay live until the retire stop CONFIRMS, and end exactly then.
@@ -2686,8 +2686,8 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         let b = Task { await sink.routeToCloud(request: "B", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-56") }
         let bResult = await b.value
         XCTAssertEqual(bResult.outcome, .earlyClose, "B's admission times out and rolls back")
-        // THE PIN: exactly two ends have fired — the nil-predecessor transfer at A's admission
-        // and A's transfer at B's admission. B's OWN hold (the last live one) is NOT ended
+        // THE pin: exactly two ends have fired — the nil-predecessor transfer at A's admission
+        // and A's transfer at B's admission. B's OWN hold (the last live one) is not ended
         // while its retire stop is unconfirmed (the bug ended it at rollback: 3).
         XCTAssertEqual(holdCounters?.end.value ?? -1, 2,
                        "the rolled-back admission's hold is NOT ended while its retire stop is unconfirmed")
@@ -2715,7 +2715,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                        "exactly ONE host resume: the confirmation restores the inherited pause")
     }
 
-    /// CLAIMED-DRAIN CANCEL (review 0585959a): a cancel landing while A's drain is claimed
+    /// CLAIMED-DRAIN cancel: a cancel landing while A's drain is claimed
     /// must be CONSUMED by the drain's own physical stop — no second physical stop may follow
     /// it. Premise: A's drain is claimed and parked; the gate parks the SUBSEQUENT stop. After
     /// the first confirmation delivers and B admits with its audio buffered, no queued stop
@@ -2748,7 +2748,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             }
         }
         // Premise: the runner is parked INSIDE the claimed drain (claim seam) when B's cancel
-        // lands. The seam is installed BEFORE A runs so the drain claim cannot be missed.
+        // lands. The seam is installed before A runs so the drain claim cannot be missed.
         let claimReached = DispatchSemaphore(value: 0)
         let claimRelease = DispatchSemaphore(value: 0)
         await MainActor.run {
@@ -2778,14 +2778,14 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // cancel's stop) passes; any later stop parks.
         await MainActor.run { sink.audioPlayerForTesting?.armPhysicalStopGateForTesting(allow: 1) }
         claimRelease.signal()
-        // THE PIN: exactly TWO physical stops carry confirmations — the drain end (which IS
+        // THE pin: exactly TWO physical stops carry confirmations — the drain end (which IS
         // the cancel's stop) and B's own done-drain. The defect ran a THIRD stop (the
         // unconsumed cancel flag) between them.
         await MainActor.run { sink.audioPlayerForTesting?.openPhysicalStopGateForTesting() }
         let bResult = await b.value
         XCTAssertEqual(bResult.outcome, .completed, "B completes once its own drain stop passes the gate")
         _ = await a.value
-        // Epochs must be STRICTLY INCREASING: the defect re-processed the unconsumed cancel
+        // Epochs must be STRICTLY increasing: the defect re-processed the unconsumed cancel
         // flag as a second stop with the SAME identity (a duplicate), shedding whatever a
         // successor had admitted on the first confirmation.
         // The gate may still be parking the defect's second stop (or B's own drain): open it
@@ -2799,24 +2799,24 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // design — the discriminator is the stop-identity log above.)
     }
 
-    /// PHYSICAL STOP OPERATION HELD (spec ea755ba1; reviewer 6453dfaa/3d4f5619/76215282):
+    /// PHYSICAL stop operation held:
     /// the stop NOTIFICATION is not the physical contract — the actual `stopEngine()` operation
     /// is, so this control parks the REAL stop and asserts the ordering that falls out of it.
     ///
-    /// WHAT THIS CONTROL MEASURES (scoped honestly, per reviewer 76215282/2542e2/wording and
-    /// spec 43f8f003):
-    ///   * the stop operation reaches the armed gate and genuinely PARKS (`allow == 0`, arrival
-    ///     recorded) while B's supersede is in flight;
-    ///   * while parked: no stop is CONFIRMED, B does not COMPLETE, and the host is not resumed;
-    ///   * on release the park ends by RELEASE, not bound expiry (`outcome == .released`);
-    ///   * the parked stop confirms the retire identity (2), and exactly one host resume follows.
+    /// WHAT this control measures (scoped honestly, per /2542e2/wording and
+    /// ):
+    /// * the stop operation reaches the armed gate and genuinely PARKS (`allow == 0`, arrival
+    /// recorded) while B's supersede is in flight;
+    /// * while parked: no stop is CONFIRMED, B does not COMPLETE, and the host is not resumed;
+    /// * on release the park ends by RELEASE, not bound expiry (`outcome == .released`);
+    /// * the parked stop confirms the retire identity (2), and exactly one host resume follows.
     ///
     /// ORDERING (precise): B is launched while the drain is HELD, so B's retire cancel lands
     /// first; the hold is then released and the real stop parks. B is therefore already in flight
     /// when the stop parks — this control does not claim "park first, then B", only that the
     /// parked stop's settlement is not preceded by confirmation/completion/resume.
     ///
-    /// WHAT IT DOES NOT MEASURE, and does not claim: that B SCHEDULED or RENDERED audio. In this
+    /// WHAT it does not measure, and does not claim: that B SCHEDULED or RENDERED audio. In this
     /// test host with the drain hold set before the turn, the runner parks inside the claimed
     /// drain and frames stay BUFFERED and UNSCHEDULED (`buffered=40 scheduled=0` measured). A
     /// live-engine/B-output proof is a device integration check (`physical-output-device-check.md`);
@@ -2908,16 +2908,16 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             default: return "unarmed"
             }
         }
-        // Bounded: the runner clears the gate flag AFTER the stop body completes (it needs the
+        // Bounded: the runner clears the gate flag after the stop body completes (it needs the
         // lock back), so the outcome may still read `.unarmed` at the instant of arrival.
         // The parked premise IS the arrival: the gate is still armed and parking (allow == 0).
-        // The outcome only becomes `released` once the wait ENDS, so it is asserted AFTER the
+        // The outcome only becomes `released` once the wait ENDS, so it is asserted after the
         // release below — asserting it here would read a value that cannot exist yet.
         let allowWhileParked: Int = await MainActor.run { sink.audioPlayerForTesting?.physicalStopGateAllowProbeForTesting ?? -99 }
         XCTAssertEqual(allowWhileParked, 0, "the gate is still armed and parking (allow=\(allowWhileParked))")
         // While parked, NOTHING is admitted or confirmed. (No scheduled-frame reading here: the
         // runner-owned scheduling counter has no synchronized publish path, so a cross-thread
-        // read would be unsynchronized evidence — see reviewer 76215282.)
+        // read would be unsynchronized evidence — see .)
         let confirmedParked: Int = await MainActor.run { sink.audioPlayerForTesting?.confirmedStopEpoch() ?? -1 }
         let resumesParked: Int = await MainActor.run { playback.calls.filter { $0 == .resume }.count }
         XCTAssertLessThan(confirmedParked, 2, "no stop is confirmed before the physical stop ran")
@@ -2929,7 +2929,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertEqual(bResult.outcome, .completed, "B completes once its own drain settles")
         let confirmedFinal: Int = await MainActor.run { sink.audioPlayerForTesting?.confirmedStopEpoch() ?? -1 }
         XCTAssertEqual(confirmedFinal, 2, "the physical stop confirmed the retire cancel's identity (2); got \(confirmedFinal)")
-        // Gate-exit cause (reviewer 6453dfaa): the park ended because the gate was RELEASED,
+        // Gate-exit cause: the park ended because the gate was RELEASED,
         // not because its bound expired and the runner proceeded anyway.
         let outcomeFinal: String = await MainActor.run {
             switch sink.audioPlayerForTesting?.physicalStopGateOutcomeForTesting {
@@ -2940,7 +2940,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             }
         }
         XCTAssertEqual(outcomeFinal, "released", "the parked stop ended by release, not a bound expiry (outcome=\(outcomeFinal))")
-        // EXACTLY ONE host resume, after the physical stop ran.
+        // EXACTLY one host resume, after the physical stop ran.
         var resumes = 0
         for _ in 0..<100 {
             resumes = await MainActor.run { playback.calls.filter { $0 == .resume }.count }
@@ -2950,7 +2950,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertEqual(resumes, 1, "the host resumed exactly once, after the physical stop ran")
     }
 
-    /// COALESCED STOP ACCOUNTING (review 4fc59e2c): cancel coalesces through the runner's
+    /// COALESCED stop accounting: cancel coalesces through the runner's
     /// flags — B and C's stops behind a parked runner share ONE processed stop/notification.
     /// Request-per-increment accounting would strand the counter positive and refuse every
     /// later admission; transition-only accounting settles to zero and D runs normally.
@@ -3011,7 +3011,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         _ = await a.value
         XCTAssertEqual(bResult.outcome, .earlyClose, "B was superseded while waiting on the coalesced stop")
         XCTAssertEqual(cResult.outcome, .completed, "C completes once the coalesced stop confirms")
-        // THE PIN: with per-request accounting the counter would still be positive here and
+        // THE pin: with per-request accounting the counter would still be positive here and
         // D would be refused; with transition-only accounting it settles and D runs.
         self.nextTurnFixture =
             """
@@ -3042,7 +3042,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertEqual(cancelsAfterD, cancelsBeforeD, "D's admission issues no stop request when nothing is outstanding")
     }
 
-    /// QUEUED-STOP VISIBILITY (review 05d27ddb): a stop that is queued but not yet processed is
+    /// QUEUED-STOP visibility: a stop that is queued but not yet processed is
     /// invisible to buffer/isPlaying — a THIRD turn (C) superseding B must still wait, because
     /// the queued stop would shed anything C admits. With A buffered and the runner parked, B
     /// and C both queue stops; neither may complete before the runner processes them.
@@ -3094,7 +3094,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             """
         let b = Task { await sink.routeToCloud(request: "B", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-66") }
         try await Task.sleep(nanoseconds: 60_000_000)
-        // B is suspended on E1's confirmation BEFORE C even starts.
+        // B is suspended on E1's confirmation before C even starts.
         let bFinishedEarly = try await timeoutProbe(b, nanoseconds: 200_000_000)
         XCTAssertFalse(bFinishedEarly, "B is suspended on E1's confirmation")
         self.nextTurnFixture =
@@ -3138,7 +3138,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertEqual(resumes, 1, "only C restores the window")
     }
 
-    /// NETWORK-COMPLETED PREDECESSOR (review ea755ba1/05d27ddb): A finished its NETWORK work
+    /// NETWORK-COMPLETED predecessor: A finished its NETWORK work
     /// (done returned, deferral recorded) with playback still pending under the drain hold. B's
     /// admission must still await A's quiescence — playback ownership outlives the Task.
     func testAdmissionAwaitsQuiescenceOfANetworkCompletedPredecessor() async throws {
@@ -3186,7 +3186,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         let b = Task { await sink.routeToCloud(request: "B", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-69") }
         let bFinishedEarly = try await timeoutProbe(b, nanoseconds: 200_000_000)
         XCTAssertFalse(bFinishedEarly, "B is suspended: A's pending playback must quiesce first")
-        // MIXED FLAGS (spec d2561f9b): A's finish (drain) was queued FIRST and B's retire-
+        // MIXED flags: A's finish (drain) was queued FIRST and B's retire-
         // cancel SECOND — the one processed stop must be the CANONICAL end: no second drain
         // stop may follow B's admission. From here every stop is recorded and delivered
         // immediately, so the total count over the rest of the test is exact.
@@ -3200,7 +3200,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         let bResult = await b.value
         XCTAssertEqual(bResult.outcome, .completed, "B completes once A is quiescent")
         _ = await a.value
-        // THE PIN: the coalesced stop (A's finish + B's retire share ONE processing) plus at
+        // THE pin: the coalesced stop (A's finish + B's retire share ONE processing) plus at
         // most B's own done-drain — two recorded stops. Under the bug a SECOND drain stop ran
         // right after the cancel's stop: three. (B's done-drain exists only if frames were
         // still pending at its done; either way the bug's extra stop is not among them.)
@@ -3218,9 +3218,9 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertFalse(pending, "no audio survives")
     }
 
-    /// CAPTURED RETIRE IDENTITY (review 14f66b72): the superseded turn's cleanup awaits the
+    /// CAPTURED retire identity: the superseded turn's cleanup awaits the
     /// identity captured for ITS token at the transfer — never the shared latest counter. A
-    /// test-injected stop (E2) moves the counter AFTER B's admission; A must still resolve on
+    /// test-injected stop (E2) moves the counter after B's admission; A must still resolve on
     /// E1's confirmation and return while E2's confirmation is still withheld.
     func testSupersededCleanupAwaitsItsCapturedRetireIdentity() async throws {
         self.nextTurnFixture =
@@ -3232,7 +3232,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":1}}
 
             """
-        // A's frames are held IN THE BUFFER (drain-hold parks dequeue without consuming), so
+        // A's frames are held IN THE buffer (drain-hold parks dequeue without consuming), so
         // "A owns playback output" is deterministic, not a race against the engine.
         self.nextTurnAudioPayloads = (0..<40).map { Data([UInt8($0)]) }
         let aGate = DispatchSemaphore(value: 0)
@@ -3428,8 +3428,8 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// running" is observable (`StubWebSocketTask.cancelled`).
     private var heldTurn: (task: StubWebSocketTask, gate: Gate)?
 
-    /// BOUNDED completion probe (review 9fc2603e): an INDEPENDENT completion flag set by a
-    /// detached watcher; the probe polls the flag under a bound and NEVER awaits the watched
+    /// BOUNDED completion probe: an INDEPENDENT completion flag set by a
+    /// detached watcher; the probe polls the flag under a bound and never awaits the watched
     /// task's value inside the group (a cancelled probe must not hang on the underlying wait).
     private func timeoutProbe<T>(_ task: Task<T, Never>, nanoseconds: UInt64) async throws -> Bool {
         let flag = ProbeCompletionFlag()
@@ -3460,11 +3460,11 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// OPT-IN binary audio for the next built turn, mirroring `nextTurnFixture`. Empty means the
     /// turn carries no audio, so every existing case is unaffected.
     private var nextTurnAudioPayloads: [Data] = []
-    /// Producer-side park (review 14f66b72 controls): blocks the NEXT built client's producer
+    /// Producer-side park: blocks the NEXT built client's producer
     /// after N frames — A's audio is enqueued while A is still running.
     private var blockProducerAfterFrames: (count: Int, semaphore: DispatchSemaphore)?
     /// Install a first-frame hook on the NEXT built client that cancels the player (a stop the
-    /// test itself injects, to move the shared latest identity AFTER a captured retire).
+    /// test itself injects, to move the shared latest identity after a captured retire).
     private var cancelPlayerOnFirstFrameForNextBuild = false
     private var injectedStopDone = false
     private var hookedSink: CloudRouteSink?
@@ -3499,7 +3499,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                 if let block = self.blockProducerAfterFrames {
                     self.blockProducerAfterFrames = nil
                     // SYNC park on the producer's own task (never the main queue): the control
-                    // holds A's producer AFTER its audio frames are enqueued, with a bounded
+                    // holds A's producer after its audio frames are enqueued, with a bounded
                     // wait so a lost release fails promptly instead of hanging.
                     let sem = block.semaphore
                     final class Counter: @unchecked Sendable {
@@ -3508,7 +3508,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                     }
                     let counter = Counter()
                     built.client.onFrameReceived = {
-                        // Block the producer AFTER the Nth frame (frames keep flowing to the
+                        // Block the producer after the Nth frame (frames keep flowing to the
                         // sink before that). Bounded waits: a lost release fails promptly.
                         if counter.next() >= block.count {
                             while sem.wait(timeout: .now() + 0.05) == .timedOut {}
@@ -3564,7 +3564,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         )
     }
 
-    /// A refused stale turn must not disturb the LIVE SUCCESSOR'S state, observed on ONE sink.
+    /// A refused stale turn must not disturb the LIVE successor'S state, observed on ONE sink.
     ///
     /// The first version of this case used two sink instances and awaited the first turn to
     /// completion, so it never held a live successor and could not observe `activeTurn`
@@ -3627,7 +3627,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             liveResult.outcome, .completed,
             "a refused stale turn prevented the held successor from completing"
         )
-        // The transport close-code assertion is deliberately NOT made. In the full suite the held
+        // The transport close-code assertion is deliberately not made. In the full suite the held
         // socket carries a normal close code even when the successor completes, so a non-nil code
         // does not separate "cancelled by the stale attempt" from "closed by its own completion"
         // — it passed in isolation and failed under suite load, which is the signature of an
@@ -3635,7 +3635,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // the discriminator that does separate the two orderings.
     }
 
-    /// POSITIVE CONTROL: with the mapper configured and the turn NOT superseded, the same fixture
+    /// POSITIVE control: with the mapper configured and the turn not superseded, the same fixture
     /// DOES seek. Without this, "no seek happened" cannot be distinguished from "the mapping was
     /// missing, so the action was refused before any seek" — which is exactly why the earlier
     /// late-action assertion could not discriminate.
@@ -3654,9 +3654,9 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         )
     }
 
-    /// A superseded turn's LATE ACTION must be suppressed, observed on the ACTION OUTPUT.
+    /// A superseded turn's LATE action must be suppressed, observed on the ACTION output.
     ///
-    /// Ordering is CONTROLLED: A's output is held, the case waits on an EXPLICIT BARRIER until B
+    /// Ordering is CONTROLLED: A's output is held, the case waits on an EXPLICIT barrier until B
     /// has reached the transport, then releases A — so A's action arrives after A lost the turn.
     /// A's stream is fed one event per receive, so releasing A delivers its ACTION.
     func testSupersededTurnsLateActionIsSuppressedAfterSuccessorInstallsItsToken() async throws {
@@ -3686,8 +3686,8 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                 origin: cloudTestOrigin, selection: .followUp
             , utteranceId: "u-82")
         }
-        // EXPLICIT BARRIER on B'S OWN TASK, read INSIDE the poll.
-        // NOTE: `CloudRouteTestURLProtocol.requestCount` is NOT usable here — it counts
+        // EXPLICIT barrier on B'S OWN task, read INSIDE the poll.
+        // NOTE: `CloudRouteTestURLProtocol.requestCount` is not usable here — it counts
         // URLProtocol startLoading, and the route path uses URLSessionWebSocketTask, which never
         // goes through URLProtocol. An earlier version used it and the condition was never true,
         // so the "barrier" silently fell through its timeout and the ordering was really a sleep.
@@ -3754,7 +3754,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         return nil
     }
 
-    /// Polls `condition` until it holds: an EXPLICIT BARRIER, not an elapsed sleep.
+    /// Polls `condition` until it holds: an EXPLICIT barrier, not an elapsed sleep.
     private func waitUntil(_ description: String, timeout: TimeInterval = 2, _ condition: () -> Bool) async throws {
         let deadline = Date(timeIntervalSinceNow: timeout)
         while Date() < deadline {
@@ -3769,7 +3769,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         throw BarrierNotReached(label: description)
     }
 
-    /// POSITIVE CONTROL for the audio path: a turn carrying binary audio must actually put
+    /// POSITIVE control for the audio path: a turn carrying binary audio must actually put
     /// NONEMPTY audio in front of the player. Without this, "no audio pending" afterwards cannot
     /// be distinguished from "no audio ever arrived", which is exactly how the first version of
     /// the output assertion was vacuous.
@@ -3797,7 +3797,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertEqual(pending, false, "the turn completed, so its audio buffer must be empty")
     }
 
-    /// A refused STALE turn must leave the held live successor's AUDIO OUTPUT intact.
+    /// A refused STALE turn must leave the held live successor's AUDIO output intact.
     ///
     /// Distinct from `testARefusedStaleTurnDoesNotCancelTheHeldLiveSuccessor`, which asserts the
     /// successor still COMPLETES. Completion is not output: a successor could finish while its
@@ -3831,10 +3831,10 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         let liveResult = await live.value
         XCTAssertEqual(liveResult.outcome, .completed, "the held successor must still complete")
 
-        // THE OUTPUT ASSERTION: the successor's audio actually reached the player and drained,
+        // THE output assertion: the successor's audio actually reached the player and drained,
         // so the stale refusal neither suppressed nor discarded the live turn's output.
         //
-        // The drain is observed with a BOUNDED WAIT rather than a single read: playback drains on
+        // The drain is observed with a BOUNDED wait rather than a single read: playback drains on
         // the player's own task, so a read taken straight after completion can still see the last
         // frames and the case then failed intermittently with no code change.
         var enqueued: Int?
@@ -3863,7 +3863,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     ///
     /// The completion is deliberately SPLIT: when audio is still pending at `done`, the sink returns
     /// `.completed` and defers restoration to `audioPlayerDidStop`, so the answer is not played over
-    /// the resumed episode. Awaiting the route's return therefore stops BEFORE restoration, which is
+    /// the resumed episode. Awaiting the route's return therefore stops before restoration, which is
     /// why an earlier attempt saw the resume appear on some runs and not others. This case drives
     /// the drain event the player actually sends, so restoration is awaited rather than raced.
     func testHeldLiveStaleRefusalOrderingIsDeterministicAndRestoresPlayback() async throws {
@@ -3901,7 +3901,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         , utteranceId: "u-87")
         XCTAssertEqual(staleResult.outcome, .refused, "the stale turn must be refused")
 
-        // THE REFUSED REQUEST CHANGED NEITHER THE HOLD NOR THE COUNTS.
+        // THE refused request changed neither the hold nor the counts.
         XCTAssertEqual(playback.calls.filter { $0 == .pause }.count, 1, "refusal must not pause")
         XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 0, "refusal must not resume")
         XCTAssertFalse(playback.isPlaying, "the refusal must not release the successor's hold")
@@ -3911,14 +3911,14 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         let liveResult = await live.value
         XCTAssertEqual(liveResult.outcome, .completed, "the held successor must complete")
 
-        // THE SUCCESSOR'S AUDIO WAS DELIVERED, and because it was still pending at `done` the
+        // THE successor'S AUDIO was delivered, and because it was still pending at `done` the
         // restoration is deferred — so drive the drain event the player sends.
         let enqueued = await MainActor.run { sink.audioPlayerForTesting?.framesEnqueuedForTesting }
         XCTAssertTrue((enqueued ?? 0) > 0, "the successor's audio must reach the player")
         let currentEpoch = await MainActor.run { sink.audioPlayerForTesting?.currentDrainEpoch ?? 0 }
         await MainActor.run { sink.audioPlayerDidStop(drainEpoch: currentEpoch) }
 
-        // ONLY NOW must restoration have happened: the live owner released its hold exactly once.
+        // only now must restoration have happened: the live owner released its hold exactly once.
         XCTAssertEqual(
             playback.calls.filter { $0 == .pause }.count, 1,
             "exactly one pause: the live turn's, with nothing added by the refused request"
@@ -3992,12 +3992,12 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
     /// A's CAPTURED, REAL stop notification must not restore once B owns the hold.
     ///
-    /// Per @reviewer's interleaving, with no second pause required:
-    ///   1. A completes with audio pending, so its restoration is deferred;
-    ///   2. A's real drain produces its notification, which is CAPTURED rather than delivered;
-    ///   3. B starts and INHERITS the outstanding hold (by design), held before its `done`;
-    ///   4. the captured notification is released while B is in flight;
-    ///   5. zero resumes while B still owns the hold.
+    /// Per 's interleaving, with no second pause required:
+    /// 1. A completes with audio pending, so its restoration is deferred;
+    /// 2. A's real drain produces its notification, which is CAPTURED rather than delivered;
+    /// 3. B starts and INHERITS the outstanding hold (by design), held before its `done`;
+    /// 4. the captured notification is released while B is in flight;
+    /// 5. zero resumes while B still owns the hold.
     ///
     /// Clearing the shared flag prevents a DUPLICATE restoration; this asks whether the FIRST
     /// notification restores too early, which is the obligation the case names.
@@ -4049,7 +4049,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         }
         let maybeHeldB = await waitForHeldTurn()
         let heldB = try XCTUnwrap(maybeHeldB, "turn B must be in flight and holding")
-        // B's distinct identity, from ITS OWN prepared frame.
+        // B's distinct identity, from ITS own prepared frame.
         let bFrame = try XCTUnwrap(heldB.task.sentAuthFrame, "B's prepared frame must be readable")
         let bRequestId = try XCTUnwrap(bFrame["request_id"] as? String, "B carries a request_id")
         XCTAssertEqual(bRequestId, "u-90", "B's wire request_id IS B's admitted utterance id (delta f47e972)")
@@ -4074,7 +4074,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         _ = await b.value
     }
 
-    /// @reviewer's conjunct case: B has ITSELF deferred, then A's OLD notification arrives.
+    /// 's conjunct case: B has ITSELF deferred, then A's OLD notification arrives.
     ///
     /// At `7e8e7fde8` this passed the owner check, because both `activeTurn` and the deferred record
     /// contained B — so A's notification restored and CLEARED B's deferred record. Identity of the
@@ -4108,7 +4108,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         try await waitUntil("A produced its stop notification") { !capturedNotifications.isEmpty }
         let aNotification = capturedNotifications[0]
 
-        // B ALSO DEFERS, so `activeTurn` and the deferred record both name B.
+        // B ALSO defers, so `activeTurn` and the deferred record both name B.
         await MainActor.run { player.setDrainHoldForTesting(true) }
         playback.setPlaying(true)
         self.nextTurnFixture = Self.doneOnlyFixture
@@ -4141,10 +4141,10 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         )
     }
 
-    /// SEQUENTIAL OWNERSHIP (NOT overlap): two dispatches in turn on ONE sink, each carrying its OWN
+    /// SEQUENTIAL ownership (not overlap): two dispatches in turn on ONE sink, each carrying its OWN
     /// observer, must each capture their own prepared identity.
     ///
-    /// SCOPE, measured rather than assumed: this case does NOT demonstrate that OVERLAPPING
+    /// SCOPE, measured rather than assumed: this case does not demonstrate that OVERLAPPING
     /// dispatches are isolated. It was falsified against a shared-slot mutation and SURVIVED, because
     /// the two turns run sequentially — a shared slot agrees with the correct value when nothing
     /// overlaps. Demonstrating overlap would need a second dispatch to publish between A's
@@ -4178,8 +4178,8 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             preparedObserver: { prepared in preparedB = prepared })
         XCTAssertEqual(b.outcome, .completed, "turn B completes")
 
-        // The two observations DIFFER, which proves they are distinct observations. It does NOT
-        // prove attribution — that each observer received ITS OWN turn's value — and it does not
+        // The two observations DIFFER, which proves they are distinct observations. It does not
+        // prove attribution — that each observer received ITS own turn's value — and it does not
         // rule out a shared slot read per dispatch. This sequential arrangement does not test overlap.
         let aValue = try XCTUnwrap(preparedA, "A's observer must have captured A's prepared identity")
         let bValue = try XCTUnwrap(preparedB, "B's observer must have captured B's prepared identity")
@@ -4261,7 +4261,7 @@ final class CloudRouteSinkErrorLocalizationTests: SocketCapturingTestCase {
     }
 }
 
-/// Spec ruling (2026-09-24): a client-authored message is spoken **only** in the
+/// Spec ruling (): a client-authored message is spoken **only** in the
 /// user's own locale; an untranslated key falls back to the error earcon rather
 /// than to base-language English.
 final class CloudRouteSinkLocaleRuleTests: SocketCapturingTestCase {
@@ -4348,7 +4348,7 @@ final class CloudRouteSinkLocaleRuleTests: SocketCapturingTestCase {
 
 /// Spec clarification 27ced9b: a `limit_exceeded` turn must reach the user as the CLIENT's own
 /// localized daily-limit template, exactly once, naming Auris and its daily allowance — and the
-/// remote frame's `message` is DIAGNOSTIC-ONLY for this code, so it must not replace that
+/// remote frame's `message` is DIAGNOSTIC-only for this code, so it must not replace that
 /// explanation.
 final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
     private var playback: RecordingPlaybackSink!
@@ -4412,7 +4412,7 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
             .spoken("You have reached your Auris free daily limit. Please try again tomorrow."),
             "limit_exceeded must speak the client's own template naming Auris and the daily limit"
         )
-        // EXACTLY ONCE, not merely "contains": the response is a single .spoken value, and it is
+        // EXACTLY once, not merely "contains": the response is a single .spoken value, and it is
         // not the generic remote text.
         guard case let .spoken(text) = response.response else {
             XCTFail("expected a single .spoken response, got \(response.response)")
@@ -4422,8 +4422,8 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
         XCTAssertEqual(text.components(separatedBy: "Auris").count - 1, 1, "Auris is named exactly once")
     }
 
-    /// THE REMOTE MESSAGE IS NEVER SPOKEN (spec 961fab07) — and not only for `limit_exceeded`.
-    /// A non-limit code whose frame carries a nonempty `message` must NOT speak that text: the
+    /// THE remote message is never spoken — and not only for `limit_exceeded`.
+    /// A non-limit code whose frame carries a nonempty `message` must not speak that text: the
     /// old pass-through behaviour is superseded by the diagnostic-only contract.
     func testNonLimitRemoteMessageIsNotSpoken() async {
         self.pendingFixture =
@@ -4435,7 +4435,7 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
         let response = await makeSink().routeToCloud(
             request: "x", tier: .free, context: context(), origin: cloudTestOrigin, selection: nil
         , utteranceId: "u-100")
-        // `provider_error` is Generic with no local template ⇒ the error earcon. What must NOT
+        // `provider_error` is Generic with no local template ⇒ the error earcon. What must not
         // happen is the operator diagnostic reaching the speaker.
         XCTAssertEqual(
             response.response, .earcon(.error),
@@ -4483,13 +4483,13 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
         XCTAssertEqual(response.outcome, .failed(code: "limit_exceeded"))
     }
 
-    /// SERVICE-TO-RENDERER, DUPLICATE AND TERMINAL-CLOSE (spec a8580c0c). An executor return
-    /// value from an always-owner mock does not establish exactly-once USER FEEDBACK, so this
+    /// SERVICE-TO-RENDERER, DUPLICATE and terminal-CLOSE. An executor return
+    /// value from an always-owner mock does not establish exactly-once USER feedback, so this
     /// runs the whole path against the REAL sink and the REAL AudioFeedbackRenderer: an owner
     /// refusal turn, a DUPLICATE of the same utterance, and a terminal-close variant. The user must
-    /// hear the daily-limit line EXACTLY ONCE, and a refused turn must not extend grace.
+    /// hear the daily-limit line EXACTLY once, and a refused turn must not extend grace.
     @MainActor
-    /// E2E REQUEST-ID PROPAGATION (reviewer d16c0246): the utterance-admitted identity must
+    /// E2E request-ID PROPAGATION: the utterance-admitted identity must
     /// reach the wire VERBATIM. ASR mints the id at admission, the sink prepares the conversation
     /// with it, and the socket auth frame presents THAT literal string — no hop downstream may
     /// mint a fresh one. A duplicate dispatch of the SAME utterance observes the settled outcome
@@ -4578,7 +4578,7 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
             utteranceId: utterance, origin: .modelCall, generation: generation
         ))
         renderer.render(duplicate)
-        // TERMINAL CLOSE on a FRESH utterance (stream ends without a terminal frame).
+        // TERMINAL close on a FRESH utterance (stream ends without a terminal frame).
         self.pendingFixture = ""
         let closeResponse = await executor.execute(CloudRouteIntent(
             request: "play something", tier: .free,
@@ -4598,7 +4598,7 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
         )
     }
 
-    /// EVERY SUPPORTED RESPONSE LANGUAGE CARRIES THE DAILY-LIMIT KEY (spec c259dc64). The scope is
+    /// every supported response language carries the daily-LIMIT key. The scope is
     /// exactly en/de/es/fr/ja/ko/zh/yue: an English entry alone does not satisfy localized
     /// daily-limit feedback, and a Chinese turn must not be answered by an English earcon. This
     /// uses the REAL resolver's own locale discovery (`SpokenTemplateResolver(locale:)`), not a
@@ -4628,10 +4628,10 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
         }
     }
 
-    /// The RESOLVER FINDS each of those languages from the user's own locale — the production
+    /// The RESOLVER finds each of those languages from the user's own locale — the production
     /// discovery path, not an injected bundle.
     func test_dailyLimitKeyResolvesInRegionalLocaleVariantsSelectedByRealDiscovery() {
-        // Reviewer cffd67d1: the app ships fr-CA.lproj and es-MX.lproj, and REAL locale
+        //: the app ships fr-CA.lproj and es-MX.lproj, and REAL locale
         // discovery hands the resolver those regional bundles for fr_CA/es_MX users — a
         // base-identifier-only list misses them and returns empty. Both regional variants
         // must carry the key AND discovery must select them from the user's own locale.
@@ -4787,9 +4787,9 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
 
     /// Prerequisites asserted, then the two snapshot placements separated.
     ///
-    /// ORDERING CONSTRAINT: the runner releases `runnerLock` BEFORE signalling arrival or waiting on
+    /// ORDERING constraint: the runner releases `runnerLock` before signalling arrival or waiting on
     /// release, so no lock spans the barrier. Both waits are BOUNDED and cleanup signals the
-    /// semaphores BEFORE clearing the references, so a setup error fails in seconds rather than
+    /// semaphores before clearing the references, so a setup error fails in seconds rather than
     /// consuming the runner.
     @MainActor
     func testAClaimedDrainKeepsItsAllocatedIdentityWhenASuccessorSchedulesInsideTheWindow() async throws {
@@ -4813,7 +4813,7 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
         let release = DispatchSemaphore(value: 0)
         player.claimReached = arrived
         player.claimRelease = release
-        // CLEANUP SIGNALS BEFORE CLEARING: nil cannot release a runner already waiting.
+        // CLEANUP signals before clearing: nil cannot release a runner already waiting.
         defer {
             release.signal()
             arrived.signal()
@@ -4829,7 +4829,7 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
         let claimedInTime = await Task.detached { arrived.wait(timeout: .now() + 5) == .success }.value
         XCTAssertTrue(claimedInTime, "the runner must reach the claim within the bound")
 
-        // INSIDE THE WINDOW: B schedules; its allocated identity must differ.
+        // INSIDE the window: B schedules; its allocated identity must differ.
         let bAllocated = player.finish()
         XCTAssertNotEqual(bAllocated, aAllocated, "B's identity must differ from A's")
 
@@ -4837,13 +4837,13 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
 
         try await waitUntilCondition(timeout: 5) { !emittedIdentities.isEmpty }
 
-        // THE RELEASE IS ASSERTED, not merely bounded: a bound only prevents an infinite block.
+        // THE release is asserted, not merely bounded: a bound only prevents an infinite block.
         XCTAssertEqual(
             player.claimReleaseOutcome, .released,
             "the runner's bounded wait must end RELEASED, not timed out"
         )
 
-        // THE ASSERTION, on the EMITTED identity: A's notification carries A's allocated identity.
+        // THE assertion, on the EMITTED identity: A's notification carries A's allocated identity.
         XCTAssertEqual(
             emittedIdentities, [aAllocated],
             "emitted=\(emittedIdentities) aAllocated=\(aAllocated) bAllocated=\(bAllocated)"
@@ -4852,9 +4852,9 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
     }
 
 
-    /// REVIEWER-SPECIFIED CONTROL (dc70303d): parked-A → mid-drain CANCEL. The cancel arrives
+    /// REVIEWER-SPECIFIED control (dc70303d): parked-A → mid-drain CANCEL. The cancel arrives
     /// while A's drain holds the claim window. The physical stop IS the cancel's stop, so the
-    /// cancel's own identity must be emitted exactly once, A's claimant identity must NOT be
+    /// cancel's own identity must be emitted exactly once, A's claimant identity must not be
     /// relabelled onto it, and A's unperformed identity must never be promoted by a later stop.
     @MainActor
     func testAMidDrainCancelEmitsTheCancelIdentityExactlyOnceAndNeverRelabelsA() async throws {
@@ -4887,7 +4887,7 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
         let claimedInTime = await Task.detached { arrived.wait(timeout: .now() + 5) == .success }.value
         XCTAssertTrue(claimedInTime, "the runner must reach A's claim within the bound")
 
-        // CANCEL INSIDE THE WINDOW: the cancel's identity supersedes A's queued drain.
+        // CANCEL inside the window: the cancel's identity supersedes A's queued drain.
         let cRequested = player.cancel()
         XCTAssertNotEqual(cRequested, aAllocated, "the cancel must allocate its own identity")
 
@@ -4907,8 +4907,8 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
         assertNoStrandedStopNotifications(player, "mid-drain cancel")
     }
 
-    /// REVIEWER-SPECIFIED CONTROL (dc70303d): combined B.finish + cancel. A successor's
-    /// independently queued finish must NOT be recorded as stopped merely because the
+    /// REVIEWER-SPECIFIED control (dc70303d): combined B.finish + cancel. A successor's
+    /// independently queued finish must not be recorded as stopped merely because the
     /// cancel's stop is newer: its own notification identity stays distinct and no
     /// second stop fires for it.
     @MainActor
@@ -4961,7 +4961,7 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
         assertNoStrandedStopNotifications(player, "combined B finish + cancel")
     }
 
-    /// REVIEWER 47f67d4d: coalesced accounting must include in-flight claim work — the
+    ///: coalesced accounting must include in-flight claim work — the
     /// pending-stop-notification counter must return to ZERO after every parked scenario,
     /// or a stranded increment refuses every future admission.
     private func assertNoStrandedStopNotifications(_ player: CloudAudioPlayer, _ label: String) {
@@ -4971,8 +4971,8 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
         )
     }
 
-    /// REVIEWER 47f67d4d: a cancelled drain's displaced owner must appear in the EXPLICIT
-    /// settlement record — and an identity NOT in that record must not be implicitly settled
+    ///: a cancelled drain's displaced owner must appear in the EXPLICIT
+    /// settlement record — and an identity not in that record must not be implicitly settled
     /// by it. A waiter on a lower, never-performed identity stays stranded (returning false
     /// on its bound), proving the exact-set settlement does not promote bystanders.
     @MainActor
@@ -4996,20 +4996,20 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
             player.claimRelease = nil
         }
 
-        // THE BYSTANDER: an identity ABOVE the cancel's (it will allocate cancel+1 implicitly? no —
+        // THE bystander: an identity ABOVE the cancel's (it will allocate cancel+1 implicitly? no —
         // identities allocate only on request), so use the identity the cancel WILL take: register
-        // the bystander waiter on `aAllocated + 1` AFTER the cancel (so the value is known), while
+        // the bystander waiter on `aAllocated + 1` after the cancel (so the value is known), while
         // the runner is still parked mid-stop? The stop fires on release. Simpler: take the bystander
-        // as an identity allocated but never satisfied — cancel() BEFORE the bystander registration
-        // is released? We register the bystander waiter AFTER the cancel request and BEFORE the
+        // as an identity allocated but never satisfied — cancel() before the bystander registration
+        // is released? We register the bystander waiter after the cancel request and before the
         // release: the bystander's epoch = cancelEpoch (performed ⇒ settles true, useless) — so use
         // bystander = aAllocated - 1 relative to a RAISED floor: perform one full turn first.
         let firstAllocated = player.finish()
         let settledFirst = await player.awaitActualStop(after: firstAllocated, timeout: 5)
         XCTAssertTrue(settledFirst, "setup: the first turn must fully stop to raise the floor to \(firstAllocated)")
         // Now floor == firstAllocated. The bystander must be ABOVE the floor (else it answers
-        // immediately) and NEVER requested. Identities allocate sequentially on request, so the
-        // next request takes firstAllocated+1. The bystander takes the identity AFTER the cancel's:
+        // immediately) and never requested. Identities allocate sequentially on request, so the
+        // next request takes firstAllocated+1. The bystander takes the identity after the cancel's:
         // request A (takes +1), cancel (+2, performed), bystander (+3, never performed, above floor 2).
         player.enqueue(CloudAudioFrame(data: Data(repeating: 0x01, count: 320)))
         XCTAssertTrue(player.hasPendingAudio, "setup: a frame must be pending for A's drain")
@@ -5038,8 +5038,8 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
         assertNoStrandedStopNotifications(player, "mid-drain cancel")
     }
 
-    /// REVIEWER 82714c29, deterministic: a coalesced B.finish settles under A's physical stop;
-    /// a waiter on B that registers ONLY AFTER the settlement must still resolve from B's
+    ///, deterministic: a coalesced B.finish settles under A's physical stop;
+    /// a waiter on B that registers only after the settlement must still resolve from B's
     /// retained explicit settlement fact — not strand because the confirmed floor is A's.
     @MainActor
     func testLatelyRegisteredWaiterOnACoalescedFinishResolvesFromItsRetainedSettlement() async throws {
@@ -5090,9 +5090,9 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
         assertNoStrandedStopNotifications(player, "late B waiter after settlement")
     }
 
-    /// REVIEWER 20ec6eaa: the retained settlement set must be BOUNDED — a repeated
+    ///: the retained settlement set must be BOUNDED — a repeated
     /// coalesce→physical-stop lifecycle drives it back to the empty baseline, while a late
-    /// settled waiter still resolves BEFORE retirement gets to its entry.
+    /// settled waiter still resolves before retirement gets to its entry.
     @MainActor
     func testRepeatedCoalesceStopCyclesKeepTheRetainedSettlementSetBounded() async throws {
         let player = CloudAudioPlayer()
@@ -5100,7 +5100,7 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
         player.delegate = delegate
         defer { player.setDrainHoldForTesting(false) }
 
-        // EXACTLY-ONCE LEDGER (reviewer 38dffe3e): every notification identity across ALL
+        // EXACTLY-ONCE ledger: every notification identity across all
         // cycles — a second physical stop for a coalesced request would show up here.
         var emittedIdentities: [Int] = []
         player.setCapturedStopNotificationForTesting { identity, completion in
@@ -5136,7 +5136,7 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
             XCTAssertNotEqual(bAllocated, aAllocated)
             XCTAssertNotEqual(cAllocated, bAllocated)
 
-            // LATE-BUT-PRE-RETIREMENT proof: register B's waiter BEFORE the release so it
+            // LATE-BUT-PRE-RETIREMENT proof: register B's waiter before the release so it
             // resolves from the retained fact even if a later physical stop retires it after.
             async let bWaiter: Bool = player.awaitActualStop(after: bAllocated, timeout: 5)
 
@@ -5161,7 +5161,7 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
             assertNoStrandedStopNotifications(player, "cycle \(cycle)")
         }
 
-        // FINAL RETIREMENT: one more plain physical stop confirms a floor above every retained
+        // FINAL retirement: one more plain physical stop confirms a floor above every retained
         // identity from all cycles — storage must return to the EMPTY baseline.
         player.enqueue(CloudAudioFrame(data: Data(repeating: 0x01, count: 320)))
         let lastAllocated = player.finish()
@@ -5177,7 +5177,7 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
         )
         assertNoStrandedStopNotifications(player, "final retirement")
 
-        // EXACTLY ONCE (reviewer 38dffe3e), asserted AFTER all notifications settled: one
+        // EXACTLY once, asserted after all notifications settled: one
         // physical stop per cycle plus the final one; the coalesced b/c requests never
         // produced notifications of their own.
         XCTAssertEqual(
@@ -5186,7 +5186,7 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
         )
     }
 
-    /// THE TIMEOUT PATH, deterministically: the release is WITHHELD, so the runner's bounded wait
+    /// THE timeout path, deterministically: the release is WITHHELD, so the runner's bounded wait
     /// must record `.timedOut` and the case asserting `.released` must fail. This does not depend on
     /// scheduling luck the way a shortened bound does.
     @MainActor
@@ -5211,7 +5211,7 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
 
         _ = player.finish()
 
-        // Wait for the claim, then deliberately DO NOT release: the runner's bounded wait must end
+        // Wait for the claim, then deliberately DO not release: the runner's bounded wait must end
         // `.timedOut`.
         let claimedInTime = await Task.detached { arrived.wait(timeout: .now() + 5) == .success }.value
         XCTAssertTrue(claimedInTime, "the runner must reach the claim")
@@ -5265,7 +5265,7 @@ final class SettlementFailingOperationRecordStore: OperationRecordStore {
 }
 
 
-// MARK: - Service-to-renderer helpers (spec a8580c0c)
+// MARK: - Service-to-renderer helpers
 
 /// Counts daily-limit utterances so "exactly once" is measured, not inferred from a substring.
 private final class CountingDailyLimitTtsEngine: TtsEngineProtocol {
@@ -5393,6 +5393,6 @@ private final class NoOpCloudStatsQuerySink: VoiceStatsQuerySink {
     func newEpisodes(timeframe: String?) -> VoiceResponse { .silent }
     func timeSinceLastListen() -> VoiceResponse { .silent }
 
-    // MARK: - Buffered playback after an ordinary `done` (reviewer 79614a4f item 3)
+    // MARK: - Buffered playback after an ordinary `done`
 
 }

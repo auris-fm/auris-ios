@@ -58,8 +58,8 @@ final class SessionAuthenticationTests: XCTestCase {
         }, defaults: defaults)
     }
 
-    /// The owner-side connection voice sharing depends on (spec 2026-11-03): a credential commit
-    /// REPORTS ITSELF once it has completed and released the lock, and the account identity it
+    /// The owner-side connection voice sharing depends on (spec): a credential commit
+    /// REPORTS itself once it has completed and released the lock, and the account identity it
     /// reports is STABLE across renewals of the same account while a genuine login changes it.
     ///
     /// Red shapes this control must reject: no completion at all (a passive restoration then has no
@@ -108,11 +108,11 @@ final class SessionAuthenticationTests: XCTestCase {
     /// This one exercises the real `ServerSettings` reader against actually-stored credentials, and
     /// asserts the distinction the whole cold path exists for:
     ///
-    ///  * a credential that is STORED but was never committed in this process must report a stored
-    ///    identity and NO committed identity — the cold-start answer is readable state, not an event;
-    ///  * the committed form and the stored form must be THE SAME STRING for the same account, because
-    ///    the first renewal commit after a cold start is otherwise read as a different account;
-    ///  * with no stored credential there is nothing to present.
+    /// * a credential that is STORED but was never committed in this process must report a stored
+    /// identity and NO committed identity — the cold-start answer is readable state, not an event;
+    /// * the committed form and the stored form must be THE same string for the same account, because
+    /// the first renewal commit after a cold start is otherwise read as a different account;
+    /// * with no stored credential there is nothing to present.
     func testStoredCredentialIdentityIsReadableWithoutACommit_andMatchesTheCommittedForm() throws {
         // Start from a device with NOTHING to present. The test host's Keychain is shared and dirty
         // from other suites, so this needs an explicit clear, not an assumption about its contents.
@@ -122,7 +122,7 @@ final class SessionAuthenticationTests: XCTestCase {
         XCTAssertNil(ServerSettings.storedAccountIdentity(),
                      "premise: with nothing stored there is nothing to present")
 
-        // A credential that IS stored: the exact state a cold start resumes from — a readable
+        // A credential that IS stored: the exact state a cold start resumes from a readable
         // refresh token AND the email it belongs to, with still no commit in this process. Both must
         // be present, because they are the two halves the identity hashes; with either one missing the
         // device genuinely cannot say which account it could act for, and must not guess.

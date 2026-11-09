@@ -4,13 +4,13 @@ import Foundation
 ///
 /// Usage:
 ///
-///     // Message only
-///     Toast.show("Hello World!")
+/// // Message only
+/// Toast.show("Hello World!")
 ///
-///     // Message with button
-///     Toast.show("Hello", actions: [.init(title: "World", action: {
-///          print("Hello World!")
-///     })])
+/// // Message with button
+/// Toast.show("Hello", actions: [.init(title: "World", action: {
+/// print("Hello World!")
+/// })])
 ///
 class Toast {
     private static var shared = Toast()

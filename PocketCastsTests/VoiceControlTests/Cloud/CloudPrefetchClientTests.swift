@@ -320,7 +320,7 @@ final class CloudTokenFailClosedTests: XCTestCase {
         // SOURCE = .requestConstruction: no credential means no frame was ever built, let alone
         // sent, so the failure is provably client-side pre-send. The expectation tracked
         // `.server` from before the error source became structural (5a58795f6) and was not
-        // updated when the emission site moved to `.requestConstruction` (e2dc42d1d).
+        // updated when the emission site moved to `.requestConstruction`.
         XCTAssertEqual(events, [.error(source: .requestConstruction, code: "unauthorized", message: "")])
     }
 

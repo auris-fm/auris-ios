@@ -235,7 +235,7 @@ final class FingerprintTimingManagerTests: XCTestCase {
 
         manager.stubMatches(stream)
 
-        // The first two candidates (0→0, 2→2) must NOT be in the mapping — if
+        // The first two candidates (0→0, 2→2) must not be in the mapping — if
         // they had been committed, a query at playback=4 would be 3-ish
         // (midway between (2,2) and the next anchor). Instead the trio
         // (4,400)/(6,402)/(8,404) is the only committed region, so

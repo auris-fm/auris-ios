@@ -6,8 +6,8 @@ extension UIViewController {
     /// Right now, this method only allow requesting it once per user
     ///
     /// - Parameters:
-    ///     - delay: The number of seconds this function will wait before showing
-    ///     the modal.
+    /// - delay: The number of seconds this function will wait before showing
+    /// the modal.
     func requestReview(delay: Double) {
         guard Settings.reviewRequestDates().isEmpty else { return }
 

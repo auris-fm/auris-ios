@@ -106,9 +106,9 @@ struct MediaTrimView: View {
 
     /// Updates the position of the trim handles
     /// - Parameters:
-    ///   - position: The raw position of a trim handle
-    ///   - side: The trim handle's side (leading or trailing)
-    ///   - width: The width of the containing view to constrain to min and max values
+    /// - position: The raw position of a trim handle
+    /// - side: The trim handle's side (leading or trailing)
+    /// - width: The width of the containing view to constrain to min and max values
     private func update(position: CGFloat, for side: TrimHandle.Side, in width: CGFloat) {
         let range: ClosedRange<CGFloat>
 

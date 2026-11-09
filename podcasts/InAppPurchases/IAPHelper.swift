@@ -207,7 +207,7 @@ class IAPHelper: NSObject {
     }
 
     /// - Parameter source: analytics source that triggered the purchase, persisted now so it can
-    ///   be attached when the transaction completes. Defaults to the current `OnboardingFlow` source.
+    /// be attached when the transaction completes. Defaults to the current `OnboardingFlow` source.
     public func buyProduct(identifier: IAPProductID, discount: IAPDiscountInfo? = nil, source: PlusUpgradeViewSource? = nil) -> Bool {
         guard settings.isLoggedIn, let product = getProduct(for: identifier) else {
             FileLog.shared.addMessage("IAPHelper Failed to initiate purchase of \(identifier)")

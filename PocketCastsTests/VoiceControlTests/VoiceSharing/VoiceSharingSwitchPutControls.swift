@@ -3,7 +3,7 @@ import UIKit
 import PocketCastsServer
 @testable import podcasts
 
-/// PHASE 2 (core 0264051b): enrollment and withdrawal are ONE `PUT /api/v1/account/voice-sharing` whose body
+/// PHASE 2: enrollment and withdrawal are ONE `PUT /api/v1/account/voice-sharing` whose body
 /// is the DESIRED state. The server derives the transition; the client asserts a precondition with
 /// `If-Match` and never auto-replays a 409.
 ///
@@ -94,7 +94,7 @@ final class VoiceSharingSwitchPutControls: XCTestCase {
 
     // MARK: - ON
 
-    /// Turning sharing on is ONE PUT to the membership path, carrying the desired state and the accepted
+    /// Turning sharing on is ONE put to the membership path, carrying the desired state and the accepted
     /// disclosure — and nothing about the transition the server should take.
     func test_switchOnSendsOnePutWithTheDesiredStateAndTheDisclosure() async throws {
         VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
@@ -161,7 +161,7 @@ final class VoiceSharingSwitchPutControls: XCTestCase {
         XCTAssertEqual(second.value(forHTTPHeaderField: "If-Match"), "r7")
     }
 
-    /// `If-Match` is REQUIRED (spec core e3cfc8ae): a client that has not read the state cannot assert one,
+    /// `If-Match` is REQUIRED: a client that has not read the state cannot assert one,
     /// so it must `GET` first. Sending the PUT anyway — with no header or an empty one — would ask the server
     /// to apply a write with no precondition, which the contract forbids. The refusal is local: no request
     /// reaches the wire.
@@ -197,7 +197,7 @@ final class VoiceSharingSwitchPutControls: XCTestCase {
         XCTAssertEqual(putRequests.count, 1, "a conflict must not produce a second request")
     }
 
-    /// Spec core 6965edf6: a request for the state ALREADY IN FORCE succeeds whatever its revision, so a
+    /// Spec core 6965edf6: a request for the state ALREADY in force succeeds whatever its revision, so a
     /// resend after a lost response is safe. The client must therefore treat the 200 it gets back as a plain
     /// applied state — not look for a conflict, and not mint a new intent.
     func test_resendAgainstAnAlreadyHeldStateIsAppliedNotConflicted() async throws {

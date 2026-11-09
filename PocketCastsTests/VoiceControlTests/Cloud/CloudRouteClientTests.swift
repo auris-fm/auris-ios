@@ -119,7 +119,7 @@ final class CloudRouteClientTests: XCTestCase {
         )
     }
 
-    /// A `request_id` reused while a predecessor turn is STILL OPEN, on ONE client (one registry,
+    /// A `request_id` reused while a predecessor turn is STILL open, on ONE client (one registry,
     /// factory returning socket A then socket B): the predecessor's close retires only its own
     /// registration, AND a LATE result sent via the predecessor's handle is undelivered — never
     /// routed onto the successor's socket.
@@ -178,8 +178,8 @@ final class CloudRouteClientTests: XCTestCase {
             "app_operation_result",
             "the frame rode the successor's socket"
         )
-        // LATE PREDECESSOR result: A's handle is retired; the result must NOT route onto B.
-        // Snapshot B's count BEFORE the late send and assert UNCHANGED after.
+        // LATE predecessor result: A's handle is retired; the result must not route onto B.
+        // Snapshot B's count before the late send and assert UNCHANGED after.
         let framesOnBBefore = taskB.sentTextFrames.count
         let lateReport = await client.sendOperationResult(try XCTUnwrap(frame), via: routedA.resultSocket)
         XCTAssertEqual(
@@ -525,7 +525,7 @@ final class CloudRouteWebSocketPathTests: XCTestCase {
         let events = await collect(client(task: task, token: nil).route(request: "hello", context: context(), turn: testTurnEnvelope()))
 
         // .requestConstruction: with no credential no frame is built, let alone sent, so the
-        // failure is provably client-side pre-send (the emission site is e2dc42d1d).
+        // failure is provably client-side pre-send.
         XCTAssertEqual(events.last, .error(source: .requestConstruction, code: "unauthorized", message: ""),
                        "a turn with no credential must report the failure, not end silently")
         XCTAssertEqual(task.sent.count, 0, "nothing is sent without a credential")
@@ -701,7 +701,7 @@ extension CloudRouteClientTests {
         liveTask.holdUntilReleased(heldGate)
         let routed = client.routeWithResultSocket(request: "x", context: sampleContext, turn: turn)
         let stream = routed.stream
-        // PRODUCTION SHAPE: the consumer claims, installs the same single idempotent close the
+        // PRODUCTION shape: the consumer claims, installs the same single idempotent close the
         // sink runs in a defer, and iterates. Cancelling the OWNING task makes AsyncStream's
         // next() return nil, the loop exits, and the defer retires the registration — no
         // test-only cancellation handler.

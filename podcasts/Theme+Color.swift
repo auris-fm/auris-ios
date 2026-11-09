@@ -5,15 +5,15 @@ import SwiftUI
 /// Usage:
 ///
 /// struct TestView: View {
-///     @EnvironmentObject var theme: Theme
+/// @EnvironmentObject var theme: Theme
 ///
-///     var body: some View {
-///         VStack {
-///             Text("Old Way ☹️").foregroundColor(AppTheme.color(for: .primaryText01, theme: theme))
+/// var body: some View {
+/// VStack {
+/// Text("Old Way ☹️").foregroundColor(AppTheme.color(for: .primaryText01, theme: theme))
 ///
-///             Text("New Way 🦄").foregroundColor(theme.primaryText01)
-///         }
-///     }
+/// Text("New Way 🦄").foregroundColor(theme.primaryText01)
+/// }
+/// }
 /// }
 ///
 extension Theme {

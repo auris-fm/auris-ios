@@ -205,7 +205,7 @@ struct UserEpisodeManager {
                             try artwork.jpegData(compressionQuality: 1)?.write(to: filePath)
                             episode.imageModified = TimeFormatter.currentUTCTimeInMillis()
                         } catch {
-                            //   throw error
+                            // throw error
                             print("failed to save artowrk")
                         }
                         episode.hasCustomImage = true

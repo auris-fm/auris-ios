@@ -1,7 +1,7 @@
 import Foundation
 
 /// The client → server `app_operation_result` frame, as fixed by the owning wire contract
-/// (core-app-tools `app-operation-wire-contract.md`, rev da327e624, section 1).
+///.
 ///
 /// Field rules the encoder enforces by construction: `operation_id` and `outcome` are always
 /// present; `reason` is present on every non-success outcome and absent on `succeeded` (a

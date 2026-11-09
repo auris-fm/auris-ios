@@ -29,7 +29,7 @@ final class CloudConfig {
     /// switch (`isCutoverActive` also honours the direct-upstream kill switch, which is a migration
     /// control, not a statement that no origin exists).
     ///
-    /// Voice Sharing uses this: spec ruling 2026-11-03 requires the sharing origin to be selected
+    /// Voice Sharing uses this: spec ruling requires the sharing origin to be selected
     /// independently of the assistant's flags, and inheriting `baseUrl` meant a configured deployment
     /// with cutover off made sharing look unconfigured.
     var configuredOrigin: String {

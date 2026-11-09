@@ -1,14 +1,14 @@
 @testable import podcasts
 import XCTest
 
-/// DESIGN ACCEPTANCE CONTROL for the classifier segmenter boundary (requested in review).
+/// DESIGN acceptance control for the classifier segmenter boundary (requested in review).
 ///
-/// WHAT THIS IS NOT. It is not evidence that today's `NativeVadSegmenter` clips speech.
+/// WHAT this is not. It is not evidence that today's `NativeVadSegmenter` clips speech.
 /// `StartOfCapturePreservationControl` measured that it does not: above-threshold frames are buffered
 /// before the confirmation check, so a command starting at capture sample zero survives
 /// (`STARTRETENTION emitted=8320, fed=8000, missing=-320`).
 ///
-/// WHAT THIS IS. The proposed change replaces an *energy* decision with a *classifier* decision. A
+/// WHAT this is. The proposed change replaces an *energy* decision with a *classifier* decision. A
 /// classifier is a windowed model whose first outputs lag its input: frames at the start of speech can
 /// initially report "no speech" while the model fills its context, and only later report speech. An
 /// energy gate has no such lag. So the risk this control addresses is real and specific to the
@@ -19,14 +19,14 @@ import XCTest
 /// as a gate that reports false for the first N frames of genuine speech, and asserts the command's
 /// exact opening samples still reach the emitted PCM.
 ///
-/// SCOPE, STATED PLAINLY: the boundary under test here is a **private toy segmenter** defined at the
+/// SCOPE, STATED plainly: the boundary under test here is a **private toy segmenter** defined at the
 /// bottom of this file. A green result therefore proves the *assertions and inputs* are the right ones;
-/// it does NOT validate a production boundary, because no production classifier adapter exists yet.
+/// it does not validate a production boundary, because no production classifier adapter exists yet.
 /// When that change is authorized, these same inputs and assertions must be re-run against the real
 /// adapter. No new protocol is required solely for this illustration.
 final class ClassifierBoundaryAcceptanceControl: XCTestCase {
 
-    /// THE ACCEPTANCE PROPERTY: known command samples from capture sample zero, preceded by classifier
+    /// THE acceptance property: known command samples from capture sample zero, preceded by classifier
     /// frames that (wrongly) report no speech, followed by a natural endpoint — the emitted PCM must
     /// preserve the **exact initial samples**.
     ///
@@ -187,7 +187,7 @@ final class ClassifierBoundaryAcceptanceControl: XCTestCase {
 /// Models the property under test and nothing else: a windowed classifier reports negative for the
 /// first `classifierNegativeFrames` frames of genuine speech, PCM is retained independently in a
 /// pre-roll from capture sample zero, and the utterance is assembled from retained PCM once the
-/// classifier confirms — then closed at a natural endpoint. It is intentionally NOT wired into
+/// classifier confirms — then closed at a natural endpoint. It is intentionally not wired into
 /// production; it exists so the acceptance property is executable and reviewable before the real
 /// adapter is built.
 ///
@@ -227,7 +227,7 @@ private final class BoundaryHarness {
         }
 
         if !confirmed {
-            // ALWAYS retain pre-classification PCM — this is the pre-roll requirement. The classifier's
+            // always retain pre-classification PCM — this is the pre-roll requirement. The classifier's
             // current opinion does not gate retention.
             preRoll.append(contentsOf: samples)
             if classifierSaysSpeech {

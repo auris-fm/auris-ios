@@ -32,8 +32,8 @@ final class GateConditionSourcesTests: XCTestCase {
         XCTAssertFalse(GateCondition.unknown(reason: "test").isAllowed)
     }
 
-    /// OWNER DELTA 8fe04cd/0aa4480, CORRECTED per spec 3893cd55 (reviewer 724db1e8): the gate
-    /// context comes ONLY from actual foreground OR an eligible playback context (an episode
+    /// OWNER delta 8fe04cd/0aa4480, CORRECTED per: the gate
+    /// context comes only from actual foreground OR an eligible playback context (an episode
     /// loaded — playing or paused). A cloud/grace hold is NEITHER and must never manufacture
     /// context: capture must be Off after the last genuine context is gone.
     func test_contextComesOnlyFromForegroundOrEligiblePlayback() {
@@ -55,7 +55,7 @@ final class GateConditionSourcesTests: XCTestCase {
         )
     }
 
-    /// THE DEFECT THIS PIN (regression control): a hold must never produce context. The same
+    /// THE defect this pin (regression control): a hold must never produce context. The same
     /// backgrounding with a HOLD but no real episode yields `.none`.
     func test_aHoldAloneIsNeverAContextSource() {
         XCTAssertEqual(

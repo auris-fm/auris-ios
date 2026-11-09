@@ -15,11 +15,11 @@ final class CloudConversationManagerTests: XCTestCase {
         manager.registerLiveOrigin(1)
     }
 
-    /// REQUEST OWNERSHIP (owner delta 3484cbc/5eca874, reviewer 724db1e8): duplicate
+    /// REQUEST ownership: duplicate
     /// preparation for the SAME utterance reuses the prepared wire request identity; an
     /// independent utterance mints its own. This is the duplicate-dispatch protection the
-    /// removed window budget was replaced by — asserted at the ACTUAL request owner.
-    /// ONE IDENTITY ON THE WIRE (contract delta f47e972 + source delta3b1def9): `request_id` is
+    /// removed window budget was replaced by asserted at the ACTUAL request owner.
+    /// ONE identity on the wire: `request_id` is
     /// REQUIRED and client-owned, and it IS the admitted utterance's identity — for create AND
     /// follow-up alike. The server refuses a missing/invalid ID before admission, so the client
     /// must never send a fabricated one when it knows the utterance identity.
@@ -35,7 +35,7 @@ final class CloudConversationManagerTests: XCTestCase {
             "a follow-up preparation sends ITS OWN admitted utterance id as the wire request_id"
         )
         // A dispatch without an admitted utterance identity is REFUSED, never re-identified
-        // (reviewer 9ab31c6d): the manager mints no stand-in UUID.
+        //: the manager mints no stand-in UUID.
         XCTAssertNil(
             manager.prepare(selection: .followUp, origin: 1, utteranceId: nil),
             "a missing utterance id must refuse, not mint a stand-in identity"
@@ -60,10 +60,10 @@ final class CloudConversationManagerTests: XCTestCase {
         )
     }
 
-    /// RETENTION RULE (reviewer 0c546ce5 item 3): EVERY utterance prepared inside the live
+    /// RETENTION rule: every utterance prepared inside the live
     /// window — create AND follow-up (resume) alike — is retained for exactly the window's
     /// lifetime, with no cap and no eviction, so a duplicate can never become a fresh dispatch.
-    /// The window's close retires the whole retention, and origin is validated BEFORE every
+    /// The window's close retires the whole retention, and origin is validated before every
     /// reuse, so a stale callback can never ride a retained identity.
     func testFollowUpPreparationIsRetainedPerUtteranceAndRetiredWithTheWindow() throws {
         // A follow-up utterance's preparation is retained and reused by its duplicate.
@@ -74,7 +74,7 @@ final class CloudConversationManagerTests: XCTestCase {
         XCTAssertEqual(followUpDuplicate.requestId, followUp.requestId, "a follow-up duplicate reuses the retained resume")
         XCTAssertEqual(followUpDuplicate.conversationId, followUp.conversationId)
 
-        // Later utterances do NOT evict earlier ones: every retained duplicate still joins.
+        // Later utterances do not evict earlier ones: every retained duplicate still joins.
         _ = manager.prepare(selection: .followUp, origin: 1, utteranceId: "u-3")
         let stillRetained = try XCTUnwrap(manager.prepare(selection: .followUp, origin: 1, utteranceId: "u-2"))
         XCTAssertEqual(stillRetained.requestId, followUp.requestId,
@@ -159,7 +159,7 @@ final class CloudConversationManagerTests: XCTestCase {
 
     // MARK: - Retry
 
-    /// ONE IDENTITY (reviewer c580c42b): a transport retry of the SAME admitted utterance
+    /// ONE identity: a transport retry of the SAME admitted utterance
     /// passes the SAME id and is served from retention — same request id, same conversation.
     func testRetryOfTheSameUtteranceReusesItsRetainedIdentity() throws {
         let admitted = "7f9c24e5-8b1a-4c02-9e6d-31b5a0f47c88"
@@ -201,7 +201,7 @@ final class CloudConversationManagerTests: XCTestCase {
             )
         )
 
-        // EVERY position key, not just the two I first checked. Asserting only the id and the
+        // every position key, not just the two I first checked. Asserting only the id and the
         // client position let an unconditional `recent_reference_positions: []` through, which
         // still claims a position history for a turn with no episode.
         let context = (frame["context"] as? [String: Any]) ?? [:]
@@ -225,7 +225,7 @@ final class CloudConversationManagerTests: XCTestCase {
 
         let context = frame["context"] as? [String: Any]
         XCTAssertEqual(context?["episode_id"] as? String, "ep-1")
-        // Int64 boxes as NSNumber, so an  cast of a stored Int64 is nil — read it as a
+        // Int64 boxes as NSNumber, so an cast of a stored Int64 is nil — read it as a
         // number and compare, or the case fails on the cast rather than on the value.
         XCTAssertEqual((context?["client_position_ms"] as? NSNumber)?.int64Value, 1_100)
     }
@@ -313,8 +313,8 @@ final class CloudConversationManagerTests: XCTestCase {
     ///
     /// SCOPE, stated narrowly because the comment previously claimed more: this drives the
     /// manager with an explicit selection, so **it cannot exercise the service's selection
-    /// derivation** and does NOT catch a live `isActive` read in `VoiceControlService`. What it
-    /// catches is the manager resuming on a wake — independently executed by @reviewer, where
+    /// derivation** and does not catch a live `isActive` read in `VoiceControlService`. What it
+    /// catches is the manager resuming on a wake — independently executed by, where
     /// changing the manager to resume on wake fails both assertions here.
     ///
     /// The service-level control — a wake during active grace driven through the real caller —
@@ -323,7 +323,7 @@ final class CloudConversationManagerTests: XCTestCase {
         let manager = CloudConversationManager()
         manager.registerLiveOrigin(1)
 
-        // A conversation must ALREADY EXIST, or "create" is inevitable and the case proves
+        // A conversation must ALREADY exist, or "create" is inevitable and the case proves
         // nothing — it would pass whether or not the wake rule is honoured. Opening a
         // follow-up first puts a conversation in place that a wake could wrongly resume.
         let existing = try XCTUnwrap(

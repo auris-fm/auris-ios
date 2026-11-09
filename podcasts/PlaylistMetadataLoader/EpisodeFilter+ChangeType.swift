@@ -49,8 +49,8 @@ extension EpisodeFilter {
     /// Checks both the change type and whether the episode's podcast is included in this playlist.
     ///
     /// - Parameters:
-    ///   - changeType: The type of episode change that occurred
-    ///   - podcastUuid: The UUID of the podcast the episode belongs to
+    /// - changeType: The type of episode change that occurred
+    /// - podcastUuid: The UUID of the podcast the episode belongs to
     /// - Returns: true if the playlist might be affected by this change
     func isAffected(by changeType: EpisodeChangeType, podcastUuid: String) -> Bool {
         // First check if the change type is relevant

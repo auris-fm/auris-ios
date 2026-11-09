@@ -348,7 +348,7 @@ final class CloudRouteClient {
 
     // MARK: - WebSocket implementation
 
-    // MARK: App-operation result transport (wire contract rev da327e624)
+    // MARK: App-operation result transport
 
     /// Live turn sockets by `request_id`, so an `app_operation_result` can ride the SAME socket
     /// its operation arrived on.

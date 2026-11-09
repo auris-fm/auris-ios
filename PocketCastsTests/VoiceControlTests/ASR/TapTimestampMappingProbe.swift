@@ -1,14 +1,14 @@
 import AVFoundation
 import XCTest
 
-/// MEASUREMENT PROBE: settle START-vs-END semantics of the tap callback's `sampleTime` in the
-/// PLAYER NODE'S OWN CLOCK, where file frame == node frame BY CONSTRUCTION (the file is
+/// MEASUREMENT probe: settle START-vs-END semantics of the tap callback's `sampleTime` in the
+/// PLAYER node'S OWN clock, where file frame == node frame BY CONSTRUCTION (the file is
 /// scheduled from zero on that node).
 ///
 /// Per callback (of a tap on the AVAudioPlayerNode itself) we record sampleTime, the buffer's
 /// frame length, and the impulse's sub-index j within the buffer. In that same node-clock domain:
-///   END prediction:   impulse node frame = sampleTime - frames + j
-///   START prediction: impulse node frame = sampleTime + j
+/// END prediction: impulse node frame = sampleTime - frames + j
+/// START prediction: impulse node frame = sampleTime + j
 /// The file index of the impulse (20 000) is then compared against both predictions directly.
 final class TapTimestampMappingProbe: XCTestCase {
 
@@ -25,7 +25,7 @@ final class TapTimestampMappingProbe: XCTestCase {
 
         var hits: [(sampleTime: Double, playerSampleTime: Double, frames: Int, j: Int?)] = []
         let lock = NSLock()
-        // Tap the PLAYER NODE: its sample time is the schedule's own frame count, so no
+        // Tap the PLAYER node: its sample time is the schedule's own frame count, so no
         // source-to-graph conversion or schedule-origin inference is needed.
         player.installTap(onBus: 0, bufferSize: 4_096, format: nil) { [weak player] buffer, when in
             var j: Int? = nil

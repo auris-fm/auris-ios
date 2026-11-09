@@ -1,14 +1,14 @@
 @testable import podcasts
 import XCTest
 
-/// CONTROLS FOR SILERO SPEECH DETECTION ON iOS (#core:25b91a1b `de18bcd1`).
+/// CONTROLS for silero speech detection on iOS ().
 ///
-/// WHY THIS EXISTS. `NativeVadSegmenter` decides "speech" by comparing raw RMS energy to a constant
+/// WHY this exists. `NativeVadSegmenter` decides "speech" by comparing raw RMS energy to a constant
 /// `0.020`. In a room whose ambient level is ~0.12 — measured on the simulator during this
 /// investigation — every frame clears that threshold, speech and noise are numerically
 /// indistinguishable, and the segmenter opens one utterance at startup that it never closes:
 ///
-///     SEGDIAG frames=305 above=305 speechActive=true buf=486400 energy=0.12
+/// SEGDIAG frames=305 above=305 speechActive=true buf=486400 energy=0.12
 ///
 /// No threshold tuning fixes that, because the two inputs really do have the same energy. Android
 /// distinguishes them by *classifying* speech (Silero), and the runtime for the same model is
@@ -35,22 +35,22 @@ final class SileroVadAvailabilityControl: XCTestCase {
         return path
     }
 
-    /// THE CORE CLAIM: Silero must separate this room's noise from speech, on structure rather than
+    /// THE core claim: Silero must separate this room's noise from speech, on structure rather than
     /// energy.
     ///
     /// MEASURED on the simulator (sweep, 3 s per signal, 512-sample frames):
     ///
-    ///     white-noise  rms 0.030  ->   0 detected frames
-    ///     white-noise  rms 0.072  ->   0 detected frames
-    ///     sinusoid     rms 0.215  ->   0 detected frames   (loud, stationary)
-    ///     voiced+AM    rms 0.067  ->  93 detected frames
-    ///     voiced+AM    rms 0.248  ->  88 detected frames
+    /// white-noise rms 0.030 -> 0 detected frames
+    /// white-noise rms 0.072 -> 0 detected frames
+    /// sinusoid rms 0.215 -> 0 detected frames (loud, stationary)
+    /// voiced+AM rms 0.067 -> 93 detected frames
+    /// voiced+AM rms 0.248 -> 88 detected frames
     ///
     /// The decisive pair is noise at rms 0.072 (rejected) versus voiced speech at rms 0.067
     /// (accepted): the *quieter* signal is the one recognised as speech. That is the property the
     /// fixed energy threshold lacks, and the reason a loud room starves the current segmenter.
     ///
-    /// The fixtures are synthetic, so this proves wiring and separation on structure — it does NOT
+    /// The fixtures are synthetic, so this proves wiring and separation on structure — it does not
     /// prove the model separates a specific real room. It also pins the failure mode: a stationary
     /// loud tone is rejected at rms 0.215, so this control would fail if the model were merely
     /// energy-sensitive.
@@ -130,7 +130,7 @@ final class SileroVadAvailabilityControl: XCTestCase {
             return (amp, hits)
         }
         // Measured: detection begins at amp 0.25 (44 of 93 windows) and reaches 81/93 at 0.40.
-        // The assertion is therefore on a voiced level the model actually detects, NOT on 0.08.
+        // The assertion is therefore on a voiced level the model actually detects, not on 0.08.
         // At 0.08 this synthetic signal has rms ~0.033 — below the ~0.069 noise floor it is meant
         // to be distinguished *from* — so failing there measured amplitude, not structure, and
         // an earlier version of this control drew the wrong conclusion from it.

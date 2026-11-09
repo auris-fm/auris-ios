@@ -27,11 +27,11 @@ class ModifedHostingController<Content: View, Modifier: ViewModifier>: UIHosting
 /// Allows easy use of SwiftUI Views by setting the Theme environment object on them
 /// Usage of this is:
 /// class MyCoolController: ThemedHostingController<MyThemedView> {
-///     init(customValue: String) {
-///         super.init(rootView: MyThemedView())
-///         or if you already have a theme...
-///         super.init(rootView: MyThemedView(), theme: theme)
-///     }
+/// init(customValue: String) {
+/// super.init(rootView: MyThemedView())
+/// or if you already have a theme...
+/// super.init(rootView: MyThemedView(), theme: theme)
+/// }
 /// }
 class ThemedHostingController<Content>: ModifedHostingController<Content, ThemedEnvironment> where Content: View {
 

@@ -139,7 +139,7 @@ enum CloudRouteRequestBuilder {
         sourceTranscript: String? = nil,
         sourceLanguage: String? = nil
     ) -> [String: Any] {
-        // SOURCE-FIRST runtime request (core b6eafe25): the runtime `request` carries the complete
+        // SOURCE-FIRST runtime request: the runtime `request` carries the complete
         // wake-trimmed SOURCE utterance when one is available — the English routing translation
         // selects the action but never REPLACES the original the model answers. When no original
         // exists (backend translate exposes English only), the available text is used without

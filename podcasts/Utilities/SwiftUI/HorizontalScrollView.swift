@@ -4,9 +4,9 @@ import SwiftUI
 /// A simple Horizontally scrolling view that restricts its height to its content size
 /// Example:
 /// HorizontalScrollView {
-///     ForEach(models) {
-///         ... Setup View ...
-///     }
+/// ForEach(models) {
+/// ... Setup View ...
+/// }
 /// }
 struct HorizontalScrollView<Content: View>: View {
     private var content: () -> Content

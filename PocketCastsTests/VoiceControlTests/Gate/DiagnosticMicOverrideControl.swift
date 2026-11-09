@@ -1,28 +1,28 @@
 @testable import podcasts
 import XCTest
 
-/// Controls for the Debug-simulator-only built-in-mic diagnostic (owner approval, #core:25b91a1b).
+/// Controls for the Debug-simulator-only built-in-mic diagnostic.
 ///
 /// The owner's requirement was not "the flag exists" but that the exception is NARROW and that the
 /// real classification survives. These controls test exactly that, and they are written so each one
 /// has a mutant that would survive if the guard were removed.
-/// SCOPE OF EVIDENCE — three distinct things, kept apart deliberately:
+/// SCOPE of evidence — three distinct things, kept apart deliberately:
 ///
-/// 1. SOURCE REVIEW: the exception is restricted by two compile-time constants (Debug +
-///    simulator), the microphone classifier is untouched, and every other gate check still runs
-///    ahead of it.
-/// 2. FAKE-CAPTURE TEST EVIDENCE (the controls in this file): the gate admits a built-in-only
-///    route, the session is configured input-capable, and injected samples reach the routing
-///    callback. These prove the WIRING. They cannot prove the simulator device or the real wake
-///    detector delivered anything — the samples are injected and wake detection is simulated.
-/// 3. ACTUAL-APP EVIDENCE (observed on simulator 928D99F3 with this build, quoted verbatim):
-///      MicExposure: noMic -> exposed (output: builtInSpeaker, input: builtInMic)
-///      Gate: off(noMicrophone) -> listening(wakeWord)
-///      Audio engine started (input: <AVAudioFormat: 1 ch, 48000 Hz, Float32> -> 16000.0Hz)
-///      First buffer: 1600 samples, min=-0.007902 max=0.006273
-///    "Audio engine started" alone is NOT sample evidence — it is emitted at startup. The
-///    `First buffer` line is emitted from the native capture callback on a real received buffer,
-///    with non-zero amplitude, at the pipeline's 16 kHz rate. That is the actual-signal line.
+/// 1. SOURCE review: the exception is restricted by two compile-time constants (Debug +
+/// simulator), the microphone classifier is untouched, and every other gate check still runs
+/// ahead of it.
+/// 2. FAKE-CAPTURE test evidence (the controls in this file): the gate admits a built-in-only
+/// route, the session is configured input-capable, and injected samples reach the routing
+/// callback. These prove the WIRING. They cannot prove the simulator device or the real wake
+/// detector delivered anything — the samples are injected and wake detection is simulated.
+/// 3. ACTUAL-APP evidence:
+/// MicExposure: noMic -> exposed (output: builtInSpeaker, input: builtInMic)
+/// Gate: off(noMicrophone) -> listening(wakeWord)
+/// Audio engine started (input: <AVAudioFormat: 1 ch, 48000 Hz, Float32> -> 16000.0Hz)
+/// First buffer: 1600 samples, min=-0.007902 max=0.006273
+/// "Audio engine started" alone is not sample evidence — it is emitted at startup. The
+/// `First buffer` line is emitted from the native capture callback on a real received buffer,
+/// with non-zero amplitude, at the pipeline's 16 kHz rate. That is the actual-signal line.
 final class DiagnosticMicOverrideControl: XCTestCase {
     /// Bounded poll, so a premise that never becomes true FAILS instead of hanging the suite.
     private func awaitTrue(timeout: TimeInterval = 5, _ condition: @escaping () -> Bool) async -> Bool {
@@ -48,7 +48,7 @@ final class DiagnosticMicOverrideControl: XCTestCase {
     }
 
     override func tearDown() {
-        // A REAL JOIN, NOT A TIMER (reviewer e8327339). `stop()` alone can leave an acquisition
+        // A REAL join, not A TIMER. `stop()` alone can leave an acquisition
         // task in flight; those tasks touch the one process-wide `AVAudioSession`, so one still
         // running perturbs whatever control executes next — measured as an interruption case
         // failing only in the combined run. An earlier version waited on an ignored 0.5s timer,
@@ -65,17 +65,17 @@ final class DiagnosticMicOverrideControl: XCTestCase {
     ///
     /// Capture must come first: `stop()` ends capture, releases the acquired route, flips the gate
     /// and runs `cancelAcquisition()`, which nils `acquisitionTask`. Looking it up after `stop()`
-    /// finds nothing and the join silently does nothing (reviewer `33d3a531` — my previous version
+    /// finds nothing and the join silently does nothing ( — my previous version
     /// had exactly that defect and its result was discarded).
     ///
-    /// A bound expiry is an ASSERTION FAILURE, not a silent pass: if the task does not complete,
+    /// A bound expiry is an ASSERTION failure, not a silent pass: if the task does not complete,
     /// teardown could not establish cleanup, and something is genuinely stuck.
     private func joinAcquisitionCleanup(
         _ service: VoiceControlService,
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
-        // Captured on the main actor, synchronously, BEFORE `stop()` can clear it.
+        // Captured on the main actor, synchronously, before `stop()` can clear it.
         var captured: Task<Void, Never>?
         let capturedBox = MainActor.assumeIsolated { () -> Task<Void, Never>? in
             captured = service.captureAcquisitionTaskForTesting()
@@ -108,8 +108,8 @@ final class DiagnosticMicOverrideControl: XCTestCase {
         _ = stopDone
     }
 
-    /// DETERMINISTIC PROOF THAT TEARDOWN JOINS A GENUINELY IN-FLIGHT ACQUISITION
-    /// (reviewer 33d3a531, tightened per 54804816).
+    /// DETERMINISTIC proof that teardown joins A GENUINELY in-FLIGHT acquisition
+    ///.
     ///
     /// The previous version released the park, awaited completion, and only THEN let teardown
     /// stop/join — so it never called `stop()` while the task was parked and did not exercise
@@ -129,7 +129,7 @@ final class DiagnosticMicOverrideControl: XCTestCase {
         session.availableAfterConfigure = [AudioPort(portType: .bluetoothHFP, uid: "park-mic")]
 
         let parked = HoldLatch()
-        // GUARANTEED RELEASE: whatever happens below, the park is opened so no later case wedges.
+        // GUARANTEED release: whatever happens below, the park is opened so no later case wedges.
         defer { parked.release() }
 
         let entered = FlagBox()
@@ -154,12 +154,12 @@ final class DiagnosticMicOverrideControl: XCTestCase {
         }
         service.startIfAllowed()
 
-        // 1. THE BARRIER MUST ACTUALLY BE ENTERED. A non-nil task only proves a task exists; it
-        //    does not prove the acquisition reached the point teardown has to interrupt.
+        // 1. THE barrier must actually be entered. A non-nil task only proves a task exists; it
+        // does not prove the acquisition reached the point teardown has to interrupt.
         let barrierEntered = await awaitTrue(timeout: 10) { entered.isSet }
         XCTAssertTrue(barrierEntered, "premise: the acquisition must be parked AT the barrier")
 
-        // 2. Capture BEFORE stop clears it.
+        // 2. Capture before stop clears it.
         let task = service.captureAcquisitionTaskForTesting()
         XCTAssertNotNil(task, "premise: the parked acquisition task must be capturable")
 
@@ -188,7 +188,7 @@ final class DiagnosticMicOverrideControl: XCTestCase {
         XCTAssertTrue(released, "the stalled task must finish after unconditional release")
     }
 
-    /// START A REAL SERVICE over a built-in-only session    /// START A REAL SERVICE over a built-in-only session, so later route changes flow through the
+    /// START A REAL service over a built-in-only session /// START A REAL service over a built-in-only session, so later route changes flow through the
     /// actual publisher chain. Shared by the connect/disconnect controls below.
     @MainActor
     private func startedServiceForLiveRoute(session: FakeAudioSessionControlling) -> VoiceControlService? {
@@ -211,7 +211,7 @@ final class DiagnosticMicOverrideControl: XCTestCase {
         return service
     }
 
-    /// THE EXCEPTION MUST TRACK THE *CURRENT* ROUTE (reviewer `20f3cb92`, blocking).
+    /// THE exception must track the *CURRENT* ROUTE.
     ///
     /// Driven through a LIVE service, not by constructing two gates: two fresh gates re-evaluate
     /// from scratch and therefore pass even when the service captures availability once at wiring
@@ -299,7 +299,7 @@ final class DiagnosticMicOverrideControl: XCTestCase {
         )
     }
 
-    /// END TO END: a built-in-microphone-only session must reach `.listening` AND start capture,
+    /// END to end: a built-in-microphone-only session must reach `.listening` AND start capture,
     /// then receive samples. This is the owner's actual requirement (approval `77121fd4`, spec
     /// restatement `db25f02b`), not merely a gate flag flipping.
     ///
@@ -360,7 +360,7 @@ final class DiagnosticMicOverrideControl: XCTestCase {
         XCTAssertTrue(listening, "gate must reach listening; state=\(service.gateState)")
         guard listening else { return }
 
-        // THE DIAGNOSTIC PATH ITSELF, asserted on its own observable. Capture start does NOT
+        // THE diagnostic path itself, asserted on its own observable. Capture start does not
         // prove it: `VoiceAsrEngine.start()` begins capture unconditionally once the engine runs,
         // so a control that stopped here passed even with the acquisition path mutated out
         // (measured — the mutant survived). The gate reaching `.listening` proves the ADMISSION
@@ -390,14 +390,14 @@ final class DiagnosticMicOverrideControl: XCTestCase {
         service.enqueueAfterCaptureForTesting = {
             if !fired { fired = true }
         }
-        // The gate settles in `.wakeWord` mode, where the pipeline deliberately does NOT route
+        // The gate settles in `.wakeWord` mode, where the pipeline deliberately does not route
         // speech — it waits for the wake word. Nothing about mic plumbing changes that, so enter
         // continuous mode exactly as a real wake-word detection would. Without this the audio
         // flows through capture and is correctly ignored, which would look like "samples never
         // arrive" but would be the wake-word requirement working.
         service.gracePeriodSignalForTesting.onWakeWordDetected()
 
-        // ONE FRAME PER CALL, and well above the segmenter threshold: `minSpeechFrames` counts
+        // ONE frame per call, and well above the segmenter threshold: `minSpeechFrames` counts
         // CALLS (5), not samples, so a single large buffer is one frame and speech is never
         // confirmed — a single burst silently produces no segment and this would look like
         // "samples never arrive".
@@ -437,7 +437,7 @@ final class DiagnosticMicOverrideControl: XCTestCase {
         )
     }
 
-    /// THE EXCEPTION DOES NOT WEAKEN THE CLASSIFICATION: `.exposed` stays `.exposed`, and without
+    /// THE exception does not weaken the classification: `.exposed` stays `.exposed`, and without
     /// the diagnostic it must still block. Mutant: making the `.exposed` case fall through
     /// unconditionally fails this.
     func testExposedStillBlocksWithoutTheDiagnostic() {
@@ -446,7 +446,7 @@ final class DiagnosticMicOverrideControl: XCTestCase {
         XCTAssertEqual(g.posture.micExposure, .exposed, "the classification itself must be unchanged")
     }
 
-    /// A REAL EXTERNAL MICROPHONE STILL KEEPS THE REQUIREMENT, even with the diagnostic active.
+    /// A REAL external microphone still keeps the requirement, even with the diagnostic active.
     /// This is the guard that stops the override masking a routing defect: if a headset IS
     /// available the app must not quietly capture from the built-in microphone instead.
     func testDiagnosticDoesNotOverrideAnAvailableExternalMicrophone() {
@@ -457,14 +457,14 @@ final class DiagnosticMicOverrideControl: XCTestCase {
         )
     }
 
-    /// AND IT DOES ADMIT the built-in microphone when nothing external exists — the one case it
+    /// AND it does admit the built-in microphone when nothing external exists — the one case it
     /// exists for. Mutant: removing the exception leaves the simulator unable to listen at all.
     func testDiagnosticAdmitsBuiltInMicWhenNoExternalExists() {
         let g = gate(exposure: .exposed, admits: true, externalCandidate: false)
         XCTAssertTrue(g.state.isListening, "the diagnostic must admit this one case")
     }
 
-    /// THE PRECEDENCE IS UNCHANGED: the exception sits AFTER readiness, conflicts and context, so it
+    /// THE precedence is unchanged: the exception sits after readiness, conflicts and context, so it
     /// cannot resurrect a gate that those already refused.
     func testDiagnosticDoesNotBypassConflicts() {
         let g = gate(
@@ -481,7 +481,7 @@ final class DiagnosticMicOverrideControl: XCTestCase {
         XCTAssertEqual(g.state.offReason, .conflictBlocking, "conflicts are checked FIRST")
     }
 
-    /// `noMic` IS NOT `exposed`: there is no microphone at all, and the diagnostic must not invent
+    /// `noMic` IS not `exposed`: there is no microphone at all, and the diagnostic must not invent
     /// one. Mutant: widening the guard to admit `.noMic` fails this.
     func testDiagnosticDoesNotAdmitAUserWithNoMicrophone() {
         let g = gate(exposure: .noMic, admits: true, externalCandidate: false)

@@ -8,17 +8,17 @@ import SwiftUI
 ///
 /// Usage:
 ///
-///     struct MyView: View {
-///         @State var text: String = ""
+/// struct MyView: View {
+/// @State var text: String = ""
 ///
-///         var body: View {
-///             VStack {
-///                 SearchField($text)
-///                 TheRestOfTheOwl()
-///             }
-///             .padding()
-///         }
-///     }
+/// var body: View {
+/// VStack {
+/// SearchField($text)
+/// TheRestOfTheOwl()
+/// }
+/// .padding()
+/// }
+/// }
 ///
 /// The colors of the `SearchField` can be customized by subclassing the `SearchTheme` and passing it in
 ///

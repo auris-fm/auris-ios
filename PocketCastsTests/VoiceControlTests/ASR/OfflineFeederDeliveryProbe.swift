@@ -1,8 +1,8 @@
 import AVFoundation
 import XCTest
 
-/// MEASUREMENT PROBE (repeat-install work): does a feeder tap fire callbacks reliably under
-/// MANUAL OFFLINE rendering? The failing lifecycle case renders offline and intermittently
+/// MEASUREMENT probe (repeat-install work): does a feeder tap fire callbacks reliably under
+/// MANUAL offline rendering? The failing lifecycle case renders offline and intermittently
 /// delivers zero audio with IDENTICAL rendered-frame counts, so the question is whether the tap
 /// callback entry itself is the varying part. Runs the same offline render N times and reports
 /// callbacks and delivered frames per run.

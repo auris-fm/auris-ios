@@ -12,7 +12,7 @@ class AboutViewModel: ObservableObject {
         L10n.whatsNewInVersion(Settings.appVersion())
     }
 
-    /// "Built 2026-10-13 09:32 +0800", or nil when the binary carries no build date.
+    /// "Built 09:32 +0800", or nil when the binary carries no build date.
     var buildDateText: String? {
         buildDateProvider().map { L10n.aboutBuildDate($0) }
     }

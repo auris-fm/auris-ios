@@ -232,15 +232,15 @@ final class VoiceSharingCaptureAllowanceClientTests: XCTestCase {
         XCTAssertEqual(object["enrollment_epoch"] as? String, "epoch-1")
     }
 
-    /// MISSING ORIGIN, observed at the TRANSPORT (spec's open item; @cloud: a request that never
+    /// MISSING origin, observed at the TRANSPORT (spec's open item;: a request that never
     /// leaves the device is invisible server-side, so the check has to watch the client).
     ///
     /// Two failing shapes are controlled here, and both are the kind that would look fine from a
     /// server log:
-    ///  * a missing origin that still DIALS something (an empty base + path is a relative URL that
-    ///    URLSession can resolve against nothing, or worse, against a stale host);
-    ///  * a missing origin that reports the same outcome as a transport failure, so the caller cannot
-    ///    tell "never asked" from "asked and failed" — those have different retry rules.
+    /// * a missing origin that still DIALS something (an empty base + path is a relative URL that
+    /// URLSession can resolve against nothing, or worse, against a stale host);
+    /// * a missing origin that reports the same outcome as a transport failure, so the caller cannot
+    /// tell "never asked" from "asked and failed" — those have different retry rules.
     func test_missingOrigin_isRefusedBeforeTheTransportIsTouched() async {
         CountingTransport.reset()
         let config = URLSessionConfiguration.ephemeral
@@ -509,7 +509,7 @@ final class VoiceSharingCaptureAllowanceClientTests: XCTestCase {
         XCTAssertEqual(response.batchID, batchA)
     }
 
-    /// Remembered cancellation, deterministically: cancel the handle BEFORE any task
+    /// Remembered cancellation, deterministically: cancel the handle before any task
     /// exists, then bind a real (unresumed) task — it must be cancelling immediately.
     func test_handle_cancelledBeforeBind_isAppliedAtBindTime() {
         let handle = VoiceSharingCaptureAllowanceClient.Handle()
@@ -518,7 +518,7 @@ final class VoiceSharingCaptureAllowanceClientTests: XCTestCase {
         let session = URLSession(configuration: config)
         let task = session.dataTask(with: URL(string: "https://api.example.test/x")!)
         XCTAssertNotEqual(task.state, .canceling, "sanity: task starts uncancelled")
-        handle.bind(task) // bind AFTER cancellation — must apply immediately
+        handle.bind(task) // bind after cancellation — must apply immediately
         XCTAssertTrue(waitForFlag { task.state == .canceling },
                       "remembered cancellation must cancel at bind time")
         task.cancel()
@@ -586,7 +586,7 @@ final class VoiceSharingCaptureAllowanceClientTests: XCTestCase {
         XCTAssertTrue(waitForFlag { Stub3.cancelled })
     }
 
-    // MARK: Disposition-driven provisioning connection (reviewer 80ef8b5f.5)
+    // MARK: Disposition-driven provisioning connection
 
     func test_issuedResponse_provisionsThroughTheRealLedgerPath_replayedNeverDoes() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -616,7 +616,7 @@ final class VoiceSharingCaptureAllowanceClientTests: XCTestCase {
         XCTAssertTrue(ledger.charge(admission), "issued batch admits and charges durably")
 
         // REPLAYED against the now-INTACT ledger: the second admission derives from the
-        // PARSED REPLAYED response itself and reopens the ledger with existing usage.
+        // PARSED replayed response itself and reopens the ledger with existing usage.
         let replayedAdmission = try XCTUnwrap(VoiceSharingCaptureAllowanceInstallation.admissionAuthority(
             account: "acct", response: replayed, consent: consent))
         XCTAssertTrue(ledger.charge(replayedAdmission),
@@ -728,7 +728,7 @@ final class VoiceSharingCaptureAllowanceClientTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let ledger = VoiceSharingCaptureLedger(root: root)
-        // No provisioning ever happened: ordinary admission must NOT treat loss as first use.
+        // No provisioning ever happened: ordinary admission must not treat loss as first use.
         XCTAssertFalse(ledger.charge(authority(account: "acct", window: window, batch: batchA)))
         // Corrupt usage: refused, never reconstructed.
         XCTAssertTrue(ledger.provision(provisioning(account: "acct", window: window, batch: batchA)))

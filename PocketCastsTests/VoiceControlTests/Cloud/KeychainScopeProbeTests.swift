@@ -4,9 +4,9 @@ import PocketCastsUtils
 
 /// Scope probe for the credential-recovery investigation.
 ///
-/// This does NOT recover anything and reads no real credential. It writes a SYNTHETIC entry
+/// This does not recover anything and reads no real credential. It writes a SYNTHETIC entry
 /// through the app's own `KeychainHelper` and reads it back with `SecItemCopyMatching` using
-/// class + service + access-group and `kSecReturnAttributes` ONLY — never `kSecReturnData`.
+/// class + service + access-group and `kSecReturnAttributes` only — never `kSecReturnData`.
 ///
 /// The purpose is to establish the query SHAPE the helper can actually satisfy on a given
 /// signing scope, so a later read-only check against a real group can be judged safe or not.
@@ -15,7 +15,7 @@ import PocketCastsUtils
 final class KeychainScopeProbeTests: XCTestCase {
     private let probeKey = "__scope_probe__"
 
-    /// Explicit enablement, read by EVERY hook that can touch the store.
+    /// Explicit enablement, read by every hook that can touch the store.
     ///
     /// `setUp` and `tearDown` run even when the test body skips, so an ungated remove here means
     /// a disabled shared-suite run still WRITES to the keychain of whatever device it runs on.
@@ -54,7 +54,7 @@ final class KeychainScopeProbeTests: XCTestCase {
         )
         XCTAssertTrue(saved, "the helper could not write a synthetic entry")
 
-        // 2. Read back with ATTRIBUTES ONLY. `kSecReturnData` is deliberately absent.
+        // 2. Read back with ATTRIBUTES only. `kSecReturnData` is deliberately absent.
         let service = "fm.auris." + probeKey
         // The access group is SPECIFIED, because that is the whole question: a query without it
         // finds an item wherever the caller happens to see it, so a success proves only that some

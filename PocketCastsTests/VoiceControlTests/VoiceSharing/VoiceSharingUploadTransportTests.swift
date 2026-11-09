@@ -103,7 +103,7 @@ final class VoiceSharingUploadTransportTests: XCTestCase {
         XCTAssertEqual(result, .transportFailure)
     }
 
-    /// Stalled headers: the deadline starts BEFORE the request, so a server that never sends
+    /// Stalled headers: the deadline starts before the request, so a server that never sends
     /// headers is cancelled promptly — not just a slow body.
     func test_stalledHeadersAreCancelledByTheDeadline() async {
         let provider = RecordingTokenProvider(tokens: ["tok-1", "tok-1"])
@@ -139,7 +139,7 @@ final class VoiceSharingUploadTransportTests: XCTestCase {
         }
     }
 
-    /// MEASURED CANCELLATION (open item from spec/reviewer): a LIVE transfer that keeps dribbling
+    /// MEASURED cancellation (open item from spec/reviewer): a LIVE transfer that keeps dribbling
     /// is stopped by the transport, and the cancellation is OBSERVED (URLSession calls
     /// stopLoading) rather than merely inferred from the return value.
     func test_liveDribblingTransferIsMeasurablyCancelled() async {
@@ -153,7 +153,7 @@ final class VoiceSharingUploadTransportTests: XCTestCase {
             bodyDeadline: 2)
         let started = Date()
         let result = await transport.send(request: makeRequest())
-        // DETERMINISTIC BOUND: wait (at most 5s) for URLSession to actually deliver stopLoading
+        // DETERMINISTIC bound: wait (at most 5s) for URLSession to actually deliver stopLoading
         // instead of asserting the instant send resumes — the cancellation notification may
         // land a beat later, which was the recurring flake.
         let observed = DispatchQueue.global().sync {
@@ -172,7 +172,7 @@ final class VoiceSharingUploadTransportTests: XCTestCase {
         XCTAssertLessThan(elapsed, 10, "the deadline bounds the transfer's lifetime")
     }
 
-    /// REAL OVER-CAP CONTROL (spec/reviewer open item): the response body genuinely crosses the
+    /// REAL over-CAP control (spec/reviewer open item): the response body genuinely crosses the
     /// 64 KiB receive ceiling mid-stream — no stubbed "cap exceeded" flag — and the transport
     /// cancels the live transfer (stopLoading observed via a bounded barrier) and reports the
     /// record's fate as UNKNOWN (transportFailure), never a fabricated acceptance.
@@ -197,7 +197,7 @@ final class VoiceSharingUploadTransportTests: XCTestCase {
                                     "the live transfer was cancelled, not drained")
     }
 
-    /// LOCALHOST HTTP (reviewer e1c86d32): a REAL local HTTP server holds the response OPEN
+    /// LOCALHOST HTTP: a REAL local HTTP server holds the response OPEN
     /// after crossing the 64 KiB cap — the provider stream is never finished — and the test
     /// OBSERVES the server-side connection ending when the client's ceiling cancellation tears
     /// the transfer down. URLProtocol's burst control cannot give this evidence (its
@@ -225,9 +225,9 @@ final class VoiceSharingUploadTransportTests: XCTestCase {
         listener.newConnectionHandler = { connection in
             acceptedConnection = connection  // for defer cleanup
             accepted.store(connection)
-            // STILL-PRODUCING PEER (reviewer e1c86d32): headers with NO content-length, then
+            // STILL-PRODUCING peer: headers with NO content-length, then
             // chunks forever. The cap crossing happens while the provider is still streaming;
-            // only a client-side cancellation can end this. Sending starts ONLY on .ready —
+            // only a client-side cancellation can end this. Sending starts only on .ready —
             // a send issued before the connection is prepared is silently dropped, which was
             // the reason an earlier attempt deadlocked into the client's deadline.
             connection.stateUpdateHandler = { state in
@@ -244,7 +244,7 @@ final class VoiceSharingUploadTransportTests: XCTestCase {
                     var sequence = 0
                     func pump() {
                         // Stop scheduling once the connection has ended or a send failed —
-                        // no work outstanding beyond the observed stop (reviewer 8619e6e2).
+                        // no work outstanding beyond the observed stop.
                         guard sequence < 100, !stopFlag.stoppedFlag, accepted.current != nil else { return }
                         sequence += 1
                         let chunk = Data(count: 16 * 1024)
@@ -287,7 +287,7 @@ final class VoiceSharingUploadTransportTests: XCTestCase {
                        "a stream that crosses the cap and never finishes is never a delivered record")
         XCTAssertLessThan(elapsed, 15,
                           "the ceiling stops the transfer long before the 30s deadline")
-        // SERVER-SIDE OBSERVATION: the client's cancellation reached the real connection.
+        // SERVER-SIDE observation: the client's cancellation reached the real connection.
         XCTAssertTrue(stopFlag.wait(timeout: 5),
                       "the server observed its connection end after the client's cap cancellation")
     }
@@ -332,12 +332,12 @@ private final class RecordingTokenProvider: CloudTokenProviding {
 }
 
 /// URLProtocol double: records every request that actually reaches the network layer.
-// MARK: - REAL transport + REAL provider boundary (reviewer 289a38b5/b799968e)
+// MARK: - REAL transport + REAL provider boundary
 
 /// The REAL `CloudAuthTokenProvider` (injected auth I/O) behind the REAL
 /// `VoiceSharingUploadTransport`: the transport's 401 branch must forward the EXACT bearer the
 /// wire request carried, the provider must rotate exactly once for it, and a duplicate rejection
-/// of an already-replaced bearer must NOT rotate again. Same-account/same-epoch identity fencing
+/// of an already-replaced bearer must not rotate again. Same-account/same-epoch identity fencing
 /// rides the same path.
 extension VoiceSharingUploadTransportTests {
     /// Stand up a real provider whose auth endpoints are served by the same URLProtocol harness,
@@ -366,7 +366,7 @@ extension VoiceSharingUploadTransportTests {
         UploadRecordingURLProtocol.expectedDeferredCount = 2
         UploadRecordingURLProtocol.bothHeldSemaphore = DispatchSemaphore(value: 0)
         UploadRecordingURLProtocol.lock.unlock()
-        // Cleanup on EVERY exit path: no send may hang on a held transfer.
+        // Cleanup on every exit path: no send may hang on a held transfer.
         defer {
             UploadRecordingURLProtocol.handler = nil
             UploadRecordingURLProtocol.releaseAllDeferred()
@@ -385,7 +385,7 @@ extension VoiceSharingUploadTransportTests {
                                         httpVersion: nil, headerFields: nil)!,
                         Data(#"{"access_token":"\#(next)","token_type":"Bearer","expires_in":900,"refresh_token":"r-\#(refreshCount)","refresh_expires_in":2592000,"issuer":"https://unit.test","subject":"acct-A"}"#.utf8))
             }
-            // THE UPLOAD: reject whatever bearer this wire request carried — recorded below.
+            // THE upload: reject whatever bearer this wire request carried — recorded below.
             if path.contains("voice-recordings") {
                 uploadRequests.append(request)
             }
@@ -433,7 +433,7 @@ extension VoiceSharingUploadTransportTests {
         XCTAssertEqual(thirdBearer, "tok-3", "the second rejection rotated to tok-3 and it is live")
     }
 
-    /// NIL-DISCRIMINATING FORWARDED-BEARER CONTROL (reviewer 5e57e531): TWO CONCURRENT sends,
+    /// NIL-DISCRIMINATING forwarded-BEARER control: TWO concurrent sends,
     /// BOTH wire requests carrying tok-1 (the provider has not rotated yet), each 401 held by a
     /// barrier. Release response A first — transport A's 401 branch reports tok-1, the provider
     /// rotates to tok-2 (count 1) — and WAIT for the adoption. Then release response B: transport
@@ -446,7 +446,7 @@ extension VoiceSharingUploadTransportTests {
         UploadRecordingURLProtocol.expectedDeferredCount = 2
         UploadRecordingURLProtocol.bothHeldSemaphore = DispatchSemaphore(value: 0)
         UploadRecordingURLProtocol.lock.unlock()
-        // Cleanup on EVERY exit path: no send may hang on a held transfer.
+        // Cleanup on every exit path: no send may hang on a held transfer.
         defer {
             UploadRecordingURLProtocol.handler = nil
             UploadRecordingURLProtocol.releaseAllDeferred()
@@ -490,7 +490,7 @@ extension VoiceSharingUploadTransportTests {
             baseURLProvider: { "https://unit.test" }, tokenProvider: provider,
             session: freshSession())
 
-        // PRE-WARM the provider: the token exchange completes BEFORE any send, so both sends
+        // PRE-WARM the provider: the token exchange completes before any send, so both sends
         // read the cached tok-1 without racing the acquisition single-flight.
         let warmed = await provider.token()
         XCTAssertEqual(warmed, "tok-1", "pre-warm mints tok-1")
@@ -513,9 +513,9 @@ extension VoiceSharingUploadTransportTests {
             }
         }
         guard !heldTimedOut else {
-            // Release BEFORE returning: the async-let children below are still held, and
+            // Release before returning: the async-let children below are still held, and
             // structured cleanup would wait for them (up to a transport deadline). Explicit
-            // release first keeps the return prompt (reviewer 2d15f73d/0505f163).
+            // release first keeps the return prompt.
             UploadRecordingURLProtocol.releaseAllDeferred()
             _ = await sendA; _ = await sendB
             return XCTFail("both transfers were not held within 10s: held=\(uploadRequests.count)")
@@ -528,7 +528,7 @@ extension VoiceSharingUploadTransportTests {
         // Release A BY KEY: its 401 branch reports tok-1 → one rotation.
         UploadRecordingURLProtocol.releaseDeferred401(key: "capture-A")
         guard case .response(401, _) = await sendA else {
-            // Same rule: unblock the still-held transfer BEFORE returning.
+            // Same rule: unblock the still-held transfer before returning.
             UploadRecordingURLProtocol.releaseAllDeferred()
             _ = await sendB
             return XCTFail("expected the 401 verdict for A")
@@ -551,9 +551,9 @@ extension VoiceSharingUploadTransportTests {
                        "the stale tok-1 rejection from transport B must NOT rotate again — this is what a nil-forwarding transport fails")
     }
 
-    /// FORCED MISSING-TRANSFER CLEANUP (reviewer 2d15f73d/0505f163): the barrier expects three
+    /// FORCED missing-TRANSFER cleanup: the barrier expects three
     /// held transfers but only two ever arrive. The bounded barrier times out at 10s, the failure
-    /// path releases what IS held BEFORE awaiting the children, and the test ends promptly —
+    /// path releases what IS held before awaiting the children, and the test ends promptly —
     /// no 90-second transport deadline is reached.
     func test_barrierFailureReleasesHeldTransfersPromptly() async throws {
         UploadRecordingURLProtocol.lock.lock()
@@ -575,7 +575,7 @@ extension VoiceSharingUploadTransportTests {
                 // Answer refresh IMMEDIATELY (rejected → provider drops the chain): otherwise
                 // the release-triggered refreshes would hang until the auth deadline and the
                 // prompt-cleanup assertion would be measuring the wrong thing
-                // (reviewer 0a748432).
+                //.
                 return (HTTPURLResponse(url: request.url!, statusCode: 401,
                                         httpVersion: nil, headerFields: nil)!,
                         Data(#"{"code":"refresh_reused"}"#.utf8))
@@ -609,7 +609,7 @@ extension VoiceSharingUploadTransportTests {
             }
         }
         XCTAssertTrue(timedOut, "with one transfer missing, the barrier must time out")
-        // FAILURE PATH: release BEFORE awaiting the children. Measure release → completions.
+        // FAILURE path: release before awaiting the children. Measure release → completions.
         let releaseStarted = Date()
         UploadRecordingURLProtocol.releaseAllDeferred()
         let resultA = await sendA
@@ -627,9 +627,9 @@ extension VoiceSharingUploadTransportTests {
     }
 
     /// SAME-account fencing across the real path, per the pinned ACCOUNT-BINDING contract
-    /// (spec 4afc6e43): after the entry was admitted under (acct-A, epoch-1), an ACCOUNT move
-    /// stops the send at the real transport's credential boundary — but an EPOCH-ONLY move for
-    /// the SAME owner MUST still ship, because a re-enrollment does not invalidate audio the
+    ///: after the entry was admitted under (acct-A, epoch-1), an ACCOUNT move
+    /// stops the send at the real transport's credential boundary — but an EPOCH-only move for
+    /// the SAME owner must still ship, because a re-enrollment does not invalidate audio the
     /// account already captured. (This test previously asserted whole-snapshot fencing, which
     /// contradicted the contract and failed on the epoch leg; corrected to pin the contract.)
     func test_realTransportFencesAccountMovesAndShipsSameOwnerEpochMoves() async throws {
@@ -674,7 +674,7 @@ extension VoiceSharingUploadTransportTests {
                        "an account move must not put a single upload byte on the wire")
 
         // The EPOCH moves identically for the SAME owner: the send must still ship. A 500 here
-        // is the point — the request left, because the owner did not change (spec 4afc6e43).
+        // is the point — the request left, because the owner did not change.
         box.current = VoiceSharingUploadIdentity(
             accountScope: "acct-A", enrollmentEpoch: "epoch-2")
         let result2 = await transport.send(
@@ -736,8 +736,8 @@ final class StopFlag {
 
 private final class UploadRecordingURLProtocol: URLProtocol {
     static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data)?)?
-    /// Deferred-401 protocol instances KEYED BY REQUEST IDENTIFIER (the Idempotency-Key header)
-    /// — arrival order is nondeterministic across concurrent sends (reviewer 7f08e173).
+    /// Deferred-401 protocol instances KEYED by request identifier (the Idempotency-Key header)
+    /// — arrival order is nondeterministic across concurrent sends.
     static var deferred401s: [String: UploadRecordingURLProtocol] = [:]
     /// Signaled once the expected transfers are all held — replaces Task.yield polling with a
     /// synchronized bounded wait.
@@ -745,8 +745,8 @@ private final class UploadRecordingURLProtocol: URLProtocol {
     static var expectedDeferredCount = 0
     /// Completes the transfer identified by `key` with a 401 (test-side barrier release).
     static func releaseDeferred401(key: String) {
-        // Collect UNDER the lock; invoke client callbacks AFTER releasing it — stopLoading
-        // (triggered by cancellation paths) acquires the same lock (reviewer 2d15f73d).
+        // Collect UNDER the lock; invoke client callbacks after releasing it — stopLoading
+        // (triggered by cancellation paths) acquires the same lock.
         lock.lock()
         let instance = deferred401s.removeValue(forKey: key)
         lock.unlock()
@@ -760,13 +760,13 @@ private final class UploadRecordingURLProtocol: URLProtocol {
         instance.client?.urlProtocol(instance, didLoad: Data())
         instance.client?.urlProtocolDidFinishLoading(instance)
     }
-    /// Releases ANY transfers still held (cleanup on failure paths) so no send hangs.
+    /// Releases any transfers still held (cleanup on failure paths) so no send hangs.
     static func releaseAllDeferred() {
         lock.lock()
         let held = Array(deferred401s.values)
         deferred401s = [:]
         lock.unlock()
-        // Callbacks AFTER the lock is released (see releaseDeferred401).
+        // Callbacks after the lock is released (see releaseDeferred401).
         for instance in held { completeWith401(instance) }
     }
     static var stall = false
@@ -774,16 +774,16 @@ private final class UploadRecordingURLProtocol: URLProtocol {
     /// only the WALL/cap bound can stop.
     static var drip = false
     static var dripInterval: TimeInterval = 0
-    /// REAL OVER-CAP MODE (spec/reviewer open item): the response body actually EXCEEDS the
+    /// REAL over-CAP mode (spec/reviewer open item): the response body actually EXCEEDS the
     /// transport's 64 KiB receive ceiling — headers first, then one burst larger than the cap.
     static var burstOverCapBytes = 0
     private(set) static var lastRequest: URLRequest?
     private(set) static var requestCount = 0
-    /// MEASURED CANCELLATION (spec/reviewer open item): how many times URLSession told the live
+    /// MEASURED cancellation (spec/reviewer open item): how many times URLSession told the live
     /// transfer to stop, and whether a drip was still running when it did.
     private(set) static var stopLoadingCount = 0
     private(set) static var dripWasLiveWhenStopped = false
-    /// DETERMINISTIC CANCELLATION BARRIER: stopLoading signals this; the test waits on it
+    /// DETERMINISTIC cancellation barrier: stopLoading signals this; the test waits on it
     /// (bounded) instead of asserting immediately after send returns — the OS may deliver
     /// stopLoading a beat after the await resumes, which was the flake.
     static var stopLoadingSemaphore: DispatchSemaphore?
@@ -816,7 +816,7 @@ private final class UploadRecordingURLProtocol: URLProtocol {
         UploadRecordingURLProtocol.requestCount += 1
         UploadRecordingURLProtocol.lastRequest = request
         UploadRecordingURLProtocol.lock.unlock()
-        // A genuine stall: the transfer exists but NEVER yields headers or bytes.
+        // A genuine stall: the transfer exists but never yields headers or bytes.
         if UploadRecordingURLProtocol.stall { return }
         if UploadRecordingURLProtocol.burstOverCapBytes > 0 {
             let response = HTTPURLResponse(
@@ -908,7 +908,7 @@ extension VoiceSharingUploadTransportTests {
         _ = await uploader.upload(entry)
         XCTAssertEqual(sends, 0)
         XCTAssertEqual(try queue.attemptCount(for: entry), 0)
-        // Bare gate + SATISFIED path: allowed now (spec 4afc6e43 happy path).
+        // Bare gate + SATISFIED path: allowed now.
         gate.update(.init(satisfied: true, interfaces: [.wifi], expensive: false, constrained: false))
         _ = await uploader.upload(entry)
         XCTAssertEqual(sends, 1)
@@ -939,7 +939,7 @@ extension VoiceSharingUploadTransportTests {
         }
     }
 
-    /// SIMPLIFIED CONTRACT (spec 4afc6e43): a bare production gate (no explicit allowance) must
+    /// SIMPLIFIED contract: a bare production gate (no explicit allowance) must
     /// allow any SATISFIED path — the previous `?? false` refused forever and silently blocked
     /// every drain. RED first: with the old behavior this failed on the first assertion.
     func test_bareNetworkGateAllowsAnySatisfiedPath() {
@@ -998,9 +998,9 @@ extension VoiceSharingUploadTransportTests {
         XCTAssertEqual(UploadRecordingURLProtocol.requestCount, 1)
     }
 
-    /// ACCOUNT-BINDING contract (spec 4afc6e43) at the held-transfer boundary: an ACCOUNT move
+    /// ACCOUNT-BINDING contract at the held-transfer boundary: an ACCOUNT move
     /// (or a cleared identity) while the actual transfer child is held must fence — zero requests.
-    /// An EPOCH-ONLY move for the SAME owner must NOT fence: the transfer ships. (This test
+    /// An EPOCH-only move for the SAME owner must not fence: the transfer ships. (This test
     /// previously expected all three legs to fence, contradicting the contract on the epoch leg.)
     func test_identityMoveWhileActualTransferChildIsHeldFollowsTheAccountBinding() async throws {
         let admitted = try XCTUnwrap(VoiceSharingUploadIdentity(accountScope: "account-A", enrollmentEpoch: "epoch-A"))

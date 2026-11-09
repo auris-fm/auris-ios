@@ -22,9 +22,9 @@ final class EpisodeArtwork {
     /// 2. Embedded artwork from the AVAsset (ID3 tags)
     /// If an image is retrieved, `episodeEmbeddedArtworkLoaded` notification is triggered
     /// - Parameters:
-    ///   - asset: an AVAsset
-    ///   - podcastUuid: the UUID of the current playing podcast
-    ///   - episodeUuid: the UUID of the current playing episode
+    /// - asset: an AVAsset
+    /// - podcastUuid: the UUID of the current playing podcast
+    /// - episodeUuid: the UUID of the current playing episode
     func loadEmbeddedImage(asset: AVAsset?, podcastUuid: String, episodeUuid: String) {
         guard Settings.loadEmbeddedImages,
               !isCached(episodeUuid: episodeUuid),

@@ -4,7 +4,7 @@ import XCTest
 @testable import PocketCastsUtils
 @testable import podcasts
 
-/// CLIENT-SIDE CREDENTIAL TRACE for incident 2026-11-05: the server proved every account call was
+/// CLIENT-SIDE credential trace for incident: the server proved every account call was
 /// refused at the verified-token gate and that the upstream credential exchange answered 500 twice,
 /// but it cannot see which bearer string the account calls carried. These controls pin that down
 /// from our side through the REAL token provider and the REAL account client, with local
@@ -201,7 +201,7 @@ final class VoiceSharingBearerTraceControls: XCTestCase {
         let firstRead = await client.fetchProjection()
         XCTAssertNil(firstRead, "the stale bearer is refused by the server")
 
-        // THE ACTUAL RETRY, after the provider recovered through its real refresh path. From here the
+        // THE actual retry, after the provider recovered through its real refresh path. From here the
         // auth endpoint mints the recovered credential, as it does for every later acquisition.
         StubServer.setStaleExchange(false)
         let retried = await client.fetchProjection()
@@ -219,7 +219,7 @@ final class VoiceSharingBearerTraceControls: XCTestCase {
         XCTAssertEqual(recoveryPaths.filter { $0 == CloudAuthTokenProvider.tokenPath }.count, 1,
                        "the account credential was exchanged exactly once (at the start): \(recoveryPaths)")
 
-        // APPLIED, not merely fetched (reviewer e66c294a): post-recovery membership is the claim.
+        // APPLIED, not merely fetched: post-recovery membership is the claim.
         // A fence belongs to ONE store instance, so this store issued the read it applies.
         let store = makeStore()
         let clientForStore = VoiceSharingAccountClient(
@@ -241,7 +241,7 @@ final class VoiceSharingBearerTraceControls: XCTestCase {
         XCTAssertEqual(store.currentAuthoritativeState?.membership.withdrawalState, .active)
     }
 
-    /// FAIL CLOSED: a failed upstream exchange yields no credential, so the account read is never
+    /// FAIL closed: a failed upstream exchange yields no credential, so the account read is never
     /// dialled — no fallback to another credential class.
     func test_failedExchangeYieldsNoBearerAndNoAccountCall() async throws {
         StubServer.reset()
@@ -309,7 +309,7 @@ final class VoiceSharingBearerTraceControls: XCTestCase {
                                     translation: nil, router: nil),
                       conversionVersion: "v1")
             })
-        // THE PRODUCTION HANDLER, wired to the real queue; the collector and sink stay alive for the
+        // THE production handler, wired to the real queue; the collector and sink stay alive for the
         // whole control so their callbacks run too.
         VoiceControlAssembly().installVoiceSharingGateLoss(
             collector: collector, sink: sink, uploadTrigger: trigger,
@@ -334,7 +334,7 @@ final class VoiceSharingBearerTraceControls: XCTestCase {
                        "the installation's own cold-start refresh really ran")
 
         let before = StubServer.snapshot().count
-        // (a) THE REAL NOTIFICATION, and AWAIT the task it schedules.
+        // (a) THE real notification, and AWAIT the task it schedules.
         let delivered = center.post(name: .userLoginDidChange)
         XCTAssertGreaterThan(delivered, 0, "the coordinator registered for the identity notification")
         await coordinator.settleObservedWork()
@@ -384,7 +384,7 @@ final class VoiceSharingBearerTraceControls: XCTestCase {
         let restartedQueue = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         XCTAssertEqual(restartedQueue.readyEntries(), [entry], "the recording survives a restart")
 
-        // (d) ACCOUNT REPLACEMENT: the other account inherits neither the choice nor the recordings.
+        // (d) ACCOUNT replacement: the other account inherits neither the choice nor the recordings.
         let otherStore = VoiceSharingEnrollmentStore(
             defaults: defaults, accountScopeProvider: { "acct-2" },
             sessionIdentityProvider: { "acct-2" })

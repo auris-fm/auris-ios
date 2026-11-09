@@ -2,17 +2,17 @@ import XCTest
 import AVFoundation
 @testable import podcasts
 
-/// THE THREE DETERMINISTIC ADMISSION ORDERS (@spec dca18343), tested SEPARATELY.
+/// THE three deterministic admission orders, tested SEPARATELY.
 ///
 /// Policy:
-///   1. a retired callback SUBMITTED after rotation             -> REFUSE
-///   2. an old block ENQUEUED before rotation, never appended   -> REFUSE (rotation wins)
-///   3. an old block ALREADY APPENDED while its producer was current -> RETAIN
+/// 1. a retired callback SUBMITTED after rotation -> REFUSE
+/// 2. an old block ENQUEUED before rotation, never appended -> REFUSE (rotation wins)
+/// 3. an old block ALREADY appended while its producer was current -> RETAIN
 ///
-/// SAMPLE-RETENTION ONLY. Any anchor assertion is deliberately absent from order 3: an earlier
+/// SAMPLE-RETENTION only. Any anchor assertion is deliberately absent from order 3: an earlier
 /// version asserted the recorded anchor survives rotation, but that version never established an
 /// anchor first (its samples carried no range or renderedAt), so the non-nil comparison had a
-/// MISSING PRECONDITION and was withdrawn. See helper-evidence/ledger/admission-orders-FINDING.txt.
+/// MISSING precondition and was withdrawn. See helper-evidence/ledger/admission-orders-FINDING.txt.
 final class HandoffAdmissionOrderTests: XCTestCase {
 
 
@@ -45,7 +45,7 @@ final class HandoffAdmissionOrderTests: XCTestCase {
         XCTAssertTrue(delivered.contains(-0.5), "ORDER 1: the new producer is accepted")
     }
 
-    /// ORDER 2: the old block is ENQUEUED while current, then rotation wins BEFORE its append.
+    /// ORDER 2: the old block is ENQUEUED while current, then rotation wins before its append.
     func testOrder2BlockEnqueuedBeforeRotationButNotAppendedIsRefused() {
         let (reference, handoff) = makeHandoff()
         let old = EchoReferenceHandoff.ProducerIdentity(kind: .episodeTap, incarnation: 1)
@@ -74,8 +74,8 @@ final class HandoffAdmissionOrderTests: XCTestCase {
         XCTAssertTrue(delivered.contains(-0.5), "ORDER 2: the new producer is accepted")
     }
 
-    /// ORDER 3: the old block was ALREADY APPENDED while its producer was current -> RETAINED.
-    /// SAMPLE-RETENTION ONLY; no anchor assertion (see the class comment).
+    /// ORDER 3: the old block was ALREADY appended while its producer was current -> RETAINED.
+    /// SAMPLE-RETENTION only; no anchor assertion (see the class comment).
     func testOrder3BlockAlreadyAppendedWhileCurrentIsRetained() {
         let (reference, handoff) = makeHandoff()
         let old = EchoReferenceHandoff.ProducerIdentity(kind: .episodeTap, incarnation: 1)
@@ -99,7 +99,7 @@ final class HandoffAdmissionOrderTests: XCTestCase {
     }
 }
 
-/// PRODUCTION CALLBACK LIFECYCLE control (@spec): install -> REMOVE -> install.
+/// PRODUCTION callback lifecycle control (): install -> REMOVE -> install.
 ///
 /// The earlier lifecycle probe covered a DOUBLE install with no intervening remove. This covers the
 /// cycle, which is the shape a graph replacement actually produces: after an explicit remove, a fresh
@@ -133,18 +133,18 @@ final class EpisodeTapLifecycleTests: XCTestCase {
         tap.remove()
         XCTAssertFalse(tap.isInstalledOnOutputNode(mixer), "remove takes the tap off the feeder")
 
-        // 3) INSTALL AGAIN
+        // 3) INSTALL again
         tap.install()
         let i2 = tap.producerIdentity.incarnation
         XCTAssertTrue(tap.isInstalledOnOutputNode(mixer), "the re-install resolves the feeder again")
         XCTAssertGreaterThan(i2, i1, "identities must rotate MONOTONICALLY across the cycle")
 
         // And the re-installed tap DELIVERS.
-        // REAL-TIME PLAYBACK — the production mode. The offline-render path measurably misses
+        // REAL-TIME playback — the production mode. The offline-render path measurably misses
         // callbacks (unresolved setup observation, kept out of this control); real time delivered
         // valid-host callbacks reliably in every probe.
         engine.prepare()
-        // CLEANUP REGISTERED BEFORE START'S POSSIBLE THROW: stop() runs even if start() fails.
+        // CLEANUP registered before start'S POSSIBLE throw: stop() runs even if start() fails.
         defer { engine.stop() }
         try engine.start()
 
@@ -178,8 +178,8 @@ final class EpisodeTapLifecycleTests: XCTestCase {
         XCTAssertGreaterThan(peak, 0.01, "the delivered audio must be non-empty")
     }
 
-    /// REPEAT INSTALL with NO intervening remove — the case that actually exercises install()'s OWN
-    /// cleanup. The explicit-remove cycle above does NOT: the test removed the tap itself, so a
+    /// REPEAT install with NO intervening remove — the case that actually exercises install()'s OWN
+    /// cleanup. The explicit-remove cycle above does not: the test removed the tap itself, so a
     /// mutated install() that skips its own remove() would go unnoticed. This case supplies the
     /// missing falsification target. CoreAudio refuses two taps on one bus, so a surviving prior tap
     /// would surface here.
@@ -201,16 +201,16 @@ final class EpisodeTapLifecycleTests: XCTestCase {
 
         tap.install()
         let i1 = tap.producerIdentity.incarnation
-        // NO REMOVE: install again, so install() must clean up ITS OWN prior tap.
+        // NO REMOVE: install again, so install() must clean up ITS own prior tap.
         tap.install()
         let i2 = tap.producerIdentity.incarnation
         XCTAssertGreaterThan(i2, i1, "a repeat install still rotates the identity")
 
-        // REAL-TIME PLAYBACK — the production mode. The offline-render path measurably misses
+        // REAL-TIME playback — the production mode. The offline-render path measurably misses
         // callbacks (unresolved setup observation, kept out of this control); real time delivered
         // valid-host callbacks reliably in every probe.
         engine.prepare()
-        // CLEANUP REGISTERED BEFORE START'S POSSIBLE THROW: stop() runs even if start() fails.
+        // CLEANUP registered before start'S POSSIBLE throw: stop() runs even if start() fails.
         defer { engine.stop() }
         try engine.start()
 
@@ -243,8 +243,8 @@ final class EpisodeTapLifecycleTests: XCTestCase {
         XCTAssertFalse(delivered.isEmpty, "a repeat install must still deliver (its own cleanup ran)")
         XCTAssertGreaterThan(peak, 0.01, "the delivered audio must be non-empty")
     }
-    /// FAILED-REPLACEMENT CLEANUP (@spec): when the feeder CANNOT be resolved, a prior install's tap
-    /// must NOT be left behind. The guard must not return before removing.
+    /// FAILED-REPLACEMENT cleanup (): when the feeder CANNOT be resolved, a prior install's tap
+    /// must not be left behind. The guard must not return before removing.
     @MainActor
     func testFailedReplacementLeavesNoPriorTapInstalled() throws {
         let f = AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 1)!
@@ -261,7 +261,7 @@ final class EpisodeTapLifecycleTests: XCTestCase {
         tap.install()
         XCTAssertTrue(tap.isInstalledOnOutputNode(mixer), "the first install must place the tap")
 
-        // BREAK THE GRAPH so the feeder cannot be resolved, then re-install.
+        // BREAK the graph so the feeder cannot be resolved, then re-install.
         engine.disconnectNodeOutput(mixer)
         tap.install()
 
@@ -273,9 +273,9 @@ final class EpisodeTapLifecycleTests: XCTestCase {
 }
 
 
-/// SAMPLE ACCEPTANCE of a retired producer's submission, at the handoff boundary. This case
-/// drives `publish(producer:)` with an explicit identity, so it measures the ACCEPTANCE BOUNDARY
-/// only — NOT the closure capture, which `InstalledClosureCaptureTests` covers through the seam.
+/// SAMPLE acceptance of a retired producer's submission, at the handoff boundary. This case
+/// drives `publish(producer:)` with an explicit identity, so it measures the ACCEPTANCE boundary
+/// only — not the closure capture, which `InstalledClosureCaptureTests` covers through the seam.
 ///
 /// `install()` captures `let admitted = producerIdentity` at install time and the tap closure
 /// submits that captured value. When the tap is reinstalled, the old closure may still be
@@ -301,7 +301,7 @@ final class HeldOldCallbackIdentityTests: XCTestCase {
     func testHeldOldCallbackAfterReinstallIsRefused() {
         let reference = PlaybackEchoReference()
         let handoff = EchoReferenceHandoff(reference: reference, capacity: 8)
-        // A REAL CONNECTED GRAPH. A bare `AVAudioEngine()` has nothing feeding its output node, so
+        // A REAL connected graph. A bare `AVAudioEngine()` has nothing feeding its output node, so
         // `outputFeederConnection` correctly returns nil and `install()` correctly does nothing —
         // there would be no feeder to tap and the case would be measuring an empty graph. A
         // player node connected to output gives the engine a feeder, which is what the placement
@@ -352,7 +352,7 @@ final class HeldOldCallbackIdentityTests: XCTestCase {
             + "the callback acquired the new identity instead of carrying its own"
         )
 
-        // POSITIVE CONTROL: the same submission under the CURRENT identity must be accepted.
+        // POSITIVE control: the same submission under the CURRENT identity must be accepted.
         tap.publish(
             toneBuffer(),
             renderedAt: AVAudioTime(sampleTime: 0, atRate: 44_100),
@@ -387,7 +387,7 @@ final class FeederBusDiscoveryTests: XCTestCase {
         // The feeder is a REAL engine's node: constructing an AVAudioNode subclass standalone
         // segfaults on this simulator runtime (measured), so the node must come from a live
         // engine. The BUS is the control variable: input bus 0 of output is fed by the feeder's
-        // OUTPUT BUS 3.
+        // OUTPUT bus 3.
         let engine = AVAudioEngine()
         let feeder = engine.mainMixerNode
         let resolved = try XCTUnwrap(
@@ -477,7 +477,7 @@ final class FeederBusDiscoveryTests: XCTestCase {
 /// under, captured at install time, rather than reading `self.producerIdentity` when it fires.
 ///
 /// This uses the test seam that retains the actual closure `install()` installed. The old
-/// closure is invoked AFTER a reinstall: if it acquired the new identity at fire time, its
+/// closure is invoked after a reinstall: if it acquired the new identity at fire time, its
 /// submission would pass the admission check and its audio would enter the reference under the
 /// wrong producer.
 /// Retains install closures for the capture test. A box class rather than a captured local:
@@ -514,7 +514,7 @@ final class InstalledClosureCaptureTests: XCTestCase {
         let tap = EpisodeOutputTap(engine: engine)
         tap.handoff = handoff
 
-        // THE TEST retains the closures: the observer hands each install's closure over and the
+        // THE test retains the closures: the observer hands each install's closure over and the
         // object itself stores nothing.
         let box = InstalledClosureBox()
         tap.onInstalledClosure = { closure in box.items.append(closure) }
@@ -540,7 +540,7 @@ final class InstalledClosureCaptureTests: XCTestCase {
             + "own retired identity — it acquired the new one at fire time"
         )
 
-        // POSITIVE CONTROL: the CURRENT closure (retained[1]) under the CURRENT identity is accepted.
+        // POSITIVE control: the CURRENT closure (retained[1]) under the CURRENT identity is accepted.
         box.items[1](toneBuffer(), AVAudioTime(sampleTime: 0, atRate: 44_100))
         handoff.drain()
         XCTAssertGreaterThan(

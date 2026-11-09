@@ -8,7 +8,7 @@ import XCTest
 /// - only clients advertising `search_results_v1` receive `event: result`;
 /// - the client renders results without auto-playing them;
 /// - an item without an Auris `episode_id` is discovery-only and resolves
-///   through the catalog flow;
+/// through the catalog flow;
 /// - `seekable == false` disables timed jumps;
 /// - provider IDs are never player keys;
 /// - empty `items` is a successful no-match result (distinct from unavailable).

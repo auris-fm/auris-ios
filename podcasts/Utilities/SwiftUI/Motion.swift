@@ -28,8 +28,8 @@ class MotionManager: ObservableObject {
 
     /// Creates an ObservableObject that published changes on the device motion
     /// - Parameters:
-    ///   - options: whether it should take into account only attitude, gravity or all
-    ///   - relativeToWhenStarting: if set to `true` the values will be relative to when the motion started. Ie.: they will be subtracted from the final value
+    /// - options: whether it should take into account only attitude, gravity or all
+    /// - relativeToWhenStarting: if set to `true` the values will be relative to when the motion started. Ie.: they will be subtracted from the final value
     init(options: MotionOptions = .all, relativeToWhenStarting: Bool = false) {
         self.options = options
         self.motionManager = CMMotionManager()

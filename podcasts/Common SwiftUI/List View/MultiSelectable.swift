@@ -4,16 +4,16 @@ import Foundation
 ///
 /// Conform and publish the two pieces of state; the selection itself comes with it:
 ///
-///     class MyListViewModel: ListViewModel<MyCustomModel>, MultiSelectable {
-///         @Published var isMultiSelecting = false
-///         @Published var selectedIDs: Set<MyCustomModel.ID> = []
+/// class MyListViewModel: ListViewModel<MyCustomModel>, MultiSelectable {
+/// @Published var isMultiSelecting = false
+/// @Published var selectedIDs: Set<MyCustomModel.ID> = []
 ///
-///         var selectableItems: [MyCustomModel] { items }
+/// var selectableItems: [MyCustomModel] { items }
 ///
-///         override var items: [MyCustomModel] {
-///             didSet { selectableItemsDidChange() }
-///         }
-///     }
+/// override var items: [MyCustomModel] {
+/// didSet { selectableItemsDidChange() }
+/// }
+/// }
 ///
 /// It's a protocol rather than a base class so a view model picks up the multi selection alongside
 /// whatever else it already is, instead of every list in the same hierarchy inheriting it.

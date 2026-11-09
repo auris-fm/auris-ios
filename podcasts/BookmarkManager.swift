@@ -72,10 +72,10 @@ class BookmarkManager {
     /// Adds a new bookmark for an episode at the given time
     ///
     /// - Parameters:
-    ///   - passage: The transcript passage to store with the bookmark, for a bookmark made
-    ///     from one the user picked out. Left nil, the passage is captured afterwards from
-    ///     the transcript around `time`.
-    ///   - referenceTime: `time` on the transcript's reference timeline, when it's already known.
+    /// - passage: The transcript passage to store with the bookmark, for a bookmark made
+    /// from one the user picked out. Left nil, the passage is captured afterwards from
+    /// the transcript around `time`.
+    /// - referenceTime: `time` on the transcript's reference timeline, when it's already known.
     @discardableResult
     func add(to episode: BaseEpisode,
              at time: TimeInterval,

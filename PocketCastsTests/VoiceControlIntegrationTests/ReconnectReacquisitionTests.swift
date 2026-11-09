@@ -22,7 +22,7 @@ import XCTest
 /// session selects no input. So the dedup suppresses the retry and the headset is
 /// never re-acquired.
 ///
-/// The contract (spec 5d418579): **one attempt per received physical route-change
+/// The contract: **one attempt per received physical route-change
 /// notification** is sufficient. Distinct notifications need not be inferred to be
 /// one physical event, and the epoch counter cannot establish that — so it is
 /// deliberately per-notification. What must never happen is a loop: repeated handling
@@ -177,7 +177,7 @@ final class ReconnectReacquisitionTests: XCTestCase {
         await waitUntil(timeout: 5) { session.configureCount >= 1 }
         XCTAssertEqual(session.configureCount, 1)
 
-        // Repeated re-evaluations that are NOT physical device changes.
+        // Repeated re-evaluations that are not physical device changes.
         for _ in 0..<5 {
             postRouteChange(reason: .categoryChange)
         }

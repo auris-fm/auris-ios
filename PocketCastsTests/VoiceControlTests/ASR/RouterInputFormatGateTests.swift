@@ -2,8 +2,8 @@ import XCTest
 @testable import podcasts
 
 /// The `dual_v1` gate is production fail-closed; only the debug benchmark
-/// harness may open it (Item 21 reviewed/debug harness path, @spec ruling
-/// #reviews:d18481a8). These tests pin both sides of that gate.
+/// harness may open it (Item 21 reviewed/debug harness path, ruling
+/// ). These tests pin both sides of that gate.
 final class RouterInputFormatGateTests: XCTestCase {
     override func setUp() {
         super.setUp()

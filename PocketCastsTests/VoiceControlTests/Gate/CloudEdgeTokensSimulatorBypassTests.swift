@@ -1,7 +1,7 @@
 import XCTest
 import PocketCastsUtils
 
-/// Simulator-gated debug bypass (owner request, task58 thread 04dd0df2 item 2):
+/// Simulator-gated debug bypass:
 /// on Debug simulator builds the cloud edge-token switch defaults ON so the
 /// cloud assistant is testable in the simulator; every other build keeps the
 /// default-off gate. The #if mirrors the production rule so the control holds

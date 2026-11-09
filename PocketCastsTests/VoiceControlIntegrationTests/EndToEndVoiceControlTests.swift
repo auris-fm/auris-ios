@@ -1,7 +1,7 @@
 import XCTest
 @testable import podcasts
 
-/// MAIN ACTOR (crash evidence t78k-3 DiagnosticReport): production builds the service on the
+/// MAIN actor (crash evidence t78k-3 DiagnosticReport): production builds the service on the
 /// main thread, and `wireLiveOriginBinding`'s inline retirement sink asserts main isolation.
 /// Building the service off-main in a test crashes on `MainActor.assumeIsolated` — that is a
 /// test-fidelity bug, not a production one, so the suite runs on the main actor.

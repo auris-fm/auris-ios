@@ -36,7 +36,7 @@ final class VolumeManagerSinkTests: XCTestCase {
     /// volume is set. This is the case `audio_session_denied` names, and the reason it needs a
     /// producer rather than a comment.
     ///
-    /// Note what the existing `.silent` assertions above do NOT establish: `setVolume` returned
+    /// Note what the existing `.silent` assertions above do not establish: `setVolume` returned
     /// `.silent` whether or not the slider was found, so they pass on the failure path too. A
     /// case that cannot distinguish success from failure is not evidence that either happened.
     func test_setSystemVolume_reportsFailureWhenTheSliderIsUnreachable() {

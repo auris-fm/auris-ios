@@ -12,12 +12,12 @@
 // The above copyright notice and this permission notice shall be included in all
 // copies or substantial portions of the Software.
 //
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// THE software is provided "AS IS", WITHOUT warranty of any kind, EXPRESS or
+// IMPLIED, INCLUDING but not limited to the warranties of merchantability,
+// FITNESS for A PARTICULAR purpose and noninfringement. IN NO EVENT shall the
+// AUTHORS or copyright holders be liable for any claim, DAMAGES or other
+// LIABILITY, WHETHER in an action of contract, TORT or otherwise, ARISING from,
+// OUT of or in connection with the software or the use or other dealings in the
 // SOFTWARE.
 
 import UIKit

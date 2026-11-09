@@ -171,7 +171,7 @@ final class CloudConversationManager {
         signal.$isActive.sink { active in
             // Registration follows the WINDOW, not merely its opening. When the signal closes,
             // no generation is live at all, so the origin must be cleared rather than left
-            // naming the ended generation (PR #49 review comment 4305981418): otherwise a turn
+            // naming the ended generation: otherwise a turn
             // dispatched while the window was open still matches `origin == liveOrigin` after
             // the window ends and creates or resumes a conversation the contract above refuses.
             // Closing always bumps the generation first, so a successor wake re-registers here

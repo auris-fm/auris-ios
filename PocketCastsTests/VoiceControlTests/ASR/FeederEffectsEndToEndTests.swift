@@ -2,16 +2,16 @@ import AVFoundation
 import XCTest
 @testable import podcasts
 
-/// END-TO-END CONTROL through the INSTALLED tap on a real feeder/effects chain.
+/// END-TO-END control through the INSTALLED tap on a real feeder/effects chain.
 ///
 /// Where the focused probes measure the scheduling and timestamp semantics in isolation, this runs
 /// the production placement (`EpisodeOutputTap.install()`) on a graph that includes an effects
 /// node, with known scheduled output, and asserts the production behaviours together:
-///   - the known scheduled output reaches the reference (bounded acknowledgment);
-///   - frame positions arrive with VALID host times and advance between callbacks;
-///   - a retained OLD install's callback is refused after a reinstall while the CURRENT one is
-///     accepted;
-///   - the measured chain delay is reported rather than absorbed into a tolerance.
+/// - the known scheduled output reaches the reference (bounded acknowledgment);
+/// - frame positions arrive with VALID host times and advance between callbacks;
+/// - a retained OLD install's callback is refused after a reinstall while the CURRENT one is
+/// accepted;
+/// - the measured chain delay is reported rather than absorbed into a tolerance.
 final class FeederEffectsEndToEndTests: XCTestCase {
 
     func testInstalledTapOnAnEffectsChainDeliversAdvancesAndRotates() throws {
@@ -23,7 +23,7 @@ final class FeederEffectsEndToEndTests: XCTestCase {
         engine.attach(player)
         engine.attach(eq)
         engine.attach(mixer)
-        // AN EFFECTS NODE IS IN THE CHAIN: the feeder must resolve whatever finally feeds output.
+        // AN EFFECTS node is in the chain: the feeder must resolve whatever finally feeds output.
         engine.connect(player, to: eq, format: f)
         engine.connect(eq, to: mixer, format: f)
         engine.connect(mixer, to: engine.outputNode, format: f)
@@ -74,7 +74,7 @@ final class FeederEffectsEndToEndTests: XCTestCase {
         print("END2END arrivals=\(seen.count) delivered=\(delivered) expected=\(expectedSamples)")
         XCTAssertGreaterThan(seen.count, 1, "the installed tap received fewer than two callbacks on the effects chain")
 
-        // ADVANCING FRAME AND HOST OBSERVATIONS, asserted: both must increase monotonically between
+        // ADVANCING frame and host observations, asserted: both must increase monotonically between
         // callbacks, which is what makes the pair usable as a position and an instant rather than
         // two constants.
         let observedFrames = seen.map(\.sampleTime)
@@ -95,13 +95,13 @@ final class FeederEffectsEndToEndTests: XCTestCase {
             "the known scheduled output did not reach the reference through the installed tap"
         )
 
-        // FRAME ANCHORS ADVANCE WITH VALID HOST TIME.
+        // FRAME anchors advance with valid host time.
         XCTAssertNotNil(
             reference.audibleEndOffsetInRetainedWindow(),
             "no frame anchor was recorded with a valid host time, so the chain published no position"
         )
 
-        // OLD CALLBACK REFUSED / NEW ACCEPTED across a reinstall.
+        // OLD callback refused / NEW accepted across a reinstall.
         let identityBefore = tap.producerIdentity
         tap.install()   // remove-first, rotate
         let identityAfter = tap.producerIdentity
@@ -132,11 +132,11 @@ final class FeederEffectsEndToEndTests: XCTestCase {
         var onBuffer: ((AVAudioPCMBuffer, AVAudioTime) -> Void)?
     }
 
-    /// THE POSITIVE TIMING CONTROL: a distinctive marker on a NON-SILENT carrier.
+    /// THE positive timing control: a distinctive marker on a NON-SILENT carrier.
     ///
     /// The file carries a modest tone (so the block survives the publication’s silence floor) plus a
     /// MULTI-SAMPLE burst at a much higher amplitude near the start. The burst is found IN THE
-    /// PUBLISHED SAMPLES, so the marker’s own sample index is identified rather than assumed, and
+    /// PUBLISHED samples, so the marker’s own sample index is identified rather than assumed, and
     /// the callback that carries it supplies the marker's sample position and valid host instant.
     /// Those are then correlated with the asserted schedule target and with the accepted reference
     /// range/anchor. A run in which the marker is not found FAILS here rather than passing on zero
@@ -157,7 +157,7 @@ final class FeederEffectsEndToEndTests: XCTestCase {
         let handoff = EchoReferenceHandoff(reference: reference, capacity: 32)
         let tap = EpisodeOutputTap(engine: engine)
         tap.handoff = handoff
-        // THE TAP MUST BE INSTALLED. Without this the fixture receives no callbacks at all, which is
+        // THE tap must be installed. Without this the fixture receives no callbacks at all, which is
         // what the earlier zero-output run measured — a fixture defect, not a scheduling result.
         tap.install()
 
@@ -183,9 +183,9 @@ final class FeederEffectsEndToEndTests: XCTestCase {
         // Observe the PUBLISHED samples: the marker's index within the delivered stream, the
         // callback clocks, and the accepted reference observations.
 
-        // ONE IDENTITY-LINKED RECORD PER ACCEPTANCE. Each record carries the accepted block's
+        // ONE identity-LINKED record per acceptance. Each record carries the accepted block's
         // IDENTITY (so callbacks and acceptances link by identity rather than by matching a range to
-        // a count), the range that identity covers, the OBSERVED BUFFER RATE, and the anchor the
+        // a count), the range that identity covers, the OBSERVED buffer rate, and the anchor the
         // reference recorded for it.
         struct AcceptedRecord {
             let identity: EchoReferenceHandoff.ProducerIdentity
@@ -282,12 +282,12 @@ final class FeederEffectsEndToEndTests: XCTestCase {
         let targetSeconds = Double(target) * secondsPerTick
         print("CARRIER targetSeconds=\(targetSeconds) callbacks=\(callbacks.count) acceptedRecords=\(accepted.count) bufferRate=\(bufferRate as Any)")
 
-        // 1. THE OBSERVED BUFFER RATE is asserted (and is the rate the records carry).
+        // 1. THE observed buffer rate is asserted (and is the rate the records carry).
         let observedRate = try XCTUnwrap(bufferRate, "no buffer rate was observed")
         XCTAssertEqual(observedRate, f.sampleRate, "the observed buffer rate is not the graph rate")
 
-        // 2. AT LEAST TWO COMPLETE ACCEPTED RECORDS: every field present, so neither adjacency nor
-        //    the marker link can be satisfied by a single or partial record.
+        // 2. AT LEAST two complete accepted records: every field present, so neither adjacency nor
+        // the marker link can be satisfied by a single or partial record.
         XCTAssertGreaterThanOrEqual(accepted.count, 2, "fewer than two complete accepted records")
         for record in accepted {
             XCTAssertEqual(record.identity.kind, .episodeTap, "an accepted record carried the wrong producer kind")
@@ -296,7 +296,7 @@ final class FeederEffectsEndToEndTests: XCTestCase {
             XCTAssertNotNil(record.producerEnd, "an accepted record is missing its range end")
             XCTAssertFalse(record.anchorHost.isNaN, "an accepted record is missing its anchor host instant")
         }
-        // 3. EVERY ADJACENT PAIR strictly advances, in frame and in host.
+        // 3. every adjacent pair strictly advances, in frame and in host.
         for (previous, next) in zip(accepted, accepted.dropFirst()) {
             XCTAssertGreaterThan(next.anchorPipelineFrames, previous.anchorPipelineFrames, "adjacent accepted anchor pipeline frames did not strictly advance")
             XCTAssertGreaterThan(next.anchorHost, previous.anchorHost, "adjacent accepted anchor host instants did not strictly advance")
@@ -307,10 +307,10 @@ final class FeederEffectsEndToEndTests: XCTestCase {
             )
             XCTAssertGreaterThan(next.streamIndex, previous.streamIndex, "adjacent accepted stream indices did not strictly advance")
         }
-        // 4. THE MARKER'S CALLBACK AND ITS ACCEPTANCE LINK BY IDENTITY: find the callback record that
-        //    carried the marker, take its producer position, and require that EXACTLY ONE accepted
-        //    record's HALF-OPEN range contains it, with that record's anchor host equal to the
-        //    marker callback's own instant.
+        // 4. THE marker'S CALLBACK and its acceptance link by identity: find the callback record that
+        // carried the marker, take its producer position, and require that EXACTLY one accepted
+        // record's HALF-OPEN range contains it, with that record's anchor host equal to the
+        // marker callback's own instant.
         let markerCallback = try XCTUnwrap(
             callbacks.first { $0.markerIndex != nil },
             "no callback record carried the marker"
@@ -319,14 +319,14 @@ final class FeederEffectsEndToEndTests: XCTestCase {
         let markerSampleTime = try XCTUnwrap(markerCallback.sampleTime, "marker callback had no sample time")
         let markerHost = try XCTUnwrap(markerCallback.hostSeconds, "marker callback had no host instant")
         let markerPosition = markerSampleTime + Double(markerIndex)
-        // PRIMARY LINK: THE BLOCK KEY. The marker callback's own key must match exactly one
+        // PRIMARY link: THE block key. The marker callback's own key must match exactly one
         // accepted record's key, which identifies the marker-bearing block without relying on a
         // producer identity (shared by many blocks) or on range arithmetic.
         let byKey = accepted.filter { $0.blockKey == markerCallback.blockKey }
         print("CARRIER markerBlockKey=\(markerCallback.blockKey) byKey=\(byKey.count) markerPosition=\(markerPosition) markerHost=\(markerHost)")
         XCTAssertEqual(byKey.count, 1, "the marker's block key did not match exactly one accepted record")
         let matched = try XCTUnwrap(byKey.first)
-        // EXACT MAPPING, not containment. The matched record's range must be exactly the range the
+        // EXACT mapping, not containment. The matched record's range must be exactly the range the
         // marker callback produced: its start is the callback's sample time, its end is that plus
         // the callback's OWN frame length, and its rate is the callback's rate. A widened or shifted
         // range that still happened to contain the marker would fail these.
@@ -342,14 +342,14 @@ final class FeederEffectsEndToEndTests: XCTestCase {
             markerPosition >= matchedStart && markerPosition < matchedEnd,
             "the marker's position is outside the half-open range of the record its key identifies"
         )
-        // THE MATCHED ANCHOR'S CONVERTED FRAME POSITION must lie inside the matched block's accepted
+        // THE matched anchor'S CONVERTED frame position must lie inside the matched block's accepted
         // reference span. The span is [this record's stream start, the next record's stream start),
         // so an anchor mapped into the neighbouring block is rejected.
-        // THE ANCHOR IS THE BLOCK'S OWN REFERENCE START. `referenceIndexForProducerPosition` maps
-        // `rangeStart + played`, where `rangeStart` is the reference stream index BEFORE this block
+        // THE anchor is the block'S OWN reference start. `referenceIndexForProducerPosition` maps
+        // `rangeStart + played`, where `rangeStart` is the reference stream index before this block
         // is appended and `played` is how far the producer had rendered INTO the block. The tap
         // reports the block's start as the rendered position, so `played == 0` and the anchor must
-        // equal this block's reference start. The record's `streamIndex` is read AFTER the append,
+        // equal this block's reference start. The record's `streamIndex` is read after the append,
         // so it is that start plus the block's pipeline length: the next record's start.
         if let matchedIndex = accepted.firstIndex(where: { $0.blockKey == markerCallback.blockKey }) {
             let blockReferenceLength = matched.streamIndex - Int(matched.anchorPipelineFrames)
@@ -367,10 +367,10 @@ final class FeederEffectsEndToEndTests: XCTestCase {
                     "consecutive accepted blocks derived different reference lengths, so an anchor is misplaced"
                 )
             }
-            // ABSOLUTE ANCHOR CHECK: equal derived lengths alone cannot detect a UNIFORM shift, so
+            // ABSOLUTE anchor check: equal derived lengths alone cannot detect a UNIFORM shift, so
             // the anchor is pinned absolutely. `referenceIndexForProducerPosition` returns
             // `rangeStart + played` with `played == 0` for the position the tap reports, and
-            // `rangeStart` is the reference's stream index BEFORE this block is appended — which is
+            // `rangeStart` is the reference's stream index before this block is appended — which is
             // exactly the PREVIOUS record's post-append stream index. The first record's anchor must
             // therefore be the reference's own start for its block, and each later record's anchor
             // must equal its predecessor's stream index.
@@ -396,7 +396,7 @@ final class FeederEffectsEndToEndTests: XCTestCase {
             matched.anchorHost, markerHost, accuracy: 0.001,
             "the matched acceptance's anchor host is not the marker callback's instant"
         )
-        // 5. THE MARKER LANDS AT ITS ASSERTED SCHEDULE INSTANT once its own index is applied.
+        // 5. THE marker lands at its asserted schedule instant once its own index is applied.
         let markerInstant = markerHost + Double(markerIndex) / markerCallback.rate
         let elapsed = markerInstant - targetSeconds
         let anchorSeconds = matched.anchorHost
@@ -405,7 +405,7 @@ final class FeederEffectsEndToEndTests: XCTestCase {
         XCTAssertLessThan(elapsed, 1.0, "the marker appeared more than a second after its target")
     }
 
-    /// BARRIER AT THE ATOMIC PUBLICATION: `onBlockAccepted` fires inside `deliver()`, after the
+    /// BARRIER at the atomic publication: `onBlockAccepted` fires inside `deliver()`, after the
     /// samples are appended and the anchor is written, before any later queued operation runs. The
     /// anchor observed THERE must map the REPRESENTED position (the block's start frame) into the
     /// reference; passing the range end as the represented position maps to the far end of the

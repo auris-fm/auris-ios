@@ -1,21 +1,21 @@
 import XCTest
 @testable import podcasts
 
-/// INTERRUPTION CONTRACT — BOTH ORDERINGS, WITH OUTBOUND SUBMISSION COUNTS
-/// (`docs/specs/cloud-assistant.md` → Interruption; spec ruling c5fe3416).
+/// INTERRUPTION contract — BOTH orderings, WITH outbound submission counts
+/// (`docs/specs/cloud-assistant.md` → Interruption; ).
 ///
 /// The contract requires the client to:
 ///
-///   * send `interrupt` on the prior turn's STILL-OPEN socket, while awaiting that turn's terminal
-///     (the server ignores a post-terminal interrupt, so this is a one-shot send with no retry);
-///   * treat that turn's terminal as the acknowledgement — `done` even with `completed` — and never
-///     wait for a second terminal or reopen the old socket;
-///   * submit the retained follow-up ONCE, on its OWN socket, after acknowledgement;
-///   * DISCARD the retained follow-up if a refusal arrives first, retaining the pending report;
-///   * attach the pending `interrupts` report to the NEXT turn's authentication frame, where the
-///     server applies it before model input.
+/// * send `interrupt` on the prior turn's STILL-OPEN socket, while awaiting that turn's terminal
+/// (the server ignores a post-terminal interrupt, so this is a one-shot send with no retry);
+/// * treat that turn's terminal as the acknowledgement — `done` even with `completed` — and never
+/// wait for a second terminal or reopen the old socket;
+/// * submit the retained follow-up ONCE, on its OWN socket, after acknowledgement;
+/// * DISCARD the retained follow-up if a refusal arrives first, retaining the pending report;
+/// * attach the pending `interrupts` report to the NEXT turn's authentication frame, where the
+/// server applies it before model input.
 ///
-/// These controls count OUTBOUND SUBMISSIONS from the socket the client actually used, because
+/// These controls count OUTBOUND submissions from the socket the client actually used, because
 /// "the outcome was not completed" cannot distinguish "nothing was resubmitted" from "something was
 /// resubmitted and also failed" — the defect earlier review found in the first version of the
 /// refusal control.
@@ -57,7 +57,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
     /// A sink sharing `state` — the SAME instance a second turn uses, which is what makes the
     /// cross-turn retention real rather than per-turn fiction.
     ///
-    /// `prepareTask` reaches each new socket; `holdGate` parks EVERY turn's `receive` so a prior
+    /// `prepareTask` reaches each new socket; `holdGate` parks every turn's `receive` so a prior
     /// turn stays genuinely IN FLIGHT (open socket, live token) while a successor starts. Without
     /// that, `activeResultSocket` and `activeTurn` are nil, the sink takes the "no transport to
     /// interrupt" branch, and a control that claims to exercise interruption ordering is
@@ -139,7 +139,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
 
     // MARK: - The state machine under test (unit level)
 
-    /// THE BINDING (reviewer ff00457c item 2): a terminal for a turn OTHER than the interrupted one
+    /// THE binding: a terminal for a turn OTHER than the interrupted one
     /// must not release the follow-up. The earlier version released whenever anything was held, so
     /// an unrelated turn's success authorised a follow-up the user had addressed elsewhere.
     func testATerminalForAnUnrelatedTurnReleasesNothing() {
@@ -165,7 +165,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         )
     }
 
-    /// SEQUENTIAL INTERRUPTIONS (reviewer item 3): resolving one must not lock out the next.
+    /// SEQUENTIAL interruptions (reviewer item 3): resolving one must not lock out the next.
     func testACompletedInterruptionDoesNotBlockTheNextOne() {
         let state = CloudInterruptionState()
         XCTAssertTrue(state.claimInterruptEmission(forRequestId: "turn-A"))
@@ -215,7 +215,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         )
     }
 
-    /// REPORT DURABILITY (reviewer item 4): taking the report does NOT consume it; only an
+    /// REPORT durability (reviewer item 4): taking the report does not consume it; only an
     /// explicit confirmation after the frame actually left does. A failed connection therefore
     /// cannot destroy the correction.
     func testTakingTheReportDoesNotConsumeItUntilTheFrameLeft() {
@@ -273,7 +273,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         let again = await MainActor.run { sink.takeReleasedInterruptionFollowUp() }
         XCTAssertNil(again, "the follow-up must be handed out once, so it cannot be submitted twice")
 
-        // SUBMISSION COUNT on turn B's own socket: one authenticate frame, nothing more.
+        // SUBMISSION count on turn B's own socket: one authenticate frame, nothing more.
         let frames = capturedTask?.sentTextFrames ?? []
         let authFrames = frames.filter { $0.contains("\"authenticate\"") }
         XCTAssertEqual(
@@ -292,7 +292,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         let gate = Gate()
         let sink = makeSink(state: state, gate: gate) { self.refusalFixture }
 
-        // PRIOR TURN, GENUINELY IN FLIGHT: its socket is open and its token is live while the
+        // PRIOR turn, GENUINELY in flight: its socket is open and its token is live while the
         // successor starts. This is the only configuration in which the sink's interruption path
         // runs at all; without it the control below would pass by never interrupting anything.
         let prior = Task {
@@ -332,11 +332,11 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         XCTAssertNil(released, "a refusal must DISCARD the follow-up; nothing may be submitted for it")
         XCTAssertNil(state.heldFollowUpForTesting, "the held follow-up must be gone after a refusal")
 
-        // RETAIN — BUT NOT ON A SUCCESSOR AUTHENTICATION (reviewer c38ff4ba item 2, spec 9e309cc1
+        // RETAIN — BUT not on A SUCCESSOR authentication (,
         // line 334). The contract says: "If an interrupt is refused before any terminal
         // acknowledgement, discard the retained next utterance and report local generic failure;
         // terminate the old transport and retain the pending interruption report for a later
-        // EXPLICIT USER REQUEST." A refusal therefore ends the turn locally — it does not
+        // EXPLICIT user request." A refusal therefore ends the turn locally — it does not
         // authenticate, so no successor frame exists to carry the report, and asserting one would
         // have required the very fall-through this control exists to forbid.
         let successorFrames = capturedTask?.sentTextFrames ?? []
@@ -363,7 +363,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
             "premise: the interrupt frame must have ridden the PRIOR turn's socket; "
             + "prior frames=\(priorFrames)"
         )
-        // BOUNDED PREMISE WAIT, not an instantaneous read. Retirement is performed by the
+        // BOUNDED premise wait, not an instantaneous read. Retirement is performed by the
         // successor's supersede, which races this turn's own return; sampling `isCancelledSocket`
         // once made the premise fail on green code whenever the supersede landed a moment later —
         // the intermittent failure this control showed under load and never in isolation. Waiting
@@ -378,9 +378,9 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         _ = await prior.value
     }
 
-    // MARK: - The successor must not overtake the acknowledgement (reviewer ff00457c item 1)
+    // MARK: - The successor must not overtake the acknowledgement
 
-    /// THE ORDERING THAT WAS BROKEN: turn B must send ZERO authenticate frames while turn A is
+    /// THE ordering that was broken: turn B must send ZERO authenticate frames while turn A is
     /// still unresolved, and exactly one carrying B's input after A's terminal.
     ///
     /// The earlier implementation cancelled A and dialled B immediately, so A's `done` never
@@ -407,7 +407,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         let priorRequestId = await MainActor.run { sink.activeResultSocketForTesting?.requestId }
         XCTAssertNotNil(priorRequestId, "premise: turn A's request id is known")
 
-        // Turn B starts and must NOT reach the wire: A is unresolved, so B's interrupt has not
+        // Turn B starts and must not reach the wire: A is unresolved, so B's interrupt has not
         // been acknowledged. B parks in the successor wait.
         let successor = Task {
             await sink.routeToCloud(
@@ -485,7 +485,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         XCTAssertFalse(state.hasPendingReport, "the report must be consumed by the turn that carried it")
     }
 
-    /// CONVERSATION ABANDONMENT DISCARDS THE REPORT (`cloud-assistant.md` → Interruption).
+    /// CONVERSATION abandonment discards the report (`cloud-assistant.md` → Interruption).
     ///
     /// The report corrects ONE conversation's settled history. Carrying it into a different
     /// conversation would ask the server to annotate turns it never settled. So a turn that
@@ -545,7 +545,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
     }
     // MARK: - Non-interrupted supersession must not regress
 
-    /// DOUBLE WAKE, NOT A BARGE-IN: a second turn starts while the first is still open, with NO
+    /// DOUBLE wake, not A BARGE-IN: a second turn starts while the first is still open, with NO
     /// interruption state armed. The acknowledgement wait must be skipped entirely (nothing was
     /// interrupted, so nothing is owed), and the successor must still reach the wire promptly.
     ///
@@ -599,7 +599,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         _ = await first.value
         _ = await second.value
     }
-    /// AN UNDELIVERED INTERRUPT SUPPRESSES ITS UTTERANCE — driven through the sink.
+    /// AN UNDELIVERED interrupt suppresses its utterance — driven through the sink.
     ///
     /// Supersedes a state-only test whose name claimed a boundary it never executed (reviewer
     /// 79614a4f item 1). The `.undelivered` case is produced the way production produces it: the
@@ -610,7 +610,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         let gate = Gate()
         let sink = makeSink(state: state, gate: gate) { self.doneFixture }
 
-        // PRIOR TURN genuinely in flight, then its transport retired so the interrupt cannot be
+        // PRIOR turn genuinely in flight, then its transport retired so the interrupt cannot be
         // delivered while `activeTurn`/`activeResultSocket` still look live to the sink.
         let prior = Task {
             await sink.routeToCloud(
@@ -631,7 +631,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
             XCTFail("premise: the prior turn must own a live socket")
             return
         }
-        // RETIRE THE REGISTRATION the way a consumer close does, leaving the sink's turn state
+        // RETIRE the registration the way a consumer close does, leaving the sink's turn state
         // untouched: precisely the state in which a send comes back `.undelivered`.
         await MainActor.run {
             if let socket = sink.activeResultSocketForTesting, let identity = socket.boundIdentity {
@@ -649,7 +649,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         )
         XCTAssertEqual(emitted, priorRequestId, "the claimed interruption owns disposal even when its send fails")
 
-        // THE WIRE ASSERTION: the interrupting utterance never reached any socket.
+        // THE wire assertion: the interrupting utterance never reached any socket.
         let frames = capturedTask?.sentTextFrames ?? []
         XCTAssertFalse(
             frames.contains { $0.contains("u-barge") },

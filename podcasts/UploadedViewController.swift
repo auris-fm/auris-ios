@@ -293,7 +293,7 @@ class UploadedViewController: PCViewController, UserEpisodeDetailProtocol {
         UserEpisodeManager.updateUserEpisodes()
     }
 
-    // NARK :- UserEpisodeDetailViewControllerDelegate
+    // NARK:- UserEpisodeDetailViewControllerDelegate
     func showEdit(userEpisode: UserEpisode) {
         let editVC = AddCustomViewController(episode: userEpisode)
         navigationController?.pushViewController(editVC, animated: true)

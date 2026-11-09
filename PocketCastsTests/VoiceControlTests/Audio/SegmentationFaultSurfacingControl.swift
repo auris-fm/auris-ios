@@ -88,7 +88,7 @@ final class SegmentationFaultSurfacingControl: XCTestCase {
         engine.onSegmentationFaultRecovered = { recovered += 1 }
         engine.installCaptureCallbacksForTesting()
 
-        // Reach the ceiling so a fault is pending on the main queue, but do NOT drain yet: this is
+        // Reach the ceiling so a fault is pending on the main queue, but do not drain yet: this is
         // the real ordering, where stop() runs before the queued delivery is executed.
         for _ in 0..<((240_000 / 20) + 10) { capture.deliver([Float](repeating: 0.1, count: 320)) }
         XCTAssertTrue(segmenter.isStuckActive, "the ceiling did not trip")
@@ -451,7 +451,7 @@ final class SegmentationFaultSurfacingControl: XCTestCase {
         XCTAssertEqual(recovered, 1, "the published interruption was not cleared on restart")
     }
 
-    /// Routine frames must NOT clear the fault: only silence or an explicit restart may.
+    /// Routine frames must not clear the fault: only silence or an explicit restart may.
     ///
     /// Otherwise the tail of the still-spoken request becomes a new command.
     func testRoutineFramesDoNotClearTheFault() {
@@ -476,7 +476,7 @@ final class SegmentationFaultSurfacingControl: XCTestCase {
     /// only at that moment is lost. The engine must learn the current state when it wires up.
     func testClassifierUnavailabilitySurvivesTheStartupOrdering() {
         let segmenter = NativeVadSegmenter(threshold: 0.020)
-        // Same order as assembly: report BEFORE the engine exists and installs callbacks.
+        // Same order as assembly: report before the engine exists and installs callbacks.
         segmenter.reportClassifierUnavailable("silero_vad.onnx could not be loaded from the app bundle")
 
         let engine = makeEngine(segmenter: segmenter)
@@ -616,7 +616,7 @@ return }
         XCTAssertEqual(earcons, [.error])
     }
 
-    /// THE PERSISTENT CONDITION IS PRESENTED ONCE, NOT PER REFUSED START.
+    /// THE persistent condition is presented once, not per refused start.
     ///
     /// Classifier unavailability never clears on its own (a missing model does not reappear
     /// mid-session), and the segmenter replays it to every newly wired observer — the engine

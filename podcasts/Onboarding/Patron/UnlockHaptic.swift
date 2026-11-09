@@ -47,7 +47,7 @@ final class UnlockHaptic: ObservableObject {
         // 🏃‍♂️🏃‍♂️ You're jogging at a brisk pace
         addFastHeartBeats()
 
-        // I AM SPRINTING AS FAST AS I CAN 🏃‍♂️🏃‍♂️🏃‍♂️🏃‍♂️💨💨💨
+        // I AM SPRINTING as fast as I CAN 🏃‍♂️🏃‍♂️🏃‍♂️🏃‍♂️💨💨💨
         addReallyFastHeartBeats()
 
         guard let pattern = try? CHHapticPattern(events: events, parameters: []) else {

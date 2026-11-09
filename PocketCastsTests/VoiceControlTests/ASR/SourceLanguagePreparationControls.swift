@@ -1,16 +1,16 @@
 import XCTest
 @testable import podcasts
 
-/// PRODUCTION-PREPARATION controls (reviewer 4af8d2d5 gap): AsrResult + ACTUAL backend
+/// PRODUCTION-PREPARATION controls: AsrResult + ACTUAL backend
 /// capability through the engine's real `maybeTranslate` → `makeRoutingInput` preparation, with
 /// the produced `IntentRoutingInput` captured via the production `onRoutingInput` seam. No case
 /// constructs the input directly.
 ///
 /// Named mutants each fail named controls:
-///   - reverting the unknown-LID `?? "en"` default → `testUnknownLidStaysNilNotEn` RED.
-///   - reverting backend-provenance order (LID check before capability) →
-///     `testBackendTranslateOmitsSourceEvenWhenLidUnknown` RED (unknown-LID backend-translate
-///     output would be mislabeled as original source text).
+/// - reverting the unknown-LID `?? "en"` default → `testUnknownLidStaysNilNotEn` RED.
+/// - reverting backend-provenance order (LID check before capability) →
+/// `testBackendTranslateOmitsSourceEvenWhenLidUnknown` RED (unknown-LID backend-translate
+/// output would be mislabeled as original source text).
 final class SourceLanguagePreparationControls: XCTestCase {
     // MARK: - Harness (real engine, real preparation path)
 
@@ -123,7 +123,7 @@ final class SourceLanguagePreparationControls: XCTestCase {
     // MARK: - Backend translate: provenance first, English-only output labeled backend
 
     /// Named control for the provenance-order mutant: with a translating backend and an unknown
-    /// LID, the output is TRANSLATED-ONLY (no source text) — asking for the LID first mislabels
+    /// LID, the output is TRANSLATED-only (no source text) — asking for the LID first mislabels
     /// it as original.
     func testBackendTranslateOmitsSourceEvenWhenLidUnknown() async {
         let input = await preparedInput(text: "来点欢快的", language: nil, canTranslate: true)

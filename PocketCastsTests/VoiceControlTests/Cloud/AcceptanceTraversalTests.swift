@@ -1,7 +1,7 @@
 import XCTest
 @testable import podcasts
 
-/// ROUTE-LOOP / CONSUMER TRAVERSAL controls. Standalone record construction does not validate the
+/// ROUTE-LOOP / CONSUMER traversal controls. Standalone record construction does not validate the
 /// traversal: these drive the SAME recorder the collector uses through an event sequence and assert the
 /// reader's rules — a stale request's evidence must not satisfy a fresh step, empty or mismatched ids
 /// must not pass, and an outgoing-only mention of the nonce must not read as recall.
@@ -13,7 +13,7 @@ final class AcceptanceTraversalTests: XCTestCase {
         return recorder
     }
 
-    /// A step must be judged on ITS OWN request. A record from an older request id does not satisfy a
+    /// A step must be judged on ITS own request. A record from an older request id does not satisfy a
     /// fresh step, because the reader compares the id it submitted with the id in the record.
     func testStaleRequestEvidenceDoesNotSatisfyAFreshStep() {
         let stale = CloudAcceptanceRecord.Recorder(requestId: "req-1", conversationId: "conv-A")
@@ -46,7 +46,7 @@ final class AcceptanceTraversalTests: XCTestCase {
         )
     }
 
-    /// RECALL IS ABOUT THE INCOMING RESPONSE. A turn whose only mention of the nonce is in the OUTGOING
+    /// RECALL is about the incoming response. A turn whose only mention of the nonce is in the OUTGOING
     /// prompt records an empty response, so recall cannot pass on the prompt.
     func testOutgoingNonceInThePromptIsNotRecall() {
         let recorder = CloudAcceptanceRecord.Recorder(requestId: "req-2", conversationId: "conv-A")
@@ -58,12 +58,12 @@ final class AcceptanceTraversalTests: XCTestCase {
         )
     }
 
-    /// TRANSPORT TERMINALS are covered: a cancelled turn and a transport error are both terminal, and
+    /// TRANSPORT terminals are covered: a cancelled turn and a transport error are both terminal, and
     /// neither reads as success.
     func testStreamEndWithoutTerminalIsTransportFailureNotCancellation() {
         let failed = CloudAcceptanceRecord.Recorder(requestId: "req-1", conversationId: "conv-A")
         failed.observe(.error(source: .server, code: "connection_lost", message: ""))
-        // `connection_lost` arrives as an ERROR EVENT (the client yields it when the socket closes or a
+        // `connection_lost` arrives as an ERROR event (the client yields it when the socket closes or a
         // transport call throws), so its stage is serverEvent by the discriminator: the client does not
         // tag it as a construction failure.
         XCTAssertEqual(failed.record().terminal, .transportFailure(stage: .serverEvent, code: "connection_lost", message: ""))

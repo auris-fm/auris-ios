@@ -8,8 +8,8 @@ extension DiscoverCollectionViewController {
 
     /// Reloads discover, keeping the items listed in `exclude`
     /// - Parameters:
-    ///   - items: Items to exclude from the reload process. These items will REMAIN in Discover
-    ///   - category: The `DiscoverCategory` to add to the layout. This is sort of an artifical `DiscoverLayout`.
+    /// - items: Items to exclude from the reload process. These items will REMAIN in Discover
+    /// - category: The `DiscoverCategory` to add to the layout. This is sort of an artifical `DiscoverLayout`.
     func reload(except items: [DiscoverItem], category: DiscoverCategory?) {
         let newLayout: DiscoverLayout?
 

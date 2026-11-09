@@ -7,17 +7,17 @@ import SwiftUI
 /// Example Usage:
 ///
 /// ```
-///  ZStack{
-///     Action { print("debugging is cool 😎") }
-///     VStack {
-///         ... some views ...
-///     }
+/// ZStack{
+/// Action { print("debugging is cool 😎") }
+/// VStack {
+/// ... some views ...
+/// }
 ///
-///     ... some views ...
+/// ... some views ...
 ///
-///     Action {
-///         viewModel.loadContent()
-///     }
+/// Action {
+/// viewModel.loadContent()
+/// }
 /// }
 /// ```
 struct Action: View {

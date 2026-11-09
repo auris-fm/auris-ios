@@ -1528,7 +1528,7 @@ class Settings: NSObject {
                 ?? Constants.RemoteParams.slumberStudiosPromoCodeDefault
         }
 
-        // TEMPORARY DEV-GUARD: return nil when Firebase isn't configured (stub build) so
+        // TEMPORARY dev-GUARD: return nil when Firebase isn't configured (stub build) so
         // the computed properties above fall back to their local defaults instead of
         // throwing on RemoteConfig.remoteConfig() during lazy init.
         private static func remoteConfigValue(_ key: String) -> RemoteConfigValue? {

@@ -6,11 +6,11 @@ import XCTest
 /// The plan verified that accumulation happens privately inside `process(_:)` and that only completion is
 /// observable (`onUtterance`). A collector that keys off completion cannot satisfy three spec rules:
 ///
-///   * `capture_id` must be assigned when an eligible segment BEGINS, before wake/bleed rejection decisions
-///     exist — those rejections are silent `return`s downstream, so a completion-only view never sees them.
-///   * Long in-progress speech must be admitted against clip ceilings BEFORE completion, because a segment
-///     that never completes (permission closes mid-speech) still must not exceed memory/disk bounds.
-///   * A reset while speech is active must CANCEL the partial contribution rather than emit it.
+/// * `capture_id` must be assigned when an eligible segment BEGINS, before wake/bleed rejection decisions
+/// exist — those rejections are silent `return`s downstream, so a completion-only view never sees them.
+/// * Long in-progress speech must be admitted against clip ceilings before completion, because a segment
+/// that never completes (permission closes mid-speech) still must not exceed memory/disk bounds.
+/// * A reset while speech is active must CANCEL the partial contribution rather than emit it.
 ///
 /// These tests pin the hooks' contract WITHOUT changing any buffer or timing semantics: recognition behaviour
 /// stays byte-identical, which the existing NativeAudioCaptureTests already prove for retention.
@@ -79,7 +79,7 @@ final class VoiceSharingCollectorSegmenterHookTests: XCTestCase {
         segmenter.process(c)
 
         XCTAssertEqual(slices.count, 2, "only post-confirmation calls carry PCM")
-        // CONFIRMATION DELIVERS THE WHOLE CONFIRMED PREFIX (a + b) exactly once; later calls deliver only
+        // CONFIRMATION delivers the whole confirmed prefix (a + b) exactly once; later calls deliver only
         // their own delta. Pre-confirmation frames are part of the segment (the segmenter kept them), so
         // losing them would make the contribution copy permanently shorter than the emitted audio.
         XCTAssertEqual(slices[0], a + b, "confirmation delivers the buffered prefix exactly once")
@@ -137,7 +137,7 @@ final class VoiceSharingCollectorSegmenterHookTests: XCTestCase {
         XCTAssertEqual(observed, baseline, "instrumentation changed the audio handed to recognition")
     }
 
-    /// Pre-speech frames dropped by confirmation are NOT part of the segment, and the collector must not see
+    /// Pre-speech frames dropped by confirmation are not part of the segment, and the collector must not see
     /// them as contribution audio (spec: no synthetic detector padding persisted).
     func test_accumulationDoesNotReportDiscardedPreSpeech() {
         let segmenter = NativeVadSegmenter(threshold: 0.5, silenceTimeoutMs: -1, minSpeechFrames: 3)
@@ -152,7 +152,7 @@ final class VoiceSharingCollectorSegmenterHookTests: XCTestCase {
 
 
     /// End-to-end PCM parity: after a full segment flows through the real engine wiring (segmenter slices →
-    /// collector appendSamples), the collector's retained copy must equal the segmenter's buffer BYTE FOR
+    /// collector appendSamples), the collector's retained copy must equal the segmenter's buffer BYTE for
     /// BYTE — including the confirming frame. A count-based or placeholder path diverges here.
     func test_contributionCopy_matchesSegmenterBufferByteForByte() {
         let segmenter = NativeVadSegmenter(threshold: 0.5, silenceTimeoutMs: -1, minSpeechFrames: 2)

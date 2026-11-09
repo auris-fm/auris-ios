@@ -55,9 +55,9 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
         let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: UUID().uuidString)
 
         // MID-SESSION (stream already open, a partial token arrived first) — distinct from the
-        // pre-stream case above. Spec ruling 2026-10-23 (f4b34311): the server's `message` is
+        // pre-stream case above. Spec ruling (f4b34311): the server's `message` is
         // operator diagnostics, "never spoken or used to select client feedback" — so whatever
-        // feedback is chosen here, the remote prose must NOT be spoken. This implementation
+        // feedback is chosen here, the remote prose must not be spoken. This implementation
         // emits the local error earcon; assert that and assert the prose is absent.
         XCTAssertEqual(response.response, .earcon(.error))
         if case .spoken(let text) = response.response {
@@ -119,7 +119,7 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
         XCTAssertTrue(playback.calls.contains(.resume), "an interrupted stream still restores playback")
         XCTAssertEqual(analytics.events.last?.1["outcome"] as? String, "error")
         // The code carries no message; the sink speaks it only in the user's own
-        // locale and otherwise emits the error earcon (spec ruling 2026-09-24).
+        // locale and otherwise emits the error earcon (spec ruling).
         // Asserting those two exact values (never `.silent`) keeps this pin able to
         // fail if the turn ever regressed to silence (PR #19 review).
         XCTAssertTrue(
@@ -158,7 +158,7 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
 
         // The refusal removes the QUOTE seek only. stop_quote still restores the pre-action
         // position, which was captured before the refusal and is sink time — the existing
-        // restore behaviour @spec kept.
+        // restore behaviour kept.
         XCTAssertFalse(playback.calls.contains(.seekTo(500)), "an unmapped reference must not become a playback position")
         XCTAssertTrue(playback.calls.contains(.seekTo(900)), "stop_quote restores the pre-action position in sink time")
         let unavailable = await MainActor.run { sink.unavailableReferenceSeek }

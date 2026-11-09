@@ -3,10 +3,10 @@ import XCTest
 
 /// The production wiring links the grace window to the conversation manager's live origin:
 ///
-///     VoiceControlAssembly.swift:24
-///       gracePeriodSignal.$isActive.sink { active in
-///           if active { conversationManager.registerLiveOrigin(gracePeriodSignal.currentGeneration()) }
-///       }
+/// VoiceControlAssembly.swift:24
+/// gracePeriodSignal.$isActive.sink { active in
+/// if active { conversationManager.registerLiveOrigin(gracePeriodSignal.currentGeneration()) }
+/// }
 ///
 /// Every existing case calls `registerLiveOrigin` DIRECTLY, so the link itself — the thing that
 /// decides whether a turn's captured origin is still live in the real app — had no coverage.
@@ -60,7 +60,7 @@ final class GraceWindowOriginRegistrationTests: XCTestCase {
         )
     }
 
-    /// A CLOSED window admits nothing (PR #49 review comment 4305981418).
+    /// A CLOSED window admits nothing.
     ///
     /// The link registered the origin only on `active == true`, so after the 30 s timeout — or
     /// any close with no successor wake — `liveOrigin` still named the ended generation. A turn

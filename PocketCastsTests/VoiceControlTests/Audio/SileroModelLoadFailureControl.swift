@@ -1,7 +1,7 @@
 @testable import podcasts
 import XCTest
 
-/// CONTROLS FOR THE PRESENT-BUT-UNLOADABLE MODEL CASE (PR55 Claude review, SpeechFrameClassifier).
+/// CONTROLS for the present-BUT-UNLOADABLE model case (PR55 Claude review, SpeechFrameClassifier).
 ///
 /// WHY. `SileroSpeechFrameClassifier.make(modelPath:)` checked only that the model FILE exists.
 /// Existence is not loadability: a truncated, corrupted, or wrong-architecture `.onnx` passes the

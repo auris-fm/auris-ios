@@ -474,7 +474,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         resultsPresenter?.present(model)
     }
 
-    // REQUEST ownership (owner delta 3484cbc/5eca874, /a2723c92): one logical
+    // REQUEST ownership: one logical
     // dispatch per utterance. A duplicate invocation for the SAME utterance joins the owner (in
     // flight) or observes its settled result — never a second wire request. INDEPENDENT
     // utterances dispatch independently.
@@ -1560,7 +1560,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         return fact ?? unknown
     }
 
-    /// The wire contract's runtime gate (rev da327e624 §1): every cloud app operation carries
+    /// The wire contract's runtime gate: every cloud app operation carries
     /// `operation_id` and `capability_version`; an identity-less app operation does not execute
     /// as a legacy fallback — it is refused (no mutation) and the refusal is reported.
     private func executeCloudMutation(
@@ -2121,7 +2121,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// own socket. Read-and-clear by the submitter so it is submitted exactly once.
     @MainActor private(set) var pendingFollowUpSubmission: CloudInterruptionState.ReleasedFollowUp?
 
-    /// Exactly-once records for server-identified operations (wire contract rev da327e624).
+    /// Exactly-once records for server-identified operations.
     /// Nil = this sink has no journal (assembly wires the durable store).
     private var operationJournal: OperationJournal?
 

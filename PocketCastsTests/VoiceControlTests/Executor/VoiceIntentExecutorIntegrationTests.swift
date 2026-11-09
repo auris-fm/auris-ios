@@ -65,7 +65,7 @@ final class VoiceIntentExecutorIntegrationTests: XCTestCase {
         XCTAssertEqual(response, .spoken("Cloud response"))
     }
 
-    /// EXACTLY-ONCE FEEDBACK FOR A REFUSED LOGICAL TURN (reviewer 98fb4c64). A string assertion is
+    /// EXACTLY-ONCE feedback for A REFUSED logical turn. A string assertion is
     /// not a feedback check: this drives a refused cloud turn through the REAL executor and asserts
     /// the executor renders ONE daily-limit response for that logical turn AND does not extend the
     /// grace window for a refusal.

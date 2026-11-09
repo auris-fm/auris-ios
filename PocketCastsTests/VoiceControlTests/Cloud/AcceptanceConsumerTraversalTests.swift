@@ -104,7 +104,7 @@ final class AcceptanceConsumerTraversalTests: XCTestCase {
     }
 }
 
-/// The OPT-IN CLIENT PATH end to end: `CloudAcceptanceRun.run` submits A1/A2/B1, and the verdict comes
+/// The OPT-IN CLIENT path end to end: `CloudAcceptanceRun.run` submits A1/A2/B1, and the verdict comes
 /// from the records those submissions produced. This exercises the integration rather than the consumer
 /// in isolation.
 final class AcceptanceRunPathTests: XCTestCase {
@@ -214,7 +214,7 @@ final class AcceptanceGateTests: XCTestCase {
     }
 }
 
-/// THE WIRING: the assembly's acceptance entry uses the SAME client factory the sink is built with, so
+/// THE wiring: the assembly's acceptance entry uses the SAME client factory the sink is built with, so
 /// the harness submits through the app's client path rather than constructing its own.
 final class AcceptanceAssemblyWiringTests: XCTestCase {
 
@@ -274,7 +274,7 @@ final class AcceptanceStageDiscriminationTests: XCTestCase {
         XCTAssertEqual(r.record().terminal, .transportFailure(stage: .serverEvent, code: "invalid_request", message: ""))
     }
 
-    /// THE POINT: the same code, two different stages, distinguishable after the fact.
+    /// THE point: the same code, two different stages, distinguishable after the fact.
     func testSameCodeWithDifferentSourcesIsDistinguishable() {
         let client = CloudAcceptanceRecord.Recorder(requestId: "r1", conversationId: "c1")
         client.observe(.error(source: .requestConstruction, code: "invalid_request", message: "request could not be built"))
@@ -329,7 +329,7 @@ final class AcceptanceVerdictBoundingTests: XCTestCase {
     }
 }
 
-/// TRANSPORT is distinct from REQUEST CONSTRUCTION. A connection that drops may have been admitted; a
+/// TRANSPORT is distinct from REQUEST construction. A connection that drops may have been admitted; a
 /// frame that was never built has provably not left. Conflating them would misreport which happened.
 final class AcceptanceOriginDistinctionTests: XCTestCase {
 

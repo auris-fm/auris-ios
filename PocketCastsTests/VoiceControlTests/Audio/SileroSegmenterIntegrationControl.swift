@@ -8,7 +8,7 @@ import XCTest
 /// speech/noise fixtures, and assert retained sample coverage rather than counting segments —
 /// a segment count cannot show retention (three one-sample segments would read the same).
 ///
-/// SCOPE. Public-fixture compatibility is what is established here. It does NOT establish
+/// SCOPE. Public-fixture compatibility is what is established here. It does not establish
 /// performance in any particular room; the spec is explicit that this is assessed separately
 /// through normal microphone testing without adding audio retention.
 final class SileroSegmenterIntegrationControl: XCTestCase {
@@ -175,7 +175,7 @@ final class SileroSegmenterIntegrationControl: XCTestCase {
             "the classified segmenter emitted nothing for real speech followed by silence, so no "
                 + "utterance closed and no wake detection could follow"
         )
-        // Coverage is measured against the AUDIBLE EXTENT, not the whole file.
+        // Coverage is measured against the AUDIBLE extent, not the whole file.
         //
         // positive.wav is 2.0 s but only ~0.36 of it is audible — the first sound starts at sample
         // 19591 and runs to 31188. Dividing by the full length measures the fixture's silence, not
@@ -347,7 +347,7 @@ final class SileroSegmenterIntegrationControl: XCTestCase {
         )
     }
 
-    /// Silence interrupted by speech must NOT accumulate into a fault clear.
+    /// Silence interrupted by speech must not accumulate into a fault clear.
     ///
     /// While faulted, a positive frame must reset the silence interval. Otherwise two brief gaps
     /// separated by a long positive tail sum into one elapsed time and clear the fault from inside
@@ -395,7 +395,7 @@ final class SileroSegmenterIntegrationControl: XCTestCase {
     ///
     /// Counting only post-confirmation positives lets the emitted audio exceed the supported
     /// ceiling, because pre-roll is audio the user actually spoke and it is prepended to the
-    /// utterance AFTER the count was accumulated.
+    /// utterance after the count was accumulated.
     func testCeilingBoundsTheRetainedUtteranceIncludingPrependedPreRoll() {
         let framesToCeiling = 240_000 / 20
         let frame = [Float](repeating: 0.1, count: 320)
@@ -564,7 +564,7 @@ final class SileroSegmenterIntegrationControl: XCTestCase {
         )
     }
 
-    /// After eviction, the utterance must report the capture instant of its FIRST RETAINED
+    /// After eviction, the utterance must report the capture instant of its FIRST retained
     /// sample — not the instant of a sample that trimming removed.
     ///
     /// Pre-roll evicts its oldest audio when it exceeds the bound. Carrying a single start
@@ -728,7 +728,7 @@ final class ScriptedSpeechClassifier: SpeechFrameClassifier {
         return true
     }
     func reset() {
-        // Deliberately does NOT exhaust the scripted budget.
+        // Deliberately does not exhaust the scripted budget.
         //
         // A real classifier resumes classifying after `reset()` — it clears carried state, it
         // does not stop working. Zeroing the budget here made the post-fault utterance

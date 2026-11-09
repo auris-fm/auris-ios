@@ -30,7 +30,7 @@ final class SuspendedAsrBackend: AsrBackend, @unchecked Sendable {
     func transcribe(samples: [Float], sampleRateHz: Int) async -> AsrResult {
         transcribeStarted = true
         entered.signal()
-        // Suspends UNTIL RELEASED, on the async executor (not a blocking wait), so the test can
+        // Suspends UNTIL released, on the async executor (not a blocking wait), so the test can
         // drive expiry while recognition is genuinely in flight and the run cannot race past it.
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
             releasedContinuations.withLock { $0.append(c) }
@@ -61,15 +61,15 @@ final class SuspendedAsrBackend: AsrBackend, @unchecked Sendable {
 /// backend suspended, rather than calling `GracePeriodSignal` directly. That distinction is
 /// the point: the defect lives in WHERE admission is recorded relative to the backend wait,
 /// and a direct-signal test cannot see that sequencing — an earlier version of this fix
-/// registered at the routing callback, which fires AFTER the wait, and so was rejected in
+/// registered at the routing callback, which fires after the wait, and so was rejected in
 /// exactly the scenario it was written for.
 ///
 /// The reservation must be bound to the admitted turn IDENTITY (not the whole generation) and
-/// written AFTER the wake decision establishes the window's origin but BEFORE the backend wait.
+/// written after the wake decision establishes the window's origin but before the backend wait.
 final class ColdAsrEligibilityProductionTests: XCTestCase {
 
     /// ISOLATED cloud configuration: `isConfigured()` is `{ !CloudConfig.shared.baseUrl.isEmpty }`,
-    /// checked BEFORE the origin gate and before the client is built. Without a base URL a routed
+    /// checked before the origin gate and before the client is built. Without a base URL a routed
     /// turn is refused before reaching the transport, so the case would fail for a reason unrelated
     /// to eligibility. An own defaults suite keeps this out of other cases; teardown restores it.
     private var suiteName: String!
@@ -231,7 +231,7 @@ final class ColdAsrEligibilityProductionTests: XCTestCase {
         backend.release()
         await recognition.value
 
-        // The turn must REACH THE DISPATCH SEAM under its OWN admitted identity. This asserts on
+        // The turn must REACH the dispatch seam under its OWN admitted identity. This asserts on
         // the observable that actually differs, at the seam that owns it: the conversation the
         // sink PREPARED for this turn. A granted claim that the sink then refuses (e.g. because
         // the fence demanded a still-live origin) prepares nothing, so this cannot pass on a
@@ -260,8 +260,8 @@ final class ColdAsrEligibilityProductionTests: XCTestCase {
         )
     }
 
-    /// NEGATIVE CONTROL for the identity binding. With turn A admitted under window 1 and still in
-    /// recognition, an unrelated turn B must NOT be able to claim window 1's expired origin. B is
+    /// NEGATIVE control for the identity binding. With turn A admitted under window 1 and still in
+    /// recognition, an unrelated turn B must not be able to claim window 1's expired origin. B is
     /// admitted under a LATER window, so it exists as a live reservation with its own origin: that
     /// is what makes this distinguish "was THIS turn admitted under that origin?" from "is anything
     /// at all in flight?" — the earlier generation-wide grant answered the latter.
@@ -287,14 +287,14 @@ final class ColdAsrEligibilityProductionTests: XCTestCase {
             originA,
             "turn A must remain eligible through recognition under its own admitted origin"
         )
-        // B must be able to claim only ITS OWN window, never A's.
+        // B must be able to claim only ITS own window, never A's.
         XCTAssertNil(
             signal.claimDispatchOwnership(capturedOrigin: originA, utteranceId: "turn-b"),
             "an unrelated turn must not borrow another in-flight turn's origin (B is in flight, so a check that only asks 'is anything in flight?' would wrongly grant A's origin)"
         )
     }
 
-    /// The reservation must NOT leak when the engine drops the turn before routing. Backend
+    /// The reservation must not leak when the engine drops the turn before routing. Backend
     /// failure is one of several real early returns (wake-only, empty/non-content transcript,
     /// translation failure, cancellation); the release is scoped to the whole engine call, so every
     /// one of them frees it.
@@ -325,7 +325,7 @@ final class ColdAsrEligibilityProductionTests: XCTestCase {
     }
 
     /// A suspended, then PRIVACY retires it, then a new wake opens B, then A completes: A must stay
-    /// refused and must NOT adopt B's window. This is the case where falling back from a missing
+    /// refused and must not adopt B's window. This is the case where falling back from a missing
     /// reservation to `currentGeneration()` would silently resurrect a retired turn.
     @MainActor
     func test_retiredTurnA_completingAfterNewWakeBCannotAdoptB() async {
@@ -409,7 +409,7 @@ final class ColdAsrEligibilityProductionTests: XCTestCase {
     }
 
     /// Privacy/route invalidation retires in-flight work: unlike an ordinary expiry, the user's
-    /// speech may no longer be safe to act on, so a late completion must NOT dispatch.
+    /// speech may no longer be safe to act on, so a late completion must not dispatch.
     @MainActor
     func test_privacyRetirement_defeatsLateCompletion() async {
         let signal = GracePeriodSignal(timeout: 30)
@@ -440,7 +440,7 @@ final class ColdAsrEligibilityProductionTests: XCTestCase {
         )
     }
 
-    /// A turn arriving AFTER the deadline is not admitted, so it cannot later claim.
+    /// A turn arriving after the deadline is not admitted, so it cannot later claim.
     @MainActor
     func test_turnArrivingAfterDeadline_isNotAdmitted() async {
         let signal = GracePeriodSignal(timeout: 30)
@@ -496,7 +496,7 @@ final class ColdAsrEligibilityProductionTests: XCTestCase {
         XCTAssertEqual(b.mode, "create")
 
         // A is still in recognition when its own window ends. Its preparation therefore happens
-        // AFTER B is live, under A's ORIGINAL origin.
+        // after B is live, under A's ORIGINAL origin.
         let a = try XCTUnwrap(
             manager.prepare(selection: .wakeWord, origin: originA, utteranceId: "A-1"),
             "admitted work must still prepare after the window moved on"
@@ -515,7 +515,7 @@ final class ColdAsrEligibilityProductionTests: XCTestCase {
         XCTAssertEqual(bFollowUp.mode, "resume")
     }
 
-    /// The reversed completion order: the live window's follow-up resolves BEFORE the delayed
+    /// The reversed completion order: the live window's follow-up resolves before the delayed
     /// turn prepares. The delayed turn must still not adopt or replace the live conversation.
     func test_liveFollowUpBeforeDelayedTurn_keepsEachWindowOwnConversation() throws {
         let manager = CloudConversationManager()
@@ -545,7 +545,7 @@ final class ColdAsrEligibilityProductionTests: XCTestCase {
         XCTAssertEqual(bThird.mode, "resume")
     }
 
-    /// A prepared WHILE LIVE, then delayed. The handle must be preserved across the window
+    /// A prepared WHILE live, then delayed. The handle must be preserved across the window
     /// transition: A created its conversation as the live window, B then opened, and A's admitted
     /// follow-up arrives late. It must RESUME A's original conversation, not open a second one for
     /// the same window, and it must leave B's conversation alone.
@@ -807,7 +807,7 @@ final class ColdAsrEligibilityProductionTests: XCTestCase {
         XCTFail("the intent router never became ready, so this control proved nothing")
     }
 }
-/// A backend that reports NOT READY, so `processUtterance` takes its real
+/// A backend that reports not ready, so `processUtterance` takes its real
 /// "drop (backend not ready)" early return after the turn was admitted — the leak path.
 final class FailingAsrBackend: AsrBackend {
     struct NotReady: Error {}

@@ -84,15 +84,15 @@ extension UITableView {
     ///
     /// Usage:
     ///
-    ///     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-    ///         let cell = tableView.dequeueReusableCell(MyCoolCustomCell.self, for: indexPath)
-    ///         cell.myCustomProperty = true
-    ///         return cell
-    ///     }
+    /// func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+    /// let cell = tableView.dequeueReusableCell(MyCoolCustomCell.self, for: indexPath)
+    /// cell.myCustomProperty = true
+    /// return cell
+    /// }
     ///
     /// - Parameters:
-    ///   - cell: A UITableViewCell type that inherits from ReusableTableCell
-    ///   - indexPath: The indexPath of the row
+    /// - cell: A UITableViewCell type that inherits from ReusableTableCell
+    /// - indexPath: The indexPath of the row
     func dequeueReusableCell<TableType: ReusableTableCell>(_ cell: TableType.Type, for indexPath: IndexPath) -> TableType {
         dequeueReusableCell(withIdentifier: cell.reuseIdentifier, for: indexPath) as! TableType
     }

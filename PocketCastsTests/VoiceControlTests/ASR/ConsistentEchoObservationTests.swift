@@ -6,7 +6,7 @@ import XCTest
 /// the alignment by exactly the samples appended between the reads.
 final class ConsistentEchoObservationTests: XCTestCase {
 
-    /// THE SPLIT-READ DEFECT, pinned at the arithmetic level: the offset a SECOND acquisition
+    /// THE split-READ defect, pinned at the arithmetic level: the offset a SECOND acquisition
     /// returns no longer describes the SNAPSHOT the first acquisition took. The filter compared
     /// the mic segment against the stale samples but aligned it with the post-append offset —
     /// displaced by exactly the appended count — which is how the assistant's own voice passed
@@ -37,7 +37,7 @@ final class ConsistentEchoObservationTests: XCTestCase {
         _ = staleSamples
     }
 
-    /// THE FIX: `consistentObservation()` reads samples, offset and anchor under ONE lock, and
+    /// THE fix: `consistentObservation()` reads samples, offset and anchor under ONE lock, and
     /// the engine's filter path passes that observation onward. A producer appending
     /// concurrently can never make the returned pair disagree: every observation taken during
     /// the append storm satisfies 0 ≤ offset ≤ samples.count — the audible position is always
@@ -113,7 +113,7 @@ final class ConsistentEchoObservationTests: XCTestCase {
         let observation = reference.consistentObservation()
         let expected = try! XCTUnwrap(observation.audibleEndOffset)
 
-        // The producer appends AFTER the observation was taken.
+        // The producer appends after the observation was taken.
         reference.append([Float](repeating: 0.1, count: 300))
 
         let engine = VoiceAsrEngine(
@@ -130,7 +130,7 @@ final class ConsistentEchoObservationTests: XCTestCase {
                            + "re-read after an append is displaced and misaligns the correlation")
     }
 
-    /// r4366062986 disposition, DETERMINISTIC (reviewer 4a332d8d): the engine fires a test-only
+    /// r4366062986 disposition, DETERMINISTIC: the engine fires a test-only
     /// hook at the production-adjacent observation boundary — after the observation is taken,
     /// before the filter call. The control forces an append AND an anchor advance INSIDE that
     /// boundary. The filter must then receive the PRE-boundary observation: exactly 80000
@@ -150,7 +150,7 @@ final class ConsistentEchoObservationTests: XCTestCase {
             wakeWordDetector: QuietWake(),
             gracePeriodSignal: GracePeriodSignal())
         // Route FIRST: a route transition retires the reference to its acoustic tail, so the
-        // data appended below must land AFTER the route is settled.
+        // data appended below must land after the route is settled.
         engine.setEchoFilterRoute(.builtInSpeaker)
         engine.setEchoReference(reference)
         reference.append([Float](repeating: 0.1, count: capacity / 2))
@@ -159,8 +159,8 @@ final class ConsistentEchoObservationTests: XCTestCase {
 
         let expectedCount = capacity / 2
         engine.echoObservationTakenForTesting = {
-            // The forced boundary change: an append and its anchor advance, landing AFTER the
-            // engine's observation and BEFORE the filter call.
+            // The forced boundary change: an append and its anchor advance, landing after the
+            // engine's observation and before the filter call.
             reference.append([Float](repeating: 0.2, count: 300))
             reference.recordRenderPosition(PlaybackRenderAnchor(
                 renderedFrames: Double(expectedCount + 300), sourceSampleRate: 16_000,
@@ -182,7 +182,7 @@ final class ConsistentEchoObservationTests: XCTestCase {
                        "the filter's window must be the observation's content")
     }
 
-    /// THE HOOK CLOSURE RACE (r4357901105): `finishTurn()` must run the close hook EXACTLY ONCE
+    /// THE hook closure race: `finishTurn()` must run the close hook EXACTLY once
     /// even when two turn-end paths race — the hook is taken-and-cleared under `bindingLock`, so
     /// only one caller wins the non-nil swap. The old pattern (run, then nil, unsynchronized)
     /// closed the lifetime twice under this arrangement.

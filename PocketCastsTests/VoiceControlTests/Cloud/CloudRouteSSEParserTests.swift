@@ -137,7 +137,7 @@ final class CloudRouteClientTextParserTests: XCTestCase {
     /// and drops a frame the wire defines. That is a fidelity defect rather than
     /// a user-visible one — `CloudRouteSink` plays answers instead of speaking
     /// them — and the frame still has to be read for what it is.
-    /// The app-operation wire contract (rev da327e624, section 1): every cloud app operation's
+    /// The app-operation wire contract: every cloud app operation's
     /// `action` frame carries `operation_id` and `capability_version`. The parser must read both
     /// through to the event — the executor's journal claim and refusal gate key on the identity,
     /// and a parser that drops it forces the exact legacy fallback the contract forbids. Frames

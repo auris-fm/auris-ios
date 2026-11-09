@@ -42,8 +42,8 @@ import AVFoundation
 /// `notes/pr49-interleaving-machine-answers.md`):
 ///
 /// ```
-/// want=800  wrote=800  playerTime=1200@24000.0
-/// want=799  wrote=799  playerTime=2399@24000.0
+/// want=800 wrote=800 playerTime=1200@24000.0
+/// want=799 wrote=799 playerTime=2399@24000.0
 /// want=1600 wrote=1600 playerTime=4799@24000.0
 /// ```
 ///
@@ -56,11 +56,11 @@ import AVFoundation
 ///
 /// Two further measurements shaped these cases:
 /// - Before its first render a node reports `sampleTime == 0` with BOTH validity flags false, and
-///   `playerTime(forNodeTime:)` THROWS for such a node time. `renderPosition(of:)` now refuses an
-///   invalid reading instead of converting it; see `testANodeThatHasNotRenderedPublishesNoPosition`.
+/// `playerTime(forNodeTime:)` THROWS for such a node time. `renderPosition(of:)` now refuses an
+/// invalid reading instead of converting it; see `testANodeThatHasNotRenderedPublishesNoPosition`.
 /// - Offline rendering reaches the mixer tap only after rendering stops, with one lumped buffer. So
-///   the tap's block is published directly (its own `publish`, the call its callback makes) rather
-///   than by pretending a callback fired.
+/// the tap's block is published directly (its own `publish`, the call its callback makes) rather
+/// than by pretending a callback fired.
 ///
 /// # Why the assembly line is pinned by source inspection
 ///
@@ -69,7 +69,7 @@ import AVFoundation
 /// aborts with "Cleanup: RPC timeout. Apparently deadlocked" before an assertion can report. That is
 /// pre-existing and unrelated: `EchoReferenceWiringTests.test_cloudProducerAppendsThroughTheRealPlayer`
 /// crashes identically on the unmodified branch. The remaining gap — that the objects wired here are
-/// wired BY the assembly, not merely in the same shape — is reported to @spec, not hidden.
+/// wired BY the assembly, not merely in the same shape — is reported to, not hidden.
 final class CloudProducerInterleavingControls: XCTestCase {
 
     /// The sink is main-actor isolated (its delegate conformance is), so reaching the player through
@@ -184,17 +184,17 @@ final class CloudProducerInterleavingControls: XCTestCase {
     ///
     /// Three measured host facts shape this (probes this session):
     ///
-    /// - A batch enqueued BEFORE the runner's first `processFrames` can stall it: `enqueue`'s
-    ///   wake signal can land before the runner sleeps, and nothing re-arms the predicate.
-    ///   Production never hits this — the socket dribbles frames — so the harness dribbles
-    ///   silent filler the same way instead of promising a property the production path
-    ///   does not have.
+    /// - A batch enqueued before the runner's first `processFrames` can stall it: `enqueue`'s
+    /// wake signal can land before the runner sleeps, and nothing re-arms the predicate.
+    /// Production never hits this — the socket dribbles frames — so the harness dribbles
+    /// silent filler the same way instead of promising a property the production path
+    /// does not have.
     /// - The runner tears the engine down the moment the buffer empties, inside the same cycle
-    ///   that appended the last block. Waiting for emptiness and THEN parking therefore always
-    ///   finds no engine.
-    /// - `startEngine` runs BEFORE `parkIfHeld` inside `processFrames`, so a drain held while at
-    ///   least `resumeThreshold` frames are buffered deterministically builds an engine and then
-    ///   parks before consuming anything.
+    /// that appended the last block. Waiting for emptiness and THEN parking therefore always
+    /// finds no engine.
+    /// - `startEngine` runs before `parkIfHeld` inside `processFrames`, so a drain held while at
+    /// least `resumeThreshold` frames are buffered deterministically builds an engine and then
+    /// parks before consuming anything.
     ///
     /// So: the content is fed and drained to completion (appends land), and only then is the
     /// drain held and a fresh engine started with filler depth. Returns the reference origin the
@@ -253,7 +253,7 @@ final class CloudProducerInterleavingControls: XCTestCase {
     /// (measured: counter advances at the full rate). The RENDERING is real — a real node, real
     /// elapsed time, real sampleTime — and the case documents that only the identity pairing is
     /// harness-controlled. The gap (the production path never yields a readable position in this
-    /// host) is reported to @spec, not hidden.
+    /// host) is reported to, not hidden.
     @MainActor
     @discardableResult
     private func submitRenderedPosition(
@@ -336,7 +336,7 @@ final class CloudProducerInterleavingControls: XCTestCase {
 
 
 
-    /// Publish a block through the EPISODE TAP's own path, so it carries the tap's identity and the
+    /// Publish a block through the EPISODE tap's own path, so it carries the tap's identity and the
     /// tap's own counter rather than a value this test asserts on its behalf. `renderedAt` is the
     /// timestamp `install()`'s callback passes; this is the same call with the same arguments, minus
     /// the hardware that delivers it (offline rendering reaches the tap only as one lumped buffer
@@ -432,14 +432,14 @@ final class CloudProducerInterleavingControls: XCTestCase {
         // Render 800 frames on the real harness node and submit that counter through the
         // production submit path: a position inside block 0 while blocks 1–2 sit appended but
         // unrendered — the queue lead. The anchor must land INSIDE block 0 (past its start: the
-        // mapping used the position, not the block start), NOT at the newest append's origin.
+        // mapping used the position, not the block start), not at the newest append's origin.
         _ = try submitRenderedPosition(800, through: graph, producer: graph.cloud.producerIdentityForTesting)
         let anchor = try XCTUnwrap(
             graph.reference.currentRenderAnchor,
             "a position inside a recorded block must produce an anchor"
         )
         let landed = Int(anchor.renderedFrames) - origin
-        // SAMPLE EVIDENCE, not arithmetic alone: the anchored sample must be block 0's audio. A
+        // SAMPLE evidence, not arithmetic alone: the anchored sample must be block 0's audio. A
         // mapping that always returned zero would satisfy the bounds above, so checking the
         // content is what makes this non-vacuous.
         XCTAssertEqual(
@@ -448,7 +448,7 @@ final class CloudProducerInterleavingControls: XCTestCase {
         )
     }
 
-    /// Interleaved queued audio from the OTHER TWO real producers must displace neither producer's
+    /// Interleaved queued audio from the OTHER two real producers must displace neither producer's
     /// anchors: each position maps into ITS containing block even though the reference holds the
     /// others' samples between them.
     @MainActor
@@ -457,7 +457,7 @@ final class CloudProducerInterleavingControls: XCTestCase {
         let cloud = Block(frames: 1_600, amplitude: 0.3)
         let firstCloudOrigin = try feed([cloud], to: graph)
 
-        // The EPISODE TAP publishes next, from its own counter. Its block sits between the cloud
+        // The EPISODE tap publishes next, from its own counter. Its block sits between the cloud
         // blocks, which is what removes any per-producer offset: the cloud producer's second block
         // cannot be found as `first origin + block size`.
         let episode = Block(frames: 1_200, amplitude: 0.7)
@@ -469,7 +469,7 @@ final class CloudProducerInterleavingControls: XCTestCase {
         publishEarcon(earcon, through: graph)
         let earconOrigin = episodeOrigin + episode.referenceLength
 
-        // The cloud producer's second block lands AFTER both, through the same enqueue path.
+        // The cloud producer's second block lands after both, through the same enqueue path.
         let secondCloudOrigin = try feed([cloud], to: graph)
         XCTAssertGreaterThanOrEqual(
             graph.reference.streamIndex, secondCloudOrigin + cloud.referenceLength,
@@ -676,7 +676,7 @@ final class CloudProducerInterleavingControls: XCTestCase {
     func testANodeThatHasNotRenderedPublishesNoPosition() throws {
         let graph = makeGraph()
         CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
-        // Park the drain BEFORE crossing the resume threshold: `startEngine` runs before
+        // Park the drain before crossing the resume threshold: `startEngine` runs before
         // `parkIfHeld`, so the runner builds the engine and parks with the pending frames
         // UNSCHEDULED — the node is attached but has never rendered (measured precondition).
         let cloud = player(in: graph)

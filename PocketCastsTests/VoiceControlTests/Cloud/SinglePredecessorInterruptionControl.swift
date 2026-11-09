@@ -71,7 +71,7 @@ final class SinglePredecessorInterruptionControl: XCTestCase {
 
     override func setUp() {
         super.setUp()
-        // RESET FIRST: `CloudRouteTestURLProtocol` is process-global, so a previous case's stubbed
+        // RESET first: `CloudRouteTestURLProtocol` is process-global, so a previous case's stubbed
         // fixture otherwise leaks into this one (measured: the refusal case's `invalid_request`
         // arriving during the undelivered case, which produced a spurious "interrupt sent").
         CloudRouteTestURLProtocol.reset()
@@ -88,11 +88,11 @@ final class SinglePredecessorInterruptionControl: XCTestCase {
         Self.startedServices.removeAll()
         VoiceControlTestObservers.dispatchOwnership = nil
         VoiceControlTestObservers.followUpTaken = nil
-        // UNCONDITIONAL RELEASE, before stopping: a case that fails mid-way must never leave a
+        // UNCONDITIONAL release, before stopping: a case that fails mid-way must never leave a
         // receive parked and wedge the next case.
         predecessorPark.release()
         for service in services { joinAcquisitionCleanup(service) }
-        // SETTLE THE PROCESS-GLOBAL TRANSPORT before the next case starts. A stopped service can
+        // SETTLE the process-GLOBAL transport before the next case starts. A stopped service can
         // still have a receive loop unwinding, and `CloudRouteTestURLProtocol` is process-global, so
         // the previous case's stubbed error was observed INSIDE the next case (measured:
         // `interruption refused for turn u-prior (code=invalid_request)` logged between the two
@@ -105,7 +105,7 @@ final class SinglePredecessorInterruptionControl: XCTestCase {
         super.tearDown()
     }
 
-    /// Capture the task BEFORE `stop()` nils it, then join its bounded completion.
+    /// Capture the task before `stop()` nils it, then join its bounded completion.
     private func joinAcquisitionCleanup(_ service: VoiceControlService) {
         let captured = service.captureAcquisitionTaskForTesting()
         var stopped = false
@@ -150,7 +150,7 @@ final class SinglePredecessorInterruptionControl: XCTestCase {
 
     /// Build a real service whose client is stubbed.
     ///
-    /// `parkFirstReceive` parks ONLY the first receive, so A is genuinely in flight; every later
+    /// `parkFirstReceive` parks only the first receive, so A is genuinely in flight; every later
     /// receive runs normally, letting A settle through its REAL terminal rather than a
     /// cancellation. Otherwise the service never reaches the state the barge-in needs.
     private func readyService(
@@ -433,14 +433,14 @@ final class SinglePredecessorInterruptionControl: XCTestCase {
 
     // MARK: - CONTROL: refused interruption
 
-    /// A REFUSED INTERRUPTION MUST NOT SUBMIT ITS RETAINED FOLLOW-UP.
+    /// A REFUSED interruption must not submit its retained follow-UP.
     ///
-    /// Deterministic premise chain (reviewer `453fbb5f`): B ADMITTED, A parked and in flight, exactly
+    /// Deterministic premise chain: B ADMITTED, A parked and in flight, exactly
     /// ONE interrupt emitted for A, B's follow-up HELD — and only then is A's error served. The
     /// zero-auth assertion is therefore not satisfiable by a harness that never created an
     /// interruption, and no unrelated dispatch can satisfy completion.
     ///
-    /// NO input barrier is used, and that is deliberate: a follow-up RETAINED FOR AN INTERRUPTION
+    /// NO input barrier is used, and that is deliberate: a follow-up RETAINED for an interruption
     /// never reaches `testInputBarrier` (the service's ownership transfer returns at 597-599, the
     /// barrier is awaited at 615), so parking B there is impossible by construction. Attempting it
     /// produced controls whose mutants all survived — the barrier, not the state machine, was what
@@ -468,20 +468,20 @@ final class SinglePredecessorInterruptionControl: XCTestCase {
         let admittedB = await MainActor.run { admit(service, "play the next one", "u-barge") }
         XCTAssertTrue(admittedB, "premise: B must be admitted, or there is no follow-up to refuse")
 
-        // 3. EXACTLY ONE interrupt reaches A. This is the interruption under test.
+        // 3. EXACTLY one interrupt reaches A. This is the interruption under test.
         let interruptEmitted = await waitUntil(timeout: 15) {
             self.recorder.all.contains { $0.sentInterrupt }
         }
         XCTAssertTrue(interruptEmitted, "premise: one interrupt must reach A; frames=\(allFrames())")
 
         // 4. B is RETAINED. Asserted through the state machine, so a harness that silently dropped
-        //    B cannot pass this control.
+        // B cannot pass this control.
         let bHeld = await MainActor.run { sink.interruptionStateForTesting.heldFollowUpForTesting?.utteranceId == "u-barge" }
         XCTAssertTrue(bHeld, "premise: B must be HELD, not already submitted")
         let submittedWhileHeld = authFrames(for: "u-barge").count
         XCTAssertEqual(submittedWhileHeld, 0, "premise: B is not submitted while held")
 
-        // 5. ONLY NOW release A, so its error (the refusal) is served.
+        // 5. only now release A, so its error (the refusal) is served.
         predecessorPark.release()
 
         // 6. Await A's terminal AND B's own disposition — never an unrelated dispatch.
@@ -511,7 +511,7 @@ final class SinglePredecessorInterruptionControl: XCTestCase {
         XCTAssertFalse(queuedClassifications.all.contains("u-barge"), "B's queued link must never classify")
         XCTAssertFalse(dispatches.all.contains("u-barge:duplicate"), "B must have only the bridge dispatch")
 
-        // 7. THE ASSERTION.
+        // 7. THE assertion.
         XCTAssertEqual(
             authFrames(for: "u-barge").count, 0,
             "a REFUSED interruption must never authenticate its follow-up; frames="

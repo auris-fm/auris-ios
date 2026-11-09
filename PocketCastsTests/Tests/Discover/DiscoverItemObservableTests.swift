@@ -233,7 +233,7 @@ final class DiscoverItemObservableTests: XCTestCase {
             }
         }
 
-        // Set up visitation data where sponsored category is NOT in top 6
+        // Set up visitation data where sponsored category is not in top 6
         UserDefaults.standard.set([
             "1": 100, // Tech - most visited
             "3": 90,  // Science - second most visited

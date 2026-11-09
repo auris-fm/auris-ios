@@ -161,14 +161,14 @@ class NativeVadSegmenter {
     // The Voice Sharing collector needs three signals that `onUtterance` cannot provide, because completion
     // arrives after wake/bleed rejection and only for segments that reach an endpoint:
     //
-    //   * `capture_id` must be minted at confirmed speech start, before any rejection decision exists — a
-    //     bleed- or wake-rejected segment is still collectable audio (spec), and rejections are silent
-    //     `return`s downstream, so a completion-only view never sees them at all.
-    //   * Long in-progress speech must be admitted against clip ceilings before completion, otherwise a
-    //     segment whose completion never arrives (permission closes mid-speech) has already exceeded its
-    //     memory/disk bound.
-    //   * A reset while speech is active is a CANCELLATION, not a completion: the partial contribution is
-    //     discarded rather than finalized.
+    // * `capture_id` must be minted at confirmed speech start, before any rejection decision exists — a
+    // bleed- or wake-rejected segment is still collectable audio (spec), and rejections are silent
+    // `return`s downstream, so a completion-only view never sees them at all.
+    // * Long in-progress speech must be admitted against clip ceilings before completion, otherwise a
+    // segment whose completion never arrives (permission closes mid-speech) has already exceeded its
+    // memory/disk bound.
+    // * A reset while speech is active is a CANCELLATION, not a completion: the partial contribution is
+    // discarded rather than finalized.
     //
     // These fire alongside the existing logic and read state only. Nothing here appends to, trims, or
     // reorders `buffer`, and no hook return value influences recognition. Retention behaviour stays pinned by

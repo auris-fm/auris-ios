@@ -35,9 +35,9 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
         )
     }
 
-    /// SPEC e1529db9: `consentGoneForPurge` is TRUE only for explicit consent loss — local
+    ///: `consentGoneForPurge` is TRUE only for explicit consent loss — local
     /// opt-out or server withdrawal. Unknown/no-projection states are TRANSIENT (launch, network)
-    /// and must NOT authorize purging durable recordings.
+    /// and must not authorize purging durable recordings.
     func test_consentGoneForPurge_onlyTrueForExplicitConsentLoss() throws {
         let store = makeStore()
         // Fresh store: no opt-in, no projection — transient, not purge-worthy.
@@ -58,7 +58,7 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
         XCTAssertTrue(store.consentGoneForPurge, "server withdrawal is explicit consent loss")
     }
 
-    /// REVIEWER ee48cdfe: ONE consent decision for capture AND upload — session + affirmative
+    ///: ONE consent decision for capture AND upload — session + affirmative
     /// local choice + no explicit consent loss. Unknown projection is transient and permits.
     func test_consentAllowsCollection_unifiedDecision() throws {
         let store = makeStore()
@@ -75,7 +75,7 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
         XCTAssertFalse(store.consentAllowsCollection, "local opt-out stops")
     }
 
-    /// Captures the fence value the way a caller MUST: before issuing the request, never after the reply.
+    /// Captures the fence value the way a caller must: before issuing the request, never after the reply.
     private func token(_ store: VoiceSharingEnrollmentStore) -> VoiceSharingEnrollmentStore.ProjectionToken {
         guard let t = store.projectionToken() else {
             XCTFail("no lifecycle, so no token can be issued")
@@ -113,7 +113,7 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
                        "a toggle is intent, not permission: nothing has come from the backend yet")
 
         // Server accepts disclosure and issues an epoch: only now is enrollment real. The GET is issued
-        // AFTER the opt-in gesture, so its token is taken at that point.
+        // after the opt-in gesture, so its token is taken at that point.
         let getIssuedAfterOptIn = token(store)
         store.apply(authoritative: projection(revision: "r1"), readUnder: getIssuedAfterOptIn)
         XCTAssertTrue(store.currentEffectiveEnrolled)
@@ -149,7 +149,7 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
         store.apply(authoritative: projection(revision: "r2"), readUnder: token(store))
         XCTAssertTrue(store.currentEffectiveEnrolled)
 
-        // Capture the fence BEFORE opting out: this is the token the delayed opt-in was issued under.
+        // Capture the fence before opting out: this is the token the delayed opt-in was issued under.
         let stale = token(store)
 
         // User opts out; the withdrawal reply advances the revision.
@@ -157,7 +157,7 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
         store.apply(authoritative: projection(revision: "r3", enrolled: false, withdrawal: .withdrawn), readUnder: token(store))
         XCTAssertFalse(store.currentEffectiveEnrolled)
 
-        // The delayed opt-in lands now. It was issued BEFORE the withdrawal, so it carries the pre-withdrawal
+        // The delayed opt-in lands now. It was issued before the withdrawal, so it carries the pre-withdrawal
         // token — and that alone refuses it. No comparison of "r2" against "r3" is involved, which matters
         // because the contract makes revisions opaque and nothing here may assume they are orderable.
         let accepted = store.apply(authoritative: projection(revision: "r2"), readUnder: stale)
@@ -205,7 +205,7 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
 
     // MARK: - Account transitions
 
-    /// An account switch replaces the whole projection. Both accounts being enrolled does NOT carry
+    /// An account switch replaces the whole projection. Both accounts being enrolled does not carry
     /// enrollment across, because the epoch belongs to the account that issued it.
     func test_accountSwitch_replacesProjectionAndBlocksUntilReenrolled() {
         let a = makeStore(scopeOverride: "account-A")
@@ -304,7 +304,7 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
         defer { store.removeObserver(id) }
 
         store.apply(authoritative: projection(revision: "r7"), readUnder: token(store))
-        // THE BASELINE CALLBACK IS DELIVERED AT REGISTRATION (spec 8a9c057f), so the count from
+        // THE baseline callback is delivered at registration, so the count from
         // here on measures TRANSITIONS only. Without this subtraction the replay assertion below
         // could not tell "one apply" from "one baseline".
         XCTAssertEqual(notifications, 2, "premise: baseline plus one transition")
@@ -315,10 +315,10 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
         XCTAssertEqual(notifications, firstCount, "a replay must not announce a second transition")
     }
 
-    // MARK: - Opaque revisions (reviewer 4599fb63 / 7897cd94)
+    // MARK: - Opaque revisions
 
     /// The contract makes `membership_revision` OPAQUE. Nothing in the store may compare or order it, so a
-    /// reply whose revision looks "older", "newer", or completely unrelated must be judged ONLY by the fence
+    /// reply whose revision looks "older", "newer", or completely unrelated must be judged only by the fence
     /// it was issued under. This drives arbitrary opaque tokens through the real apply path.
     func test_opaqueRevisions_neverDecideAcceptance_theyAreJustData() {
         let store = makeStore()
@@ -345,7 +345,7 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
 
     /// Cold start with a remembered ACTIVE projection plus a remembered opt-in, and the session's GET is
     /// delayed (or refused). Collection must stay OFF the whole time; then a current-session reply turns it on.
-    /// PROVENANCE, NOT PERMISSION (spec 1bb73eac): a cold-started app that has NEVER received a
+    /// PROVENANCE, not permission: a cold-started app that has never received a
     /// projection in this process must still be able to stamp the epoch it already persisted.
     ///
     /// The regression this pins: upload admission read `activeEnrollmentEpoch`, which needs
@@ -390,7 +390,7 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
         XCTAssertEqual(relaunched.persistedEnrollmentEpochForProvenance, "epoch-1",
                        "the account's persisted epoch is provenance and needs no round trip")
 
-        // POSITIVE CONTROL: the two must stay distinguishable. Opting out still answers nil, so
+        // POSITIVE control: the two must stay distinguishable. Opting out still answers nil, so
         // this reader cannot be mistaken for an always-on value.
         relaunched.setLocalOptIn(false) // also records the explicit opt-out
         XCTAssertTrue(relaunched.currentState.explicitOptOut,
@@ -413,7 +413,7 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
             sessionIdentityProvider: { "session-1" }
         )
         first.setLocalOptIn(true)
-        // The confirming GET is issued AFTER the opt-in gesture, so it carries the fence value as of then.
+        // The confirming GET is issued after the opt-in gesture, so it carries the fence value as of then.
         let firstToken = VoiceSharingEnrollmentStore.ProjectionToken(
             lifecycleGeneration: "session-1",
             operationGeneration: first.projectionToken()?.operationGeneration ?? 0
@@ -439,7 +439,7 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
                        "but a previous session's projection is NOT this session's permission")
 
         // While the GET is in flight the feature stays off. The remembered OPT-IN is the user's own
-        // standing choice and stays consent (spec 4afc6e43 keeps consent and membership separate), but the
+        // standing choice and stays consent, but the
         // remembered EXPECTATION — enrollment, epoch, disclosure — is not this session's, so membership
         // refuses and nothing is collected.
         do {
@@ -486,7 +486,7 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
                        "a reply to a request issued before sign-out must not land after it")
     }
 
-    // MARK: - Enroll → fresh activation → permitted (reviewer 7897cd94)
+    // MARK: - Enroll → fresh activation → permitted
 
     /// A successful enrollment permits collection immediately, with no further activation step.
     func test_successfulEnrollmentPermitsCollection() {

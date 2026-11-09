@@ -4,10 +4,10 @@ import XCTest
 @testable import PocketCastsUtils
 @testable import podcasts
 
-/// INCIDENT 2026-11-05 CONTROLS (staging: 32 durable recordings purged at 19:58, zero log
+/// INCIDENT controls (staging: 32 durable recordings purged at 19:58, zero log
 /// lines, after three projection-GET 401s). Reviewer round on the incident report:
-/// - a same-account 401/auth-recovery with queued recordings must NOT purge — the queue
-///   survives and the retention decision is LOGGED with its cause;
+/// - a same-account 401/auth-recovery with queued recordings must not purge — the queue
+/// survives and the retention decision is LOGGED with its cause;
 /// - an explicit withdrawal still purges, with the purge decision logged;
 /// - the diagnostics record cause and counts, never audio or credentials.
 final class VoiceSharingUnauthorizedRecoveryControls: XCTestCase {
@@ -161,7 +161,7 @@ final class VoiceSharingUnauthorizedRecoveryControls: XCTestCase {
 
         let fetched = await client.fetchProjection()
 
-        // The recovery callback fired, and NOTHING ELSE moved.
+        // The recovery callback fired, and NOTHING else moved.
         XCTAssertEqual(provider.recoveries, 1, "the 401 must reach the auth-recovery callback")
         XCTAssertNil(fetched, "a rejected projection is never applied")
         XCTAssertFalse(store.consentGoneForPurge,
@@ -184,7 +184,7 @@ final class VoiceSharingUnauthorizedRecoveryControls: XCTestCase {
 
     /// REQUEST-LEVEL (spec, incident follow-up): auth recovery alone never mints a withdrawal
     /// or enrollment intent. A 401 GET, the recovery rotation, and a subsequent 200 refresh
-    /// produce ONLY the GETs the client itself issued — no withdrawal/enrollment POST exists —
+    /// produce only the GETs the client itself issued — no withdrawal/enrollment POST exists —
     /// and the refreshed projection applies normally with the queue retained.
     func test_authRecoveryIssuesNoWithdrawalOrEnrollmentIntent() async throws {
         let store = makeStore()
@@ -242,7 +242,7 @@ final class VoiceSharingUnauthorizedRecoveryControls: XCTestCase {
         XCTAssertFalse(store.consentGoneForPurge, "the refreshed projection keeps consent intact")
         XCTAssertEqual(queue.readyEntries(), [entry], "the queue survives the whole recovery")
 
-        // THE REQUEST-LEVEL ASSERTION: the client only ever issued projection GETs.
+        // THE request-LEVEL assertion: the client only ever issued projection GETs.
         let methods = seen.map(\.method)
         XCTAssertFalse(methods.contains("POST"),
                        "auth recovery must never mint a withdrawal/enrollment POST: \(seen)")

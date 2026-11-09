@@ -189,7 +189,7 @@ extension AccountViewController {
     ) -> VoiceSharingAccountController? {
         guard surfaceEnabled(), signedIn() else { return nil }
         let local = localModel()
-        // SPEC RULING 2026-11-03: Voice Sharing uses the Auris provider on EVERY build where sharing
+        // SPEC ruling: Voice Sharing uses the Auris provider on every build where sharing
         // is enabled, independent of the assistant's routing flag and the cutover gate. Missing
         // configuration means sharing is unavailable, never a static-identity fallback.
         guard let tokenProvider = CloudTokenProviderRouter.voiceSharingProvider() else {
@@ -198,7 +198,7 @@ extension AccountViewController {
         }
         let account = accountModel?() ?? VoiceSharingAccountModel(
             client: VoiceSharingAccountClient(tokenProvider: tokenProvider),
-            // Activation slice (2026-11-03): the production disclosure token. Before this line
+            // Activation slice (): the production disclosure token. Before this line
             // the init default was nil and the surface rendered `disclosureUnavailable` —
             // enrollment could never start. The token is the exact server-supported string.
             disclosureVersion: VoiceSharingDisclosure.productionVersion,

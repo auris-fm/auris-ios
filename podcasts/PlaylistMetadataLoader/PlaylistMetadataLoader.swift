@@ -264,9 +264,9 @@ actor PlaylistMetadataLoader {
     /// Only marks playlists that would be affected by the change type and podcast.
     ///
     /// - Parameters:
-    ///   - changeType: The type of episode change that occurred
-    ///   - podcastUuid: The UUID of the podcast the episode belongs to (nil for bulk changes)
-    ///   - playlists: The playlists to check against
+    /// - changeType: The type of episode change that occurred
+    /// - podcastUuid: The UUID of the podcast the episode belongs to (nil for bulk changes)
+    /// - playlists: The playlists to check against
     func markStaleIfAffected(
         by changeType: EpisodeChangeType,
         podcastUuid: String?,

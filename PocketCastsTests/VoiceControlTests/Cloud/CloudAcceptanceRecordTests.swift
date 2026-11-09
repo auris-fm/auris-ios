@@ -56,7 +56,7 @@ final class CloudAcceptanceRecordTests: XCTestCase {
         )
     }
 
-    /// REQUEST IDENTITY: the record carries the request id of the turn that was SUBMITTED, so two
+    /// REQUEST identity: the record carries the request id of the turn that was SUBMITTED, so two
     /// steps' records are distinguishable and a recall assertion cannot be judged against another
     /// step's turn. Fresh recorders alone would not establish this.
     func testRecordCarriesTheSubmittedTurnsRequestId() {

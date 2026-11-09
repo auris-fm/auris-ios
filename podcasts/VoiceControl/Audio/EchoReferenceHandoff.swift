@@ -516,7 +516,7 @@ final class EchoReferenceHandoff {
         // sit between this producer's blocks, so no single per-producer offset maps them and the
         // append tail would be another producer's audio. A separate `streamIndex` read before a
         // separate append let an interleaved append shift the origin after it was read
-        // (PR #49 review comment 4305981485).
+        //.
         let rangeStart = reference.appendReturningOrigin(resampled)
 
         // Keep this block's two clocks together so a later position can be matched to the
@@ -542,11 +542,11 @@ final class EchoReferenceHandoff {
         // The anchor is the block's reference range plus how far the producer had actually
         // rendered within it. Two things are deliberately not used here:
         //
-        //   * the block's own length, which is a duration rather than a position and was the
-        //     original defect — as an offset it falls below a sliding window and the filter
-        //     then declines every segment;
-        //   * the append tail, which is the newest SUBMITTED sample and runs ahead of what
-        //     has been heard by however much audio is still queued in the output node.
+        // * the block's own length, which is a duration rather than a position and was the
+        // original defect — as an offset it falls below a sliding window and the filter
+        // then declines every segment;
+        // * the append tail, which is the newest SUBMITTED sample and runs ahead of what
+        // has been heard by however much audio is still queued in the output node.
         //
         // When the producer reports no position, the block's start is recorded rather than
         // its end: the start is a fact about where the audio is, while the end would claim

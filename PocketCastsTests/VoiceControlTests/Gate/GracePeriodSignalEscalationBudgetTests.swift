@@ -1,8 +1,8 @@
 import XCTest
 @testable import podcasts
 
-/// OWNER DELTA 3484cbc/5eca874 (spec): there is NO separate grace-window dispatch budget.
-/// Request ownership permits at most one logical dispatch PER UTTERANCE; each independent
+/// OWNER delta 3484cbc/5eca874 (spec): there is NO separate grace-window dispatch budget.
+/// Request ownership permits at most one logical dispatch PER utterance; each independent
 /// utterance may dispatch its own request, including within the same grace window. These
 /// controls assert the window signal no longer refuses a second, independent dispatch and
 /// that only a closed/foreign window refuses.

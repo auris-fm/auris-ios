@@ -1,7 +1,7 @@
 import XCTest
 @testable import podcasts
 
-/// STOP-IDENTITY controls (review 5295572f): confirmation must mean the ACTUAL owned output
+/// STOP-IDENTITY controls: confirmation must mean the ACTUAL owned output
 /// quiescent — exactly the stopped identity, never a promotion onto a cancel-bumped identity
 /// that was never physically stopped, and never a regression from a delayed stale delivery.
 final class CloudAudioPlayerStopIdentityTests: XCTestCase {
@@ -119,7 +119,7 @@ final class CloudAudioPlayerStopIdentityTests: XCTestCase {
         XCTAssertGreaterThan(cancelEpoch, drainEpoch, "the cancel allocated a fresh identity")
         try await Task.sleep(nanoseconds: 200_000_000)
         // Deliver the STALE A stop FIRST, while B's identity is still unconfirmed — the exact
-        // promotion hazard (review 5295572f): confirmation must mean the identity that actually
+        // promotion hazard: confirmation must mean the identity that actually
         // stopped. A stale delivery must not promote the unconfirmed B identity.
         await MainActor.run { delivery.deliverOldest() }
         try await Task.sleep(nanoseconds: 200_000_000)
@@ -166,7 +166,7 @@ final class CloudAudioPlayerStopIdentityTests: XCTestCase {
             try await Task.sleep(nanoseconds: 20_000_000)
             confirmedOnce = await MainActor.run { player.confirmedStopEpoch() }
         }
-        // Identity 3 was never stopped (2 and 3 unperformed). A short bounded wait must NOT
+        // Identity 3 was never stopped (2 and 3 unperformed). A short bounded wait must not
         // be satisfied by the confirmed 1 — confirmation is identity-exact upward.
         let start = Date()
         let satisfied = await player.awaitActualStop(after: 3, timeout: 0.3)
@@ -174,7 +174,7 @@ final class CloudAudioPlayerStopIdentityTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(start), 0.25, "the bound was honored")
     }
 
-    /// CANCEL BEFORE REGISTER (review fa03b7f9): a waiter whose await is cancelled before its
+    /// CANCEL before register: a waiter whose await is cancelled before its
     /// registration runs must return false promptly, never park — and the registry holds ZERO
     /// tickets afterwards.
     func testCancelBeforeRegisterDoesNotStrandTheWaiter() async throws {
@@ -209,7 +209,7 @@ final class CloudAudioPlayerStopIdentityTests: XCTestCase {
         await MainActor.run { player.setCapturedStopNotificationForTesting(nil) }
     }
 
-    /// CANCEL BEFORE REGISTER, DETERMINISTIC (reviews 3b2d4386 + ec3b5150): the park is
+    /// CANCEL before register, DETERMINISTIC: the park is
     /// ASSERTED before cancelling; the awaiter's completion is probed with a BOUND (never an
     /// unbounded wait); a failed probe fails PROMPTLY and then RESCUES the (mutant-)stranded
     /// waiter so the process never hangs; the latch hook is always unset.
@@ -239,10 +239,10 @@ final class CloudAudioPlayerStopIdentityTests: XCTestCase {
             done.signal()
             return r
         }
-        // ASSERT the park: registration must NOT have run when we cancel.
+        // ASSERT the park: registration must not have run when we cancel.
         let parked = latch.wait(timeout: .now() + 2)
         XCTAssertEqual(parked, .success, "the waiter is parked in the latch BEFORE the cancel")
-        waiter.cancel()  // the cancellation handler runs BEFORE registration
+        waiter.cancel()  // the cancellation handler runs before registration
         try await Task.sleep(nanoseconds: 100_000_000)
         release.signal()  // release INTO registration
         // BOUNDED completion probe: fail PROMPTLY instead of hanging, then rescue.
@@ -340,7 +340,7 @@ final class DeliveryBox: @unchecked Sendable {
     func store(_ d: @escaping () -> Void) {
         lock.lock(); deliveries.append(d); lock.unlock()
     }
-    /// Delivers ONLY the OLDEST withheld stop (the earliest identity still pending).
+    /// Delivers only the OLDEST withheld stop (the earliest identity still pending).
     func deliverOldest() {
         lock.lock(); let d = deliveries.isEmpty ? nil : deliveries.removeFirst(); lock.unlock()
         d?()

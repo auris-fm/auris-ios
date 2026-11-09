@@ -62,7 +62,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         ]
     }
 
-    /// PUBLICATION → DRAIN (spec 5ffbfdd5): a durable publication REACHES THE TRANSPORT with no
+    /// PUBLICATION → DRAIN: a durable publication REACHES the transport with no
     /// lifecycle event at all. The assembly wires the sink's success callback to the existing
     /// upload trigger; here the same seam is wired to a real trigger over a real scheduler, and the
     /// transport records the request. A RED failure under a sink that never calls back proves the
@@ -109,7 +109,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
             "the publication's drain must reach the transport with no lifecycle event")
     }
 
-    /// SPEC DEFECT d6580187, fix 1: a pass that ends with every entry behind its not-before
+    ///, fix 1: a pass that ends with every entry behind its not-before
     /// boundary must produce a second drain AT the boundary, with NO lifecycle event and NO new
     /// entry — the 503-retry stall on the owner simulator (uploader idle since 10:00:21Z while
     /// the retry was due at 10:00:26Z) is exactly this missing wake. Red on the parent: after
@@ -154,7 +154,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         let afterIdlePass = await transportCalls.count()
         XCTAssertEqual(afterIdlePass, 0, "premise: the boundary pass sends nothing")
 
-        // THE FIX: one bounded wake armed from the boundary must re-offer and run the due entry —
+        // THE fix: one bounded wake armed from the boundary must re-offer and run the due entry —
         // with no foreground event, no network change, and no new publication. Observed over a
         // bounded window so the control also compiles (and fails) without the fix.
         let deadline = ContinuousClock.now + .seconds(4)
@@ -167,7 +167,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
             "the retry boundary wake must run the due entry with no lifecycle event")
     }
 
-    /// REVIEWER ea2964b3 (1): an orphaned/expired not-before stamp must not suppress another
+    /// (1): an orphaned/expired not-before stamp must not suppress another
     /// live entry's future retry. The simulator holds ten orphan stamps; on HEAD the boundary
     /// reader answered 0 for an unreadable stamp and the trigger refused to arm any wake, so the
     /// live boundary never fired. RED on `eb8350219`.
@@ -223,7 +223,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
             "the orphan stamps must not suppress the live entry's retry wake")
     }
 
-    /// REVIEWER ea2964b3 (1): a still-future boundary within 50 ms must still be armed. HEAD
+    /// (1): a still-future boundary within 50 ms must still be armed. HEAD
     /// refused to arm any wake for delays <= 0.05, leaving the entry idle forever. RED on HEAD.
     func test_aNearBoundaryStillArmsTheRetryWake() async throws {
         let sink = VoiceSharingContributionSink(
@@ -270,7 +270,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
             "a boundary within the schedule floor must still wake the trigger")
     }
 
-    /// SPEC DEFECT d6580187, collector-level control (reviewer ea2964b3): the retry→capture path
+    ///, collector-level control: the retry→capture path
     /// must work with a capture fed through the REAL collector emission path, not just
     /// `sink.handle`. A retry disposition, then a new collector capture: it must produce an
     /// entry and reach the transport.
@@ -324,7 +324,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
             "the collector-emitted capture becomes an entry and is attempted despite the retry")
     }
 
-    /// SPEC DEFECT d6580187, regression coverage: a retry disposition followed by NEW captures
+    ///, regression coverage: a retry disposition followed by NEW captures
     /// must still produce entries and reach the transport — the stalled uploader must never
     /// gate the capture-to-entry path, and the new entry must serve while the old one is
     /// behind its retry boundary.
@@ -384,7 +384,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
     }
 
     func test_gateClosedBetweenPrepareAndFinalizeDiscardsTheUnreadyEntry() throws {
-        // Reviewer 5357d089: the gate must be re-checked after prepare — consent loss during the
+        //: the gate must be re-checked after prepare — consent loss during the
         // queue transaction must not publish. The gate flips closed on its THIRD read (encode,
         // prepare, finalize), so the entry exists but must never become ready.
         var calls = 0
@@ -473,7 +473,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
     private var lastSink: VoiceSharingContributionSink?
 
     func test_pendingBoundHoldsWhileWorkerIsBlocked() {
-        // Reviewer 5b1ba089: the bound must be enforced BEFORE enqueue (the serialized worker
+        //: the bound must be enforced before enqueue (the serialized worker
         // block can never see more than one). Block the worker, submit max+5, assert exactly
         // max accepted.
         let sink = makeSink()
@@ -517,7 +517,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
 
     func test_eventQueuedUnderSupersededAuthorizationNeverPublishes() {
         // Prior-epoch binding: capture the event while the gate is open at generation 0, revoke
-        // BEFORE the worker processes it (worker blocked), then release. The stale-authorization
+        // before the worker processes it (worker blocked), then release. The stale-authorization
         // event must never publish even though the gate boolean still reads true.
         let sink = makeSink()
         let blockedInWorker = XCTestExpectation(description: "blocked")
@@ -530,7 +530,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
             blockedInWorker.fulfill()
         }
         sink.handle(event()) // enqueued, generation 0
-        sink.noteRevocation() // generation 1 — BEFORE processing
+        sink.noteRevocation() // generation 1 — before processing
         cond.lock(); releaseGate = true; cond.broadcast(); cond.unlock()
         wait(for: [blockedInWorker], timeout: 5)
         sink.waitForIdleForTesting()
@@ -566,7 +566,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         refusingFM.refuse = false // allow tearDown cleanup
         XCTAssertEqual(result, .reconciled(removed: 0, retained: 1),
                        "a removal failure is retained-but-durably-disqualified, never collapsed")
-        // NON-VACUITY: the retained entry is structurally COMPLETE — the ONLY reason it cannot
+        // NON-VACUITY: the retained entry is structurally COMPLETE — the only reason it cannot
         // serve is the durable disqualification marker written by the purge.
         let entryDir = root.appendingPathComponent(name)
         let contents = try FileManager.default.contentsOfDirectory(atPath: entryDir.path)
@@ -583,7 +583,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         XCTAssertEqual(after.count, 0, "a disqualified retained entry never serves")
     }
 
-    /// Reviewer 70e5fc58 (1): `handle` must return PROMPTLY on the audio caller even while a
+    /// (1): `handle` must return PROMPTLY on the audio caller even while a
     /// publication transaction is stalled in encode/fsync. The control stalls the worker inside
     /// the publication lock, then measures `handle`'s return time from the caller thread.
     func test_handleReturnsPromptlyWhilePublicationIsStalled() {
@@ -617,7 +617,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         sink.waitForIdleForTesting()
     }
 
-    /// Reviewer 70e5fc58 (2): the REAL assembly path invalidates authorization. Off→on and an
+    /// (2): the REAL assembly path invalidates authorization. Off→on and an
     /// account transition must reach the sink's generation, so an event queued under the old
     /// authorization never publishes after the gate reads true again.
     func test_gateLostThroughCoordinatorRegistrySupersedesQueuedEvents() throws {
@@ -642,7 +642,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         release.lock()
         while !inside { release.wait() }
         release.unlock()
-        // Off: the coordinator fires EVERY registered handler — the production signal the assembly
+        // Off: the coordinator fires every registered handler — the production signal the assembly
         // installs. Nothing here calls noteRevocation directly.
         coordinator.fireGateLostHandlersForTesting()
         // On again: the live gate reads true, so only the captured generation can stop publication.
@@ -655,14 +655,14 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
                        "off→on must not republish an event authorized in the previous epoch")
     }
 
-    /// Reviewer 70e5fc58 (3): a disqualification whose MARKER cannot be confirmed durable must not
+    /// (3): a disqualification whose MARKER cannot be confirmed durable must not
     /// be claimed. The purge holds the owner and leaves the entry untouched.
     func test_unconfirmedDisqualificationHoldsOwnerAndClaimsNothing() throws {
         makeSink().handle(event())
         drain()
         guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage(),
               let name = ready.first?.name else { return XCTFail("expected one ready entry") }
-        // Marker byte-sync fails (a directory barrier alone does NOT persist a file's bytes).
+        // Marker byte-sync fails (a directory barrier alone does not persist a file's bytes).
         var syncCalls = 0
         let failingFileSyncQueue = VoiceSharingUploadQueue(
             rootDirectory: root,
@@ -692,7 +692,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         XCTAssertFalse(failingFileSyncQueue.hasAdmissionAllowance())
     }
 
-    /// Reviewer 35e67a87: a FRESH queue must not serve an unmarked survivor after a revocation
+    ///: a FRESH queue must not serve an unmarked survivor after a revocation
     /// that could not durably disqualify it. The intent is on disk, so restart cannot forget it.
     func test_freshQueueHoldsAfterUnconfirmedDisqualification() throws {
         makeSink().handle(event())
@@ -717,7 +717,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
             try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent(name).path)
                 .filter { ["audio.wav", "metadata.json", "created.at", "ready.marker"].contains($0) }.count,
             4)
-        // A FRESH queue (production restart) must honor the durable intent in EVERY authority.
+        // A FRESH queue (production restart) must honor the durable intent in every authority.
         let fresh = VoiceSharingUploadQueue(rootDirectory: root, clock: Date.init)
         guard case .revocationHeld = fresh.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("a fresh queue must not serve after an unconfirmed revocation")
@@ -730,7 +730,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         }
     }
 
-    /// Reviewer 35e67a87: a REFUSED listing (root unreadable/overflowing) must set the hold — a
+    ///: a REFUSED listing (root unreadable/overflowing) must set the hold — a
     /// purge that could not see the root has not revoked anything, and must not leave the owner
     /// admitting once the I/O failure clears.
     func test_refusedListingHoldsOwnerUntilReconciled() throws {
@@ -740,7 +740,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         let refusingListQueue = VoiceSharingUploadQueue(
             rootDirectory: root,
             clock: Date.init,
-            // Discovery reads the UNBOUNDED lister (spec a4b417fc ruling 1); injecting into the
+            // Discovery reads the UNBOUNDED lister; injecting into the
             // bounded one made the listing succeed and the control prove nothing.
             listDirectory: { url, keys in
                 if failListing { throw CocoaError(.fileReadNoPermission) }
@@ -750,7 +750,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         guard case .refused = refusingListQueue.purgeAll() else {
             return XCTFail("an unlistable root must refuse, never report success")
         }
-        // The I/O failure now clears — the hold must NOT clear with it.
+        // The I/O failure now clears — the hold must not clear with it.
         failListing = false
         guard case .revocationHeld = refusingListQueue.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("a refused listing must leave the owner held")
@@ -770,7 +770,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         XCTAssertEqual(after.count, 0, "the entry was removed by the reconciled purge")
     }
 
-    /// Reviewer 2d7cb2c9 (1): a RECURSIVE removal that deletes publication.failed before failing
+    /// (1): a RECURSIVE removal that deletes publication.failed before failing
     /// on another child must not be treated as durably disqualified. The owner stays held, and a
     /// fresh queue refuses to serve the survivor.
     func test_partialDeletionOfMarkerThenRemovalFailureKeepsOwnerHeld() throws {
@@ -816,20 +816,20 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         XCTAssertEqual(after.count, 0, "a survivor whose marker was destroyed must never serve")
     }
 
-    /// Reviewer 2d7cb2c9 (2): intent discovery must not collapse "cannot determine" into "absent".
+    /// (2): intent discovery must not collapse "cannot determine" into "absent".
     /// An unstatable intent path keeps the owner held across fresh initialization.
     func test_unknownIntentDiscoveryHoldsOwnerAcrossFreshInitialization() throws {
         makeSink().handle(event())
         drain()
-        // REAL POSIX couples intent-stat failure with an unreadable root (every downstream guard
+        // REAL posix couples intent-stat failure with an unreadable root (every downstream guard
         // would then mask the hold), so the discovery failure is injected ISOLATED: the root and
-        // its surviving entry stay perfectly readable, and ONLY the intent lookup is unknown.
+        // its surviving entry stay perfectly readable, and only the intent lookup is unknown.
         // This is exactly the case `fileExists` collapses into absence.
         let fresh = VoiceSharingUploadQueue(
             rootDirectory: root, clock: Date.init,
             intentDiscovery: { _ in .failure })
         // The hold is real, but its ORIGIN is "cannot determine", not "a revocation failed":
-        // the retry-hold discovery is unknown, so coverage is unknown (reviewer 8ae2b980).
+        // the retry-hold discovery is unknown, so coverage is unknown.
         guard case .unknownCoverage = fresh.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("unknown intent discovery must HOLD the owner, never resume serving")
         }
@@ -868,7 +868,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         XCTAssertTrue(String(decoding: metadata, as: UTF8.self).contains(terminal.captureID.uuidString))
     }
 
-    /// SPEC 1e79e5b4, BUILDER SIDE: the ASR stage states the observed skip that belongs to a bleed
+    ///, BUILDER side: the ASR stage states the observed skip that belongs to a bleed
     /// rejection, while the bleed stage keeps its own observed decision. The claim arrives as an
     /// OBSERVED stage fact — the encoder never infers stage facts from the event kind (review: fixtures
     /// that omitted `reportedStages` were exercising nothing but that inference) — so this control states
@@ -913,7 +913,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
                        "the wake path is unchanged by the bleed-skip change")
     }
 
-    /// RECOVERY SIDE of spec 1e79e5b4: a persisted bleed-skip record — built by the real encoder and
+    /// RECOVERY side of: a persisted bleed-skip record — built by the real encoder and
     /// marked ready with its real bytes and digest — must be confirmed by a FRESH queue instance.
     /// Recovery refuses a pairing intake refuses, so the known skip has to survive restart.
     func test_genuineBleedRejectedRecordSurvivesFreshQueueRecovery() throws {
@@ -1128,20 +1128,20 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
             collector?.appendSamples(samples)
             collector?.segmentationEnded(context)
         }
-        // AMENDED BY SPEC 2741a0ca: the in-process FIFO cap that used to press a record out of the
+        // AMENDED by: the in-process FIFO cap that used to press a record out of the
         // ring is GONE, because discarding a capture before any durable record exists maps to no
         // allowed gate. Pressure is counted and logged; the capture is still queued. So the eviction
         // this control was written around no longer happens — which is the point, not a regression.
         // What still matters is the property it protected: nothing is silently lost.
         // The terminal ring still evicts past 32, but an unemitted record is SUBMITTED through the
         // normal sink path at eviction and only then has its deadline cancelled — so eviction is
-        // never silent loss (spec defect d6580187). What the FIFO-cap removal changed is the
+        // never silent loss. What the FIFO-cap removal changed is the
         // HANDOFF: pressure no longer discards a capture before any durable record exists.
         let evicted = scheduler.scheduled.filter { $0.1.isCancelled }
         XCTAssertFalse(evicted.isEmpty, "ring eviction retires the deadline of the record it submits")
         for (_, work) in evicted { work.perform() }
         drain()
-        // NO-SILENT-LOSS (spec defect d6580187): the record pressed out of the ring is EMITTED
+        // NO-SILENT-LOSS: the record pressed out of the ring is EMITTED
         // at eviction — exactly one durably ready entry — and the evicted (cancelled) timer can
         // never publish a second copy of it. The emission hops the collector's work queue, so
         // observe over a bounded window instead of racing it.
@@ -1161,7 +1161,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
             "no stale timer resurrects or duplicates a published record")
     }
 
-    /// `OutcomeWaitLimit` still refuses a nonsense value (spec 4afc6e43 keeps the timeout a fixed
+    /// `OutcomeWaitLimit` still refuses a nonsense value ( keeps the timeout a fixed
     /// annotation deadline), but its ABSENCE is no longer an admission gate: the collector admits
     /// and retains audio on consent alone. This control used to assert the retired readiness gate.
     func test_invalidOutcomeLimitIsRejectedButItsAbsenceNoLongerClosesAdmission() {
@@ -1183,7 +1183,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
     /// the only expiry watcher scheduled the POLICY deadline — so a short allowance stayed usable
     /// after its own deadline while policy was still live.
     ///
-    /// REVIEWER (on `bf335f109`, gap 1): the first version of this control granted ONE record, so its
+    /// REVIEWER: the first version of this control granted ONE record, so its
     /// second `take` failed on ledger exhaustion whatever the deadline did, and two direct `isLive`
     /// assertions were carrying the evidence. This version grants spare capacity and asserts the
     /// PRODUCTION admission result on both sides of the boundary.
@@ -1272,7 +1272,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(producerWakes, 1, "and it must ask the producer for another allocation")
     }
 
-    /// Spec c74d7e30 ("Actual upload usage"): the client no longer holds a per-day record
+    /// ("Actual upload usage"): the client no longer holds a per-day record
     /// limit or charges a usage ledger — the SERVER meters actual accepted bytes per UTC day.
     /// The former allowance test asserted a second capture is REFUSED locally; its replacement
     /// asserts the NEW contract: the second consented capture is admitted, and no local ledger
@@ -1374,7 +1374,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         var data = try Data(contentsOf: audioURL)
         data[VoiceSharingRecordBinding.wavHeaderBytes + 2] ^= 0xFF
         try data.write(to: audioURL)
-        // AMENDED BY SPEC a4b417fc RULING 2: tampered audio is a DIGEST MISMATCH, and the ruling is
+        // AMENDED by: tampered audio is a DIGEST mismatch, and the ruling is
         // explicit that such a record must be SENT rather than held — only the server's final
         // refusal may delete it. So the assertion inverts: it stays ready upload work. What must
         // still be true is that the client never treats it as the record it claims to be.
@@ -1445,8 +1445,8 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         return await calls.count()
     }
 
-    /// REVIEWER 23901ee6 finding 3: a drain that found the scheduler busy and registered a
-    /// completion waiter behind a BLOCKED EXPIRY must be woken when expiry finishes. Expiry released
+    /// finding 3: a drain that found the scheduler busy and registered a
+    /// completion waiter behind a BLOCKED expiry must be woken when expiry finishes. Expiry released
     /// `passInFlight` without firing the waiters, so that drain never re-offered. RED before expiry
     /// used the same completion path as `drainOnce`.
     func test_aDrainWaitingBehindABlockedExpiryIsWoken() async throws {
@@ -1462,7 +1462,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
             isAuthorized: { true })
         let expiryHeld = expectation(description: "expiry owns the scheduler")
         let woken = expectation(description: "the waiting drain is woken")
-        // BLOCK INSIDE EXPIRY with a semaphore (XCTestExpectation cannot be waited on off the main
+        // BLOCK inside expiry with a semaphore (XCTestExpectation cannot be waited on off the main
         // thread here): expiry holds the slot until the control signals it.
         let release = DispatchSemaphore(value: 0)
         scheduler.expiryBodyForTesting = {
@@ -1475,7 +1475,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
             expiryDone.fulfill()
         }
         await fulfillment(of: [expiryHeld], timeout: 5)
-        // A DRAIN ARRIVES WHILE EXPIRY OWNS THE SCHEDULER: it must WAIT, not take ownership.
+        // A DRAIN arrives while expiry owns the scheduler: it must WAIT, not take ownership.
         let registration = scheduler.registerOwnerCompletion { woken.fulfill() }
         XCTAssertFalse(registration.assumedOwnership,
                        "premise: the drain must wait behind expiry, not assume ownership")
@@ -1483,9 +1483,9 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         await fulfillment(of: [woken, expiryDone], timeout: 5)
     }
 
-    /// REVIEWER 34aae0fa (1) / 7c4c9cff PROGRESS RULE: a wake may only be armed for work the next
+    /// (1) / 7c4c9cff PROGRESS rule: a wake may only be armed for work the next
     /// pass can ATTEMPT, and the check must use the SAME admission facts the drain uses. Under an
-    /// OWNER-WIDE RETRY HOLD (`attempt.pause.intent`, VoiceSharingUploadQueue.swift
+    /// OWNER-WIDE retry hold (`attempt.pause.intent`, VoiceSharingUploadQueue.swift
     /// `retryHoldLocked`) `admitAttempt` throws for every entry, so a due boundary is not work.
     /// RED on f3f5f70ec, where the boundary reader ignored the hold and returned 0 — the exact
     /// zero delay that makes the trigger re-offer itself without progress.
@@ -1495,7 +1495,7 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         // The durable retry-hold marker, exactly as a failed boundary publication leaves it.
         try Data([0x01]).write(to: root.appendingPathComponent("attempt.pause.intent"),
                                options: .atomic)
-        // AMENDED BY SPEC d720ab6c / reviewer 4f98b831: a retry hold no longer suppresses the
+        // AMENDED by /: a retry hold no longer suppresses the
         // wake. The ORIGINAL worry behind this control is still real and still asserted below — a
         // zero delay would make the trigger re-offer itself without progress — so the boundary must
         // be either nil or a POSITIVE delay, never 0. Here the entry has a genuine future deadline,
@@ -1518,14 +1518,14 @@ final class VoiceSharingContributionSinkTests: XCTestCase {
         XCTAssertFalse(entryName.isEmpty, "premise")
     }
 
-    /// REVIEWER 34aae0fa (1): the same rule for the SECOND owner-wide hold. A durable revocation
+    /// (1): the same rule for the SECOND owner-wide hold. A durable revocation
     /// hold (`revocationHoldLocked`, i.e. a pending disqualification across the owner) refuses
     /// admission for every entry, so a due boundary over one is not due work either.
     func test_aDueBoundaryUnderAnOwnerWideHoldArmsNoWake() async throws {
         let calls = TransportCallBox()
         let (_, trigger) = readyEntryWithDueBoundary(calls)
         // The durable owner-wide revocation marker: `revocation.intent` at the root, which recovery
-        // reads into `revocationHoldLocked` (VoiceSharingUploadQueue.swift:269, :3572).
+        // reads into `revocationHoldLocked` (VoiceSharingUploadQueue.swift:269,:3572).
         try Data([0x01]).write(to: root.appendingPathComponent("revocation.intent"),
                                options: .atomic)
         // Re-open the queue so recovery picks the marker up the way production does.
