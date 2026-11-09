@@ -32,10 +32,18 @@ final class VoiceSharingDirectSink {
 
     func handle(_ event: VoiceSharingCollector.SegmentEvent) async {
         guard isEnabled() else { return }
-        // A STARTED event marks the moment a segment opened; it carries no audio and no stages yet.
-        // Publishing it wrote a record whose observations were whatever the fallback claims said,
-        // which then competed with the real completed record for the same capture.
-        guard event.kind != .started else { return }
+        // Only a segment that actually produced a recording is published: a completed one, or one the
+        // pipeline rejected (a bleed or wake refusal still analyses the audio, so the server needs the
+        // record). Everything else is bookkeeping for this device alone — a started event carries no
+        // audio and no stages yet, so publishing it wrote a record whose observations were only the
+        // fallback claims and competed with the real record for the same capture; a cancelled one is a
+        // content-free disposal notice, and publishing it would upload an empty WAV.
+        switch event.kind {
+        case .completed, .rejectedBleed, .rejectedWake:
+            break
+        case .started, .cancelled:
+            return
+        }
         do {
             // ENGINE-PRODUCED observations win: the event carries the stages the recogniser
             // actually reported, and they override any caller claim for the same stage.

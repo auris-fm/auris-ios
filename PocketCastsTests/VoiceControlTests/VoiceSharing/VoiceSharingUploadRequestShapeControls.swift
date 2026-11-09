@@ -73,6 +73,42 @@ final class VoiceSharingUploadRequestShapeControls: XCTestCase {
         XCTAssertNotNil(RecordingWire.shared.request, "the request reached the wire after the stop")
     }
 
+    /// WITHDRAWAL IN THE START WINDOW. Permission is answered and the transfer is registered inside ONE
+    /// critical section, so no stop can land between them: if one does, `cancelInFlight()` finds nothing
+    /// registered and the recording leaves without permission ever being re-read.
+    ///
+    /// The seam runs at exactly that instant — after the answer, before registration — and withdraws.
+    /// With the check inside the section the withdrawal has already been recorded when the send would
+    /// begin, so nothing leaves; with the check hoisted above the lock the transfer starts anyway.
+    func test_aStopBetweenThePermissionAnswerAndRegistrationStillStopsTheUpload() async throws {
+        RecordingWire.shared.reset()
+        let queue = VoiceSharingQueue(root: root, log: { _ in })
+        _ = await queue.publish(audio: Data(repeating: 3, count: 512),
+                          metadata: Data(#"{"enrollment_epoch":"epoch-1"}"#.utf8),
+                          name: "one")
+        let published = await queue.entries()
+        let entry = try XCTUnwrap(published.first)
+
+        let transport = VoiceSharingUploadTransport(
+            baseURLProvider: { "https://unit.test" },
+            tokenProvider: RecordingTokens(),
+            session: RecordingWire.session)
+        let box = VoiceSharingPermissionBox()
+        transport.afterPermissionBeforeRegistrationForTesting = {
+            // The user withdraws in the gap the old code left open.
+            box.consentHeld = false
+        }
+        let answer = await transport.send(entry: entry, stillPermitted: {
+            box.wasAsked = true
+            return box.consentHeld
+        })
+
+        XCTAssertNil(RecordingWire.shared.request,
+                     "a withdrawal in the start window must not let the recording reach the network")
+        XCTAssertNotEqual(answer, .response(status: 201), "a stopped attempt is not reported as a reply")
+        XCTAssertTrue(box.wasAsked, "the hook is consulted before anything is registered")
+    }
+
     /// Both parts arrive, in the order the server reads them, with `metadata` carrying no filename:
     /// its whole value is the record JSON.
     func test_thePartsArriveInOrderAndMetadataCarriesNoFilename() async throws {
@@ -176,4 +212,19 @@ private final class RecordingTokens: CloudTokenProviding {
     func token() async -> String? { "tok-acct-1" }
     func prepare() async {}
     func handleUnauthorized(rejectedToken: String?) async {}
+}
+
+/// Stands in for live consent, and records that the transport consulted it.
+private final class VoiceSharingPermissionBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var held = true
+    private var asked = false
+    var consentHeld: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return held }
+        set { lock.lock(); held = newValue; lock.unlock() }
+    }
+    var wasAsked: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return asked }
+        set { lock.lock(); asked = newValue; lock.unlock() }
+    }
 }

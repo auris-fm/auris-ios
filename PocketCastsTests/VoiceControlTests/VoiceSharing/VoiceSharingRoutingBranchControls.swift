@@ -82,6 +82,33 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
             requestUploadDrain: {})
     }
 
+    /// Only a segment that produced a recording may be published. A cancelled segment is a
+    /// content-free disposal notice for this device; publishing it uploads an empty WAV. A started
+    /// segment likewise carries no audio and no stages, so its record would compete with the real one.
+    func test_onlyCompletedAndRejectedSegmentsArePublished() async throws {
+        let sink = makeSink()
+        let queue = try XCTUnwrap(self.queue)
+        let audio: [Float] = [0, 0.2, -0.3, 0.4]
+        func event(_ kind: VoiceSharingCollector.SignalKind) -> VoiceSharingCollector.SegmentEvent {
+            VoiceSharingCollector.SegmentEvent(
+                kind: kind, captureID: UUID(), enrollmentEpoch: "epoch-1",
+                authorizationSession: "sess-1", retainedSamples: audio.count, truncated: false,
+                droppedSpans: [], originalSampleCount: nil, audio: audio, isGateControl: false)
+        }
+        for kind in [VoiceSharingCollector.SignalKind.started, .cancelled] {
+            await sink.handle(event(kind))
+            let published = await queue.entries()
+            XCTAssertTrue(published.isEmpty,
+                          "\(kind) must not be published: it carries no recording to upload")
+        }
+        for kind in [VoiceSharingCollector.SignalKind.completed, .rejectedBleed, .rejectedWake] {
+            let before = await queue.count()
+            await sink.handle(event(kind))
+            let after = await queue.count()
+            XCTAssertEqual(after, before + 1, "\(kind) carries a real recording and must be published")
+        }
+    }
+
     private var provenance: VoiceSharingContributionEncoder.Provenance {
         VoiceSharingContributionEncoder.Provenance(
             platform: "ios", appVersion: "9.0", build: "1000", captureSessionID: "gen-A",

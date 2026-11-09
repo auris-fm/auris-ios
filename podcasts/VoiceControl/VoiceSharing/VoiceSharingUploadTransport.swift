@@ -32,6 +32,10 @@ final class VoiceSharingUploadTransport {
     /// The transfer currently in flight, so a consent loss can cancel it rather than merely stop
     /// scheduling new work. Cancelling the task cancels the underlying request.
     private let inFlightLock = NSLock()
+    /// Test seam for the withdrawal window: called under the registration lock, after permission is
+    /// answered and before the transfer is published. A caller that withdraws here proves the stop is
+    /// observed by the same critical section rather than slipping into a gap.
+    var afterPermissionBeforeRegistrationForTesting: (() -> Void)?
     private var inFlight: Task<(Data, URLResponse), any Error>?
 
     init(baseURLProvider: @escaping () -> String,
@@ -52,9 +56,10 @@ final class VoiceSharingUploadTransport {
 
     /// Sends `metadata` then `audio` as multipart parts, in that order, as the spec requires.
     ///
-    /// `stillPermitted` is asked immediately before the request leaves, after the credential is in
-    /// hand: a withdrawal that lands while this call is waiting for a credential must stop the
-    /// recording from reaching the network at all.
+    /// `stillPermitted` is asked after the credential is in hand, INSIDE the same critical section
+    /// that registers the transfer: a withdrawal that lands while this call is waiting for a
+    /// credential — or in the instant between that answer and registration — must stop the recording
+    /// from reaching the network at all.
     func send(entry: VoiceSharingQueue.Entry,
               stillPermitted: () -> Bool = { true }) async -> VoiceSharingUploader.Answer {
         guard let token = await tokenProvider.token(), !token.isEmpty else {
@@ -71,7 +76,6 @@ final class VoiceSharingUploadTransport {
             // retrying forever on the same bytes.
             return .response(status: 400)
         }
-        guard stillPermitted() else { return .cancelled }
         var request = URLRequest(url: url, timeoutInterval: Self.requestTimeout)
         request.httpMethod = "POST"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -84,9 +88,12 @@ final class VoiceSharingUploadTransport {
         request.setValue(String(body.count), forHTTPHeaderField: "Content-Length")
         lastPresentedToken = token
         do {
-            let (_, response) = try await runInFlight(request, body: body)
+            let (_, response) = try await runInFlight(request, body: body, stillPermitted: stillPermitted)
             guard let http = response as? HTTPURLResponse else { return .noAnswer }
             return .response(status: http.statusCode)
+        } catch is CancellationError {
+            // Refused under the registration lock: nothing was sent, and nothing is left registered.
+            return .cancelled
         } catch {
             return .noAnswer
         }
@@ -94,20 +101,40 @@ final class VoiceSharingUploadTransport {
 
     /// Runs one transfer, publishing it so `cancelInFlight()` can reach it.
     ///
-    /// No latch: a stop cancels the attempt in flight, and the next call starts a fresh one. The
-    /// gate, not a flag, is what makes registration atomic — the task is created and published under
-    /// the same lock `cancelInFlight()` takes, and is only released once it is reachable, so a stop
-    /// arriving mid-start either cancels it or finds it already gone.
-    private func runInFlight(_ request: URLRequest, body: Data) async throws -> (Data, URLResponse) {
+    /// No latch: a stop cancels the attempt in flight, and the next call starts a fresh one.
+    ///
+    /// The permission check is INSIDE the same critical section that creates and publishes the task.
+    /// Asking before taking the lock leaves a window: a withdrawal landing after the answer but
+    /// before registration found nothing to cancel, and the transfer then started without ever
+    /// re-reading permission — a recording would reach the network after the user said stop. The
+    /// gate closes the remaining interval, so the task cannot send until it is reachable.
+    private func runInFlight(_ request: URLRequest, body: Data,
+                             stillPermitted: () -> Bool) async throws -> (Data, URLResponse) {
         let gate = TransferGate()
         inFlightLock.lock()
+        guard stillPermitted() else {
+            inFlightLock.unlock()
+            throw CancellationError()
+        }
+        // Test seam: runs the interleaving a real withdrawal could otherwise only reach by luck.
+        afterPermissionBeforeRegistrationForTesting?()
         let task = Task { [session] in
             await gate.waitUntilReleased()
             return try await session.upload(for: request, from: body)
         }
         inFlight = task
+        // Asked AGAIN once the transfer is registered, still under the same lock: the answer above
+        // can be stale by now, and a withdrawal in between would otherwise let the bytes leave. A
+        // stop that ran in that window cancelled nothing (there was nothing to cancel yet), so this
+        // second reading is what makes the start atomic.
+        let permittedAfterRegistration = stillPermitted()
+        if !permittedAfterRegistration {
+            inFlight = nil
+            task.cancel()
+        }
         inFlightLock.unlock()
         defer { inFlightLock.lock(); inFlight = nil; inFlightLock.unlock() }
+        guard permittedAfterRegistration else { throw CancellationError() }
         gate.release()
         return try await task.value
     }
