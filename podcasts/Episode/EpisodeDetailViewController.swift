@@ -1,4 +1,5 @@
 import Combine
+import Kingfisher
 import PocketCastsDataModel
 import PocketCastsServer
 import PocketCastsUtils
@@ -68,7 +69,7 @@ class EpisodeDetailViewController: FakeNavViewController, UIDocumentInteractionC
     @IBOutlet var buttonsStackView: UIStackView!
     @IBOutlet var downloadBtn: UIButton! {
         didSet {
-            downloadBtn.titleLabel?.font = UIFont.font(ofSize: 13, weight: .regular, scalingWith: .footnote)
+            downloadBtn.titleLabel?.font = UIFont.font(ofSize: 13, weight: .regular, scalingWith: .footnote, maxSizeCategory: .extraExtraExtraLarge)
             downloadBtn.titleLabel?.adjustsFontForContentSizeCategory = true
             downloadBtn.titleLabel?.numberOfLines = 3
             downloadBtn.imageView?.adjustsImageSizeForAccessibilityContentSizeCategory = true
@@ -77,7 +78,7 @@ class EpisodeDetailViewController: FakeNavViewController, UIDocumentInteractionC
 
     @IBOutlet var addButton: UIButton! {
         didSet {
-            addButton.titleLabel?.font = UIFont.font(ofSize: 13, weight: .regular, scalingWith: .footnote)
+            addButton.titleLabel?.font = UIFont.font(ofSize: 13, weight: .regular, scalingWith: .footnote, maxSizeCategory: .extraExtraExtraLarge)
             addButton.titleLabel?.adjustsFontForContentSizeCategory = true
             addButton.titleLabel?.numberOfLines = 3
         }
@@ -87,7 +88,7 @@ class EpisodeDetailViewController: FakeNavViewController, UIDocumentInteractionC
 
     @IBOutlet var playStatusButton: UIButton! {
         didSet {
-            playStatusButton.titleLabel?.font = UIFont.font(ofSize: 13, weight: .regular, scalingWith: .footnote)
+            playStatusButton.titleLabel?.font = UIFont.font(ofSize: 13, weight: .regular, scalingWith: .footnote, maxSizeCategory: .extraExtraExtraLarge)
             playStatusButton.titleLabel?.adjustsFontForContentSizeCategory = true
             playStatusButton.titleLabel?.numberOfLines = 3
         }
@@ -95,7 +96,7 @@ class EpisodeDetailViewController: FakeNavViewController, UIDocumentInteractionC
 
     @IBOutlet var archiveButton: UIButton! {
         didSet {
-            archiveButton.titleLabel?.font = UIFont.font(ofSize: 13, weight: .regular, scalingWith: .footnote)
+            archiveButton.titleLabel?.font = UIFont.font(ofSize: 13, weight: .regular, scalingWith: .footnote, maxSizeCategory: .extraExtraExtraLarge)
             archiveButton.titleLabel?.adjustsFontForContentSizeCategory = true
             archiveButton.titleLabel?.numberOfLines = 3
         }
@@ -160,6 +161,7 @@ class EpisodeDetailViewController: FakeNavViewController, UIDocumentInteractionC
 
     private var episodeArtworkURL: URL?
     private var didResolveEpisodeArtwork = false
+    private var didLoadBaseEpisodeArtwork = false
 
     var rawShowNotes: String?
     var lastThemeRenderedNotesIn: Theme.ThemeType?
@@ -181,8 +183,8 @@ class EpisodeDetailViewController: FakeNavViewController, UIDocumentInteractionC
 
     init(episodeUuid: String, source: EpisodeDetailViewSource, playlist: AutoplayHelper.Playlist? = nil, timestamp: TimeInterval? = nil) {
         // it's ok to crash here, an episode card with no episode or podcast is invalid
-        episode = DataManager.sharedManager.findEpisode(uuid: episodeUuid)!
-        podcast = DataManager.sharedManager.findPodcast(uuid: episode.podcastUuid, includeUnsubscribed: true)!
+        episode = DataManager.shared.findEpisode(uuid: episodeUuid)!
+        podcast = DataManager.shared.findPodcast(uuid: episode.podcastUuid, includeUnsubscribed: true)!
         viewSource = source
         fromPlaylist = playlist
         self.timestamp = timestamp
@@ -190,7 +192,7 @@ class EpisodeDetailViewController: FakeNavViewController, UIDocumentInteractionC
     }
 
     init(episodeUuid: String, podcast: Podcast, source: EpisodeDetailViewSource, playlist: AutoplayHelper.Playlist? = nil) {
-        episode = DataManager.sharedManager.findEpisode(uuid: episodeUuid)! // it's ok to crash here, an episode card with no episode is invalid
+        episode = DataManager.shared.findEpisode(uuid: episodeUuid)! // it's ok to crash here, an episode card with no episode is invalid
         self.podcast = podcast
         viewSource = source
         fromPlaylist = playlist
@@ -235,7 +237,6 @@ class EpisodeDetailViewController: FakeNavViewController, UIDocumentInteractionC
             self.didDismiss()
         }
 
-        modalPresentationCapturesStatusBarAppearance = true
         presentationController?.delegate = self
 
         // Hide the scroll title if the tabs are visible
@@ -259,6 +260,7 @@ class EpisodeDetailViewController: FakeNavViewController, UIDocumentInteractionC
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
 
+        didLoadBaseEpisodeArtwork = false
         updateDisplayedData()
         updateColors()
 
@@ -283,6 +285,7 @@ class EpisodeDetailViewController: FakeNavViewController, UIDocumentInteractionC
 
         addCustomObserver(Constants.Notifications.downloadProgress, selector: #selector(updateDownloadProgress))
         addCustomObserver(Constants.Notifications.episodeDownloaded, selector: #selector(episodeDownloadedEvent))
+        addCustomObserver(.episodeEmbeddedArtworkLoaded, selector: #selector(episodeEmbeddedArtworkLoaded))
 
         addCustomObserver(Constants.Notifications.episodePlayStatusChanged, selector: #selector(specificEpisodeEventDidFire(_:)))
         addCustomObserver(Constants.Notifications.episodeArchiveStatusChanged, selector: #selector(specificEpisodeEventDidFire(_:)))
@@ -321,10 +324,6 @@ class EpisodeDetailViewController: FakeNavViewController, UIDocumentInteractionC
         }
     }
 
-    override var preferredStatusBarStyle: UIStatusBarStyle {
-        .lightContent
-    }
-
     // MARK: - Event Based Updates
 
     @objc private func specificEpisodeEventDidFire(_ notification: Notification) {
@@ -344,8 +343,16 @@ class EpisodeDetailViewController: FakeNavViewController, UIDocumentInteractionC
     }
 
     @objc private func episodeDownloadedEvent() {
+        didLoadBaseEpisodeArtwork = false
         updateDisplayedData()
         updateColors()
+    }
+
+    @objc private func episodeEmbeddedArtworkLoaded() {
+        guard episodeArtworkURL == nil else { return }
+
+        didLoadBaseEpisodeArtwork = false
+        updateArtwork()
     }
 
     @objc private func generalEpisodeEventDidFire() {
@@ -396,7 +403,7 @@ class EpisodeDetailViewController: FakeNavViewController, UIDocumentInteractionC
 
     private func performUpdateDisplayedData(reloadingEpisode: Bool = true) {
         if reloadingEpisode {
-            guard let updatedEpisode = DataManager.sharedManager.findEpisode(uuid: episode.uuid) else { return }
+            guard let updatedEpisode = DataManager.shared.findEpisode(uuid: episode.uuid) else { return }
             episode = updatedEpisode
         }
 
@@ -407,7 +414,7 @@ class EpisodeDetailViewController: FakeNavViewController, UIDocumentInteractionC
                 downloadBtn.setTitle(L10n.cancel, for: .normal)
                 downloadIndicator.progress = 1
                 downloadIndicator.color = ThemeColor.secondaryIcon01(for: themeOverride)
-            } else if let progress = DownloadManager.shared.progressManager.progressForEpisode(episode.uuid) {
+            } else if let progress = DownloadManager.shared.progressManager.progress(forEpisodeUuid: episode.uuid) {
                 downloadBtn.setTitle(progress.percentageProgressAsString(), for: .normal)
                 downloadIndicator.progress = CGFloat(progress.progress())
             } else {
@@ -422,7 +429,7 @@ class EpisodeDetailViewController: FakeNavViewController, UIDocumentInteractionC
         podcastName.text = podcast.title
         updateArtwork()
 
-        episodeInfo.text = DateFormatHelper.sharedHelper.longLocalizedFormat(episode.publishedDate) + " · " + episode.displayableTimeLeft()
+        episodeInfo.text = DateFormatHelper.shared.longLocalizedFormat(episode.publishedDate) + " · " + episode.displayableTimeLeft()
 
         updateStar()
 
@@ -433,14 +440,22 @@ class EpisodeDetailViewController: FakeNavViewController, UIDocumentInteractionC
     }
 
     private func updateArtwork() {
-        // While episode artwork is enabled but not yet resolved, show a placeholder. Once resolved,
-        // show the episode's own artwork, falling back to the podcast artwork when there is none.
-        if Settings.loadEmbeddedImages, !didResolveEpisodeArtwork {
-            podcastImage.setPlaceholder(size: .page)
-        } else if let episodeArtworkURL {
+        guard Settings.loadEmbeddedImages else {
+            didLoadBaseEpisodeArtwork = false
+            podcastImage.setPodcast(uuid: podcast.uuid, size: .page)
+            return
+        }
+
+        if let episodeArtworkURL {
             podcastImage.setEpisodeArtwork(url: episodeArtworkURL, size: .page)
-        } else if let uuid = episode.parentPodcast()?.uuid {
-            podcastImage.setPodcast(uuid: uuid, size: .page)
+        } else if !didResolveEpisodeArtwork, !EpisodeArtwork().isCached(episodeUuid: episode.uuid) {
+            podcastImage.setPlaceholder(size: .page)
+        } else if !didLoadBaseEpisodeArtwork {
+            // Reading embedded artwork from a downloaded file is expensive. Only retry when
+            // artwork becomes available, a download finishes, or the screen is revisited.
+            didLoadBaseEpisodeArtwork = true
+            podcastImage.imageView?.kf.cancelDownloadTask()
+            podcastImage.setBaseEpisode(episode: episode, size: .page)
         }
     }
 
@@ -485,7 +500,7 @@ class EpisodeDetailViewController: FakeNavViewController, UIDocumentInteractionC
         showNotesWebView.backgroundColor = bgColor
         view.backgroundColor = bgColor
 
-        let podcastColor = (themeOverride?.isDark ?? Theme.isDarkTheme()) ? ColorManager.darkThemeTintForPodcast(podcast) : ColorManager.lightThemeTintForPodcast(podcast)
+        let podcastColor = (themeOverride?.isDark ?? Theme.isDarkTheme) ? ColorManager.darkThemeTint(for: podcast) : ColorManager.lightThemeTint(for: podcast)
         podcastName.textColor = ThemeColor.podcastText02(podcastColor: podcastColor, for: themeOverride)
         episodeChevron.tintColor = ThemeColor.podcastIcon02(podcastColor: podcastColor, for: themeOverride)
         progressView.backgroundColor = ThemeColor.podcastIcon02(podcastColor: podcastColor, for: themeOverride)
@@ -508,7 +523,7 @@ class EpisodeDetailViewController: FakeNavViewController, UIDocumentInteractionC
 
         messageIcon.tintColor = primaryText02
 
-        if lastThemeRenderedNotesIn != (themeOverride ?? Theme.sharedTheme.activeTheme) {
+        if lastThemeRenderedNotesIn != (themeOverride ?? Theme.shared.activeTheme) {
             renderShowNotes()
         }
 
@@ -532,7 +547,7 @@ class EpisodeDetailViewController: FakeNavViewController, UIDocumentInteractionC
         Analytics.track(.episodeDetailPodcastNameTapped, properties: ["source": viewSource])
 
         dismiss(animated: true) {
-            NavigationManager.sharedManager.navigateTo(NavigationManager.podcastPageKey, data: [NavigationManager.podcastKey: podcast])
+            NavigationManager.shared.navigateTo(NavigationManager.podcastPageKey, data: [NavigationManager.podcastKey: podcast, NavigationManager.podcastSourceKey: PodcastScreenSource.episodeDetails])
         }
     }
 
@@ -546,14 +561,6 @@ class EpisodeDetailViewController: FakeNavViewController, UIDocumentInteractionC
 
     func documentInteractionControllerDidDismissOpenInMenu(_ controller: UIDocumentInteractionController) {
         docController = nil
-    }
-
-    private func shareLinkToEpisode(sharePosition: Bool, sourceRect: CGRect) {
-        let shareTime = sharePosition ? episode.playedUpTo : 0
-
-        let type = shareTime == 0 ? "episode" : "current_position"
-
-        SharingHelper.shared.shareLinkTo(episode: episode, shareTime: shareTime, fromController: self, sourceRect: sourceRect, sourceView: view, fromSource: analyticsSource, analyticsType: type)
     }
 
     func episodeFileAction(from sourceRect: CGRect) -> OptionAction? {
@@ -678,7 +685,7 @@ private extension EpisodeDetailViewController {
 
         fakeNavView.addSubview(tabContainerView)
 
-        let trailingAnchor = tabContainerView.trailingAnchor.constraint(equalTo: fakeNavView.trailingAnchor)
+        let trailingAnchor = tabContainerView.trailingAnchor.constraint(equalTo: fakeNavView.safeAreaLayoutGuide.trailingAnchor)
         NSLayoutConstraint.activate([
             tabContainerView.leadingAnchor.constraint(equalTo: backBtn.trailingAnchor),
             trailingAnchor,
@@ -776,7 +783,7 @@ private extension EpisodeDetailViewController {
 
         tabContainerTrailingAnchor.isActive = false
 
-        let anchor = rightActionButtons.last?.leadingAnchor ?? fakeNavView.trailingAnchor
+        let anchor = rightActionButtons.last?.leadingAnchor ?? fakeNavView.safeAreaLayoutGuide.trailingAnchor
         let trailingAnchor = tabContainerView.trailingAnchor.constraint(equalTo: anchor)
 
         trailingAnchor.isActive = true

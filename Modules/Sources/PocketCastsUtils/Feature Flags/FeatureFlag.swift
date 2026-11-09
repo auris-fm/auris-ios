@@ -29,15 +29,6 @@ public enum FeatureFlag: String, CaseIterable {
     /// Enable the new Upgrade Experiments
     case upgradeExperiment
 
-    /// Enable the Referrals feature
-    case referrals
-
-    /// Enables the referrals Send Flow
-    case referralsSend
-
-    /// Enables the referrals Claim Flow
-    case referralsClaim
-
     /// Run a vacuum process on the database in order to optimize data fetch
     case runVacuumOnVersionUpdate
 
@@ -52,9 +43,6 @@ public enum FeatureFlag: String, CaseIterable {
 
     /// Enable/Disable the podcast feed reload feature
     case podcastFeedUpdate
-
-    /// Enable/Disable the use of a thread safe ongoing downloads cache
-    case downloadsThreadSafeCache
 
     /// Enable Disable the use of suggested folders
     case suggestedFolders
@@ -129,9 +117,6 @@ public enum FeatureFlag: String, CaseIterable {
     /// Show a satisfaction survey before prompting to rate
     case userSatisfactionSurvey
 
-    /// Whether to use database concurrent reads or not
-    case concurrentDatabaseReads
-
     /// Limit playback position changes when switching episodes
     case limitPlaybackPositionChanges
 
@@ -165,9 +150,6 @@ public enum FeatureFlag: String, CaseIterable {
     /// Uses the PlaylistMetadataLoader cache before running the query (the query will update when it's done)
     case playlistDataCacheBeforeQuery
 
-    /// Ignores play remote commands when another app is playing non-mixable audio
-    case ignorePlayWithOtherAudio
-
     /// Use cellular-specific network APIs instead of expensive network APIs
     case useCellularNetworkApis
 
@@ -194,9 +176,6 @@ public enum FeatureFlag: String, CaseIterable {
 
     /// Enable VoiceBoostN with updated description copy (TestFlight only)
     case voiceBoostN
-
-    /// Use GRDB QueryInterface for database queries instead of raw SQL
-    case grdbQueryInterface
 
     /// Adds invalidation to the playlist cache on appearance when its been > 30 seconds
     case playlistCacheInvalidation
@@ -284,6 +263,38 @@ public enum FeatureFlag: String, CaseIterable {
     /// Enable the What's New feed
     case whatsNewFeed
 
+    /// Show the What's New feed's research messages, which ask the user to answer a poll
+    case whatsNewPolls
+
+    /// Don't pause on a route change while a play request is activating the audio session
+    case ignoreRouteChangeWhilePlayRequestPending
+
+    /// Ignore non-200 responses (such as 304 Not Modified) to the background Up Next sync instead of treating them as an empty queue
+    case ignoreUnsuccessfulBackgroundUpNextSync
+
+    /// Show the full screen player and its tabs side by side on large screens (iOS 27.1+),
+    /// over a blurred artwork background
+    case largeScreenNowPlaying
+
+    /// Show the synced transcript timing debug overlay at the bottom of the transcript (debug builds only)
+    case transcriptDebugOverlay
+
+    /// Enable Playback 2026 (the yearly listening recap). Also the remote kill switch: turning it off in
+    /// Remote Config (`playback2026`) hides every entry point and exits a running flow
+    case playback2026
+
+    /// Show the Played Podcasts option in the Podcasts tab, which hides podcasts with nothing left to listen to
+    case hidePlayedPodcasts
+
+    /// Update the podcast cache from the rows each write changes, instead of reloading every podcast after each write
+    case reloadOnlySavedPodcast
+
+    /// On a first sign-in, sync Up Next after the full sync imports the podcasts, instead of downloading each Up Next podcast first
+    case syncUpNextAfterFullSync
+
+    /// Save the episodes a podcast update finds missing in transactions of up to 100, instead of one by one
+    case saveMissingEpisodesInOneTransaction
+
     public var enabled: Bool {
         if let overriddenValue = FeatureFlagOverrideStore().overriddenValue(for: self) {
             return overriddenValue
@@ -316,12 +327,6 @@ public enum FeatureFlag: String, CaseIterable {
             false
         case .upgradeExperiment:
             false
-        case .referrals:
-            true
-        case .referralsClaim:
-            true
-        case .referralsSend:
-            true
         case .runVacuumOnVersionUpdate:
             false
         case .endOfYear2024:
@@ -331,8 +336,6 @@ public enum FeatureFlag: String, CaseIterable {
         case .winback:
             true
         case .podcastFeedUpdate:
-            true
-        case .downloadsThreadSafeCache:
             true
         case .suggestedFolders:
             true
@@ -385,8 +388,6 @@ public enum FeatureFlag: String, CaseIterable {
             true
         case .userSatisfactionSurvey:
             true
-        case .concurrentDatabaseReads:
-            true
         case .limitPlaybackPositionChanges:
             true
         case .shareTranscripts:
@@ -409,8 +410,6 @@ public enum FeatureFlag: String, CaseIterable {
             true
         case .playlistDataCacheBeforeQuery:
             true
-        case .ignorePlayWithOtherAudio:
-            true
         case .useCellularNetworkApis:
             true
         case .optimizeManualPlaylistQueries:
@@ -429,8 +428,6 @@ public enum FeatureFlag: String, CaseIterable {
             true
         case .voiceBoostN:
             false
-        case .grdbQueryInterface:
-            true
         case .playlistCacheInvalidation:
             true
         case .watchLogFileTransfer:
@@ -484,7 +481,27 @@ public enum FeatureFlag: String, CaseIterable {
         case .newEpisodeNotificationsPushOptOut:
             true
         case .whatsNewFeed:
+            true
+        case .whatsNewPolls:
+            false
+        case .ignoreRouteChangeWhilePlayRequestPending:
+            true
+        case .ignoreUnsuccessfulBackgroundUpNextSync:
+            true
+        case .largeScreenNowPlaying:
+            true
+        case .transcriptDebugOverlay:
+            false
+        case .playback2026:
             BuildEnvironment.current == .debug
+        case .hidePlayedPodcasts:
+            false
+        case .reloadOnlySavedPodcast:
+            true
+        case .syncUpNextAfterFullSync:
+            true
+        case .saveMissingEpisodesInOneTransaction:
+            true
         }
     }
 
@@ -512,6 +529,4 @@ extension FeatureFlag: OverrideableFlag {
     public var canOverride: Bool {
         true
     }
-
-    private static let isTestFlight = Bundle.main.appStoreReceiptURL?.lastPathComponent == "sandboxReceipt"
 }

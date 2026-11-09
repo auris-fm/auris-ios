@@ -32,7 +32,7 @@ class UpgradeAccountViewModel: PlusPurchaseModel {
         self.flowSource = flowSource
         self.style = style
         super.init()
-        loadPrices() {
+        loadPrices() { [weak self] in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.products = self.pricingInfo.products.filter {
@@ -143,8 +143,9 @@ class UpgradeAccountViewModel: PlusPurchaseModel {
     }
 
     func presentLogin(with product: ProductInfo? = nil) {
-        let controller = LoginCoordinator.make(in: navigationController, continuePurchasing: product)
-        navigationController?.pushViewController(controller, animated: true)
+        guard let navigationController else { return }
+        let controller = LoginCoordinator.make(in: navigationController, continuePurchasing: product, traitCollection: navigationController.traitCollection)
+        navigationController.pushViewController(controller, animated: true)
     }
 
     func changedSubscriptionPeriod(_ value: PlanFrequency) {

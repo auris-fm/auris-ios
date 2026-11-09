@@ -29,14 +29,20 @@
     <string>複数選択をキャンセル</string>
     <key>accessibility_close_dialog</key>
     <string>ダイアログを閉じる</string>
+    <key>accessibility_close_player</key>
+    <string>プレーヤーを閉じる</string>
     <key>accessibility_deselect_episode</key>
     <string>エピソードの選択を解除</string>
     <key>accessibility_disabled</key>
     <string>無効</string>
     <key>accessibility_dismiss</key>
     <string>非表示</string>
+    <key>accessibility_episode_actions</key>
+    <string>エピソードアクション</string>
     <key>accessibility_episode_playback</key>
     <string>エピソードの再生</string>
+    <key>accessibility_follow_podcast</key>
+    <string>%1$@ をフォロー</string>
     <key>accessibility_hide_filter_details</key>
     <string>タップしてフィルターの詳細を非表示</string>
     <key>accessibility_hint_player_navigate_to_podcast_label</key>
@@ -45,6 +51,10 @@
     <string>ダブルタップしてエピソードに星を付ける</string>
     <key>accessibility_hint_unstar</key>
     <string>ダブルタップしてエピソードから星を削除</string>
+    <key>accessibility_mini_player</key>
+    <string>プレーヤー</string>
+    <key>accessibility_mini_player_hint</key>
+    <string>タップしてプレーヤーをフルサイズで開く</string>
     <key>accessibility_more_actions</key>
     <string>その他の操作</string>
     <key>accessibility_patron_only</key>
@@ -63,6 +73,8 @@
     <string>プレイリスト画像</string>
     <key>accessibility_plus_only</key>
     <string>ロック済み、Plus 機能</string>
+    <key>accessibility_podcast_artwork</key>
+    <string>ポッドキャストのアートワーク</string>
     <key>accessibility_profile_settings</key>
     <string>Pocket Casts の設定</string>
     <key>accessibility_select_episode</key>
@@ -73,6 +85,10 @@
     <string>タップして表示またはアカウントを開設</string>
     <key>accessibility_sort_and_options</key>
     <string>並び替えとオプション</string>
+    <key>accessibility_unfollow_podcast</key>
+    <string>%1$@ のフォローを解除</string>
+    <key>accessibility_up_next_list</key>
+    <string>次のエピソード一覧</string>
     <key>account</key>
     <string>アカウント</string>
     <key>account_change_email</key>
@@ -337,7 +353,11 @@
     <string>ブックマーク</string>
     <key>bookmark_delete_warning_body</key>
     <string>これらのブックマークを削除してもよろしいですか。元に戻すことはできません。</string>
+    <key>bookmark_delete_warning_body_singular</key>
+    <string>このブックマークを削除してもよいですか。元に戻すことはできません。</string>
     <key>bookmark_delete_warning_title</key>
+    <string>ブックマークを削除しますか ?</string>
+    <key>bookmark_delete_warning_title_singular</key>
     <string>ブックマークを削除しますか ?</string>
     <key>bookmark_details_title</key>
     <string>ブックマーク</string>
@@ -690,6 +710,8 @@ Pocket Casts Plus</string>
     <string>端末がシェイクされたためスリープタイマーが再開しました</string>
     <key>discover</key>
     <string>ディスカバー</string>
+    <key>discover_all_categories</key>
+    <string>カテゴリー一覧</string>
     <key>discover_all_episodes</key>
     <string>すべてのエピソード</string>
     <key>discover_all_podcasts</key>
@@ -754,6 +776,8 @@ Pocket Casts Plus</string>
     <string>TV / 映画</string>
     <key>discover_change_region</key>
     <string>リージョンを変更 (現在は%1$@)</string>
+    <key>discover_clear_category</key>
+    <string>カテゴリーをクリア</string>
     <key>discover_episode_fail_to_load</key>
     <string>エピソードを読み込めませんでした</string>
     <key>discover_featured</key>
@@ -864,6 +888,8 @@ Pocket Casts Plus</string>
     <string>検索に失敗</string>
     <key>discover_search_failed_msg</key>
     <string>インターネット接続を確認してください。</string>
+    <key>discover_select_a_category</key>
+    <string>カテゴリーを選択</string>
     <key>discover_select_region</key>
     <string>コンテンツのリージョンを選択</string>
     <key>discover_show_all</key>
@@ -1181,12 +1207,6 @@ Pocket Casts を最大限に活用しましょう。</string>
     <string>キューをシャッフル</string>
     <key>feature_marketing_watch_playback</key>
     <string>Wear OS と Apple Watch 向けアプリ</string>
-    <key>feature_tour_end_tour</key>
-    <string>ツアーを終了</string>
-    <key>feature_tour_new</key>
-    <string>新規</string>
-    <key>feature_tour_step_format</key>
-    <string>%1$@ / %2$@</string>
     <key>feedback_continue_with_mail</key>
     <string>デフォルトのメールアプリを開く</string>
     <key>feedback_mail_not_configured_msg</key>
@@ -1349,6 +1369,8 @@ Pocket Casts を最大限に活用しましょう。</string>
     <string>フォルダーを作成</string>
     <key>folder_create_new</key>
     <string>新規フォルダーを作成</string>
+    <key>folder_create_skip</key>
+    <string>スキップ</string>
     <key>folder_delete</key>
     <string>フォルダーを削除</string>
     <key>folder_delete_prompt_msg</key>
@@ -1968,6 +1990,10 @@ Pocket Casts を最大限に活用しましょう。</string>
     <string>Pocket Casts Plus でエピソードのシャッフルなどを利用しましょう</string>
     <key>paywall_dynamic_headline_watch</key>
     <string>Pocket Casts Plus でスマートウォッチからの聴取などを利用しましょう</string>
+    <key>pcasts_import_message</key>
+    <string>これにより、ポッドキャストと設定がこのファイルの内容に置き換えられ、Pocket Casts が閉じます。</string>
+    <key>pcasts_import_title</key>
+    <string>ポッドキャストと設定をインポート</string>
     <key>phone</key>
     <string>スマートフォン</string>
     <key>play</key>
@@ -2185,8 +2211,12 @@ Pocket Casts を最大限に活用しましょう。</string>
     <string>このエピソードは再生できません。</string>
     <key>player_error_internet_connection</key>
     <string>インターネット接続を確認して、もう一度お試しください。</string>
+    <key>player_error_not_enough_storage</key>
+    <string>端末のストレージが不足しています。 空き容量を確保してから、もう一度お試しください。</string>
     <key>player_error_short_no_connection</key>
     <string>オフラインになっています</string>
+    <key>player_error_short_not_enough_storage</key>
+    <string>端末のストレージがいっぱいです</string>
     <key>player_error_short_playback_error</key>
     <string>再生できませんでした。もう一度お試しください</string>
     <key>player_increment_time</key>
@@ -2215,6 +2245,10 @@ Pocket Casts を最大限に活用しましょう。</string>
     <string>再生エラー</string>
     <key>player_user_episode_upload_error</key>
     <string>アップロードエラー</string>
+    <key>player_video_exit_full_screen</key>
+    <string>フルスクリーン表示を終了</string>
+    <key>player_video_full_screen</key>
+    <string>フルスクリーン表示</string>
     <key>playlist_add_to_title</key>
     <string>「%@」に追加</string>
     <key>playlist_create_no_episodes_description</key>
@@ -2259,8 +2293,10 @@ Pocket Casts を最大限に活用しましょう。</string>
     <string>ポッドキャストを参照</string>
     <key>playlist_manual_create_error_message</key>
     <string>プレイリストの作成中にエラーが発生しました。</string>
+    <key>playlist_manual_empty_state_subtitle</key>
+    <string>フォローしているポッドキャストからエピソードを選択します。 または、エピソードを左にスワイプして、続行しながら追加できます。</string>
     <key>playlist_manual_empty_state_subtitle_no_podcasts</key>
-    <string>エピソードを左にスワイプしてプレイリストに追加します。</string>
+    <string>お好きなポッドキャストを見つけて、エピソードを左にスワイプして追加します。</string>
     <key>playlist_manual_empty_state_title</key>
     <string>プレイリストの作成を開始</string>
     <key>playlist_manual_empty_state_title_no_podcasts</key>
@@ -2286,7 +2322,7 @@ Pocket Casts を最大限に活用しましょう。</string>
     <key>playlist_play_all_sheet_button_title</key>
     <string>置換して再生</string>
     <key>playlist_play_all_sheet_description</key>
-    <string>これを再生すると、現在の「次のエピソード」が置き換えられます。</string>
+    <string>これを再生すると、現在の「次のエピソード」が置き換えられます。 プレイリストとして保存して保持します。</string>
     <key>playlist_play_all_sheet_title</key>
     <string>「次のエピソード」を置き換えますか ?</string>
     <key>playlist_play_all_sheet_toggle</key>
@@ -2317,12 +2353,6 @@ Pocket Casts を最大限に活用しましょう。</string>
     <string>フォロー中のすべてのポッドキャスト</string>
     <key>playlist_smart_rule_save_button</key>
     <string>スマートルールを保存</string>
-    <key>playlist_smart_rule_starred_header_subtitle_toggle_off</key>
-    <string>星付きエピソードは、他のルールと一致する場合にも引き続き表示できます。</string>
-    <key>playlist_smart_rule_starred_header_subtitle_toggle_on</key>
-    <string>他のルールに一致する星付きエピソードのみを含めます。</string>
-    <key>playlist_smart_rule_starred_header_title</key>
-    <string>星付きエピソード</string>
     <key>playlist_smart_rules_title</key>
     <string>スマートルール</string>
     <key>playlists</key>
@@ -2529,8 +2559,6 @@ Pocket Casts を最大限に活用しましょう。</string>
     <string>Pocket Casts Plus</string>
     <key>pocket_casts_plus_short</key>
     <string>Plus</string>
-    <key>pocket_casts_welcome_newsletter_title</key>
-    <string>ニュースレターをチェック</string>
     <key>podcast_access_ended</key>
     <string>アクセス権終了日: %1$@</string>
     <key>podcast_access_ends</key>
@@ -3259,8 +3287,8 @@ Pocket Casts を最大限に活用しましょう。</string>
     <string>ブラウザーでリンクを開く</string>
     <key>settings_general_play_back_actions</key>
     <string>他の再生操作</string>
-    <key>settings_general_play_back_actions_subtitle</key>
-    <string>スマートフォンのロック画面に星オプションを追加します。</string>
+    <key>settings_general_play_back_actions_subtitle_device</key>
+    <string>ロック画面に星オプションを追加します。</string>
     <key>settings_general_player_header</key>
     <string>プレーヤー</string>
     <key>settings_general_publish_chapter_titles</key>
@@ -3295,6 +3323,10 @@ Pocket Casts を最大限に活用しましょう。</string>
     <string>VoiceBoostN</string>
     <key>settings_general_voice_boost_n_subtitle</key>
     <string>より安定した音声レベルで更新されたボリュームブーストを使用します。</string>
+    <key>settings_general_whats_new_unread_dot</key>
+    <string>未読のドットを表示</string>
+    <key>settings_general_whats_new_unread_dot_subtitle</key>
+    <string>新しい新着情報メッセージがある場合、プロフィールに未読のドットが表示されます。</string>
     <key>settings_global_settings</key>
     <string>グローバル設定</string>
     <key>settings_headphone_controls</key>
@@ -3407,8 +3439,8 @@ Pocket Casts を最大限に活用しましょう。</string>
     <string>一般的なポッドキャストホスト</string>
     <key>settings_status_host_description</key>
     <string>ポッドキャストの作成者は、Pocket Casts が管理していないさまざまなホスティングプロバイダーでエピソードファイルをホストします。</string>
-    <key>settings_status_host_failure_message</key>
-    <string>最も一般的な原因は、スマートフォンかネットワークで広告ブロッカーを設定していることです。 ポッドキャストをダウンロードするにはこのドメインのブロックを解除する必要があります。 Pocket Casts はポッドキャストをホストすることも、ポッドキャストのホスト先を選択することもありません。これらはショーの作成者が判断するものであり、Pocket Casts の管轄外となっています。</string>
+    <key>settings_status_host_failure_message_device</key>
+    <string>最も一般的な原因は、端末かネットワークで広告ブロッカーを設定していることです。 ポッドキャストをダウンロードするにはこのドメインのブロックを解除する必要があります。 Pocket Casts はポッドキャストをホストすることも、ポッドキャストのホスト先を選択することもありません。これらは番組の作成者が判断するものであり、Pocket Casts の管轄外となっています。</string>
     <key>settings_status_internet</key>
     <string>インターネット</string>
     <key>settings_status_internet_description</key>
@@ -3421,8 +3453,8 @@ Pocket Casts を最大限に活用しましょう。</string>
     <string>新しいエピソードを見つけるのに使用するサービス。</string>
     <key>settings_status_run</key>
     <string>今すぐ実行</string>
-    <key>settings_status_service_ad_blocker_help_singular</key>
-    <string>最も一般的な原因は、スマートフォンかネットワークで広告ブロッカーを設定していることです。 ドメイン %1$@ のブロックを解除する必要があります</string>
+    <key>settings_status_service_ad_blocker_help_singular_device</key>
+    <string>最も一般的な原因は、端末かネットワークで広告ブロッカーを設定していることです。 ドメイン %1$@ のブロックを解除する必要があります</string>
     <key>settings_storage</key>
     <string>ストレージとデータ使用量</string>
     <key>settings_storage_data_warning</key>
@@ -3433,8 +3465,8 @@ Pocket Casts を最大限に活用しましょう。</string>
     <string>モバイルデータ</string>
     <key>settings_storage_usage</key>
     <string>使用量</string>
-    <key>settings_storage_usage_footer</key>
-    <string>これは iPhone の設定に表示されるストレージとは異なる場合があります。iOS はキャッシュされたデータを自動的に管理し、必要に応じて解放します。</string>
+    <key>settings_storage_usage_footer_device</key>
+    <string>これは、%1$@ の設定に表示されるストレージとは異なる場合があります。 お使いの端末はキャッシュされたデータを自動的に管理し、必要に応じて解放します。</string>
     <key>settings_third_party_analytics</key>
     <string>サードパーティのアナリティクス</string>
     <key>settings_title</key>
@@ -3473,8 +3505,8 @@ Pocket Casts を最大限に活用しましょう。</string>
     <string>アカウントを設定</string>
     <key>shake_to_restart_sleep_timer</key>
     <string>シェイクしてスリープタイマーを再開</string>
-    <key>shake_to_restart_sleep_timer_description</key>
-    <string>オンにすると、スマートフォンをシェイクした際にスリープタイマーが再開されます。</string>
+    <key>shake_to_restart_sleep_timer_description_device</key>
+    <string>オンにすると、端末をシェイクした際にスリープタイマーが再開されます。</string>
     <key>share</key>
     <string>共有</string>
     <key>share_clip</key>
@@ -3659,6 +3691,8 @@ Pocket Casts を最大限に活用しましょう。</string>
     <string>タイマーをキャンセル</string>
     <key>sleep_timer_end_of_episode</key>
     <string>エピソード終了時</string>
+    <key>sleep_timer_episode_count</key>
+    <string>あと%1$@エピソード</string>
     <key>sleep_timer_sleeping_after</key>
     <string>%1$@件のエピソードでスリープ</string>
     <key>sleep_timer_sleeping_after_current_episode</key>
@@ -4272,6 +4306,8 @@ Pocket Casts を最大限に活用しましょう。</string>
     <string>キューの順序を変更せずに、ランダムなエピソードを簡単に再生できます。</string>
     <key>up_next_shuffle_announcement_title</key>
     <string>シャッフルの紹介</string>
+    <key>up_next_shuffle_button</key>
+    <string>シャッフル</string>
     <key>up_next_shuffle_toast_message</key>
     <string>シャッフルはオンです。 エピソードはランダムな順序で再生されます。</string>
     <key>up_next_sort_duration_tooltip_body</key>
@@ -4424,26 +4460,30 @@ Pocket Casts は間違いなく、ポッドキャストを聴くための最高�
     <string>次のエピソードには何もありません</string>
     <key>week</key>
     <string>週</string>
-    <key>welcome_discover_button</key>
-    <string>次のポッドキャストを検索</string>
-    <key>welcome_discover_description</key>
-    <string>厳選された Discover ページで、まだ知らない最近人気のポッドキャストを見つけましょう。</string>
-    <key>welcome_discover_title</key>
-    <string>新しいものを見つける</string>
     <key>welcome_import_button</key>
     <string>ポッドキャストをインポート</string>
-    <key>welcome_import_description</key>
-    <string>新規ユーザーですか ? ポッドキャストを移すことができます。</string>
-    <key>welcome_import_title</key>
-    <string>ポッドキャストをインポートする</string>
-    <key>welcome_new_account_title</key>
-    <string>ようこそ、どうぞお聞きください !</string>
-    <key>welcome_plus_title</key>
-    <string>ありがとうございます。どうぞお聞きください !</string>
     <key>whats_new</key>
     <string>新着情報</string>
     <key>whats_new_blog_more_link_text</key>
     <string>今回の更新の詳細については、ブログをご覧ください</string>
+    <key>whats_new_category_announcement</key>
+    <string>お知らせ</string>
+    <key>whats_new_category_known_issue</key>
+    <string>既知の問題</string>
+    <key>whats_new_category_new_feature</key>
+    <string>新機能</string>
+    <key>whats_new_category_research</key>
+    <string>ユーザー調査</string>
+    <key>whats_new_category_tip</key>
+    <string>アドバイスとヒント</string>
+    <key>whats_new_feed_empty_description</key>
+    <string>新機能、ヒント、お知らせがこちらに表示されます。</string>
+    <key>whats_new_feed_empty_title</key>
+    <string>まだメッセージがありません</string>
+    <key>whats_new_feed_read_all</key>
+    <string>すべて読む</string>
+    <key>whats_new_feed_unable_to_load</key>
+    <string>新着情報を読み込めません</string>
     <key>whats_new_in_version</key>
     <string>%1$@ の新機能</string>
     <key>whats_new_page_one_7_20</key>
@@ -4458,6 +4498,8 @@ Pocket Casts は間違いなく、ポッドキャストを聴くための最高�
 これにより、ポッドキャストページを配置し、アカウントに同期するために費やす手間がなくなるので安心です。</string>
     <key>whats_new_page_two_title_7_20</key>
     <string>ホームグリッドの同期</string>
+    <key>whats_new_poll_answered</key>
+    <string>ご回答ありがとうございました。</string>
     <key>widgets_app_icon_description</key>
     <string>Pocket Casts をクイック起動</string>
     <key>widgets_app_icon_name</key>

@@ -21,6 +21,7 @@ public class DataManager {
     private let userEpisodeManager = UserEpisodeDataManager()
     private let folderManager = FolderDataManager()
     private lazy var endOfYearManager = EndOfYearDataManager()
+    private lazy var playbackStatsManager = PlaybackStatsDataManager()
     private lazy var upNextHistoryManager = UpNextHistoryManager()
     private lazy var folderHistoryManager = FolderHistoryManager()
 
@@ -29,14 +30,14 @@ public class DataManager {
     public let ratings: RatingsDataManager
     public let networkDataUsageManager: NetworkDataUsageManager
 
-    let dbQueue: PCDBQueue
+    let dbQueue: GRDBQueue
 
     /// `true` if the database was created from scratch during init (no tables existed).
     /// On tvOS, where the database lives in the purgeable Caches directory, a logged-in
     /// user seeing this means their data was wiped and a full resync is required.
     public let databaseWasCreated: Bool
 
-    public internal(set) static var sharedManager = DataManager()
+    public internal(set) static var shared = DataManager()
 
     public static var logger: ErrorLogger?
 
@@ -69,37 +70,8 @@ public class DataManager {
         self.init(dbQueue: dbQueue)
     }
 
-    static func checkDatabaseCorruption(dbPool: DatabasePool) -> Bool {
-        var isDatabaseCorrupted = false
-        try? dbPool.write { db in
-            do {
-                let rows = try Row.fetchAll(db, sql: "PRAGMA integrity_check")
-                    for row in rows {
-                        let result: String = row[0]
-                        if result != "ok" {
-                            isDatabaseCorrupted = true
-                        }
-                    }
-            } catch {
-                if error.localizedDescription.contains("image is malformed") {
-                    isDatabaseCorrupted = true
-                }
-            }
-        }
-
-        if isDatabaseCorrupted {
-            try? dbPool.close()
-
-            try? FileManager.default.moveItem(at: URL(fileURLWithPath: DataManager.pathToDb()), to: URL(fileURLWithPath: DataManager.pathToDbBackup()))
-            try? FileManager.default.moveItem(at: URL(fileURLWithPath: "\(DataManager.pathToDb())-shm"), to: URL(fileURLWithPath: "\(DataManager.pathToDbBackup())-shm"))
-            try? FileManager.default.moveItem(at: URL(fileURLWithPath: "\(DataManager.pathToDb())-wal"), to: URL(fileURLWithPath: "\(DataManager.pathToDbBackup())-wal"))
-        }
-
-        return isDatabaseCorrupted
-    }
-
-    /// Creates a DataManager using the given `PCDBQueue`.
-    public init(dbQueue: PCDBQueue) {
+    /// Creates a DataManager using the given `GRDBQueue`.
+    public init(dbQueue: GRDBQueue) {
         self.dbQueue = dbQueue
 
         self.databaseWasCreated = DatabaseHelper.setup(queue: dbQueue)
@@ -107,8 +79,7 @@ public class DataManager {
         autoAddCandidates = AutoAddCandidatesDataManager(dbQueue: dbQueue)
         bookmarks = BookmarkDataManager(dbQueue: dbQueue)
         ratings = RatingsDataManager()
-        // Force unwrap is safe here as dbQueue is always a GRDBQueue at runtime
-        networkDataUsageManager = NetworkDataUsageManager(dbQueue: dbQueue as! GRDBQueue)
+        networkDataUsageManager = NetworkDataUsageManager(dbQueue: dbQueue)
 
         setupInMemoryCaches()
     }
@@ -140,15 +111,13 @@ public class DataManager {
         //Do a vacuum before doing db changes
         vacuumDatabase()
         let duration = DBUtils.measureTime {
-            dbQueue.inTransaction { db, _ in
+            dbQueue.write { db in
                 do {
 
                     try? db.executeUpdate("ALTER TABLE SJPodcast DROP COLUMN settings;", values: nil)
                     try? db.executeUpdate("ALTER TABLE SJEpisode DROP COLUMN metadata", values: nil)
                     try db.executeUpdate("DROP INDEX IF EXISTS episode_archived;", values: nil)
-                    try db.executeUpdate("CREATE INDEX IF NOT EXISTS episode_download_task_id ON SJEpisode (downloadTaskId);", values: nil)
                     try db.executeUpdate("CREATE INDEX IF NOT EXISTS episode_non_null_download_task_id ON SJEpisode(downloadTaskId) WHERE downloadTaskId IS NOT NULL;", values: nil)
-                    try db.executeUpdate("CREATE INDEX IF NOT EXISTS episode_added_date ON SJEpisode (addedDate);", values: nil)
                 } catch {
                 }
             }
@@ -158,19 +127,30 @@ public class DataManager {
         vacuumDatabase()
     }
 
-    public func vacuumDatabase() {
+    /// Rebuilds the database to reclaim free pages, skipping it when less than
+    /// `minimumFreePageRatio` of the file is free, since it rewrites the whole file.
+    public func vacuumDatabase(minimumFreePageRatio: Double = 0.2) {
+        do {
+            let freePageRatio = try dbQueue.freePageRatio()
+            guard freePageRatio >= minimumFreePageRatio else {
+                FileLog.shared.addMessage("VACUUM -> Skipped, free page ratio: \(freePageRatio)")
+                return
+            }
+        } catch {
+            FileLog.shared.addMessage("VACUUM -> error: \(error)")
+            return
+        }
+
         if let sizeString = databaseSize {
             FileLog.shared.addMessage("VACUUM -> Database start size: \(sizeString)")
         }
 
         FileLog.shared.addMessage("VACUUM -> Start")
-        let duration =  DBUtils.measureTime {
-            dbQueue.write { db in
-                do {
-                    try db.executeUpdate("VACUUM;", values: nil)
-                } catch {
-                    FileLog.shared.addMessage("VACUUM -> error: \(error)")
-                }
+        let duration = DBUtils.measureTime {
+            do {
+                try dbQueue.vacuum()
+            } catch {
+                FileLog.shared.addMessage("VACUUM -> error: \(error)")
             }
         }
         FileLog.shared.addMessage("VACUUM -> End")
@@ -329,28 +309,28 @@ public class DataManager {
 
     // MARK: - Podcasts
 
-    public func allPodcasts(includeUnsubscribed: Bool, reloadFromDatabase: Bool = false) -> [Podcast] {
-        podcastManager.allPodcasts(includeUnsubscribed: includeUnsubscribed, reloadFromDatabase: reloadFromDatabase, dbQueue: dbQueue)
+    public func allPodcasts(includeUnsubscribed: Bool) -> [Podcast] {
+        podcastManager.allPodcasts(includeUnsubscribed: includeUnsubscribed, dbQueue: dbQueue)
     }
 
     public func searchPodcasts(term: String) -> [Podcast] {
         podcastManager.searchPodcasts(term: term, dbQueue: dbQueue)
     }
 
-    public func allPodcastsOrderedByTitle(reloadFromDatabase: Bool = false) -> [Podcast] {
-        podcastManager.allPodcastsOrderedByTitle(reloadFromDatabase: reloadFromDatabase, dbQueue: dbQueue)
+    public func allPodcastsOrderedByTitle() -> [Podcast] {
+        podcastManager.allPodcastsOrderedByTitle(dbQueue: dbQueue)
     }
 
-    public func allPodcastsOrderedByNewestEpisodes(reloadFromDatabase: Bool = false) -> [Podcast] {
-        podcastManager.allPodcastsOrderedByNewestEpisodes(reloadFromDatabase: reloadFromDatabase, dbQueue: dbQueue)
+    public func allPodcastsOrderedByNewestEpisodes() -> [Podcast] {
+        podcastManager.allPodcastsOrderedByNewestEpisodes(dbQueue: dbQueue)
     }
 
-    public func allPodcastsOrderedByLastPlayedEpisodes(reloadFromDatabase: Bool = false) -> [Podcast] {
-        podcastManager.allPodcastsOrderedByLastPlayedEpisodes(reloadFromDatabase: reloadFromDatabase, dbQueue: dbQueue)
+    public func allPodcastsOrderedByLastPlayedEpisodes() -> [Podcast] {
+        podcastManager.allPodcastsOrderedByLastPlayedEpisodes(dbQueue: dbQueue)
     }
 
-    public func allPodcastsOrderedByAddedDate(reloadFromDatabase: Bool = false) -> [Podcast] {
-        podcastManager.allPodcastsOrderedByAddedDate(reloadFromDatabase: reloadFromDatabase, dbQueue: dbQueue)
+    public func allPodcastsOrderedByAddedDate() -> [Podcast] {
+        podcastManager.allPodcastsOrderedByAddedDate(dbQueue: dbQueue)
     }
 
     public func findPodcast(uuid: String, includeUnsubscribed: Bool = false) -> Podcast? {
@@ -379,6 +359,11 @@ public class DataManager {
 
     public func podcastUnfinishedCounts() -> [String: Int32] {
         podcastManager.unfinishedCounts(dbQueue: dbQueue)
+    }
+
+    /// Subscribed podcasts with at least one completed episode and no unarchived unplayed or in-progress episodes.
+    public func playedPodcastUuids() -> Set<String> {
+        podcastManager.playedPodcastUuids(dbQueue: dbQueue)
     }
 
     public func markAllPodcastsSynced() {
@@ -445,8 +430,8 @@ public class DataManager {
         podcastManager.saveSortOrders(podcasts: podcasts, dbQueue: dbQueue)
     }
 
-    public func markAllUnarchivedForPodcast(id: Int64) {
-        episodeManager.markAllUnarchivedForPodcast(id: id, dbQueue: dbQueue)
+    public func markAllUnarchived(forPodcastId id: Int64) {
+        episodeManager.markAllUnarchived(forPodcastId: id, dbQueue: dbQueue)
     }
 
     public func updateAllPodcastGrouping(to grouping: PodcastGrouping) {
@@ -624,6 +609,10 @@ public class DataManager {
 
     public func bulkSave(episodes: [Episode]) {
         episodeManager.bulkSave(episodes: episodes, dbQueue: dbQueue)
+    }
+
+    public func insertMissing(episodes: [Episode]) {
+        episodeManager.insertMissing(episodes: episodes, dbQueue: dbQueue)
     }
 
     public func bulkSetStarred(starred: Bool, episodes: [Episode], updateSyncStatus: Bool) {
@@ -873,8 +862,8 @@ public class DataManager {
         episodeManager.markAllSynced(episodeIDs: episodeIDs, dbQueue: dbQueue)
     }
 
-    public func allEpisodesForPodcast(id: Int64) -> [Episode] {
-        episodeManager.allEpisodesForPodcast(id: id, dbQueue: dbQueue)
+    public func allEpisodes(forPodcastId id: Int64) -> [Episode] {
+        episodeManager.allEpisodes(forPodcastId: id, dbQueue: dbQueue)
     }
 
     public func delete(episodeUuid: String) {
@@ -1071,10 +1060,6 @@ public class DataManager {
         playlistManager.moveEpisode(episodeUuid, in: playlist, to: index, dbQueue: dbQueue)
     }
 
-    public func updateEpisodePosition(_ episodeUuid: String, in playlist: EpisodeFilter, to position: Int32) {
-        playlistManager.updateEpisodePosition(episodeUuid, in: playlist, to: position, dbQueue: dbQueue)
-    }
-
     public func deleteEpisodes(_ episodeUuids: [String], from playlist: EpisodeFilter) {
         playlistManager.deleteEpisodes(episodeUuids, from: playlist, dbQueue: dbQueue)
     }
@@ -1227,19 +1212,19 @@ public class DataManager {
         let pushOnQuery = "SELECT COUNT(*) FROM \(DataManager.podcastTableName) WHERE subscribed = 1 AND pushEnabled = 1"
         let totalQuery = "SELECT COUNT(*) FROM \(DataManager.podcastTableName) WHERE subscribed = 1"
 
-        let pushOnCount = DataManager.sharedManager.count(query: pushOnQuery, values: nil)
-        let totalCount = (DataManager.sharedManager.count(query: totalQuery, values: nil) - 1) // -1 because the podcast we're currently adding could be returned by this query
+        let pushOnCount = DataManager.shared.count(query: pushOnQuery, values: nil)
+        let totalCount = (DataManager.shared.count(query: totalQuery, values: nil) - 1) // -1 because the podcast we're currently adding could be returned by this query
         if totalCount > 0, pushOnCount >= totalCount {
             podcast.pushEnabled = true
         } else {
             podcast.pushEnabled = false
         }
 
-        DataManager.sharedManager.save(podcast: podcast)
+        DataManager.shared.save(podcast: podcast)
     }
 
     public func pushEnabledPodcastsCount() -> Int {
-        DataManager.sharedManager.count(query: "SELECT COUNT(*) FROM \(DataManager.podcastTableName) WHERE pushEnabled = 1 AND subscribed = 1", values: nil)
+        DataManager.shared.count(query: "SELECT COUNT(*) FROM \(DataManager.podcastTableName) WHERE pushEnabled = 1 AND subscribed = 1", values: nil)
     }
 
     // MARK: - Up Next History Manager
@@ -1301,6 +1286,22 @@ public extension DataManager {
 
     func reconcileOrphanedEpisode(survivorId: Int64, realPodcastId: Int64, idsToDelete: [Int64]) {
         episodeManager.reconcileOrphanedEpisode(survivorId: survivorId, realPodcastId: realPodcastId, idsToDelete: idsToDelete, dbQueue: dbQueue)
+    }
+}
+
+// MARK: - Playback stats
+
+public extension DataManager {
+    func playbackPodcastStats(in year: Int) -> [PlaybackPodcastStats] {
+        playbackStatsManager.podcastStats(in: year, dbQueue: dbQueue)
+    }
+
+    func playbackMonthlySeconds(in year: Int) -> [Double] {
+        playbackStatsManager.monthlySeconds(in: year, dbQueue: dbQueue)
+    }
+
+    func playbackEpisodesStartedAndCompleted(in year: Int) -> (started: Int, completed: Int) {
+        playbackStatsManager.episodesStartedAndCompleted(in: year, dbQueue: dbQueue)
     }
 }
 
@@ -1383,7 +1384,7 @@ extension DataManager {
             return
         }
 
-        let destinationDbQueue = (dbQueue as? GRDBQueue)!.dbPool
+        let destinationDbQueue = dbQueue.dbPool
 
         // Fetch all table names (excluding SQLite internal tables and SJEpisode)
         let tableNames: [String]? = try? sourceDbQueue.read { db in
@@ -1438,7 +1439,7 @@ extension DataManager {
     /// logout; a later login repopulates the database via a full sync.
     public func deleteAllData() {
         do {
-            try (dbQueue as? GRDBQueue)?.dbPool.write { db in
+            try dbQueue.dbPool.write { db in
                 let tableNames = try String.fetchAll(db, sql: "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
                 for tableName in tableNames {
                     try db.execute(sql: "DELETE FROM \(tableName.quotedDatabaseIdentifier)")

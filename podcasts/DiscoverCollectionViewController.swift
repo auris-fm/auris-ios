@@ -21,7 +21,6 @@ class DiscoverCollectionViewController: PCViewController {
     }()
 
     private(set) var dataSource: UICollectionViewDiffableDataSource<Section, Item>!
-    private let coordinator: DiscoverCoordinator
     private var loadingContent = false
     private(set) var discoverLayout: DiscoverLayout?
     fileprivate var selectedCategory: DiscoverCategory?
@@ -36,8 +35,7 @@ class DiscoverCollectionViewController: PCViewController {
         searchResultsController
     }
 
-    init(coordinator: DiscoverCoordinator) {
-        self.coordinator = coordinator
+    init() {
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -63,7 +61,8 @@ class DiscoverCollectionViewController: PCViewController {
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        searchController.viewDidAppear(animated)
+        searchController.beginAppearanceTransition(true, animated: animated)
+        searchController.endAppearanceTransition()
         AnalyticsHelper.navigatedToDiscover()
         Analytics.track(.discoverShown)
 
@@ -72,7 +71,8 @@ class DiscoverCollectionViewController: PCViewController {
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
-        searchController.viewDidDisappear(animated)
+        searchController.beginAppearanceTransition(false, animated: animated)
+        searchController.endAppearanceTransition()
     }
 
     func reloadData(completion: (() -> Void)? = nil) {
@@ -212,6 +212,7 @@ extension DiscoverCollectionViewController {
     private func setupCollectionView() {
         let layout = createCompositionalLayout()
         collectionView.collectionViewLayout = layout
+        collectionView.selfSizingInvalidation = .enabledIncludingConstraints
         collectionView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(collectionView)
         NSLayoutConstraint.activate([
@@ -244,18 +245,22 @@ extension DiscoverCollectionViewController {
             partialResult[cellType] = cellType.createCellRegistration(parentViewController: self, delegate: self)
         }
 
+        // The cells span the safe area, which the SwiftUI content of these insets itself.
         let loadingRegistration = UICollectionView.CellRegistration<UICollectionViewCell, Item> { cell, _, _ in
             cell.contentConfiguration = ContentUnavailableConfiguration.loading()
+            cell.insetsLayoutMarginsFromSafeArea = false
         }
 
-        let noNetworkRegistration = UICollectionView.CellRegistration<UICollectionViewCell, Item> { cell, _, _ in
+        let noNetworkRegistration = UICollectionView.CellRegistration<UICollectionViewCell, Item> { [weak self] cell, _, _ in
             cell.contentConfiguration = ContentUnavailableConfiguration.noNetwork { [weak self] in
                 self?.reloadData()
             }
+            cell.insetsLayoutMarginsFromSafeArea = false
         }
 
         let noResultsRegistration = UICollectionView.CellRegistration<UICollectionViewCell, Item> { cell, _, _ in
             cell.contentConfiguration = ContentUnavailableConfiguration.noResults()
+            cell.insetsLayoutMarginsFromSafeArea = false
         }
 
         let emptyRegistration = UICollectionView.CellRegistration<UICollectionViewCell, Item> { cell, _, _ in
@@ -305,6 +310,7 @@ extension DiscoverCollectionViewController {
             group = NSCollectionLayoutGroup.vertical(layoutSize: groupSize, subitems: [item])
 
             let section = NSCollectionLayoutSection(group: group)
+            section.contentInsetsReference = .none
 
             let footerSize = NSCollectionLayoutSize(widthDimension: .fractionalWidth(1.0),
                                                     heightDimension: .estimated(44))

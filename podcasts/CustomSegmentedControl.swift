@@ -288,17 +288,13 @@ class CustomSegmentedControl: UIControl {
     }
 
     @objc private func segmentTapped(_ recognizer: UITapGestureRecognizer) {
-        let locationTapped = recognizer.location(in: self)
-        selectSegment(atLocation: locationTapped)
+        guard let segmentView = recognizer.view as? SegmentView else { return }
+        selectSegment(at: segmentView.index)
     }
 
     // MARK: - Accessibility Support
 
     private var actions: [SegmentedAction] = []
-
-    func setActionsWithAccessibility(_ actions: [SegmentedAction]) {
-        setActions(actions)
-    }
 
     private func clampSelectedIndexIfNeeded() {
         if actions.isEmpty {
@@ -313,16 +309,6 @@ class CustomSegmentedControl: UIControl {
         if clampedValue != selectedIndex {
             selectedIndex = clampedValue
         }
-    }
-
-    private func selectSegment(atLocation point: CGPoint) {
-        guard actionCount > 0, bounds.width > 0 else { return }
-
-        let segmentWidth = bounds.width / CGFloat(actionCount)
-        guard segmentWidth > 0 else { return }
-
-        let rawIndex = Int(point.x / segmentWidth)
-        selectSegment(at: rawIndex)
     }
 
     private func selectSegment(at index: Int) {

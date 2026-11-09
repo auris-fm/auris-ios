@@ -25,13 +25,6 @@ public class MainServerHandler {
     private static let parserVersion = "1.7"
     private static let deviceType = "1"
 
-    private lazy var securityDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMddHHmmss"
-
-        return formatter
-    }()
-
     private lazy var searchQueue: OperationQueue = {
         let queue = OperationQueue()
         queue.maxConcurrentOperationCount = 1
@@ -199,23 +192,27 @@ public class MainServerHandler {
 
     public func refresh(podcasts: [Podcast], completion: @escaping (PodcastRefreshResponse?) -> Void) {
         FileLog.shared.addMessage("Refresh - Started)")
+        let startDate = Date()
         guard let request = createRefreshRequest(podcasts: podcasts) else {
             completion(PodcastRefreshResponse.failedResponse())
             return
         }
+        FileLog.shared.addMessage("Refresh - Sending request for \(podcasts.count) podcasts, built in \(startDate.elapsedTimeDescription)")
 
+        let requestDate = Date()
         tokenHelper.callSecureUrl(request: request) { response, data, error in
             let statusCode = response?.statusCode ?? 0
 
             guard statusCode == ServerConstants.HttpConstants.ok, let data else {
                 if let error {
-                    FileLog.shared.addMessage("Refresh failed: with error \(error.localizedDescription), status code \(statusCode)")
+                    FileLog.shared.addMessage("Refresh failed: with error \(error.localizedDescription), status code \(statusCode) after \(requestDate.elapsedTimeDescription)")
                 } else {
-                    FileLog.shared.addMessage("Refresh failed: response returned no data, status code \(statusCode)")
+                    FileLog.shared.addMessage("Refresh failed: response returned no data, status code \(statusCode) after \(requestDate.elapsedTimeDescription)")
                 }
                 completion(PodcastRefreshResponse.failedResponse())
                 return
             }
+            FileLog.shared.addMessage("Refresh - Server responded in \(requestDate.elapsedTimeDescription) with \(data.count) bytes")
             FileLog.shared.addMessage("Decoding Refresh Response)")
             let refreshResponse = ServerHelper.decodeRefreshResponse(from: data)
             completion(refreshResponse)

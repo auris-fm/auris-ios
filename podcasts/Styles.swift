@@ -71,7 +71,7 @@ struct RequiredFieldStyle: TextFieldStyle {
 
     func _body(configuration: TextField<Self._Label>) -> some View {
         configuration
-            .colorScheme(Theme.isDarkTheme() ? .dark : .light)
+            .colorScheme(Theme.isDarkTheme ? .dark : .light)
             .foregroundColor(ThemeColor.primaryText01(for: theme.activeTheme).color)
             .padding(6)
             .required(hasErrored)
@@ -207,6 +207,7 @@ struct RoundedButtonStyle: ButtonStyle {
 
 struct RoundedButton: ViewModifier {
     @EnvironmentObject var theme: Theme
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var destructive: Bool
 
@@ -218,14 +219,14 @@ struct RoundedButton: ViewModifier {
         HStack {
             Spacer()
             content
-                .font(.system(size: 18, weight: .semibold))
+                .font(size: 18, style: .body, weight: .semibold)
                 .foregroundColor(ThemeColor.primaryUi01(for: theme.activeTheme).color)
             Spacer()
         }
         .padding()
         .background(destructive ? ThemeColor.support05(for: theme.activeTheme).color : ThemeColor.primaryInteractive01(for: theme.activeTheme).color)
         .cornerRadius(ViewConstants.buttonCornerRadius)
-        .frame(height: 44)
+        .frame(height: dynamicTypeSize.isAccessibilitySize ? nil : 44)
     }
 }
 
@@ -249,25 +250,6 @@ struct BorderButton: ViewModifier {
                 .stroke(ThemeColor.primaryInteractive01(for: theme.activeTheme).color, lineWidth: ViewConstants.buttonStrokeWidth)
         )
         .frame(height: 44)
-    }
-}
-
-/// A dark button filled with a light color
-struct RoundedDarkButton: ButtonStyle {
-    @ObservedObject var theme: Theme
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 18, weight: .semibold))
-            .frame(maxWidth: .infinity)
-            .padding()
-
-            .foregroundColor(ThemeColor.primaryUi01(for: theme.activeTheme).color)
-            .background(ThemeColor.primaryText01(for: theme.activeTheme).color)
-
-            .cornerRadius(ViewConstants.buttonCornerRadius)
-            .applyButtonEffect(isPressed: configuration.isPressed)
-            .contentShape(Rectangle())
     }
 }
 
@@ -338,13 +320,6 @@ struct SimpleTextButtonStyle: ButtonStyle {
             .applyButtonEffect(isPressed: configuration.isPressed)
             .cornerRadius(ViewConstants.buttonCornerRadius)
             .contentShape(Rectangle())
-    }
-}
-
-struct ClickyButton: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .applyButtonEffect(isPressed: configuration.isPressed)
     }
 }
 

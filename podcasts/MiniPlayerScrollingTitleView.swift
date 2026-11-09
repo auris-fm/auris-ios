@@ -65,6 +65,7 @@ final class MiniPlayerScrollingTitleView: UIView {
             label.adjustsFontForContentSizeCategory = true
             scrollContainer.addSubview(label)
         }
+        trailingLabel.accessibilityElementsHidden = true
 
         gradientMask.startPoint = CGPoint(x: 0, y: 0.5)
         gradientMask.endPoint = CGPoint(x: 1, y: 0.5)
@@ -93,11 +94,6 @@ final class MiniPlayerScrollingTitleView: UIView {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    /// Restarts the marquee from the beginning of its pause-then-scroll cycle.
-    func restartAnimation() {
-        scheduleAnimation()
-    }
 
     /// Picks up another instance's marquee phase, so a snapshot clone scrolls
     /// in lock-step with the live mini player instead of restarting from

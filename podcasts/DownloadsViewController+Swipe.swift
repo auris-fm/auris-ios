@@ -2,6 +2,7 @@ import Foundation
 import PocketCastsDataModel
 import SwipeCellKit
 import PocketCastsUtils
+import UIKit
 
 extension DownloadsViewController: SwipeTableViewCellDelegate, SwipeHandler {
     // MARK: - SwipeTableViewCellDelegate
@@ -9,7 +10,7 @@ extension DownloadsViewController: SwipeTableViewCellDelegate, SwipeHandler {
     func tableView(_ tableView: UITableView, editActionsForRowAt indexPath: IndexPath, for orientation: SwipeActionsOrientation) -> [SwipeAction]? {
         guard !isMultiSelectEnabled, let episode = episodeAtIndexPath(indexPath) else { return nil }
 
-        switch orientation {
+        switch orientation.resolvedForLayoutDirection {
         case .left:
             let actions = SwipeActionsHelper.createLeftActionsForEpisode(episode, tableView: tableView, indexPath: indexPath, swipeHandler: self)
             return actions.swipeKitActions()
@@ -22,7 +23,7 @@ extension DownloadsViewController: SwipeTableViewCellDelegate, SwipeHandler {
     func tableView(_ tableView: UITableView, editActionsOptionsForRowAt indexPath: IndexPath, for orientation: SwipeActionsOrientation) -> SwipeOptions {
         var options = SwipeOptions()
 
-        switch orientation {
+        switch orientation.resolvedForLayoutDirection {
         case .left:
             options.expansionStyle = .selection
         case .right:
@@ -59,7 +60,7 @@ extension DownloadsViewController: SwipeTableViewCellDelegate, SwipeHandler {
     }
 
     func addToManualPlaylist(episode: PocketCastsDataModel.Episode, at: IndexPath) {
-        NavigationManager.sharedManager.navigateTo(
+        NavigationManager.shared.navigateTo(
             NavigationManager.manualPlaylistsChooserKey,
             data: [
                 NavigationManager.manualPlaylistsChooserEpisodeKey: episode

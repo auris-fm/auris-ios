@@ -4,15 +4,17 @@ import PocketCastsUtils
 
 class ApiBaseTask: Operation, @unchecked Sendable {
     private let syncTimeout = 60 as TimeInterval
-    private let isoDateFormatter = ISO8601DateFormatter()
     let apiVersion = "2"
 
     let dataManager: DataManager
 
+    /// Logs how long the task took when it runs on a queue.
+    var logsDuration = false
+
     private let urlConnection: URLConnection
     private let tokenHelper: TokenHelper
 
-    init(dataManager: DataManager = .sharedManager, urlConnection: URLConnection = URLConnection(handler: URLSession.shared)) {
+    init(dataManager: DataManager = .shared, urlConnection: URLConnection = URLConnection(handler: URLSession.shared)) {
         self.dataManager = dataManager
         self.urlConnection = urlConnection
         self.tokenHelper = TokenHelper(urlConnection: urlConnection)
@@ -21,7 +23,11 @@ class ApiBaseTask: Operation, @unchecked Sendable {
 
     override func main() {
         autoreleasepool {
+            let startDate = Date()
             runTaskSynchronously()
+            if logsDuration {
+                FileLog.shared.addMessage("\(type(of: self)) finished in \(startDate.elapsedTimeDescription)")
+            }
         }
     }
 
@@ -134,14 +140,6 @@ class ApiBaseTask: Operation, @unchecked Sendable {
         }
 
         return (nil, ServerConstants.HttpConstants.serverError)
-    }
-
-    func formatDate(_ date: Date?) -> String {
-        if let date {
-            return isoDateFormatter.string(from: date)
-        }
-
-        return ""
     }
 
     func createRequest(url: URL, method: String, token: String?) -> URLRequest {

@@ -178,7 +178,7 @@ extension AccountViewController: UITableViewDataSource, UITableViewDelegate {
         case .upgradeView:
             break
         case .upgradeAccount:
-                let controller = OnboardingFlow.shared.begin(flow: .patronAccountUpgrade, in: self, source: .account)
+                let controller = OnboardingFlow.shared.begin(flow: .patronAccountUpgrade, in: self, source: .account, traitCollection: traitCollection)
             navigationController?.present(controller, animated: true)
         case .supporterContributions:
             let supporterVC = SupporterContributionsViewController()
@@ -212,17 +212,17 @@ extension AccountViewController: UITableViewDataSource, UITableViewDelegate {
             present(controller, animated: true, completion: nil)
             Analytics.track(.accountDetailsCancelTapped)
         case .privacyPolicy:
-            NavigationManager.sharedManager.navigateTo(NavigationManager.showPrivacyPolicyPageKey, data: nil)
+            NavigationManager.shared.navigateTo(NavigationManager.showPrivacyPolicyPageKey, data: nil)
             Analytics.track(.accountDetailsShowPrivacyPolicy)
         case .termsOfUse:
-            NavigationManager.sharedManager.navigateTo(NavigationManager.showTermsOfUsePageKey, data: nil)
+            NavigationManager.shared.navigateTo(NavigationManager.showTermsOfUsePageKey, data: nil)
             Analytics.track(.accountDetailsShowTOS)
         }
         tableView.deselectRow(at: indexPath, animated: false)
     }
 
     private func showSignOutWarning() {
-        let numSubscriptionPodcasts = DataManager.sharedManager.allPaidPodcasts().count
+        let numSubscriptionPodcasts = DataManager.shared.allPaidPodcasts().count
         let message: String
         if numSubscriptionPodcasts > 0 {
             message = L10n.accountSignOutSupporterPrompt(numSubscriptionPodcasts.localized()) + "\n\n" + L10n.accountSignOutSupporterSubtitle
@@ -281,7 +281,7 @@ extension AccountViewController: UITableViewDataSource, UITableViewDelegate {
     func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
         if section == 0 {
             let view = UIView(frame: CGRect(x: 0, y: 0, width: 100, height: 2))
-            view.backgroundColor = AppTheme.colorForStyle(.primaryUi03, themeOverride: nil)
+            view.backgroundColor = .clear
             return view
         }
         return nil

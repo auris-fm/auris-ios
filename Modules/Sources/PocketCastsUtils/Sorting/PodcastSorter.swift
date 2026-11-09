@@ -2,17 +2,13 @@ import Foundation
 
 public enum PodcastSorter {
     /**
-     A case insensitive string comparison that ignores the word "The" at the start of the title.
+     A case and accent insensitive string comparison that ignores the word "The" at the start of the title.
      - Parameter title1 String
      - Parameter title2 String
      - Returns true when title1 is alphabetically before title2, false otherwise
      */
     public static func titleSort(title1: String, title2: String) -> Bool {
-
-        let convertedTitle1 = title1.trimmingThePrefix().convertToPinyinIfNeeded()
-        let convertedTitle2 = title2.trimmingThePrefix().convertToPinyinIfNeeded()
-
-        return convertedTitle1.localizedLowercase.compare(convertedTitle2.localizedLowercase) == .orderedAscending
+        return compareTitles(title1, title2) == .orderedAscending
     }
 
     /**
@@ -25,16 +21,21 @@ public enum PodcastSorter {
         guard let title1 = item1.itemTitle, let title2 = item2.itemTitle else {
             return false
         }
-        let convertedTitle1 = title1.trimmingThePrefix().convertToPinyinIfNeeded()
-        let convertedTitle2 = title2.trimmingThePrefix().convertToPinyinIfNeeded()
-
-        let result = convertedTitle1.localizedLowercase.compare(convertedTitle2.localizedLowercase)
+        let result = compareTitles(title1, title2)
         switch result {
         case .orderedSame:
             return item1.itemUUID.compare(item2.itemUUID) == .orderedAscending
         default:
             return result == .orderedAscending
         }
+    }
+
+    private static func compareTitles(_ title1: String, _ title2: String) -> ComparisonResult {
+        let convertedTitle1 = title1.trimmingThePrefix().convertToPinyinIfNeeded()
+        let convertedTitle2 = title2.trimmingThePrefix().convertToPinyinIfNeeded()
+
+        // Ignoring accents keeps a title like "Área" with the As instead of after Z
+        return convertedTitle1.compare(convertedTitle2, options: [.caseInsensitive, .diacriticInsensitive])
     }
 
     /**
@@ -60,11 +61,7 @@ public enum PodcastSorter {
 
 private extension String {
     func trimmingThePrefix() -> String {
-        guard let range = range(of: "^the ", options: [.regularExpression, .caseInsensitive]) else {
-            return self
-        }
-
-        return String(self[range.upperBound...])
+        prefix(4).lowercased() == "the " ? String(dropFirst(4)) : self
     }
 }
 
@@ -73,18 +70,21 @@ private extension String {
  - Returns Pinyin string
  */
 extension String {
-    func convertToPinyinIfNeeded() -> String {
-        let range = NSRange(location: 0, length: self.utf16.count)
-        let regex = try! NSRegularExpression(pattern: "[\\u4e00-\\u9fff]+")
-        let hasChineseCharacter = regex.firstMatch(in: self, options: [], range: range) != nil
+    private static let pinyinCache = Mutex([String: String]())
 
-        if hasChineseCharacter {
-            let mutableString = NSMutableString(string: self) as CFMutableString
-            CFStringTransform(mutableString, nil, kCFStringTransformToLatin, false)
-            CFStringTransform(mutableString, nil, kCFStringTransformStripDiacritics, false)
-            return mutableString as String
-        } else {
+    func convertToPinyinIfNeeded() -> String {
+        guard unicodeScalars.contains(where: { (0x4E00...0x9FFF).contains($0.value) }) else {
             return self
         }
+        if let pinyin = Self.pinyinCache.withLock({ $0[self] }) {
+            return pinyin
+        }
+
+        let mutableString = NSMutableString(string: self) as CFMutableString
+        CFStringTransform(mutableString, nil, kCFStringTransformToLatin, false)
+        CFStringTransform(mutableString, nil, kCFStringTransformStripDiacritics, false)
+        let pinyin = mutableString as String
+        Self.pinyinCache.withLock { $0[self] = pinyin }
+        return pinyin
     }
 }

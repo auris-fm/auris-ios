@@ -1,6 +1,7 @@
 import Foundation
 import PocketCastsDataModel
 import PocketCastsUtils
+import UIKit
 
 extension FolderViewController: UICollectionViewDelegate, UICollectionViewDataSource, UICollectionViewDelegateFlowLayout {
     private static let podcastCellId = "PodcastGridCell"
@@ -20,7 +21,7 @@ extension FolderViewController: UICollectionViewDelegate, UICollectionViewDataSo
     }
 
     func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
-        if Settings.libraryType() == .list {
+        if Settings.libraryType == .list {
             return collectionView.dequeueReusableCell(withReuseIdentifier: FolderViewController.podcastListCellId, for: indexPath)
         }
 
@@ -30,15 +31,16 @@ extension FolderViewController: UICollectionViewDelegate, UICollectionViewDataSo
     func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
         guard let podcast = podcasts[safe: indexPath.row] else { return }
 
-        let libraryType = Settings.libraryType()
-        let badgeType = Settings.podcastBadgeType()
+        let libraryType = Settings.libraryType
+        let badgeType = Settings.podcastBadgeType
+        let isPlayed = playedPodcastUuids.contains(podcast.uuid)
 
         if libraryType == .list {
             let castCell = cell as! PodcastListCell
-            castCell.populateFrom(podcast, badgeType: badgeType)
+            castCell.populateFrom(podcast, badgeType: badgeType, isPlayed: isPlayed)
         } else {
             let castCell = cell as! PodcastGridCell
-            castCell.populateFrom(podcast: podcast, badgeType: badgeType, libraryType: libraryType)
+            castCell.populateFrom(podcast: podcast, badgeType: badgeType, libraryType: libraryType, isPlayed: isPlayed)
         }
 
         // Keep the reorder-edit treatment in sync so reused/recycled cells stay correct.
@@ -54,7 +56,7 @@ extension FolderViewController: UICollectionViewDelegate, UICollectionViewDataSo
 
         guard let podcast = podcasts[safe: indexPath.row] else { return }
 
-        NavigationManager.sharedManager.navigateTo(NavigationManager.podcastPageKey, data: [NavigationManager.podcastKey: podcast])
+        NavigationManager.shared.navigateTo(NavigationManager.podcastPageKey, data: [NavigationManager.podcastKey: podcast, NavigationManager.podcastSourceKey: PodcastScreenSource.podcastList])
     }
 
     // MARK: - Row Sizing

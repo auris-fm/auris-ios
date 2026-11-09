@@ -31,7 +31,7 @@ class FoldersCoordinator: NSObject {
         static let intervalAfterStartup: TimeInterval = 10.seconds
     }
 
-    init(navigationManager: NavigationManager = .sharedManager, dataManager: DataManager = .sharedManager) {
+    init(navigationManager: NavigationManager = .shared, dataManager: DataManager = .shared) {
         self.navigationManager = navigationManager
         self.dataManager = dataManager
         self.suggestedFoldersModel = SuggestedFoldersModel()
@@ -43,7 +43,7 @@ class FoldersCoordinator: NSObject {
 
     func startFolderCreationFlow(from vc: UIViewController) {
         if FeatureFlag.suggestedFolders.enabled,
-           dataManager.allPodcasts(includeUnsubscribed: false, reloadFromDatabase: false).count > Constants.minimumNumberOfPodcasts,
+           dataManager.allPodcasts(includeUnsubscribed: false).count > Constants.minimumNumberOfPodcasts,
            suggestedFoldersModel.loadingState == .loaded,
            didPodcastsChanged() {
             suggestedFolderCreationFlow(from: vc, source: .podcastsList)
@@ -56,7 +56,7 @@ class FoldersCoordinator: NSObject {
 
     func showSuggestedFolders(from vc: UIViewController, source: AnalyticsSource = .notifications) {
         guard FeatureFlag.suggestedFolders.enabled,
-              dataManager.allPodcasts(includeUnsubscribed: false, reloadFromDatabase: false).count > Constants.minimumNumberOfPodcasts else {
+              dataManager.allPodcasts(includeUnsubscribed: false).count > Constants.minimumNumberOfPodcasts else {
             return
         }
         suggestedFolderCreationFlow(from: vc, source: source)
@@ -69,7 +69,7 @@ class FoldersCoordinator: NSObject {
               DateUtil.hasEnoughTimePassed(since: startingTime, time: Constants.intervalAfterStartup),
               Settings.suggestedFoldersUpsellCount < Constants.maxUpsellDisplays,
               DateUtil.hasEnoughTimePassed(since: Settings.suggestedFoldersLastUpsellDate, time: Constants.intervalBetweenUpsell),
-              dataManager.allPodcasts(includeUnsubscribed: false, reloadFromDatabase: false).count > Constants.minimumNumberOfPodcasts,
+              dataManager.allPodcasts(includeUnsubscribed: false).count > Constants.minimumNumberOfPodcasts,
               suggestedFoldersModel.loadingState == .loaded
         else {
             return
@@ -94,7 +94,7 @@ class FoldersCoordinator: NSObject {
                 vc?.dismiss(animated: true, completion: nil)
             }
         }
-        let hostingController = PCHostingController(rootView: creatFolderView.environmentObject(Theme.sharedTheme))
+        let hostingController = PCHostingController(rootView: creatFolderView.environmentObject(Theme.shared))
 
         vc.present(hostingController, animated: true, completion: nil)
     }
@@ -124,7 +124,7 @@ class FoldersCoordinator: NSObject {
                 })
             }
         }
-        let hostingController = UIHostingController(rootView: suggestedFoldersView.environmentObject(Theme.sharedTheme))
+        let hostingController = UIHostingController(rootView: suggestedFoldersView.environmentObject(Theme.shared))
         vc.present(hostingController, animated: true, completion: nil)
         hostingController.sheetPresentationController?.delegate = self
     }
@@ -147,14 +147,14 @@ class FoldersCoordinator: NSObject {
                 return
             }
         }
-        let hostingController = UIHostingController(rootView: suggestedFoldersView.environmentObject(Theme.sharedTheme))
+        let hostingController = UIHostingController(rootView: suggestedFoldersView.environmentObject(Theme.shared))
         vc.present(hostingController, animated: true, completion: nil)
         hostingController.sheetPresentationController?.delegate = self
     }
 
     private func applySuggestedFolders(_ suggestedFolders: [SuggestedFolder]) {
         saveLastUuidsUsed()
-        DataManager.sharedManager.deleteAllFoldersAndMarkSync()
+        DataManager.shared.deleteAllFoldersAndMarkSync()
         for suggestedFolder in suggestedFolders {
             let folder = makeFolder(from: suggestedFolder)
             dataManager.bulkSetFolderUuid(folderUuid: folder.uuid, podcastUuids: suggestedFolder.podcastUuids)
@@ -185,7 +185,7 @@ class FoldersCoordinator: NSObject {
         folder.sortOrder = ServerPodcastManager.shared.lowestSortOrderForHomeGrid() - 1
 
         // the sort type for newly created folders defaults to the same thing the home grid is set to
-        folder.sortType = Int32(Settings.homeFolderSortOrder().old.rawValue)
+        folder.sortType = Int32(Settings.homeFolderSortOrder.old.rawValue)
         dataManager.save(folder: folder)
         return folder
     }

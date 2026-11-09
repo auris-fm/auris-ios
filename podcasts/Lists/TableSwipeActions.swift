@@ -1,5 +1,6 @@
 import Foundation
 import SwipeCellKit
+import UIKit
 
 class TableSwipeActions {
     private var actions = [TableSwipeAction]()
@@ -81,5 +82,12 @@ struct TableSwipeAction {
         self.tableView = tableView
         self.hidesWhenSelected = hidesWhenSelected
         self.handler = handler
+    }
+}
+
+extension SwipeActionsOrientation {
+    var resolvedForLayoutDirection: SwipeActionsOrientation {
+        guard UIApplication.shared.userInterfaceLayoutDirection == .rightToLeft else { return self }
+        return self == .left ? .right : .left
     }
 }

@@ -13,12 +13,14 @@ extension PodcastListViewController {
     }
 
     @objc func saveEditingTapped() {
-        saveSortOrder()
+        if hasReorderedItems {
+            saveSortOrder()
+        }
         setEditingOrder(false)
     }
 
     func applyEditingTreatment(to cell: UICollectionViewCell) {
-        if Settings.libraryType() == .list {
+        if Settings.libraryType == .list {
             addReorderHandle(to: cell)
         } else {
             cell.startEditingWiggle()
@@ -40,7 +42,7 @@ extension PodcastListViewController {
 
         podcastsCollectionView.dragInteractionEnabled = true
         podcastsCollectionView.allowsSelection = false
-        setEnclosingTabBarHidden(true, animated: true)
+        setHidesEnclosingTabBar(true, animated: true)
 
         for cell in podcastsCollectionView.visibleCells {
             applyEditingTreatment(to: cell)
@@ -48,9 +50,10 @@ extension PodcastListViewController {
     }
 
     private func exitEditMode() {
+        hasReorderedItems = false
         podcastsCollectionView.dragInteractionEnabled = false
         podcastsCollectionView.allowsSelection = true
-        setEnclosingTabBarHidden(false, animated: true)
+        setHidesEnclosingTabBar(false, animated: true)
 
         setCustomRightBtn(savedRightBarButtonItem, animated: true)
         savedRightBarButtonItem = nil
@@ -118,6 +121,7 @@ extension PodcastListViewController: UICollectionViewDragDelegate, UICollectionV
             gridItems.insert(moved, at: destinationIndexPath.item)
             collectionView.moveItem(at: sourceIndexPath, to: destinationIndexPath)
         }
+        hasReorderedItems = true
         coordinator.drop(dropItem.dragItem, toItemAt: destinationIndexPath)
         Analytics.track(.podcastsListReordered)
     }
