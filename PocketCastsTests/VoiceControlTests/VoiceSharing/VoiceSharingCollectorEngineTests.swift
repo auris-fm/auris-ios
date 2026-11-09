@@ -1790,7 +1790,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         let cases: [(label: String, state: String, reason: String?, expected: String?)] = [
             ("completed", "completed", nil, "success"),
             ("failed action", "failed", "action_failed", "failure"),
-            ("refusal (spec 553ec4a6)", "failed", "client_refused", "refused"),
+            ("refusal", "failed", "client_refused", "refused"),
             ("cancelled", "cancelled", "cancelled_by_user", "cancelled"),
             ("unobserved", "unknown", "observation_unavailable", nil),
         ]

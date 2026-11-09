@@ -2767,7 +2767,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
                        "the disqualified entry is never served")
         XCTAssertFalse(FileManager.default.fileExists(
             atPath: root.appendingPathComponent(failedPrep.name).path),
-            "spec 1a0d3ffb: the refused entry is deleted, not retained")
+            "the refused entry is deleted, not retained")
         XCTAssertTrue(FileManager.default.fileExists(
             atPath: root.appendingPathComponent(livePrep.name).path),
             "the live entry is untouched by the refusal sweep")
@@ -3049,7 +3049,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     /// (one age authority for the whole type) — not a new mechanism.
     func test_aRecordingNotAcceptedWithinSevenDaysOfCaptureIsDeleted() throws {
         XCTAssertEqual(VoiceSharingUploadQueue.maxEntryAge, 7 * 24 * 60 * 60,
-                       "retention is seven days from capture (spec 05ff27d0)")
+                       "retention is seven days from capture")
         var q = makeQueue()
         _ = try prepareAndFinalize(q, metadata: validRecord(audio: audioA), audio: audioA)
         // JUST inside the seven-day bound: it must survive, so the control cannot pass by deleting
@@ -3677,7 +3677,7 @@ final class VoiceSharingUploadQueueTests: XCTestCase {
     /// not hot), and must reach the full hour before flattening.
     func test_theRetryCeilingIsOneHour() {
         XCTAssertEqual(VoiceSharingRetryPolicy.compiledMaximumDelaySeconds, 3600,
-                       "backoff ceiling is one hour (spec 05ff27d0)")
+                       "backoff ceiling is one hour")
         // Attempt 13's exponential ceiling (2 * 2^12) already exceeds an hour; full jitter must
         // then be capped by the hour, not by the old minute.
         let policy = VoiceSharingRetryPolicy(
@@ -4072,7 +4072,7 @@ final class VoiceSharingClockOrderingRegressionTests: XCTestCase {
             return XCTFail("coverage stays known: the entry is readable, merely not fresh")
         }
         XCTAssertTrue(ready.isEmpty,
-                      "a future-dated admission instant is NOT fresh (spec 4ae8c740): the strict "
+                      "a future-dated admission instant is not fresh: the strict "
                       + "rule stands. Diag: \(reader.lastDiscoveryDiagnostic)")
         XCTAssertEqual(reader.readyEntries().count, 0,
                        "and the legacy path must agree — the disagreement WAS the defect")
@@ -4375,7 +4375,7 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
 
         XCTAssertFalse(FileManager.default.fileExists(
             atPath: entryRoot.appendingPathComponent(entry.name).path),
-            "spec 1a0d3ffb: the rejected entry is deleted, not kept")
+            "the rejected entry is deleted, not kept")
         XCTAssertTrue(makeQueue().readyEntries().isEmpty, "the refused capture never serves")
 
         // CAPACITY freed: the queue admits a fresh recording afterwards.
@@ -4476,7 +4476,7 @@ final class VoiceSharingRefusalDeletionTests: XCTestCase {
         XCTAssertTrue(queue.readyEntries().isEmpty)
         XCTAssertFalse(FileManager.default.fileExists(
             atPath: entryRoot.appendingPathComponent(refused.name).path),
-            "spec 1a0d3ffb: the server-refused entry is deleted, not kept")
+            "the server-refused entry is deleted, not kept")
 
         // An ACTIVE publication stage is never a refusal.
         let active = try seed(makeQueue())

@@ -21,7 +21,7 @@ final class VoiceSharingRetryPolicyTests: XCTestCase {
         let base = VoiceSharingRetryPolicy.compiledInitialDelaySeconds
         let maximum = VoiceSharingRetryPolicy.compiledMaximumDelaySeconds
         XCTAssertEqual(base, 2, "production retry base")
-        XCTAssertEqual(maximum, 3600, "production retry ceiling (spec 05ff27d0: one hour)")
+        XCTAssertEqual(maximum, 3600, "production retry ceiling: one hour")
         // Production assembles `random: { Double.random(in: 0...1) }`; pin that range here so a
         // later change to a wider or negative range fails this control instead of production.
         var lowest = 1.0

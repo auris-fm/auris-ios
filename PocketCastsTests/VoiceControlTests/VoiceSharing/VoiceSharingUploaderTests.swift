@@ -530,7 +530,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
         // DELETED at once: the entry directory leaves the disk.
         XCTAssertFalse(FileManager.default.fileExists(
             atPath: root.appendingPathComponent(entry.name).path),
-            "spec 1a0d3ffb: the refused entry is deleted, not kept")
+            "the refused entry is deleted, not kept")
         // not served by any listing, present or reconstructed.
         guard case .known(let ready) = queue.readyEntriesReportingUnknownCoverage() else {
             return XCTFail("coverage known")
