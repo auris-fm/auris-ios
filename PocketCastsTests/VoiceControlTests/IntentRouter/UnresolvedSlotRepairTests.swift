@@ -17,12 +17,16 @@ final class UnresolvedSlotRepairTests: XCTestCase {
         /// value keeps whichever scalar the fixture stated.
         enum Scalar: Decodable, Equatable {
             case int(Int)
+            /// Speeds are fractional (`0.5`), so a whole-number-only reader loses them.
+            case double(Double)
             case string(String)
 
             init(from decoder: Decoder) throws {
                 let container = try decoder.singleValueContainer()
                 if let value = try? container.decode(Int.self) {
                     self = .int(value)
+                } else if let value = try? container.decode(Double.self) {
+                    self = .double(value)
                 } else {
                     self = .string(try container.decode(String.self))
                 }
@@ -31,6 +35,7 @@ final class UnresolvedSlotRepairTests: XCTestCase {
             var described: String {
                 switch self {
                 case .int(let value): return "\(value)"
+                case .double(let value): return "\(value)"
                 case .string(let value): return value
                 }
             }
@@ -43,8 +48,22 @@ final class UnresolvedSlotRepairTests: XCTestCase {
         }
 
         let id: String
-        let language: String
+        /// The language of the text being repaired. Absent when the fixture deliberately leaves it
+        /// unstated, which is itself a case: repair must not guess a language.
+        let textLanguage: String?
+        let sourceLanguage: String?
         let utterance: String
+
+        /// A label for reports, not an input to repair.
+        var language: String {
+            textLanguage ?? sourceLanguage ?? "unstated"
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case id, utterance, predicted, repaired, reason
+            case textLanguage = "text_language"
+            case sourceLanguage = "source_language"
+        }
         let predicted: Call
         let repaired: Call?
         let reason: String
@@ -53,9 +72,9 @@ final class UnresolvedSlotRepairTests: XCTestCase {
     /// The core commit the bundled copy was taken from. The file is authored there and copied here,
     /// so nothing regenerates it: without a pin the two drift apart silently and this suite goes on
     /// passing against a contract that no longer exists.
-    private static let fixtureCoreCommit = "233c5051"
+    private static let fixtureCoreCommit = "fa7a34c1"
     private static let fixtureSHA256 =
-        "9ec72d55b2bf898242a06536ebdddfd03d9d038612814dfe00597906eaf13485"
+        "7c35fcc3ca78df1c55d226f49007a8c557f224cfd78b5082a5d6452f727cdf8f"
 
     private func fixtureData() throws -> Data {
         let url = try XCTUnwrap(
@@ -99,7 +118,7 @@ final class UnresolvedSlotRepairTests: XCTestCase {
     /// Every fixture, through the production repair path.
     func test_everySharedFixtureMatchesTheRepairResult() throws {
         let fixtures = try loadFixtures()
-        XCTAssertEqual(fixtures.count, 72, "the shared fixture set must be complete")
+        XCTAssertEqual(fixtures.count, 136, "the shared fixture set must be complete")
 
         for fixture in fixtures {
             let raw = "<|tool_call_start|>[\(rawCall(fixture.predicted))]<|tool_call_end|>"
@@ -107,7 +126,8 @@ final class UnresolvedSlotRepairTests: XCTestCase {
                 raw: raw,
                 utterance: fixture.utterance,
                 tool: fixture.predicted.tool,
-                action: fixture.predicted.action)
+                action: fixture.predicted.action,
+                textLanguage: fixture.textLanguage)
 
             if let expected = fixture.repaired {
                 let unwrapped = try XCTUnwrap(
@@ -118,6 +138,10 @@ final class UnresolvedSlotRepairTests: XCTestCase {
                     case .int(let number):
                         XCTAssertEqual(
                             unwrapped.arguments[key] as? Int, number,
+                            "\(fixture.id) [\(fixture.language)]: \(key) — \(fixture.reason)")
+                    case .double(let number):
+                        XCTAssertEqual(
+                            unwrapped.arguments[key] as? Double, number,
                             "\(fixture.id) [\(fixture.language)]: \(key) — \(fixture.reason)")
                     case .string(let word):
                         XCTAssertEqual(

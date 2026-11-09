@@ -2,11 +2,13 @@ import Foundation
 
 /// Lightweight port of training `_slot_repair.py` / Android `SlotRepair`.
 enum SlotRepair {
+    /// - Parameter textLanguage: the language of `utterance`, where the caller knows it.
     static func repair(
         raw: String,
         utterance: String,
         tool: String,
-        action: String
+        action: String,
+        textLanguage: String? = nil
     ) -> ToolCall? {
         guard !tool.isEmpty else { return nil }
         if tool == "no_match" {
@@ -17,7 +19,8 @@ enum SlotRepair {
         // cannot resolve it by picking a side, and the direction fallback below would
         // otherwise manufacture a confident seek out of an unresolved one. Drop the
         // whole call so the local route defers it.
-        if hasUnresolvedExecutionCondition(tool: tool, action: action, utterance: utterance) {
+        if hasUnresolvedExecutionCondition(
+                tool: tool, action: action, utterance: utterance, textLanguage: textLanguage) {
             return nil
         }
 
@@ -329,93 +332,242 @@ enum SlotRepair {
     /// describes an event that may not have happened. Repair resolves slot values; it cannot
     /// resolve either of these, so the call must not survive repair at all.
     ///
-    /// The patterns mirror the shared Python fixture authoring so the same utterance is classified
-    /// the same way on every client. Titles and search queries can quote these words without
-    /// conditioning execution, so only actions that consume a numeric slot or drive playback are
-    /// checked.
+    /// This mirrors the shared fixture authoring, so one utterance is classified the same way on
+    /// every client. The shapes that look conditional but are not carry the weight here: a duration
+    /// after "after", an adjacent-chapter reference, a repetition "once", and a quoted title are
+    /// each ordinary settled requests, and the exemptions below are what keep them out.
+    /// - Parameter textLanguage: the language of `utterance`. "Once" is the Spanish numeral eleven,
+    ///   so the clause reading applies only where the text is not Spanish; an English translation
+    ///   carries `en` even when the source was `es`.
     static func hasUnresolvedExecutionCondition(
         tool: String,
         action: String,
-        utterance: String
+        utterance: String,
+        textLanguage: String? = nil
     ) -> Bool {
-        let numericAction = allowedParams(tool: tool, action: action).contains { key in
-            Self.numericParamKeys.contains(key)
-        }
+        // Already-deferred calls keep their own paths; a read-only request asks for information
+        // now and cannot run early.
+        guard !["cloud_route", "no_match", "dialog_control"].contains(tool) else { return false }
+        let readOnly = tool.hasSuffix("_query") || action == "query" || action.hasPrefix("query_")
+
+        let allowed = allowedParams(tool: tool, action: action)
+        let numericAction = allowed.contains { Self.numericParamKeys.contains($0) }
         let controlAction = (["playback", "effects", "volume", "sleep"].contains(tool) && action != "query")
             || (tool == "chapter" && ["next", "previous"].contains(action))
-        guard numericAction || controlAction else { return false }
+        let actionParams = Set(allowed)
 
-        let text = utterance.precomposedStringWithCompatibilityMapping
-        if firstMatch(unresolvedExecutionConditionRegex, in: text) != nil { return true }
-        let corrected = correctedNumericRequest(text)
+        // A quoted title is a name, not a condition, so the words inside it are blanked before the
+        // condition is read. Blanking preserves offsets, leaving identical words outside the quote
+        // observable.
+        var conditionText = utterance
+        if !actionParams.isDisjoint(with: ["title", "query", "ref", "episode", "podcast"]) {
+            for title in quotedSpans(utterance) {
+                for quote in ["\"", "'"] {
+                    let literal = quote + title + quote
+                    conditionText = conditionText.replacingOccurrences(
+                        of: literal, with: String(repeating: " ", count: literal.count))
+                }
+            }
+        }
+        if readOnly {
+            // "When did it start" asks now. A separate "when this ends" clause stays visible.
+            conditionText = replace(readOnlyWhenRegex, in: conditionText, with: "")
+            conditionText = replace(readOnlyIfRegex, in: conditionText, with: "$1whether")
+            conditionText = replace(readOnlyUntilRegex, in: conditionText, with: "$1")
+        }
+        // A correction settles the value it affirms, but it cannot erase a condition stated
+        // outside it, so only the numeric text is stripped of quotes and corrected below.
+        let numericText = utterance.replacingOccurrences(of: "\"", with: "")
+            .replacingOccurrences(of: "'", with: "")
+
+        conditionText = replace(politeConditionalRegex, in: conditionText, with: "")
+
+        if tool == "queue", ["add_top", "query_next"].contains(action) {
+            // Queue-next encodes this ordering; an ending predicate still delays the mutation.
+            conditionText = replace(adjacentEpisodeRegex, in: conditionText, with: "")
+        }
+        if action == "seek_to" {
+            // An episode-position offset is a coordinate, not a request to wait.
+            conditionText = replace(seekOffsetCoordinateRegex, in: conditionText, with: "")
+            conditionText = replace(seekOffsetCoordinateCJRegex, in: conditionText, with: "")
+        }
+        if tool == "chapter", ["previous", "next"].contains(action) {
+            // "The chapter before this one" identifies a chapter; an ending predicate makes it
+            // a future condition.
+            conditionText = replace(adjacentChapterRegex, in: conditionText, with: "")
+        }
+        if tool == "sleep", action == "set" {
+            // A timer's own duration is its target, not a condition on starting a seek.
+            conditionText = replace(sleepAfterAmountRegex, in: conditionText, with: "")
+        }
+        if tool == "sleep", ["end_of_episode", "end_of_chapter"].contains(action) {
+            conditionText = replace(sleepEndEventRegex(tool: tool, action: action),
+                                    in: conditionText, with: "")
+        }
+
+        if firstMatch(unresolvedExecutionConditionRegex, in: conditionText) != nil { return true }
+        let language = textLanguage?
+            .trimmingCharacters(in: .whitespaces)
+            .replacingOccurrences(of: "_", with: "-")
+            .lowercased()
+            .split(separator: "-", maxSplits: 1).first.map(String.init) ?? ""
+        if language != "es", Self.onceOpensExecutionClause(conditionText) { return true }
+
+        guard numericAction || controlAction else { return false }
+        let corrected = replace(correctionRegex, in: numericText, with: " ")
         return firstMatch(unresolvedAlternativeRegex, in: corrected) != nil
             || firstMatch(unresolvedBoundRegex, in: corrected) != nil
             || firstMatch(unresolvedRangeRegex, in: corrected) != nil
     }
 
-    /// A correction settles the value it affirms, so the rejected value must not keep the request
-    /// looking unresolved. Removing the excluded clause leaves the affirmed amount alone.
-    private static func correctedNumericRequest(_ text: String) -> String {
-        replace(correctionRegex, in: text, with: " ")
+    /// Whether "once" opens a clause rather than counting times.
+    ///
+    /// "Once" is also the Spanish numeral eleven, so this reads the complement instead of matching
+    /// the word: a repetition ("once more", "once for me", "once please") completes the phrase and
+    /// is a modifier, while anything left over ("once more people arrive") is a clause. No verb
+    /// list is used, so an unrecognised predicate stays conservative rather than executing early.
+    private static func onceOpensExecutionClause(_ text: String) -> Bool {
+        var searchRange = text.startIndex..<text.endIndex
+        while let marker = onceWordRegex.firstMatch(in: text, range: NSRange(searchRange, in: text)) {
+            guard let matchRange = Range(marker.range, in: text) else { break }
+            searchRange = matchRange.upperBound..<text.endIndex
+            let tail = text[matchRange.upperBound...]
+                .drop { $0 == " " || $0 == "\t" || $0 == "," }
+            let sentence = String(tail.prefix { !";.!?\n".contains($0) })
+            for (index, phrase) in sentence.split(
+                separator: ",", omittingEmptySubsequences: false).enumerated() {
+                var complement = String(phrase).trimmingCharacters(in: .whitespaces)
+                // A modifier alone is a repetition, but "more people arrive" keeps a subject
+                // and predicate once the modifier is removed.
+                while let stripped = replacingOncePrefix(complement) { complement = stripped }
+                if complement.isEmpty {
+                    if index == 0 { break }
+                    continue
+                }
+                // A beneficiary phrase ("once for me") is not a clause. Continuing past a comma
+                // stops a parenthetical from concealing an actual condition.
+                if firstMatch(beneficiaryRegex, in: complement) != nil { continue }
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func replacingOncePrefix(_ text: String) -> String? {
+        guard let match = onceModifierRegex.firstMatch(
+            in: text, range: NSRange(text.startIndex..., in: text)),
+            let range = Range(match.range, in: text) else { return nil }
+        return String(text[range.upperBound...])
     }
 
     private static let numericParamKeys: Set<String> = [
-        "delta_seconds", "position_seconds", "minutes", "seconds", "duration", "level",
+        "delta_seconds", "position_seconds", "minutes", "seconds", "duration", "level", "index",
     ]
+
+    private static func replace(_ regex: NSRegularExpression, in text: String, with template: String) -> String {
+        let range = NSRange(text.startIndex..., in: text)
+        return regex.stringByReplacingMatches(in: text, options: [], range: range, withTemplate: template)
+    }
 
     private static func firstMatch(_ regex: NSRegularExpression, in text: String) -> NSTextCheckingResult? {
         regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text))
     }
 
-    /// A number in any of the supported languages, optionally followed by a unit.
+    /// A spoken quantity: digits, spelled numbers, mixed fractions ("one and a half"), and bare
+    /// fractions. Consuming the whole mixed quantity before its integer prefix is what keeps a
+    /// correct 1.5 from being read as the first "one".
     private static let unresolvedNumber =
-        #"\d+(?:[.,]\d+)?|(?:ten|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)"#
-        + #"|(?:uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|dieciséis|dieciseis|"#
-        + #"diecisiete|dieciocho|diecinueve|veinte|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa)"#
-        + #"|[一二两三四五六七八九十百]+|[０-９]+"#
+        #"(?<![A-Za-z])(?:(?:a\s+)?couple|"# + unresolvedBaseNumber + #"\s+(?:halves|quarters|thirds)"#
+        + #"|"# + unresolvedBaseNumber + #"\s+and\s+(?:a\s+)?(?:half|quarter)|(?:a\s+)?(?:half|quarter)"#
+        + #"|"# + unresolvedBaseNumber + #"|cero|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez"#
+        + #"|once|doce|trece|catorce|quince|dieciséis|dieciseis|diecisiete|dieciocho|diecinueve"#
+        + #"|veinte|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa"#
+        + #"|[零〇一二三四五六七八九十百千万萬两兩]+)(?![A-Za-z])"#
+    private static let unresolvedBaseNumber =
+        #"(?:\d+(?:\.\d+)?|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve"#
+        + #"|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty"#
+        + #"|fifty|sixty|seventy|eighty|ninety)(?:[-\s](?:one|two|three|four|five|six|seven|eight|nine))?)"#
     private static let unresolvedUnit =
-        #"(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|秒|分钟|分鐘|分|時間|segundos?|minutos?|horas?)"#
+        #"(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|秒钟|秒鐘|秒|分钟|分鐘|分|小时|小時|時間"#
+        + #"|segundos?|minutos?|horas?)"#
     private static let unresolvedAmount =
-        "(?:" + unresolvedNumber + ")(?:(?:\\s*(?:of\\s+)?(?:an?\\s+)?)?(?:"
-        + unresolvedUnit + "))?"
+        unresolvedNumber + #"(?:\s*(?:of\s+)?(?:an?\s+)?"# + unresolvedUnit + #")?"#
 
-    /// "ten or twenty", "十秒或者二十秒", "10秒か20秒".
+    /// "ten or twenty", "十秒或者二十秒", "10秒か20秒", "half or a quarter".
     private static let unresolvedAlternativeRegex = try! NSRegularExpression(
-        pattern: unresolvedAmount + "\\s*(?:\\bor\\b|\\bo\\b|或者|或|还是|還是|か)\\s*(?:"
-            + unresolvedNumber + ")",
+        pattern: unresolvedAmount + #"\s*(?:\bor\b|\bo\b|或者|或|还是|還是|か)\s*"# + unresolvedNumber,
         options: [.caseInsensitive])
 
     /// "at least ten", "至少十秒", "al menos diez".
     private static let unresolvedBoundRegex = try! NSRegularExpression(
         pattern: #"(?:\b(?:at\s+(?:least|most)|no\s+(?:more|less)\s+than|more\s+than|less\s+than|over|under|"#
             + #"al\s+menos|como\s+(?:mínimo|máximo|minimo|maximo)|más\s+de|mas\s+de|menos\s+de)\s+|"#
-            + #"至少|最多|最少|不超过|不超過|不少于|不少於|多于|多於|少于|少於|少なくとも|多くとも)\s*(?:"#
-            + unresolvedNumber + ")|" + unresolvedAmount + #"\s*(?:以上|以下|未満|以内)"#,
+            + #"至少|最多|最少|不超过|不超過|不少于|不少於|多于|多於|少于|少於|少なくとも|多くとも)\s*"#
+            + unresolvedNumber + #"|"# + unresolvedAmount + #"\s*(?:以上|以下|未満|以内)"#,
         options: [.caseInsensitive])
 
     /// "between ten and twenty", "十到二十".
     private static let unresolvedRangeRegex = try! NSRegularExpression(
-        pattern: #"\b(?:between|entre)\s+"# + unresolvedAmount + #"\s+(?:and|y)\s+(?:"#
-            + unresolvedNumber + ")|" + unresolvedAmount + "\\s*(?:到|至|から|[~〜～])\\s*(?:"
-            + unresolvedNumber + ")",
+        pattern: #"\b(?:between|entre)\s+"# + unresolvedAmount + #"\s+(?:and|y)\s*"# + unresolvedNumber
+            + #"|"# + unresolvedAmount + #"\s*(?:到|至|から|[~〜～])\s*"# + unresolvedNumber,
         options: [.caseInsensitive])
 
-    /// A condition on WHEN to act: "when this ends", "等这集结束后", "cuando termine".
+    /// A condition on WHEN to act, after the exemptions above have removed the settled shapes.
     private static let unresolvedExecutionConditionRegex = try! NSRegularExpression(
-        pattern: #"\b(?:when|after|before|until|if|cuando|si|después\s+de|despues\s+de|antes\s+de|hasta\s+que)\b"#
-            + #"|\bonce(?!"#
-            + "(?:\\s+(?:more|again|" + unresolvedUnit + ")\\b)"
-            + #")(?=\s+\w)"#
+        pattern: #"\b(?:when|after|before|until|if|cuando|si|después\s+de|despues\s+de|antes\s+de|hasta\s+que"#
+            + #"|una\s+vez\s+que)\b"#
             + "|(?:等|当|當|如果|要是).{0,64}(?:结束|結束|完|后|後|时|時|就|再)"
             + "|(?:结束|結束|播放完|播完)(?:之)?(?:后|後|前)"
             + "|(?:たら|なら|とき|時に|あとで|後で|秒後|分後|時間後)",
         options: [.caseInsensitive])
 
+    private static let onceWordRegex = try! NSRegularExpression(pattern: #"\bonce\b"#, options: [.caseInsensitive])
+    private static let onceModifierRegex = try! NSRegularExpression(
+        pattern: #"^(?:(?:more|again|only|please)\b\s*)+"#, options: [.caseInsensitive])
+    private static let beneficiaryRegex = try! NSRegularExpression(
+        pattern: #"^for\b"#, options: [.caseInsensitive])
+    private static let quotedSpanRegex = try! NSRegularExpression(pattern: #""[^"]*"|'[^']*'"#)
+
+    private static let readOnlyWhenRegex = try! NSRegularExpression(
+        pattern: #"\bwhen(?=\s+(?:did|do|does|was|were|is|are|have|has|will)\b)"#, options: [.caseInsensitive])
+    private static let readOnlyIfRegex = try! NSRegularExpression(
+        pattern: #"(\b(?:tell|show|check|know|see)\s+(?:(?:me|us)\s+)?|\band\s+)if\b"#,
+        options: [.caseInsensitive])
+    private static let readOnlyUntilRegex = try! NSRegularExpression(
+        pattern: #"(\bhow\b[^,;?]*?)\buntil\b"#, options: [.caseInsensitive])
+    private static let politeConditionalRegex = try! NSRegularExpression(
+        pattern: #"\bif\s+you\s+(?:could|would)\s*,?"#, options: [.caseInsensitive])
+    private static let adjacentEpisodeRegex = try! NSRegularExpression(
+        pattern: #"\b(?:right\s+)?after\s+(?:(?:this|the|current)\s+)*(?:episode|track|one)\b"#
+            + #"(?!\s+(?:ends?|finishes?|is\s+done)\b)"#,
+        options: [.caseInsensitive])
+    private static let seekOffsetCoordinateRegex = try! NSRegularExpression(
+        pattern: unresolvedAmount + #"\s+(?:before\s+(?:the\s+)?end|after\s+(?:the\s+)?(?:start|beginning))\b"#,
+        options: [.caseInsensitive])
+    private static let seekOffsetCoordinateCJRegex = try! NSRegularExpression(
+        pattern: #"(?:结束|結束)(?:之前|前)\s*"# + unresolvedAmount
+            + #"|"# + unresolvedAmount + #"\s+antes\s+del\s+final\b"#,
+        options: [.caseInsensitive])
+    private static let adjacentChapterRegex = try! NSRegularExpression(
+        pattern: #"\bchapter\s+(?:right\s+)?(?:before|after)\s+(?:this|current)(?:\s+(?:one|chapter))?\b"#
+            + #"(?!\s+(?:one|chapter|ends?|finishes?|is\s+done)\b)"#,
+        options: [.caseInsensitive])
+    private static let sleepAfterAmountRegex = try! NSRegularExpression(
+        pattern: #"\bafter\s+"# + unresolvedAmount, options: [.caseInsensitive])
+
+    private static func sleepEndEventRegex(tool: String, action: String) -> NSRegularExpression {
+        let event = action == "end_of_chapter"
+            ? "chapter" : "episode|track|segment|show"
+        return try! NSRegularExpression(
+            pattern: #"\b(?:after|once|when|until)\s+(?:(?:this|the|current|particular|show)\s+)*"#
+                + "(?:" + event + ")(?:\\s+(?:ends?|finishes?|is\\s+done))?\\b",
+            options: [.caseInsensitive])
+    }
+
     /// The clause a correction rejects: "twenty, not ten", "二十秒，不是十秒".
     private static let correctionRegex = try! NSRegularExpression(
         pattern: #"(?:,|，)?\s*(?:\bnot\b|\binstead\s+of\b|不是|而不是|ではなく|no)\s+"#
-            + "(?:" + unresolvedNumber + ")(?:(?:\\s*(?:of\\s+)?(?:an?\\s+)?)?"
-            + unresolvedUnit + ")?",
+            + unresolvedNumber + #"(?:\s*(?:of\s+)?(?:an?\s+)?"# + unresolvedUnit + #")?"#,
         options: [.caseInsensitive])
 
     /// Check if a delta value is within the contract constraint (±1 hour).
@@ -748,11 +900,6 @@ enum SlotRepair {
             prev = current
         }
         return prev[rightChars.count]
-    }
-
-    private static func replace(_ regex: NSRegularExpression, in text: String, with template: String) -> String {
-        let range = NSRange(text.startIndex..., in: text)
-        return regex.stringByReplacingMatches(in: text, options: [], range: range, withTemplate: template)
     }
 
     private static let wordRepeatRegex = try! NSRegularExpression(

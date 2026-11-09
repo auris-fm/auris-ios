@@ -1,7 +1,6 @@
 [
   {
     "id": "nov09o-root-001-en-decoded-0",
-    "language": "en",
     "utterance": "rewind ten or twenty seconds",
     "predicted": {
       "tool": "playback",
@@ -11,11 +10,12 @@
       }
     },
     "repaired": null,
-    "reason": "Two alternative amounts are offered without choosing either. One unresolved action, not two affirmed seeks; do not choose ten, twenty, a sum, or a default."
+    "reason": "Two alternative amounts are offered without choosing either. One unresolved action, not two affirmed seeks; do not choose ten, twenty, a sum, or a default.",
+    "source_language": "en",
+    "text_language": "en"
   },
   {
     "id": "nov09o-root-001-en-decoded-1",
-    "language": "en",
     "utterance": "rewind ten or twenty seconds",
     "predicted": {
       "tool": "playback",
@@ -25,11 +25,12 @@
       }
     },
     "repaired": null,
-    "reason": "Two alternative amounts are offered without choosing either. One unresolved action, not two affirmed seeks; do not choose ten, twenty, a sum, or a default."
+    "reason": "Two alternative amounts are offered without choosing either. One unresolved action, not two affirmed seeks; do not choose ten, twenty, a sum, or a default.",
+    "source_language": "en",
+    "text_language": "en"
   },
   {
     "id": "nov09o-root-001-en-decoded-2",
-    "language": "en",
     "utterance": "rewind ten or twenty seconds",
     "predicted": {
       "tool": "playback",
@@ -37,11 +38,12 @@
       "params": {}
     },
     "repaired": null,
-    "reason": "Two alternative amounts are offered without choosing either. One unresolved action, not two affirmed seeks; do not choose ten, twenty, a sum, or a default."
+    "reason": "Two alternative amounts are offered without choosing either. One unresolved action, not two affirmed seeks; do not choose ten, twenty, a sum, or a default.",
+    "source_language": "en",
+    "text_language": "en"
   },
   {
     "id": "nov09o-root-001-zh-decoded-0",
-    "language": "zh",
     "utterance": "往回跳十秒或者二十秒",
     "predicted": {
       "tool": "playback",
@@ -51,11 +53,12 @@
       }
     },
     "repaired": null,
-    "reason": "Two alternative amounts are offered without choosing either. One unresolved action, not two affirmed seeks; do not choose ten, twenty, a sum, or a default."
+    "reason": "Two alternative amounts are offered without choosing either. One unresolved action, not two affirmed seeks; do not choose ten, twenty, a sum, or a default.",
+    "source_language": "zh",
+    "text_language": "zh"
   },
   {
     "id": "nov09o-root-001-zh-decoded-1",
-    "language": "zh",
     "utterance": "往回跳十秒或者二十秒",
     "predicted": {
       "tool": "playback",
@@ -65,11 +68,12 @@
       }
     },
     "repaired": null,
-    "reason": "Two alternative amounts are offered without choosing either. One unresolved action, not two affirmed seeks; do not choose ten, twenty, a sum, or a default."
+    "reason": "Two alternative amounts are offered without choosing either. One unresolved action, not two affirmed seeks; do not choose ten, twenty, a sum, or a default.",
+    "source_language": "zh",
+    "text_language": "zh"
   },
   {
     "id": "nov09o-root-001-zh-decoded-2",
-    "language": "zh",
     "utterance": "往回跳十秒或者二十秒",
     "predicted": {
       "tool": "playback",
@@ -77,11 +81,12 @@
       "params": {}
     },
     "repaired": null,
-    "reason": "Two alternative amounts are offered without choosing either. One unresolved action, not two affirmed seeks; do not choose ten, twenty, a sum, or a default."
+    "reason": "Two alternative amounts are offered without choosing either. One unresolved action, not two affirmed seeks; do not choose ten, twenty, a sum, or a default.",
+    "source_language": "zh",
+    "text_language": "zh"
   },
   {
     "id": "nov09o-root-001-ja-decoded-0",
-    "language": "ja",
     "utterance": "10秒か20秒戻して",
     "predicted": {
       "tool": "playback",
@@ -91,11 +96,12 @@
       }
     },
     "repaired": null,
-    "reason": "Two alternative amounts are offered without choosing either. One unresolved action, not two affirmed seeks; do not choose ten, twenty, a sum, or a default."
+    "reason": "Two alternative amounts are offered without choosing either. One unresolved action, not two affirmed seeks; do not choose ten, twenty, a sum, or a default.",
+    "source_language": "ja",
+    "text_language": "ja"
   },
   {
     "id": "nov09o-root-001-ja-decoded-1",
-    "language": "ja",
     "utterance": "10秒か20秒戻して",
     "predicted": {
       "tool": "playback",
@@ -105,11 +111,12 @@
       }
     },
     "repaired": null,
-    "reason": "Two alternative amounts are offered without choosing either. One unresolved action, not two affirmed seeks; do not choose ten, twenty, a sum, or a default."
+    "reason": "Two alternative amounts are offered without choosing either. One unresolved action, not two affirmed seeks; do not choose ten, twenty, a sum, or a default.",
+    "source_language": "ja",
+    "text_language": "ja"
   },
   {
     "id": "nov09o-root-001-ja-decoded-2",
-    "language": "ja",
     "utterance": "10秒か20秒戻して",
     "predicted": {
       "tool": "playback",
@@ -117,11 +124,12 @@
       "params": {}
     },
     "repaired": null,
-    "reason": "Two alternative amounts are offered without choosing either. One unresolved action, not two affirmed seeks; do not choose ten, twenty, a sum, or a default."
+    "reason": "Two alternative amounts are offered without choosing either. One unresolved action, not two affirmed seeks; do not choose ten, twenty, a sum, or a default.",
+    "source_language": "ja",
+    "text_language": "ja"
   },
   {
     "id": "nov09o-root-001-es-decoded-0",
-    "language": "es",
     "utterance": "retrocede diez o veinte segundos",
     "predicted": {
       "tool": "playback",
@@ -131,11 +139,12 @@
       }
     },
     "repaired": null,
-    "reason": "Two alternative amounts are offered without choosing either. One unresolved action, not two affirmed seeks; do not choose ten, twenty, a sum, or a default."
+    "reason": "Two alternative amounts are offered without choosing either. One unresolved action, not two affirmed seeks; do not choose ten, twenty, a sum, or a default.",
+    "source_language": "es",
+    "text_language": "es"
   },
   {
     "id": "nov09o-root-001-es-decoded-1",
-    "language": "es",
     "utterance": "retrocede diez o veinte segundos",
     "predicted": {
       "tool": "playback",
@@ -145,11 +154,12 @@
       }
     },
     "repaired": null,
-    "reason": "Two alternative amounts are offered without choosing either. One unresolved action, not two affirmed seeks; do not choose ten, twenty, a sum, or a default."
+    "reason": "Two alternative amounts are offered without choosing either. One unresolved action, not two affirmed seeks; do not choose ten, twenty, a sum, or a default.",
+    "source_language": "es",
+    "text_language": "es"
   },
   {
     "id": "nov09o-root-001-es-decoded-2",
-    "language": "es",
     "utterance": "retrocede diez o veinte segundos",
     "predicted": {
       "tool": "playback",
@@ -157,11 +167,12 @@
       "params": {}
     },
     "repaired": null,
-    "reason": "Two alternative amounts are offered without choosing either. One unresolved action, not two affirmed seeks; do not choose ten, twenty, a sum, or a default."
+    "reason": "Two alternative amounts are offered without choosing either. One unresolved action, not two affirmed seeks; do not choose ten, twenty, a sum, or a default.",
+    "source_language": "es",
+    "text_language": "es"
   },
   {
     "id": "nov09o-root-002-en-decoded-0",
-    "language": "en",
     "utterance": "rewind twenty seconds, not ten",
     "predicted": {
       "tool": "playback",
@@ -177,11 +188,12 @@
       },
       "tool": "playback"
     },
-    "reason": "The negative clause excludes ten and leaves twenty as the single affirmed amount: one backward displacement of twenty seconds."
+    "reason": "The negative clause excludes ten and leaves twenty as the single affirmed amount: one backward displacement of twenty seconds.",
+    "source_language": "en",
+    "text_language": "en"
   },
   {
     "id": "nov09o-root-002-zh-decoded-0",
-    "language": "zh",
     "utterance": "往回跳二十秒，不是十秒",
     "predicted": {
       "tool": "playback",
@@ -197,11 +209,12 @@
       },
       "tool": "playback"
     },
-    "reason": "The negative clause excludes ten and leaves twenty as the single affirmed amount: one backward displacement of twenty seconds."
+    "reason": "The negative clause excludes ten and leaves twenty as the single affirmed amount: one backward displacement of twenty seconds.",
+    "source_language": "zh",
+    "text_language": "zh"
   },
   {
     "id": "nov09o-root-002-ja-decoded-0",
-    "language": "ja",
     "utterance": "10秒ではなく20秒戻して",
     "predicted": {
       "tool": "playback",
@@ -217,11 +230,12 @@
       },
       "tool": "playback"
     },
-    "reason": "The negative clause excludes ten and leaves twenty as the single affirmed amount: one backward displacement of twenty seconds."
+    "reason": "The negative clause excludes ten and leaves twenty as the single affirmed amount: one backward displacement of twenty seconds.",
+    "source_language": "ja",
+    "text_language": "ja"
   },
   {
     "id": "nov09o-root-002-es-decoded-0",
-    "language": "es",
     "utterance": "retrocede veinte segundos, no diez",
     "predicted": {
       "tool": "playback",
@@ -237,11 +251,12 @@
       },
       "tool": "playback"
     },
-    "reason": "The negative clause excludes ten and leaves twenty as the single affirmed amount: one backward displacement of twenty seconds."
+    "reason": "The negative clause excludes ten and leaves twenty as the single affirmed amount: one backward displacement of twenty seconds.",
+    "source_language": "es",
+    "text_language": "es"
   },
   {
     "id": "nov09o-root-003-en-decoded-0",
-    "language": "en",
     "utterance": "rewind at least ten seconds",
     "predicted": {
       "tool": "playback",
@@ -251,11 +266,12 @@
       }
     },
     "repaired": null,
-    "reason": "At least ten is a fully spoken lower bound, not exactly ten. No unique displacement is supplied; do not substitute the bound or default."
+    "reason": "At least ten is a fully spoken lower bound, not exactly ten. No unique displacement is supplied; do not substitute the bound or default.",
+    "source_language": "en",
+    "text_language": "en"
   },
   {
     "id": "nov09o-root-003-en-decoded-1",
-    "language": "en",
     "utterance": "rewind at least ten seconds",
     "predicted": {
       "tool": "playback",
@@ -265,11 +281,12 @@
       }
     },
     "repaired": null,
-    "reason": "At least ten is a fully spoken lower bound, not exactly ten. No unique displacement is supplied; do not substitute the bound or default."
+    "reason": "At least ten is a fully spoken lower bound, not exactly ten. No unique displacement is supplied; do not substitute the bound or default.",
+    "source_language": "en",
+    "text_language": "en"
   },
   {
     "id": "nov09o-root-003-en-decoded-2",
-    "language": "en",
     "utterance": "rewind at least ten seconds",
     "predicted": {
       "tool": "playback",
@@ -277,11 +294,12 @@
       "params": {}
     },
     "repaired": null,
-    "reason": "At least ten is a fully spoken lower bound, not exactly ten. No unique displacement is supplied; do not substitute the bound or default."
+    "reason": "At least ten is a fully spoken lower bound, not exactly ten. No unique displacement is supplied; do not substitute the bound or default.",
+    "source_language": "en",
+    "text_language": "en"
   },
   {
     "id": "nov09o-root-003-zh-decoded-0",
-    "language": "zh",
     "utterance": "往回跳至少十秒",
     "predicted": {
       "tool": "playback",
@@ -291,11 +309,12 @@
       }
     },
     "repaired": null,
-    "reason": "At least ten is a fully spoken lower bound, not exactly ten. No unique displacement is supplied; do not substitute the bound or default."
+    "reason": "At least ten is a fully spoken lower bound, not exactly ten. No unique displacement is supplied; do not substitute the bound or default.",
+    "source_language": "zh",
+    "text_language": "zh"
   },
   {
     "id": "nov09o-root-003-zh-decoded-1",
-    "language": "zh",
     "utterance": "往回跳至少十秒",
     "predicted": {
       "tool": "playback",
@@ -305,11 +324,12 @@
       }
     },
     "repaired": null,
-    "reason": "At least ten is a fully spoken lower bound, not exactly ten. No unique displacement is supplied; do not substitute the bound or default."
+    "reason": "At least ten is a fully spoken lower bound, not exactly ten. No unique displacement is supplied; do not substitute the bound or default.",
+    "source_language": "zh",
+    "text_language": "zh"
   },
   {
     "id": "nov09o-root-003-zh-decoded-2",
-    "language": "zh",
     "utterance": "往回跳至少十秒",
     "predicted": {
       "tool": "playback",
@@ -317,11 +337,12 @@
       "params": {}
     },
     "repaired": null,
-    "reason": "At least ten is a fully spoken lower bound, not exactly ten. No unique displacement is supplied; do not substitute the bound or default."
+    "reason": "At least ten is a fully spoken lower bound, not exactly ten. No unique displacement is supplied; do not substitute the bound or default.",
+    "source_language": "zh",
+    "text_language": "zh"
   },
   {
     "id": "nov09o-root-003-ja-decoded-0",
-    "language": "ja",
     "utterance": "少なくとも10秒戻して",
     "predicted": {
       "tool": "playback",
@@ -331,11 +352,12 @@
       }
     },
     "repaired": null,
-    "reason": "At least ten is a fully spoken lower bound, not exactly ten. No unique displacement is supplied; do not substitute the bound or default."
+    "reason": "At least ten is a fully spoken lower bound, not exactly ten. No unique displacement is supplied; do not substitute the bound or default.",
+    "source_language": "ja",
+    "text_language": "ja"
   },
   {
     "id": "nov09o-root-003-ja-decoded-1",
-    "language": "ja",
     "utterance": "少なくとも10秒戻して",
     "predicted": {
       "tool": "playback",
@@ -345,11 +367,12 @@
       }
     },
     "repaired": null,
-    "reason": "At least ten is a fully spoken lower bound, not exactly ten. No unique displacement is supplied; do not substitute the bound or default."
+    "reason": "At least ten is a fully spoken lower bound, not exactly ten. No unique displacement is supplied; do not substitute the bound or default.",
+    "source_language": "ja",
+    "text_language": "ja"
   },
   {
     "id": "nov09o-root-003-ja-decoded-2",
-    "language": "ja",
     "utterance": "少なくとも10秒戻して",
     "predicted": {
       "tool": "playback",
@@ -357,11 +380,12 @@
       "params": {}
     },
     "repaired": null,
-    "reason": "At least ten is a fully spoken lower bound, not exactly ten. No unique displacement is supplied; do not substitute the bound or default."
+    "reason": "At least ten is a fully spoken lower bound, not exactly ten. No unique displacement is supplied; do not substitute the bound or default.",
+    "source_language": "ja",
+    "text_language": "ja"
   },
   {
     "id": "nov09o-root-003-es-decoded-0",
-    "language": "es",
     "utterance": "retrocede al menos diez segundos",
     "predicted": {
       "tool": "playback",
@@ -371,11 +395,12 @@
       }
     },
     "repaired": null,
-    "reason": "At least ten is a fully spoken lower bound, not exactly ten. No unique displacement is supplied; do not substitute the bound or default."
+    "reason": "At least ten is a fully spoken lower bound, not exactly ten. No unique displacement is supplied; do not substitute the bound or default.",
+    "source_language": "es",
+    "text_language": "es"
   },
   {
     "id": "nov09o-root-003-es-decoded-1",
-    "language": "es",
     "utterance": "retrocede al menos diez segundos",
     "predicted": {
       "tool": "playback",
@@ -385,11 +410,12 @@
       }
     },
     "repaired": null,
-    "reason": "At least ten is a fully spoken lower bound, not exactly ten. No unique displacement is supplied; do not substitute the bound or default."
+    "reason": "At least ten is a fully spoken lower bound, not exactly ten. No unique displacement is supplied; do not substitute the bound or default.",
+    "source_language": "es",
+    "text_language": "es"
   },
   {
     "id": "nov09o-root-003-es-decoded-2",
-    "language": "es",
     "utterance": "retrocede al menos diez segundos",
     "predicted": {
       "tool": "playback",
@@ -397,11 +423,12 @@
       "params": {}
     },
     "repaired": null,
-    "reason": "At least ten is a fully spoken lower bound, not exactly ten. No unique displacement is supplied; do not substitute the bound or default."
+    "reason": "At least ten is a fully spoken lower bound, not exactly ten. No unique displacement is supplied; do not substitute the bound or default.",
+    "source_language": "es",
+    "text_language": "es"
   },
   {
     "id": "nov09o-root-004-en-decoded-0",
-    "language": "en",
     "utterance": "rewind exactly ten seconds",
     "predicted": {
       "tool": "playback",
@@ -417,11 +444,12 @@
       },
       "tool": "playback"
     },
-    "reason": "Exactly ten supplies a unique, representable integer-second backward displacement."
+    "reason": "Exactly ten supplies a unique, representable integer-second backward displacement.",
+    "source_language": "en",
+    "text_language": "en"
   },
   {
     "id": "nov09o-root-004-zh-decoded-0",
-    "language": "zh",
     "utterance": "往回跳正好十秒",
     "predicted": {
       "tool": "playback",
@@ -437,11 +465,12 @@
       },
       "tool": "playback"
     },
-    "reason": "Exactly ten supplies a unique, representable integer-second backward displacement."
+    "reason": "Exactly ten supplies a unique, representable integer-second backward displacement.",
+    "source_language": "zh",
+    "text_language": "zh"
   },
   {
     "id": "nov09o-root-004-ja-decoded-0",
-    "language": "ja",
     "utterance": "ちょうど10秒戻して",
     "predicted": {
       "tool": "playback",
@@ -457,11 +486,12 @@
       },
       "tool": "playback"
     },
-    "reason": "Exactly ten supplies a unique, representable integer-second backward displacement."
+    "reason": "Exactly ten supplies a unique, representable integer-second backward displacement.",
+    "source_language": "ja",
+    "text_language": "ja"
   },
   {
     "id": "nov09o-root-004-es-decoded-0",
-    "language": "es",
     "utterance": "retrocede exactamente diez segundos",
     "predicted": {
       "tool": "playback",
@@ -477,11 +507,12 @@
       },
       "tool": "playback"
     },
-    "reason": "Exactly ten supplies a unique, representable integer-second backward displacement."
+    "reason": "Exactly ten supplies a unique, representable integer-second backward displacement.",
+    "source_language": "es",
+    "text_language": "es"
   },
   {
     "id": "nov09o-root-005-en-decoded-0",
-    "language": "en",
     "utterance": "when this episode ends, rewind ten seconds",
     "predicted": {
       "tool": "playback",
@@ -491,11 +522,12 @@
       }
     },
     "repaired": null,
-    "reason": "The seek is conditional on a future episode-end event. No history says that event occurred. Immediate local execution discards the temporal condition; defer the preserved request without claiming to schedule it."
+    "reason": "The seek is conditional on a future episode-end event. No history says that event occurred. Immediate local execution discards the temporal condition; defer the preserved request without claiming to schedule it.",
+    "source_language": "en",
+    "text_language": "en"
   },
   {
     "id": "nov09o-root-005-en-decoded-1",
-    "language": "en",
     "utterance": "when this episode ends, rewind ten seconds",
     "predicted": {
       "tool": "playback",
@@ -505,11 +537,12 @@
       }
     },
     "repaired": null,
-    "reason": "The seek is conditional on a future episode-end event. No history says that event occurred. Immediate local execution discards the temporal condition; defer the preserved request without claiming to schedule it."
+    "reason": "The seek is conditional on a future episode-end event. No history says that event occurred. Immediate local execution discards the temporal condition; defer the preserved request without claiming to schedule it.",
+    "source_language": "en",
+    "text_language": "en"
   },
   {
     "id": "nov09o-root-005-en-decoded-2",
-    "language": "en",
     "utterance": "when this episode ends, rewind ten seconds",
     "predicted": {
       "tool": "playback",
@@ -517,11 +550,12 @@
       "params": {}
     },
     "repaired": null,
-    "reason": "The seek is conditional on a future episode-end event. No history says that event occurred. Immediate local execution discards the temporal condition; defer the preserved request without claiming to schedule it."
+    "reason": "The seek is conditional on a future episode-end event. No history says that event occurred. Immediate local execution discards the temporal condition; defer the preserved request without claiming to schedule it.",
+    "source_language": "en",
+    "text_language": "en"
   },
   {
     "id": "nov09o-root-005-zh-decoded-0",
-    "language": "zh",
     "utterance": "等这集结束后，再往回跳十秒",
     "predicted": {
       "tool": "playback",
@@ -531,11 +565,12 @@
       }
     },
     "repaired": null,
-    "reason": "The seek is conditional on a future episode-end event. No history says that event occurred. Immediate local execution discards the temporal condition; defer the preserved request without claiming to schedule it."
+    "reason": "The seek is conditional on a future episode-end event. No history says that event occurred. Immediate local execution discards the temporal condition; defer the preserved request without claiming to schedule it.",
+    "source_language": "zh",
+    "text_language": "zh"
   },
   {
     "id": "nov09o-root-005-zh-decoded-1",
-    "language": "zh",
     "utterance": "等这集结束后，再往回跳十秒",
     "predicted": {
       "tool": "playback",
@@ -545,11 +580,12 @@
       }
     },
     "repaired": null,
-    "reason": "The seek is conditional on a future episode-end event. No history says that event occurred. Immediate local execution discards the temporal condition; defer the preserved request without claiming to schedule it."
+    "reason": "The seek is conditional on a future episode-end event. No history says that event occurred. Immediate local execution discards the temporal condition; defer the preserved request without claiming to schedule it.",
+    "source_language": "zh",
+    "text_language": "zh"
   },
   {
     "id": "nov09o-root-005-zh-decoded-2",
-    "language": "zh",
     "utterance": "等这集结束后，再往回跳十秒",
     "predicted": {
       "tool": "playback",
@@ -557,11 +593,12 @@
       "params": {}
     },
     "repaired": null,
-    "reason": "The seek is conditional on a future episode-end event. No history says that event occurred. Immediate local execution discards the temporal condition; defer the preserved request without claiming to schedule it."
+    "reason": "The seek is conditional on a future episode-end event. No history says that event occurred. Immediate local execution discards the temporal condition; defer the preserved request without claiming to schedule it.",
+    "source_language": "zh",
+    "text_language": "zh"
   },
   {
     "id": "nov09o-root-005-ja-decoded-0",
-    "language": "ja",
     "utterance": "このエピソードが終わったら10秒戻して",
     "predicted": {
       "tool": "playback",
@@ -571,11 +608,12 @@
       }
     },
     "repaired": null,
-    "reason": "The seek is conditional on a future episode-end event. No history says that event occurred. Immediate local execution discards the temporal condition; defer the preserved request without claiming to schedule it."
+    "reason": "The seek is conditional on a future episode-end event. No history says that event occurred. Immediate local execution discards the temporal condition; defer the preserved request without claiming to schedule it.",
+    "source_language": "ja",
+    "text_language": "ja"
   },
   {
     "id": "nov09o-root-005-ja-decoded-1",
-    "language": "ja",
     "utterance": "このエピソードが終わったら10秒戻して",
     "predicted": {
       "tool": "playback",
@@ -585,11 +623,12 @@
       }
     },
     "repaired": null,
-    "reason": "The seek is conditional on a future episode-end event. No history says that event occurred. Immediate local execution discards the temporal condition; defer the preserved request without claiming to schedule it."
+    "reason": "The seek is conditional on a future episode-end event. No history says that event occurred. Immediate local execution discards the temporal condition; defer the preserved request without claiming to schedule it.",
+    "source_language": "ja",
+    "text_language": "ja"
   },
   {
     "id": "nov09o-root-005-ja-decoded-2",
-    "language": "ja",
     "utterance": "このエピソードが終わったら10秒戻して",
     "predicted": {
       "tool": "playback",
@@ -597,11 +636,12 @@
       "params": {}
     },
     "repaired": null,
-    "reason": "The seek is conditional on a future episode-end event. No history says that event occurred. Immediate local execution discards the temporal condition; defer the preserved request without claiming to schedule it."
+    "reason": "The seek is conditional on a future episode-end event. No history says that event occurred. Immediate local execution discards the temporal condition; defer the preserved request without claiming to schedule it.",
+    "source_language": "ja",
+    "text_language": "ja"
   },
   {
     "id": "nov09o-root-005-es-decoded-0",
-    "language": "es",
     "utterance": "cuando termine este episodio, retrocede diez segundos",
     "predicted": {
       "tool": "playback",
@@ -611,11 +651,12 @@
       }
     },
     "repaired": null,
-    "reason": "The seek is conditional on a future episode-end event. No history says that event occurred. Immediate local execution discards the temporal condition; defer the preserved request without claiming to schedule it."
+    "reason": "The seek is conditional on a future episode-end event. No history says that event occurred. Immediate local execution discards the temporal condition; defer the preserved request without claiming to schedule it.",
+    "source_language": "es",
+    "text_language": "es"
   },
   {
     "id": "nov09o-root-005-es-decoded-1",
-    "language": "es",
     "utterance": "cuando termine este episodio, retrocede diez segundos",
     "predicted": {
       "tool": "playback",
@@ -625,11 +666,12 @@
       }
     },
     "repaired": null,
-    "reason": "The seek is conditional on a future episode-end event. No history says that event occurred. Immediate local execution discards the temporal condition; defer the preserved request without claiming to schedule it."
+    "reason": "The seek is conditional on a future episode-end event. No history says that event occurred. Immediate local execution discards the temporal condition; defer the preserved request without claiming to schedule it.",
+    "source_language": "es",
+    "text_language": "es"
   },
   {
     "id": "nov09o-root-005-es-decoded-2",
-    "language": "es",
     "utterance": "cuando termine este episodio, retrocede diez segundos",
     "predicted": {
       "tool": "playback",
@@ -637,11 +679,12 @@
       "params": {}
     },
     "repaired": null,
-    "reason": "The seek is conditional on a future episode-end event. No history says that event occurred. Immediate local execution discards the temporal condition; defer the preserved request without claiming to schedule it."
+    "reason": "The seek is conditional on a future episode-end event. No history says that event occurred. Immediate local execution discards the temporal condition; defer the preserved request without claiming to schedule it.",
+    "source_language": "es",
+    "text_language": "es"
   },
   {
     "id": "nov09o-root-006-en-decoded-0",
-    "language": "en",
     "utterance": "rewind ten seconds now",
     "predicted": {
       "tool": "playback",
@@ -657,11 +700,12 @@
       },
       "tool": "playback"
     },
-    "reason": "Now requests immediate backward displacement of ten seconds with no future trigger."
+    "reason": "Now requests immediate backward displacement of ten seconds with no future trigger.",
+    "source_language": "en",
+    "text_language": "en"
   },
   {
     "id": "nov09o-root-006-zh-decoded-0",
-    "language": "zh",
     "utterance": "现在往回跳十秒",
     "predicted": {
       "tool": "playback",
@@ -677,11 +721,12 @@
       },
       "tool": "playback"
     },
-    "reason": "Now requests immediate backward displacement of ten seconds with no future trigger."
+    "reason": "Now requests immediate backward displacement of ten seconds with no future trigger.",
+    "source_language": "zh",
+    "text_language": "zh"
   },
   {
     "id": "nov09o-root-006-ja-decoded-0",
-    "language": "ja",
     "utterance": "今すぐ10秒戻して",
     "predicted": {
       "tool": "playback",
@@ -697,11 +742,12 @@
       },
       "tool": "playback"
     },
-    "reason": "Now requests immediate backward displacement of ten seconds with no future trigger."
+    "reason": "Now requests immediate backward displacement of ten seconds with no future trigger.",
+    "source_language": "ja",
+    "text_language": "ja"
   },
   {
     "id": "nov09o-root-006-es-decoded-0",
-    "language": "es",
     "utterance": "retrocede diez segundos ahora",
     "predicted": {
       "tool": "playback",
@@ -717,11 +763,12 @@
       },
       "tool": "playback"
     },
-    "reason": "Now requests immediate backward displacement of ten seconds with no future trigger."
+    "reason": "Now requests immediate backward displacement of ten seconds with no future trigger.",
+    "source_language": "es",
+    "text_language": "es"
   },
   {
     "id": "unresolved-precedence-1-en-0",
-    "language": "en",
     "utterance": "rewind ten or twenty seconds now",
     "predicted": {
       "tool": "playback",
@@ -731,11 +778,12 @@
       }
     },
     "repaired": null,
-    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition."
+    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition.",
+    "source_language": "en",
+    "text_language": "en"
   },
   {
     "id": "unresolved-precedence-1-en-1",
-    "language": "en",
     "utterance": "rewind ten or twenty seconds now",
     "predicted": {
       "tool": "playback",
@@ -745,11 +793,12 @@
       }
     },
     "repaired": null,
-    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition."
+    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition.",
+    "source_language": "en",
+    "text_language": "en"
   },
   {
     "id": "unresolved-precedence-1-en-2",
-    "language": "en",
     "utterance": "rewind ten or twenty seconds now",
     "predicted": {
       "tool": "playback",
@@ -757,11 +806,12 @@
       "params": {}
     },
     "repaired": null,
-    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition."
+    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition.",
+    "source_language": "en",
+    "text_language": "en"
   },
   {
     "id": "unresolved-precedence-1-zh-0",
-    "language": "zh",
     "utterance": "现在往回跳十秒或者二十秒",
     "predicted": {
       "tool": "playback",
@@ -771,11 +821,12 @@
       }
     },
     "repaired": null,
-    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition."
+    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition.",
+    "source_language": "zh",
+    "text_language": "zh"
   },
   {
     "id": "unresolved-precedence-1-zh-1",
-    "language": "zh",
     "utterance": "现在往回跳十秒或者二十秒",
     "predicted": {
       "tool": "playback",
@@ -785,11 +836,12 @@
       }
     },
     "repaired": null,
-    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition."
+    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition.",
+    "source_language": "zh",
+    "text_language": "zh"
   },
   {
     "id": "unresolved-precedence-1-zh-2",
-    "language": "zh",
     "utterance": "现在往回跳十秒或者二十秒",
     "predicted": {
       "tool": "playback",
@@ -797,11 +849,12 @@
       "params": {}
     },
     "repaired": null,
-    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition."
+    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition.",
+    "source_language": "zh",
+    "text_language": "zh"
   },
   {
     "id": "unresolved-precedence-1-ja-0",
-    "language": "ja",
     "utterance": "今すぐ10秒か20秒戻して",
     "predicted": {
       "tool": "playback",
@@ -811,11 +864,12 @@
       }
     },
     "repaired": null,
-    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition."
+    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition.",
+    "source_language": "ja",
+    "text_language": "ja"
   },
   {
     "id": "unresolved-precedence-1-ja-1",
-    "language": "ja",
     "utterance": "今すぐ10秒か20秒戻して",
     "predicted": {
       "tool": "playback",
@@ -825,11 +879,12 @@
       }
     },
     "repaired": null,
-    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition."
+    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition.",
+    "source_language": "ja",
+    "text_language": "ja"
   },
   {
     "id": "unresolved-precedence-1-ja-2",
-    "language": "ja",
     "utterance": "今すぐ10秒か20秒戻して",
     "predicted": {
       "tool": "playback",
@@ -837,11 +892,12 @@
       "params": {}
     },
     "repaired": null,
-    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition."
+    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition.",
+    "source_language": "ja",
+    "text_language": "ja"
   },
   {
     "id": "unresolved-precedence-1-es-0",
-    "language": "es",
     "utterance": "retrocede diez o veinte segundos ahora",
     "predicted": {
       "tool": "playback",
@@ -851,11 +907,12 @@
       }
     },
     "repaired": null,
-    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition."
+    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition.",
+    "source_language": "es",
+    "text_language": "es"
   },
   {
     "id": "unresolved-precedence-1-es-1",
-    "language": "es",
     "utterance": "retrocede diez o veinte segundos ahora",
     "predicted": {
       "tool": "playback",
@@ -865,11 +922,12 @@
       }
     },
     "repaired": null,
-    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition."
+    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition.",
+    "source_language": "es",
+    "text_language": "es"
   },
   {
     "id": "unresolved-precedence-1-es-2",
-    "language": "es",
     "utterance": "retrocede diez o veinte segundos ahora",
     "predicted": {
       "tool": "playback",
@@ -877,11 +935,12 @@
       "params": {}
     },
     "repaired": null,
-    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition."
+    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition.",
+    "source_language": "es",
+    "text_language": "es"
   },
   {
     "id": "unresolved-precedence-2-en-0",
-    "language": "en",
     "utterance": "when this ends, rewind exactly ten seconds",
     "predicted": {
       "tool": "playback",
@@ -891,11 +950,12 @@
       }
     },
     "repaired": null,
-    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition."
+    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition.",
+    "source_language": "en",
+    "text_language": "en"
   },
   {
     "id": "unresolved-precedence-2-en-1",
-    "language": "en",
     "utterance": "when this ends, rewind exactly ten seconds",
     "predicted": {
       "tool": "playback",
@@ -905,11 +965,12 @@
       }
     },
     "repaired": null,
-    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition."
+    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition.",
+    "source_language": "en",
+    "text_language": "en"
   },
   {
     "id": "unresolved-precedence-2-en-2",
-    "language": "en",
     "utterance": "when this ends, rewind exactly ten seconds",
     "predicted": {
       "tool": "playback",
@@ -917,11 +978,12 @@
       "params": {}
     },
     "repaired": null,
-    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition."
+    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition.",
+    "source_language": "en",
+    "text_language": "en"
   },
   {
     "id": "unresolved-precedence-2-zh-0",
-    "language": "zh",
     "utterance": "等这集结束后，再往回跳正好十秒",
     "predicted": {
       "tool": "playback",
@@ -931,11 +993,12 @@
       }
     },
     "repaired": null,
-    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition."
+    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition.",
+    "source_language": "zh",
+    "text_language": "zh"
   },
   {
     "id": "unresolved-precedence-2-zh-1",
-    "language": "zh",
     "utterance": "等这集结束后，再往回跳正好十秒",
     "predicted": {
       "tool": "playback",
@@ -945,11 +1008,12 @@
       }
     },
     "repaired": null,
-    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition."
+    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition.",
+    "source_language": "zh",
+    "text_language": "zh"
   },
   {
     "id": "unresolved-precedence-2-zh-2",
-    "language": "zh",
     "utterance": "等这集结束后，再往回跳正好十秒",
     "predicted": {
       "tool": "playback",
@@ -957,11 +1021,12 @@
       "params": {}
     },
     "repaired": null,
-    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition."
+    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition.",
+    "source_language": "zh",
+    "text_language": "zh"
   },
   {
     "id": "unresolved-precedence-2-ja-0",
-    "language": "ja",
     "utterance": "このエピソードが終わったらちょうど10秒戻して",
     "predicted": {
       "tool": "playback",
@@ -971,11 +1036,12 @@
       }
     },
     "repaired": null,
-    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition."
+    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition.",
+    "source_language": "ja",
+    "text_language": "ja"
   },
   {
     "id": "unresolved-precedence-2-ja-1",
-    "language": "ja",
     "utterance": "このエピソードが終わったらちょうど10秒戻して",
     "predicted": {
       "tool": "playback",
@@ -985,11 +1051,12 @@
       }
     },
     "repaired": null,
-    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition."
+    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition.",
+    "source_language": "ja",
+    "text_language": "ja"
   },
   {
     "id": "unresolved-precedence-2-ja-2",
-    "language": "ja",
     "utterance": "このエピソードが終わったらちょうど10秒戻して",
     "predicted": {
       "tool": "playback",
@@ -997,11 +1064,12 @@
       "params": {}
     },
     "repaired": null,
-    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition."
+    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition.",
+    "source_language": "ja",
+    "text_language": "ja"
   },
   {
     "id": "unresolved-precedence-2-es-0",
-    "language": "es",
     "utterance": "cuando termine esto, retrocede exactamente diez segundos",
     "predicted": {
       "tool": "playback",
@@ -1011,11 +1079,12 @@
       }
     },
     "repaired": null,
-    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition."
+    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition.",
+    "source_language": "es",
+    "text_language": "es"
   },
   {
     "id": "unresolved-precedence-2-es-1",
-    "language": "es",
     "utterance": "cuando termine esto, retrocede exactamente diez segundos",
     "predicted": {
       "tool": "playback",
@@ -1025,11 +1094,12 @@
       }
     },
     "repaired": null,
-    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition."
+    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition.",
+    "source_language": "es",
+    "text_language": "es"
   },
   {
     "id": "unresolved-precedence-2-es-2",
-    "language": "es",
     "utterance": "cuando termine esto, retrocede exactamente diez segundos",
     "predicted": {
       "tool": "playback",
@@ -1037,6 +1107,1114 @@
       "params": {}
     },
     "repaired": null,
-    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition."
+    "reason": "Now or exactly cannot settle a remaining alternative or future execution condition.",
+    "source_language": "es",
+    "text_language": "es"
+  },
+  {
+    "id": "chapter-alternatives-0",
+    "utterance": "go to chapter ten or twenty",
+    "predicted": {
+      "tool": "chapter",
+      "action": "by_index",
+      "params": {
+        "index": 10
+      }
+    },
+    "repaired": null,
+    "reason": "The unresolved alternative/event must refuse the whole classified call.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "chapter-alternatives-1",
+    "utterance": "go to chapter ten or twenty",
+    "predicted": {
+      "tool": "chapter",
+      "action": "by_index",
+      "params": {}
+    },
+    "repaired": null,
+    "reason": "The unresolved alternative/event must refuse the whole classified call.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "chapter-alternatives-2",
+    "utterance": "go to chapter ten or twenty",
+    "predicted": {
+      "tool": "chapter",
+      "action": "by_index",
+      "params": {
+        "index": 20
+      }
+    },
+    "repaired": null,
+    "reason": "The unresolved alternative/event must refuse the whole classified call.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "fraction-alternatives-0",
+    "utterance": "rewind half or a quarter of a minute",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -15
+      }
+    },
+    "repaired": null,
+    "reason": "The unresolved alternative/event must refuse the whole classified call.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "fraction-alternatives-1",
+    "utterance": "rewind half or a quarter of a minute",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {}
+    },
+    "repaired": null,
+    "reason": "The unresolved alternative/event must refuse the whole classified call.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "fraction-alternatives-2",
+    "utterance": "rewind half or a quarter of a minute",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "direction": "backward"
+      }
+    },
+    "repaired": null,
+    "reason": "The unresolved alternative/event must refuse the whole classified call.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "event-first-condition-0",
+    "utterance": "这集结束后倒回十秒",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -10
+      }
+    },
+    "repaired": null,
+    "reason": "The unresolved alternative/event must refuse the whole classified call.",
+    "source_language": "zh",
+    "text_language": "zh"
+  },
+  {
+    "id": "event-first-condition-1",
+    "utterance": "这集结束后倒回十秒",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {}
+    },
+    "repaired": null,
+    "reason": "The unresolved alternative/event must refuse the whole classified call.",
+    "source_language": "zh",
+    "text_language": "zh"
+  },
+  {
+    "id": "event-first-condition-2",
+    "utterance": "这集结束后倒回十秒",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "direction": "backward"
+      }
+    },
+    "repaired": null,
+    "reason": "The unresolved alternative/event must refuse the whole classified call.",
+    "source_language": "zh",
+    "text_language": "zh"
+  },
+  {
+    "id": "fractional-timer",
+    "utterance": "set a sleep timer after half an hour",
+    "predicted": {
+      "tool": "sleep",
+      "action": "set",
+      "params": {
+        "minutes": 30
+      }
+    },
+    "repaired": {
+      "tool": "sleep",
+      "action": "set",
+      "params": {
+        "minutes": 30
+      }
+    },
+    "reason": "The known duration or encoded timer target is resolved.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "spanish-eleven",
+    "utterance": "retrocede once segundos",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -11
+      }
+    },
+    "repaired": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -11
+      }
+    },
+    "reason": "The known duration or encoded timer target is resolved.",
+    "source_language": "es",
+    "text_language": "es"
+  },
+  {
+    "id": "spanish-exact-eleven",
+    "utterance": "retrocede exactamente once segundos",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -11
+      }
+    },
+    "repaired": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -11
+      }
+    },
+    "reason": "The known duration or encoded timer target is resolved.",
+    "source_language": "es",
+    "text_language": "es"
+  },
+  {
+    "id": "chapter-coordinate-previous",
+    "utterance": "go to the chapter before this one",
+    "predicted": {
+      "tool": "chapter",
+      "action": "previous",
+      "params": {}
+    },
+    "repaired": {
+      "tool": "chapter",
+      "action": "previous",
+      "params": {}
+    },
+    "reason": "The relation identifies a chapter target, not a future execution condition.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "chapter-coordinate-next",
+    "utterance": "go to the chapter after this one",
+    "predicted": {
+      "tool": "chapter",
+      "action": "next",
+      "params": {}
+    },
+    "repaired": {
+      "tool": "chapter",
+      "action": "next",
+      "params": {}
+    },
+    "reason": "The relation identifies a chapter target, not a future execution condition.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "chapter-future-after-completion",
+    "utterance": "go to the chapter after this one ends",
+    "predicted": {
+      "tool": "chapter",
+      "action": "next",
+      "params": {}
+    },
+    "repaired": null,
+    "reason": "An explicit ending predicate makes this an execution condition, not an adjacent-chapter coordinate.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "end-coordinate-zh",
+    "utterance": "跳到结束前十秒",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_to",
+      "params": {
+        "position_seconds": -10
+      }
+    },
+    "repaired": {
+      "tool": "playback",
+      "action": "seek_to",
+      "params": {
+        "position_seconds": -10
+      }
+    },
+    "reason": "The temporal relation encodes an episode position, not an execution trigger.",
+    "source_language": "zh",
+    "text_language": "zh"
+  },
+  {
+    "id": "end-coordinate-ja",
+    "utterance": "終了の10秒前に移動して",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_to",
+      "params": {
+        "position_seconds": -10
+      }
+    },
+    "repaired": {
+      "tool": "playback",
+      "action": "seek_to",
+      "params": {
+        "position_seconds": -10
+      }
+    },
+    "reason": "The temporal relation encodes an episode position, not an execution trigger.",
+    "source_language": "ja",
+    "text_language": "ja"
+  },
+  {
+    "id": "end-coordinate-es",
+    "utterance": "ve a diez segundos antes del final",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_to",
+      "params": {
+        "position_seconds": -10
+      }
+    },
+    "repaired": {
+      "tool": "playback",
+      "action": "seek_to",
+      "params": {
+        "position_seconds": -10
+      }
+    },
+    "reason": "The temporal relation encodes an episode position, not an execution trigger.",
+    "source_language": "es",
+    "text_language": "es"
+  },
+  {
+    "id": "future-with-end-coordinate-zh",
+    "utterance": "这集结束后跳到结束前十秒",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_to",
+      "params": {
+        "position_seconds": -10
+      }
+    },
+    "repaired": null,
+    "reason": "A resolved target position does not erase the separate execution condition.",
+    "source_language": "zh",
+    "text_language": "zh"
+  },
+  {
+    "id": "title-execution-condition",
+    "utterance": "when this episode ends, go to chapter 'Introduction'",
+    "predicted": {
+      "tool": "chapter",
+      "action": "by_title",
+      "params": {
+        "query": "Introduction"
+      }
+    },
+    "repaired": null,
+    "reason": "An execution condition outside quoted title/reference content must defer; quoted condition words alone name data.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "bookmark-execution-condition",
+    "utterance": "when this episode ends, play my bookmark",
+    "predicted": {
+      "tool": "bookmark",
+      "action": "play",
+      "params": {
+        "ref": "my bookmark"
+      }
+    },
+    "repaired": null,
+    "reason": "An execution condition outside quoted title/reference content must defer; quoted condition words alone name data.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "quoted-title-condition-words",
+    "utterance": "go to chapter 'When This Episode Ends'",
+    "predicted": {
+      "tool": "chapter",
+      "action": "by_title",
+      "params": {
+        "query": "When This Episode Ends"
+      }
+    },
+    "repaired": {
+      "tool": "chapter",
+      "action": "by_title",
+      "params": {
+        "query": "When This Episode Ends"
+      }
+    },
+    "reason": "An execution condition outside quoted title/reference content must defer; quoted condition words alone name data.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "quoted-reference-condition-words",
+    "utterance": "play bookmark 'When This Episode Ends'",
+    "predicted": {
+      "tool": "bookmark",
+      "action": "play",
+      "params": {
+        "ref": "When This Episode Ends"
+      }
+    },
+    "repaired": {
+      "tool": "bookmark",
+      "action": "play",
+      "params": {
+        "ref": "When This Episode Ends"
+      }
+    },
+    "reason": "An execution condition outside quoted title/reference content must defer; quoted condition words alone name data.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "condition-outside-matching-title",
+    "utterance": "when this episode ends, go to chapter 'when this episode ends'",
+    "predicted": {
+      "tool": "chapter",
+      "action": "by_title",
+      "params": {
+        "query": "when this episode ends"
+      }
+    },
+    "repaired": null,
+    "reason": "An execution condition outside quoted title/reference content must defer; quoted condition words alone name data.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "queue-order-not-trigger",
+    "utterance": "queue 'Introduction' right after this episode",
+    "predicted": {
+      "tool": "queue",
+      "action": "add_top",
+      "params": {
+        "episode": "Introduction"
+      }
+    },
+    "repaired": {
+      "tool": "queue",
+      "action": "add_top",
+      "params": {
+        "episode": "Introduction"
+      }
+    },
+    "reason": "A queue position or polite request is resolved; a separate future execution condition is not.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "polite-if-request",
+    "utterance": "If you could, please append 'Introduction' to the very end",
+    "predicted": {
+      "tool": "queue",
+      "action": "move_to_bottom",
+      "params": {
+        "episode": "Introduction"
+      }
+    },
+    "repaired": {
+      "tool": "queue",
+      "action": "move_to_bottom",
+      "params": {
+        "episode": "Introduction"
+      }
+    },
+    "reason": "A queue position or polite request is resolved; a separate future execution condition is not.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "queue-future-trigger",
+    "utterance": "when this episode ends, queue 'Introduction'",
+    "predicted": {
+      "tool": "queue",
+      "action": "add_top",
+      "params": {
+        "episode": "Introduction"
+      }
+    },
+    "repaired": null,
+    "reason": "A queue position or polite request is resolved; a separate future execution condition is not.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "future-read-only-query",
+    "utterance": "when this episode ends, tell me the volume",
+    "predicted": {
+      "tool": "volume",
+      "action": "query",
+      "params": {}
+    },
+    "repaired": null,
+    "reason": "A future execution condition also constrains a query; an immediate temporal question does not.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "current-when-question",
+    "utterance": "when did I last listen",
+    "predicted": {
+      "tool": "stats_query",
+      "action": "time_since_last_listen",
+      "params": {}
+    },
+    "repaired": {
+      "tool": "stats_query",
+      "action": "time_since_last_listen",
+      "params": {}
+    },
+    "reason": "A future execution condition also constrains a query; an immediate temporal question does not.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "query-next-order",
+    "utterance": "what episode plays after this one",
+    "predicted": {
+      "tool": "queue",
+      "action": "query_next",
+      "params": {}
+    },
+    "repaired": {
+      "tool": "queue",
+      "action": "query_next",
+      "params": {}
+    },
+    "reason": "This asks now about an encoded ordering/time target; it does not schedule the query.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "remaining-time-question",
+    "utterance": "how much longer until this episode is done",
+    "predicted": {
+      "tool": "playback_query",
+      "action": "time_remaining",
+      "params": {}
+    },
+    "repaired": {
+      "tool": "playback_query",
+      "action": "time_remaining",
+      "params": {}
+    },
+    "reason": "This asks now about an encoded ordering/time target; it does not schedule the query.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "timer-remaining-question",
+    "utterance": "how much longer until the sleep timer goes off",
+    "predicted": {
+      "tool": "sleep",
+      "action": "query",
+      "params": {}
+    },
+    "repaired": {
+      "tool": "sleep",
+      "action": "query",
+      "params": {}
+    },
+    "reason": "This asks now about an encoded ordering/time target; it does not schedule the query.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "es-eleven-volume",
+    "utterance": "pon el volumen a once por ciento",
+    "predicted": {
+      "tool": "volume",
+      "action": "set_volume",
+      "params": {
+        "volume": 11
+      }
+    },
+    "repaired": {
+      "tool": "volume",
+      "action": "set_volume",
+      "params": {
+        "volume": 11
+      }
+    },
+    "reason": "Eleven in a numeric context or once as a repetition count does not introduce an execution clause.",
+    "source_language": "es",
+    "text_language": "es"
+  },
+  {
+    "id": "es-exact-eleven-volume",
+    "utterance": "pon el volumen exactamente a once por ciento",
+    "predicted": {
+      "tool": "volume",
+      "action": "set_volume",
+      "params": {
+        "volume": 11
+      }
+    },
+    "repaired": {
+      "tool": "volume",
+      "action": "set_volume",
+      "params": {
+        "volume": 11
+      }
+    },
+    "reason": "Eleven in a numeric context or once as a repetition count does not introduce an execution clause.",
+    "source_language": "es",
+    "text_language": "es"
+  },
+  {
+    "id": "es-eleven-adjustment",
+    "utterance": "sube el volumen once puntos",
+    "predicted": {
+      "tool": "volume",
+      "action": "adjust_volume",
+      "params": {
+        "delta": 11
+      }
+    },
+    "repaired": {
+      "tool": "volume",
+      "action": "adjust_volume",
+      "params": {
+        "delta": 11
+      }
+    },
+    "reason": "Eleven in a numeric context or once as a repetition count does not introduce an execution clause.",
+    "source_language": "es",
+    "text_language": "es"
+  },
+  {
+    "id": "es-fractional-rate-eleven",
+    "utterance": "pon la velocidad en uno coma once veces",
+    "predicted": {
+      "tool": "effects",
+      "action": "set_speed",
+      "params": {
+        "speed": 1.11
+      }
+    },
+    "repaired": {
+      "tool": "effects",
+      "action": "set_speed",
+      "params": {
+        "speed": 1.11
+      }
+    },
+    "reason": "Eleven in a numeric context or once as a repetition count does not introduce an execution clause.",
+    "source_language": "es",
+    "text_language": "es"
+  },
+  {
+    "id": "es-eleven-chapter-now",
+    "utterance": "ve al capítulo once ahora",
+    "predicted": {
+      "tool": "chapter",
+      "action": "by_index",
+      "params": {
+        "index": 11
+      }
+    },
+    "repaired": {
+      "tool": "chapter",
+      "action": "by_index",
+      "params": {
+        "index": 11
+      }
+    },
+    "reason": "Eleven in a numeric context or once as a repetition count does not introduce an execution clause.",
+    "source_language": "es",
+    "text_language": "es"
+  },
+  {
+    "id": "es-eleven-timer",
+    "utterance": "pon un temporizador de once minutos",
+    "predicted": {
+      "tool": "sleep",
+      "action": "set",
+      "params": {
+        "minutes": 11
+      }
+    },
+    "repaired": {
+      "tool": "sleep",
+      "action": "set",
+      "params": {
+        "minutes": 11
+      }
+    },
+    "reason": "Eleven in a numeric context or once as a repetition count does not introduce an execution clause.",
+    "source_language": "es",
+    "text_language": "es"
+  },
+  {
+    "id": "es-eleven-position",
+    "utterance": "ve al segundo once ahora",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_to",
+      "params": {
+        "position_seconds": 11
+      }
+    },
+    "repaired": {
+      "tool": "playback",
+      "action": "seek_to",
+      "params": {
+        "position_seconds": 11
+      }
+    },
+    "reason": "Eleven in a numeric context or once as a repetition count does not introduce an execution clause.",
+    "source_language": "es",
+    "text_language": "es"
+  },
+  {
+    "id": "en-once-count-please",
+    "utterance": "rewind ten seconds once please",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -10
+      }
+    },
+    "repaired": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -10
+      }
+    },
+    "reason": "Eleven in a numeric context or once as a repetition count does not introduce an execution clause.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "en-once-episode",
+    "utterance": "once this episode ends, rewind ten seconds",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -10
+      }
+    },
+    "repaired": null,
+    "reason": "Once introduces an English event/state clause that conditions execution.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "en-once-paused",
+    "utterance": "rewind ten seconds once playback is paused",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -10
+      }
+    },
+    "repaired": null,
+    "reason": "Once introduces an English event/state clause that conditions execution.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "en-once-download",
+    "utterance": "once the download completes, play my bookmark",
+    "predicted": {
+      "tool": "bookmark",
+      "action": "play",
+      "params": {
+        "ref": "my bookmark"
+      }
+    },
+    "repaired": null,
+    "reason": "Once introduces an English event/state clause that conditions execution.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "en-once-ready",
+    "utterance": "once ready, go to chapter Introduction",
+    "predicted": {
+      "tool": "chapter",
+      "action": "by_title",
+      "params": {
+        "query": "Introduction"
+      }
+    },
+    "repaired": null,
+    "reason": "Once introduces an English event/state clause that conditions execution.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "en-once-plural-subject",
+    "utterance": "once both chapters finish, rewind ten seconds",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -10
+      }
+    },
+    "repaired": null,
+    "reason": "An English event predicate after once conditions execution regardless of the subject form.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "en-once-named-subject",
+    "utterance": "once Alex finishes, rewind ten seconds",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -10
+      }
+    },
+    "repaired": null,
+    "reason": "An English event predicate after once conditions execution regardless of the subject form.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "en-once-elapsed-duration",
+    "utterance": "once thirty seconds elapse, rewind ten seconds",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -10
+      }
+    },
+    "repaired": null,
+    "reason": "An English event predicate after once conditions execution regardless of the subject form.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "en-once-say-go",
+    "utterance": "once I say go, rewind ten seconds",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -10
+      }
+    },
+    "repaired": null,
+    "reason": "An unresolved English once clause defers regardless of its event verb.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "en-once-music-fades",
+    "utterance": "once the intro music fades, rewind ten seconds",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -10
+      }
+    },
+    "repaired": null,
+    "reason": "An unresolved English once clause defers regardless of its event verb.",
+    "source_language": "en",
+    "text_language": "en"
+  },
+  {
+    "id": "translated-once-english-source-es",
+    "source_language": "es",
+    "text_language": "en",
+    "utterance": "once I say go, rewind ten seconds",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -10
+      }
+    },
+    "repaired": null,
+    "reason": "Disambiguation uses the exact repair text language, not its ASR source; unknown is conservative."
+  },
+  {
+    "id": "unknown-once-english-source-es",
+    "source_language": "es",
+    "text_language": null,
+    "utterance": "once I say go, rewind ten seconds",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -10
+      }
+    },
+    "repaired": null,
+    "reason": "Disambiguation uses the exact repair text language, not its ASR source; unknown is conservative."
+  },
+  {
+    "id": "translated-once-inline-english",
+    "source_language": "es",
+    "text_language": "en",
+    "utterance": "rewind ten seconds once the intro music fades",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -10
+      }
+    },
+    "repaired": null,
+    "reason": "Disambiguation uses the exact repair text language, not its ASR source; unknown is conservative."
+  },
+  {
+    "id": "unknown-text-native-spanish",
+    "source_language": "es",
+    "text_language": null,
+    "utterance": "pon el volumen a once por ciento",
+    "predicted": {
+      "tool": "volume",
+      "action": "set_volume",
+      "params": {
+        "volume": 11
+      }
+    },
+    "repaired": null,
+    "reason": "Disambiguation uses the exact repair text language, not its ASR source; unknown is conservative."
+  },
+  {
+    "id": "spanish-regional-eleven",
+    "source_language": "es",
+    "text_language": "es-ES",
+    "utterance": "pon el volumen a once por ciento",
+    "predicted": {
+      "tool": "volume",
+      "action": "set_volume",
+      "params": {
+        "volume": 11
+      }
+    },
+    "repaired": {
+      "tool": "volume",
+      "action": "set_volume",
+      "params": {
+        "volume": 11
+      }
+    },
+    "reason": "Disambiguation uses the exact repair text language, not its ASR source; unknown is conservative."
+  },
+  {
+    "id": "english-regional-condition",
+    "source_language": "es",
+    "text_language": "en-US",
+    "utterance": "once I say go, rewind ten seconds",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -10
+      }
+    },
+    "repaired": null,
+    "reason": "Disambiguation uses the exact repair text language, not its ASR source; unknown is conservative."
+  },
+  {
+    "id": "es-una-vez-execution-condition",
+    "source_language": "es",
+    "text_language": "es",
+    "utterance": "una vez que termine este episodio, retrocede diez segundos",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -10
+      }
+    },
+    "repaired": null,
+    "reason": "Spanish eleven is numeric; the distinct una vez que conjunction still conditions execution."
+  },
+  {
+    "id": "en-once-for-me",
+    "source_language": "en",
+    "text_language": "en",
+    "utterance": "rewind ten seconds once for me",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -10
+      }
+    },
+    "repaired": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -10
+      }
+    },
+    "reason": "Beneficiary/count complements are repetition; a remaining subject/clause conditions execution even without punctuation."
+  },
+  {
+    "id": "en-once-for-us",
+    "source_language": "en",
+    "text_language": "en",
+    "utterance": "rewind ten seconds once for us",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -10
+      }
+    },
+    "repaired": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -10
+      }
+    },
+    "reason": "Beneficiary/count complements are repetition; a remaining subject/clause conditions execution even without punctuation."
+  },
+  {
+    "id": "en-once-for-listener",
+    "source_language": "en",
+    "text_language": "en",
+    "utterance": "rewind ten seconds once for the listener",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -10
+      }
+    },
+    "repaired": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -10
+      }
+    },
+    "reason": "Beneficiary/count complements are repetition; a remaining subject/clause conditions execution even without punctuation."
+  },
+  {
+    "id": "en-once-more-beneficiary",
+    "source_language": "en",
+    "text_language": "en",
+    "utterance": "rewind ten seconds once more for me",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -10
+      }
+    },
+    "repaired": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -10
+      }
+    },
+    "reason": "Beneficiary/count complements are repetition; a remaining subject/clause conditions execution even without punctuation."
+  },
+  {
+    "id": "en-once-more-subject",
+    "source_language": "en",
+    "text_language": "en",
+    "utterance": "rewind ten seconds once more people arrive",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -10
+      }
+    },
+    "repaired": null,
+    "reason": "Beneficiary/count complements are repetition; a remaining subject/clause conditions execution even without punctuation."
+  },
+  {
+    "id": "en-once-again-subject",
+    "source_language": "en",
+    "text_language": "en",
+    "utterance": "rewind ten seconds once again the intro music fades",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -10
+      }
+    },
+    "repaired": null,
+    "reason": "Beneficiary/count complements are repetition; a remaining subject/clause conditions execution even without punctuation."
+  },
+  {
+    "id": "once-beneficiary-politeness",
+    "source_language": "en",
+    "text_language": "en",
+    "utterance": "rewind ten seconds once for me, please",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -10
+      }
+    },
+    "repaired": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -10
+      }
+    },
+    "reason": "A beneficiary adjunct alone is repetition; a parenthetical cannot conceal a following condition clause."
+  },
+  {
+    "id": "once-parenthetical-before-clause",
+    "source_language": "en",
+    "text_language": "en",
+    "utterance": "once, for whatever reason, the intro music fades, rewind ten seconds",
+    "predicted": {
+      "tool": "playback",
+      "action": "seek_relative",
+      "params": {
+        "delta_seconds": -10
+      }
+    },
+    "repaired": null,
+    "reason": "A beneficiary adjunct alone is repetition; a parenthetical cannot conceal a following condition clause."
   }
 ]
