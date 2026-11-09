@@ -1474,7 +1474,7 @@ final class VoiceSharingUploaderTests: XCTestCase {
     func test_eachRetryClassRetainsTheEntry() async throws {
         let retrying: [(Int, String?)] = [
             // 401 is authentication, not a verdict: the credential is refreshed out of band and
-            // the SAME immutable entry is retried.
+            // the same immutable entry is retried.
             (401, "unauthorized"),
             (429, "quota_exceeded"),
             (503, "upload_pending"),
@@ -1483,6 +1483,9 @@ final class VoiceSharingUploaderTests: XCTestCase {
         ]
         for (status, bodyCode) in retrying {
             let entry = try makeReadyEntry()
+            // Snapshot the bytes BEFORE the attempt: a directory can survive while a file inside it
+            // is lost, so the directory's presence alone does not show the recording was retained.
+            let before = try recordingBytes(of: entry)
             let body = bodyCode.map { Data("{\"schema_version\":1,\"code\":\"\($0)\"}".utf8) }
                 ?? Data()
             let uploader = makeUploader(transport: { _, _, _ in
@@ -1496,11 +1499,28 @@ final class VoiceSharingUploaderTests: XCTestCase {
             // Retention alone is not enough: the bytes must still be there, or the entry was kept
             // in name only. `readyEntries()` is not the check — an entry inside its backoff window
             // is correctly absent from it — so the directory is read directly.
-            let directory = root.appendingPathComponent(entry.name, isDirectory: true)
-            XCTAssertTrue(
-                FileManager.default.fileExists(atPath: directory.path),
-                "\(status) \(bodyCode ?? "-"): the entry must remain on disk")
+            let after = try recordingBytes(of: entry)
+            XCTAssertEqual(
+                after, before,
+                "\(status) \(bodyCode ?? "-"): the recording's bytes must be unchanged")
+            // Named explicitly so a failure reports WHICH file was lost rather than only that the
+            // pair differed.
+            for name in ["audio.wav", "metadata.json"] {
+                XCTAssertNotNil(after[name], "\(status) \(bodyCode ?? "-"): \(name) must survive")
+                XCTAssertEqual(after[name], before[name],
+                               "\(status) \(bodyCode ?? "-"): \(name) must be byte-identical")
+            }
         }
+    }
+
+    /// The bytes of the two files that make a recording servable. Both are read, because either
+    /// one going missing leaves an entry that can be counted but never uploaded.
+    private func recordingBytes(of entry: VoiceSharingUploadQueue.Entry) throws -> [String: Data] {
+        let directory = root.appendingPathComponent(entry.name, isDirectory: true)
+        return [
+            "audio.wav": try Data(contentsOf: directory.appendingPathComponent("audio.wav")),
+            "metadata.json": try Data(contentsOf: directory.appendingPathComponent("metadata.json")),
+        ]
     }
 
     /// 410 carries either owning code: record_gone or enrollment_retired.
