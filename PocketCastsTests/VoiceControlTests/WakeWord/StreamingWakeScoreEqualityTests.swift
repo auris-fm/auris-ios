@@ -99,11 +99,12 @@ final class StreamingWakeScoreEqualityTests: XCTestCase {
         }
     }
 
-    /// The same property on recorded human speech, which is what the control has to hold for.
+    /// The same property on TTS-synthesized speech, which is what the control has to hold for.
     ///
     /// The synthetic tone above scores near zero for every input, so an equality there could hold
     /// for a trivial reason. This uses a checked-in speech fixture and asserts the score is actually
-    /// non-trivial, so the equality is a real one.
+    /// non-trivial, so the equality is a real one. The clip is synthesized, not a recording of a
+    /// person — see the provenance note below.
     ///
     /// Provenance of the fixture: a TTS-synthesized "hey livekit" positive from the upstream
     /// `livekit-wakeword` project (its positive-clip pipeline is Piper VITS / VoxCPM2 synthesis),

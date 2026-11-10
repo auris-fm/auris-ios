@@ -136,6 +136,12 @@ protocol VoiceIntentExecuting: AnyObject {
     /// Production paths read this instead of force-downcasting `self`, so an unfamiliar conformer
     /// degrades to "no sink" rather than trapping the process.
     var cloudRouteSinkAccess: CloudRouteSink? { get }
+    /// Early-connection lifecycle (task81). The concrete executor forwards to its cloud sink;
+    /// conformers without a cloud sink do nothing, matching `cloudRouteSinkAccess`'s degrade rule.
+    @MainActor func beginEarlyCloudConnection(tag: String)
+    @MainActor func claimEarlyCloudConnection(tag: String?, utteranceId: String)
+    @MainActor func discardEarlyCloudConnection(tag: String, reason: String)
+    @MainActor func discardEarlyCloudConnection(openedBy utteranceId: String, reason: String)
 }
 
 extension VoiceIntentExecuting {
@@ -145,6 +151,10 @@ extension VoiceIntentExecuting {
     @MainActor func releaseRetainedAdmittedDispatch(utteranceId: String, origin: Int) {}
     @MainActor func retireRetainedDispatchesIfWindowChanged(to origin: Int?) {}
     var cloudRouteSinkAccess: CloudRouteSink? { nil }
+    @MainActor func beginEarlyCloudConnection(tag: String) {}
+    @MainActor func claimEarlyCloudConnection(tag: String?, utteranceId: String) {}
+    @MainActor func discardEarlyCloudConnection(tag: String, reason: String) {}
+    @MainActor func discardEarlyCloudConnection(openedBy utteranceId: String, reason: String) {}
     /// Default bridge for conformers that have not adopted structured verdicts. CORRECTION (spec
     /// 6a033773): only the executor's OWN decisions are stated here — the error earcon is the
     /// failure the executor itself logs and acts on, and confirm-required is the executor's own
@@ -426,7 +436,7 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
         // This line therefore separates the two events where the model can distinguish them; it
         // does not make the executed case a measurement of effect.
         if !(intent is CloudRouteIntent) {
-            let stage = Self.localActionStage(for: response)
+            let stage = Self.localActionStage(for: voiceResponse)
             FileLog.shared.addMessage("[VoicePipeline] \(stage) intent=\(type(of: intent))")
         }
 
@@ -480,7 +490,6 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
         }
     }
 
-    private func executePlayback(_ intent: PlaybackIntent) -> (response: VoiceResponse, fact: SinkActionFact?) {
     /// Names what the local path did, from the only signal the response model carries. Split out
     /// so the classification can be controlled without capturing log output, and so the limit is
     /// in one place: "executed" states that the executor returned a non-error response, not that
@@ -489,6 +498,7 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
         response == .earcon(.error) ? "localActionFailed" : "localActionExecuted"
     }
 
+    private func executePlayback(_ intent: PlaybackIntent) -> (response: VoiceResponse, fact: SinkActionFact?) {
         switch intent {
         case .pause:
             return playbackSink.pauseWithFact()

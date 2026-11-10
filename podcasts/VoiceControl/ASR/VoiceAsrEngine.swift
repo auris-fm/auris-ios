@@ -689,9 +689,6 @@ class VoiceAsrEngine {
         // is not a fault, so the block above does not cover it; leaving it in place would
         // concatenate old-session PCM with the new session's and dispatch them as one command.
         segmenter.resetForNewSession()
-<<<<<<< HEAD
-        // A connection tag opened for a turn that never finished must not describe the next turn.
-        shortUtteranceConnectionTag = nil
         contributionCollector?.pipelineStopped()
     }
 
@@ -709,11 +706,6 @@ class VoiceAsrEngine {
     var isExposedSpeakerRouteForTesting: Bool {
         get { echoFilterRoute.appliesCorrelationWindow }
         set { echoFilterRoute = newValue ? .builtInSpeaker : .external }
-||||||| parent of 6bac53193 (Open at the verdict only when this utterance has no connection yet)
-        // A connection tag opened for a turn that never finished must not describe the next turn.
-        shortUtteranceConnectionTag = nil
-=======
->>>>>>> 6bac53193 (Open at the verdict only when this utterance has no connection yet)
     }
 
     /// Exposed for focused translate-drop tests (`@testable`).
@@ -756,6 +748,12 @@ class VoiceAsrEngine {
         // must never share or clear it. A field here would let one turn read another's tag — the
         // defect this whole item keeps returning to.
         var turnEarlyConnectionTag = earlyConnectionTag
+        let utteranceContext = frozenContext
+        var captureHandedToRouting = false
+        defer {
+            if !captureHandedToRouting { contributionCollector?.finalizeDeferredCompletion(context: utteranceContext) }
+        }
+        lastUtteranceContextForTesting = utteranceContext
 
         stageTimer.mark() // VAD segment ready
         // ONE identity from admission: the utterance is admitted HERE, so its
