@@ -876,6 +876,19 @@ class VoiceAsrEngine {
             // and it is still before the backend wait, so opening here is the only point that can
             // still save the handshake. `earlyResult == nil` distinguishes exactly the case that
             // was not already opened at silence onset; an early-scored utterance opened there.
+            // The utterance is routable, which for a notDetected result means grace is active or
+            // the mode is continuous — both real turns, so opening here agrees with "addressed
+            // means routable" rather than widening it.
+            //
+            // A short utterance never reaches the eligible span, so it had no early result and
+            // nothing opened at silence onset; this is where its verdict first becomes known, and
+            // it is still before the backend wait, so it is the only remaining point that can save
+            // the handshake.
+            //
+            // The `earlyResult == nil` guard selects exactly that case. It is not load-bearing for
+            // correctness — the sink's open is idempotent, so an early-scored utterance reaching
+            // here would be a no-op — but it keeps the intent legible: this line is for the
+            // utterances that had no earlier opportunity.
             if earlyResult == nil {
                 FileLog.shared.addMessage("[VoicePipeline] short utterance routable — opening early connection before ASR")
                 onAddressedTrailingSilenceBegan?()
