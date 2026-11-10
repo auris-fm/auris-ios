@@ -32,6 +32,11 @@ final class CloudRouteClient {
     private let playbackTimingFactory: (String) -> CloudPlaybackTiming?
     private let webSocketTaskFactory: ((URLRequest) -> WebSocketTasking)?
 
+    /// Seam for the clock that times the early-connection age. The limit is nine seconds, so a real
+    /// clock makes the guard untestable except by a nine-second sleep — which is why the age rule
+    /// needs an injectable clock rather than a test that simply takes a long time.
+    private let now: () -> Date
+
     /// The state of the most recent PRODUCTION-created task, readable by a test. Exists because the
     /// injected-factory tests bypass the default path entirely.
     private(set) var lastProductionTaskStateForTesting: URLSessionTask.State?
@@ -67,8 +72,10 @@ final class CloudRouteClient {
         requestTimeoutSeconds: TimeInterval = CloudRouteClient.defaultTimeoutSeconds,
         tokenProvider: CloudTokenProviding? = nil,
         webSocketTaskFactory: ((URLRequest) -> WebSocketTasking)? = nil,
-        playbackTimingFactory: @escaping (String) -> CloudPlaybackTiming? = CloudPlaybackTiming.make
+        playbackTimingFactory: @escaping (String) -> CloudPlaybackTiming? = CloudPlaybackTiming.make,
+        now: @escaping () -> Date = Date.init
     ) {
+        self.now = now
         self.baseURL = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         // Seam (slice 5, design-only): the credential comes from one place so the
         // trusted-issuer swap (task #26) is a provider change. Default preserves
@@ -539,6 +546,10 @@ final class CloudRouteClient {
 
         var req = URLRequest(url: url)
         req.timeoutInterval = requestTimeoutSeconds
+        // The instant the upgrade request is sent, on the client clock. The server closes a
+        // connection that receives no first frame within 10 seconds and the client cannot see why
+        // a connection closed, so reuse is decided from this stamp and nothing else.
+        let upgradeRequestedAt = now()
         let wsTask: WebSocketTasking
         if let injected = webSocketTaskFactory?(req) {
             // A test double. It owns its own readiness, so nothing is resumed here.
@@ -649,6 +660,17 @@ final class CloudRouteClient {
             // admitted. The conservative reading is the correct one here: once the send is
             // INVOKED, admission is possible, so only a failure BEFORE entry proves the frame
             // never left.
+            // A connection opened before the request was ready is only worth reusing while it is
+            // still fresh. Refusing here leaves the turn un-admitted rather than sending into a
+            // connection the server has probably already closed, so the turn can be retried on a
+            // fresh connection instead of being lost with no explanation.
+            let connectionAge = now().timeIntervalSince(upgradeRequestedAt)
+            guard EarlyConnectionPolicy.canSend(connectionAge: connectionAge) else {
+                FileLog.shared.addMessage("[CloudRoute] \(EarlyConnectionPolicy.describe(connectionAge: connectionAge)) — not submitting")
+                continuation.yield(.error(source: .requestConstruction, code: "connection_stale", message: "the connection was too old to use"))
+                continuation.finish()
+                return true
+            }
             try await wsTask.send(.string(authText))
 
             // THE REPORT IS NOW SPENT — confirmed only HERE, after the frame actually reached the
