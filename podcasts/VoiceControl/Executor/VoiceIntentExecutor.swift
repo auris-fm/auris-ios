@@ -193,26 +193,25 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
     /// Only the concrete sink can do this: the protocol has no early-open operation, because a
     /// sink that never talks to the cloud has nothing to open. A non-concrete sink therefore
     /// skips it rather than being forced to implement a no-op.
-    @MainActor func beginEarlyCloudConnection() {
+    /// Opens a connection for the utterance now being spoken and returns its tag, or nil.
+    @MainActor @discardableResult func beginEarlyCloudConnection() -> String? {
         (cloudRouteSink as? CloudRouteSink)?.beginEarlyConnection()
     }
 
-    /// Records which utterance owns the early connection, at the point its identity is minted.
-    @MainActor func claimEarlyCloudConnection(for utteranceId: String) {
-        (cloudRouteSink as? CloudRouteSink)?.claimEarlyConnection(for: utteranceId)
+    /// Pins the held connection to the utterance whose turn will use it, at admission.
+    @MainActor func claimEarlyCloudConnection(tag: String?, utteranceId: String) {
+        (cloudRouteSink as? CloudRouteSink)?.claimEarlyConnection(tag: tag, utteranceId: utteranceId)
     }
 
-    /// Closes a connection opened for an utterance that produced no turn — empty audio, or gated
-    /// out before routing. Without this the early socket would outlive the utterance that asked
-    /// for it.
-    @MainActor func discardEarlyCloudConnection(reason: String) {
-        (cloudRouteSink as? CloudRouteSink)?.discardEarlyConnection(reason: reason)
+    /// Closes the connection owned by `utteranceId`. Fenced: a drop for any other utterance is
+    /// ignored, so a predecessor's late drop cannot close a successor's socket.
+    /// Closes the connection identified by `tag`, when the owning utterance's identity may not
+    /// exist yet — a turn that died before admission.
+    @MainActor func discardEarlyCloudConnection(tag: String, reason: String) {
+        (cloudRouteSink as? CloudRouteSink)?.discardEarlyConnection(tag: tag, reason: reason)
     }
 
-    /// Closes the early connection opened by `utteranceId` when routing settled without a cloud
-    /// turn — a locally answered command never consumes it, and leaving it held blocks the next
-    /// utterance's open and leaves a socket idle for a turn that will not come.
-    @MainActor func discardEarlyCloudConnection(openedBy utteranceId: String?, reason: String) {
+    @MainActor func discardEarlyCloudConnection(openedBy utteranceId: String, reason: String) {
         (cloudRouteSink as? CloudRouteSink)?
             .discardEarlyConnection(openedBy: utteranceId, reason: reason)
     }

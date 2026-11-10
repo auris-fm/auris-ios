@@ -132,68 +132,98 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     ///
     /// Idempotent: a second call while a connection is held does nothing, because only one can be
     /// handed to a turn and opening another would orphan the first.
-    func beginEarlyConnection() {
-        guard earlyRouteClient == nil else { return }
+    /// Opens a connection and returns the tag identifying it, or nil when none opened.
+    ///
+    /// The tag is minted HERE rather than supplied by the caller: the connection opens while the
+    /// utterance is still being spoken, so the utterance's own identity does not exist yet (it is
+    /// minted at admission, and deliberately so — retries of the same capture must carry it). The
+    /// tag therefore identifies the CONNECTION, and the utterance it belongs to is pinned to it at
+    /// admission with `claimEarlyConnection(tag:utteranceId:)`.
+    ///
+    /// Replacing a held connection rather than skipping is what keeps the tag honest: a held
+    /// connection belongs to ONE utterance, so a new utterance must never inherit it.
+    @discardableResult
+    func beginEarlyConnection() -> String? {
+        if let held = earlyRouteClient {
+            FileLog.shared.addMessage(
+                "[CloudRoute] early connection replaced — one was held by \(earlyRouteUtteranceId ?? "no utterance yet")"
+            )
+            earlyRouteClient = nil
+            earlyRouteTag = nil
+            earlyRouteUtteranceId = nil
+            held.discardEarlyConnection(reason: "replaced by a later utterance")
+        }
         guard isConfigured() else {
             FileLog.shared.addMessage("[VoicePipeline] early connection skipped — cloud not configured")
-            return
+            return nil
         }
         let client = clientFactory()
-        guard client.openEarlyConnection() else { return }
+        guard client.openEarlyConnection() else { return nil }
+        let tag = UUID().uuidString
         earlyRouteClient = client
-        // No owner yet: the connection opened while the utterance was still being spoken, so its
-        // identity did not exist. `claimEarlyConnection(for:)` assigns it when the utterance is
-        // admitted.
+        earlyRouteTag = tag
         earlyRouteUtteranceId = nil
+        return tag
     }
 
-    /// Records which utterance owns the held early connection.
+    /// Pins the held connection to the utterance whose turn will use it.
     ///
-    /// Called at admission, where the identity is minted. Until then the connection has no owner,
-    /// and cleanup fenced on identity leaves it alone — correct, because a turn that has not been
-    /// admitted cannot have settled.
-    func claimEarlyConnection(for utteranceId: String) {
-        guard earlyRouteClient != nil, earlyRouteUtteranceId == nil else { return }
+    /// Called once, at admission, where the utterance's own identity is minted. After this the
+    /// connection belongs to exactly that utterance: only a drop carrying the same tag may close
+    /// it, and only that utterance's turn may take it.
+    func claimEarlyConnection(tag: String?, utteranceId: String) {
+        guard let tag, tag == earlyRouteTag, earlyRouteClient != nil else { return }
+        guard earlyRouteUtteranceId == nil else { return }
         earlyRouteUtteranceId = utteranceId
     }
 
-    /// Whether an early connection is currently held (and therefore has no owner yet, or is owned
-    /// by the utterance it names). Used by controls and by the claim decision.
-    var hasEarlyConnectionForTesting: Bool { earlyRouteClient != nil }
-    var earlyConnectionOwnerForTesting: String? { earlyRouteUtteranceId }
-
-    /// Abandons a connection opened for an utterance that produced no turn.
+    /// Abandons a connection that its own utterance did not end up using.
     ///
-    /// An empty utterance or one gated out before routing leaves the early socket with no owner.
-    /// Closing it here is what keeps the early open from becoming a leak for the life of the
-    /// process.
-    func discardEarlyConnection(reason: String) {
-        guard let client = earlyRouteClient else { return }
-        earlyRouteClient = nil
-        earlyRouteUtteranceId = nil
-        client.discardEarlyConnection(reason: reason)
-    }
-
-    /// Closes an early connection that its own utterance ended up not using — a command answered
-    /// locally, or routing that settled without a cloud turn.
+    /// Fenced by identity: only the utterance tagged on the connection may close it. Without the
+    /// fence a predecessor whose drop arrives late would close the successor's socket, leaving that
+    /// turn waiting on a handshake that was cancelled underneath it.
     ///
-    /// Fenced by identity: cleanup is only honoured for the utterance that opened the connection.
-    /// A late predecessor settling after a successor has already opened must not close the
-    /// successor's socket, which would leave the user waiting on a handshake that was cancelled
-    /// underneath them.
-    func discardEarlyConnection(openedBy utteranceId: String?, reason: String) {
+    /// An unused connection is not a leak worth chasing through every way a turn can end: opening
+    /// the next one replaces it, and the server closes it on its own idle timeout. Cleanup exists
+    /// for the caller that knows the turn is over, not as a tax on every exit.
+    func discardEarlyConnection(openedBy utteranceId: String, reason: String) {
         guard let client = earlyRouteClient else { return }
         guard earlyRouteUtteranceId == utteranceId else {
             FileLog.shared.addMessage(
-                "[CloudRoute] early connection kept — cleanup for \(utteranceId ?? "-") does not own it "
-                    + "(\(earlyRouteUtteranceId ?? "-"))"
+                "[CloudRoute] early connection kept — drop for \(utteranceId) does not own it "
+                    + "(\(earlyRouteUtteranceId ?? "none"))"
             )
             return
         }
         earlyRouteClient = nil
+        earlyRouteTag = nil
         earlyRouteUtteranceId = nil
         client.discardEarlyConnection(reason: reason)
     }
+
+    /// Closes the connection identified by `tag`, if it is still the one held.
+    ///
+    /// Used where the caller knows the connection but the owning utterance's identity may not
+    /// exist yet (a turn that died before admission). Fencing on the tag rather than the utterance
+    /// is what lets a delayed drop be honoured for its own connection and ignored for a
+    /// successor's.
+    func discardEarlyConnection(tag: String, reason: String) {
+        guard let client = earlyRouteClient else { return }
+        guard earlyRouteTag == tag else {
+            FileLog.shared.addMessage(
+                "[CloudRoute] early connection kept — drop for tag \(tag.prefix(8)) is not the held one"
+            )
+            return
+        }
+        earlyRouteClient = nil
+        earlyRouteTag = nil
+        earlyRouteUtteranceId = nil
+        client.discardEarlyConnection(reason: reason)
+    }
+
+    /// Whether an early connection is currently held, and which utterance owns it. Used by controls.
+    var hasEarlyConnectionForTesting: Bool { earlyRouteClient != nil }
+    var earlyConnectionOwnerForTesting: String? { earlyRouteUtteranceId }
 
     private let clientFactory: () -> CloudRouteClient
 
@@ -207,6 +237,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
 
     /// The utterance whose early open produced `earlyRouteClient`, or nil when none is held.
     private var earlyRouteUtteranceId: String?
+
+    /// Identifies the connection itself, minted when it opens. Survives until the connection is
+    /// taken or closed; the utterance that owns it is pinned separately at admission.
+    private var earlyRouteTag: String?
 
     private let isConfigured: () -> Bool
     /// Prepares the conversation identity for each turn.
@@ -913,9 +947,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         let client: CloudRouteClient
         if let earlyClient = earlyRouteClient {
             client = earlyClient
-            // The connection now belongs to this turn. The identity goes with it, so a predecessor
-            // settling later cannot claim or close what this turn is using.
+            // The connection now belongs to this turn. The tag and owner go with it, so a
+            // predecessor settling later cannot claim or close what this turn is using.
             earlyRouteClient = nil
+            earlyRouteTag = nil
             earlyRouteUtteranceId = nil
         } else {
             MainActor.assumeIsolated { clientCreationCountForTesting += 1 }

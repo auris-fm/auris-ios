@@ -187,7 +187,8 @@ class VoiceAsrEngine {
     /// utterance observed before the deadline stays eligible through recognition). It also has to
     /// be after the wake decision, not at the top of the method: a wake-selected turn opens its own
     /// window there, and reserving earlier would sample the preceding window's origin.
-    var onTurnAdmitted: ((_ utteranceId: String, _ origin: Int?) -> Void)?
+    /// Carries the tag of the connection this turn opened, so admission pins it to this utterance.
+    var onTurnAdmitted: ((_ utteranceId: String, _ origin: Int?, _ earlyConnectionTag: String?) -> Void)?
 
     /// Hands the router an input. It returns the ROUTER'S OWN acceptance result: a rejection (e.g.
     /// the service stopped) means nobody took ownership, so the engine keeps the turn and its
@@ -205,7 +206,10 @@ class VoiceAsrEngine {
     /// Invoked when a turn that was admitted leaves the engine WITHOUT reaching routing — a
     /// backend/recognition/translation drop or a cancellation. The routing path does not call it;
     /// ownership transfers to the routing chain there.
-    var onTurnReleased: ((_ utteranceId: String) -> Void)?
+    ///
+    /// Carries the tag of the connection this turn opened, so the drop closes ITS connection and
+    /// not a successor's.
+    var onTurnReleased: ((_ utteranceId: String, _ earlyConnectionTag: String?) -> Void)?
     /// Opens the early connection when the utterance is routable AND its trailing silence is
     /// already under way.
     ///
@@ -229,7 +233,9 @@ class VoiceAsrEngine {
             return
         }
         FileLog.shared.addMessage("[VoicePipeline] opening early connection (wake positive=\(positive), grace=\(duringGrace))")
-        onAddressedTrailingSilenceBegan?()
+        // The tag rides with the utterance from here: it identifies the connection this speech
+        // opened, and travels to delivery so nothing has to be looked up later.
+        currentEarlyConnectionTag = onAddressedTrailingSilenceBegan?()
     }
 
     /// Called on every positive detection so the service can reset grace and
@@ -243,7 +249,13 @@ class VoiceAsrEngine {
     /// the handshake can overlap the hangover and the ASR work instead of following them. It is
     /// deliberately NOT the wake decision, which happens after the endpoint and therefore after
     /// the wait this exists to remove.
-    var onAddressedTrailingSilenceBegan: (() -> Void)?
+    /// Opens the early connection for the utterance now ending its speech, returning the tag that
+    /// identifies the connection it opened (nil when none was opened).
+    var onAddressedTrailingSilenceBegan: (() -> String?)?
+
+    /// The tag of the connection opened for the utterance currently being processed. Set at the
+    /// open, cleared once it has been handed on, so it cannot describe a later utterance.
+    private var currentEarlyConnectionTag: String?
     /// Called when a positive wake result leaves no routable transcript, i.e. the
     /// user woke the assistant and said nothing else. Silent by contract: the wake
     /// is the start of a session, not a failed question, so nothing is played.
@@ -891,7 +903,7 @@ class VoiceAsrEngine {
             // utterances that had no earlier opportunity.
             if earlyResult == nil {
                 FileLog.shared.addMessage("[VoicePipeline] short utterance routable — opening early connection before ASR")
-                onAddressedTrailingSilenceBegan?()
+                currentEarlyConnectionTag = onAddressedTrailingSilenceBegan?()
             }
             if detected {
                 onWakeWordDetected?()
@@ -914,7 +926,11 @@ class VoiceAsrEngine {
         // capture (bleed, no grace, wake error) has already returned, so it cannot gain
         // eligibility; an empty utterance is excluded by the guard above.
         let admittedOrigin = gracePeriodSignal.currentGeneration()
-        onTurnAdmitted?(utteranceId, admittedOrigin)
+        // The connection this utterance opened, carried to both its exits: admission pins it to
+        // this utterance's turn, and a drop closes exactly this one.
+        let turnEarlyConnectionTag = currentEarlyConnectionTag
+        currentEarlyConnectionTag = nil
+        onTurnAdmitted?(utteranceId, admittedOrigin, turnEarlyConnectionTag)
         // The reservation is owned for exactly as long as this turn is in the engine. Every exit
         // below — backend failure, wake-only, empty/non-content transcript, translation failure,
         // cancellation — passes through this defer and releases it. The routing path sets the flag
@@ -922,7 +938,7 @@ class VoiceAsrEngine {
         // outcome. Without this, an early return leaves the reservation permanently in flight.
         var admissionHandedToRouting = false
         defer {
-            if !admissionHandedToRouting { onTurnReleased?(utteranceId) }
+            if !admissionHandedToRouting { onTurnReleased?(utteranceId, turnEarlyConnectionTag) }
         }
         let ready: Result<Void, Error>
         backendReadyLock.lock()

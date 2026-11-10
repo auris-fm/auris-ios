@@ -200,7 +200,7 @@ final class EarlyWakeResultUsageControl: XCTestCase {
             gracePeriodSignal: grace
         )
         var opens = 0
-        engine.onAddressedTrailingSilenceBegan = { opens += 1 }
+        engine.onAddressedTrailingSilenceBegan = { opens += 1; return nil }
         engine.installCaptureCallbacksForTesting()
 
         // Grace is active: the session was opened by a previous command.
@@ -240,7 +240,7 @@ final class EarlyWakeResultUsageControl: XCTestCase {
             gracePeriodSignal: GracePeriodSignal()
         )
         var opens = 0
-        engine.onAddressedTrailingSilenceBegan = { opens += 1 }
+        engine.onAddressedTrailingSilenceBegan = { opens += 1; return nil }
         engine.installCaptureCallbacksForTesting()
 
         let frame = 320

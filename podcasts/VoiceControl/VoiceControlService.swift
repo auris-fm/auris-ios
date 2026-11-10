@@ -815,30 +815,40 @@ class VoiceControlService: ObservableObject {
         // remaining wait instead of following it. Opening at the wake decision would be too late —
         // that decision happens after the endpoint. The turn reuses the connection if it is still
         // fresh and replaces it silently if not, so opening early can never cost correctness.
+        // The tag identifies THIS connection. It is returned here and carried by the engine to
+        // the turn's own exits, so the connection is pinned to the utterance that will use it and
+        // a drop closes exactly its own — never a successor's.
         asrEngine.onAddressedTrailingSilenceBegan = { [weak self] in
-            // Hop to the main actor: the sink is main-actor isolated, and the segmenter callback is
-            // not.
-            Task { @MainActor [weak self] in
-                self?.executor.beginEarlyCloudConnection()
-            }
+            // Hop to the main actor: the sink is main-actor isolated, and the segmenter callback
+            // is not. The engine needs the answer synchronously to carry it, so this is the one
+            // place the open is bridged; nil means no connection was opened.
+            guard let self else { return nil }
+            return MainActor.assumeIsolated { self.executor.beginEarlyCloudConnection() }
         }
         // A turn is ADMITTED the moment the engine has settled its window origin and before the
         // backend wait, so a slow (cold-start) recognition cannot let the deadline retire it
         // (spec voice-control-core.md:270). Recorded against the turn's own id, and released on
         // its terminal outcome below, so eligibility lasts exactly as long as the work is live.
-        asrEngine.onTurnAdmitted = { [weak self] utteranceId, origin in
+        asrEngine.onTurnAdmitted = { [weak self] utteranceId, origin, earlyConnectionTag in
             self?.gracePeriodSignal.admitInFlightTurn(utteranceId: utteranceId, origin: origin)
+            // Pin the connection to this utterance at the first instant its identity exists, so
+            // this turn's cloud route may take it and any other utterance is refused it.
+            guard let self, let tag = earlyConnectionTag else { return }
+            MainActor.assumeIsolated {
+                self.executor.claimEarlyCloudConnection(tag: tag, utteranceId: utteranceId)
+            }
         }
         // A turn that leaves the engine without reaching routing (backend failure, wake-only,
         // empty/non-content transcript, translation failure, cancellation) releases its own
         // reservation here, so it cannot leak for the life of the process.
-        asrEngine.onTurnReleased = { [weak self] utteranceId in
+        asrEngine.onTurnReleased = { [weak self] utteranceId, earlyConnectionTag in
             self?.gracePeriodSignal.releaseInFlightTurn(utteranceId: utteranceId)
-            // The turn left the engine without reaching routing — backend failure, wake-only,
-            // empty or non-content transcript. Any connection opened for it will never be claimed,
-            // so close it here rather than leaving a socket open for the life of the process.
+            guard let self, let tag = earlyConnectionTag else { return }
+            // The turn left the engine without reaching routing, so the connection it opened will
+            // never be used. Close it — fenced by the tag it carries, so a drop that arrives after
+            // a successor opened leaves the successor's socket alone.
             Task { @MainActor [weak self] in
-                self?.executor.discardEarlyCloudConnection(reason: "turn released without routing")
+                self?.executor.discardEarlyCloudConnection(tag: tag, reason: "turn released without routing")
             }
         }
         // Silent by contract: a wake-only capture is the user opening a session,
@@ -1262,29 +1272,11 @@ class VoiceControlService: ObservableObject {
                 )
                 return .suppressedByInterruption
             }
-            // Claim the early connection for this utterance BEFORE it can settle. A locally
-            // answered command never reaches the cloud branch, so claiming there would leave the
-            // connection unowned and the cleanup below unable to match it — the leak this fixes.
-            await MainActor.run {
-                executor.claimEarlyCloudConnection(for: input.utteranceId)
-            }
             let (response, executionVerdict) = await executor.executeWithVerdict(intent, preparedObserver: preparedObserver)
             reportExecution(executionVerdict, captureContext: captureContext,
                             predictedIntent: VoiceAnalytics.predictedIntentName(from: intent),
                             predictedTool: VoiceAnalytics.predictedToolName(from: intent))
-            // SUBMIT the retained follow-UP (cloud-assistant.md → Interruption, ).
-            // Routing has settled for THIS utterance. If it was answered locally — or refused —
-            // the connection opened for it was never consumed: close it, or it stays held, blocks
-            // the next utterance's open, and sits idle for a turn that will not come. Fenced by
-            // the utterance's identity, so a late predecessor settling after a successor has
-            // opened cannot close the successor's socket. A cloud turn took the connection inside
-            // `routeToCloud` and cleared its identity there, so this is a no-op for it.
-            await MainActor.run {
-                executor.discardEarlyCloudConnection(
-                    openedBy: input.utteranceId,
-                    reason: "routing settled without consuming it"
-                )
-            }
+            // SUBMIT THE RETAINED FOLLOW-UP (cloud-assistant.md → Interruption, spec c5fe3416).
             // When the turn that just settled was interrupted, the interrupting utterance was held
             // until its acknowledgement — a `done` for the prior turn, even `completed`, is that
             // acknowledgement. It is submitted here ONCE on its own socket, through the ordinary
