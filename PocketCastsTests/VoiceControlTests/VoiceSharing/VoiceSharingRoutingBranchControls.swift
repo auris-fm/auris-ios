@@ -91,6 +91,18 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
 
     private var collected: [VoiceSharingCollector.SegmentEvent] = []
     private var queue: VoiceSharingQueue!
+    /// Sink deliveries still running, so a control can wait for publication instead of sleeping.
+    private var sinkWork: [Task<Void, Never>] = []
+
+    /// Waits for every sink delivery started so far. The collector's sink is off-callback and the
+    /// publication is a Task, so this is the barrier — the only thing that makes "nothing was
+    /// published" a statement about consent rather than about how fast the machine was.
+    private func settleSinkDeliveries() async {
+        let outstanding = sinkWork
+        sinkWork.removeAll()
+        for task in outstanding { await task.value }
+    }
+
     /// How many times the withdrawn pipeline's uploader tried to send. A count rather than a trap:
     /// the claim is that consent loss stops NEW requests, not that no code path is ever reached.
     private var withdrawnSendCount = 0
@@ -344,10 +356,11 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
     /// than a mechanism this suite cannot name.
     ///
     /// The third outcome the spec names — an upload already in flight is CANCELLED — is not asserted
-    /// here, because it needs a transfer genuinely suspended mid-flight. It is covered by
-    /// `VoiceSharingGateLossScopeControls.test_fActualLossStopsASuspendedDrainBeforeTheWire`, which
-    /// holds a real drain at credential acquisition across the production consent-loss fan-out and
-    /// asserts zero requests reach the wire.
+    /// here, because it needs a transfer genuinely in flight. It is covered by
+    /// `VoiceSharingGateLossScopeControls.test_hActualLossCancelsARequestAlreadyOnTheWire`, which
+    /// holds a real upload open at a URLProtocol until the transport cancels it and asserts that
+    /// cancellation. (The older `test_f` proves only that an upload never STARTS: it stops at
+    /// credential acquisition, and removing `cancelInFlight`'s `task?.cancel()` leaves it green.)
     func test_consentLossRetainsNoRecordingAndSendsNoRequest() async throws {
         let suite = "routing-lifetime-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
@@ -409,9 +422,11 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
             // "no queue entry" would hold whether or not consent was ever checked.
             collector = makeCollector(
                 isCollectionPermitted: { [weak self] in self?.gateOpen ?? false },
-                sink: { [weak sink] event in
+                sink: { [weak self] event in
                     let capture: VoiceSharingDirectSink? = sink
-                    Task { await capture?.handle(event) }
+                    // The Task is KEPT so the control can await it. A sleep would let a slow
+                    // publication land after the assertion and make absence depend on timing.
+                    self?.sinkWork.append(Task { await capture?.handle(event) })
                 })
             weakCollector = collector
             let model = VoiceSharingSettingsModel(
@@ -466,9 +481,9 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         // cancellation and the sink drops it. Isolation between those guards is not observable, and
         // the spec accepts the outcome instead of a named mechanism.
         collector.speechCompleted([Float](repeating: 0.4, count: 16_000), context: openContext)
-        // The sink is off-callback and delivers on a Task, so give the handoff a chance to land
-        // before asserting absence — otherwise the empty queue is the scheduler's timing.
-        try? await Task.sleep(nanoseconds: 300_000_000)
+        // Await the sink deliveries themselves. A late publication can otherwise land after this
+        // assertion and the empty queue would be the scheduler's timing, not consent's decision.
+        await settleSinkDeliveries()
         let entriesAfterConsentLoss = await queue.entries()
         XCTAssertTrue(entriesAfterConsentLoss.isEmpty,
                       "a segment completed after consent loss must be kept nowhere")

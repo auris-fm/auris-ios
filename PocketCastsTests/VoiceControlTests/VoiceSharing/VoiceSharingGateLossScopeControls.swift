@@ -597,6 +597,64 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
         XCTAssertFalse(store.consentAllowsCollection, "premise: consent is gone")
     }
 
+    /// THE third outcome, on the wire rather than before it.
+    ///
+    /// The gate-loss control above stops at credential acquisition: it proves an upload never
+    /// STARTS, not that one already travelling is cancelled, and removing `cancelInFlight()`'s
+    /// `task?.cancel()` leaves it green. Here the request is genuinely in flight — a URLProtocol
+    /// receives the upload headers, is published as the transport's in-flight task, and holds the
+    /// body open — so the only thing that can end it is the production fan-out reaching
+    /// `cancelInFlight`.
+    func test_hActualLossCancelsARequestAlreadyOnTheWire() async throws {
+        store.transitionToAccount(signedIn: true)
+        store.setLocalOptIn(true)
+        store.apply(
+            authoritative: VoiceSharingMembership(
+                membershipRevision: "rev-1", plan: .free, voiceSharingEnrolled: true,
+                enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "voice-sharing-v1",
+                withdrawalState: .active),
+            readUnder: try XCTUnwrap(store.projectionToken()))
+
+        let queue = VoiceSharingQueue(root: root)
+        _ = try await makeReadyEntry(queue)
+        let coordinator = VoiceSharingCoordinator(enrollmentStore: store)
+        let held = HeldUploadWire()
+        // No credential seam this time: the token is served immediately so the upload actually
+        // LEAVES and the refusal is not confused with a pre-send check.
+        let trigger = VoiceControlAssembly().makeVoiceSharingUploadTrigger(
+            queue: queue,
+            isAuthorized: { self.store.consentAllowsCollection },
+            currentIdentity: { (ServerSettings.userId ?? "signed-out", "epoch-1") },
+            baseURLProvider: { "https://unit.test" },
+            tokenProvider: GateLossTokens(),
+            session: held.session)
+        let subscription = coordinator.registerGateLostHandler { [weak trigger] in
+            trigger?.stop()
+        }
+        defer { _ = subscription }
+        await coordinator.settleObservedWork()
+
+        trigger.trigger()
+        let deadline = Date().addingTimeInterval(10)
+        while !held.hasRequest && Date() < deadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(held.hasRequest, "premise: the upload request reached the wire and is held")
+        XCTAssertFalse(held.wasCancelled, "premise: it is still travelling, not yet cancelled")
+
+        // A REAL withdrawal, through the production observer path.
+        store.setLocalOptIn(false)
+        let stopDeadline = Date().addingTimeInterval(10)
+        while !held.wasCancelled && Date() < stopDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertTrue(held.wasCancelled,
+                      "consent loss must cancel a transfer already on the wire")
+        XCTAssertFalse(store.consentAllowsCollection, "premise: consent really left")
+        await joinDrain(trigger)
+    }
+
     private func makeReadyEntry(_ queue: VoiceSharingQueue) async throws
         -> VoiceSharingQueue.Entry
     {
@@ -664,6 +722,52 @@ private final class GateLossWire: URLProtocol {
     }
 
     override func stopLoading() {}
+}
+
+/// Holds an upload open after its headers arrive, so the request is genuinely ON THE WIRE when
+/// consent is withdrawn, and records whether the transport's cancellation reached it.
+private final class HeldUploadWire: URLProtocol {
+    private static let lock = NSLock()
+    private static var requestSeen = false
+    private static var cancelled = false
+
+    var hasRequest: Bool { HeldUploadWire.lock.lock(); defer { HeldUploadWire.lock.unlock() }; return HeldUploadWire.requestSeen }
+    var wasCancelled: Bool { HeldUploadWire.lock.lock(); defer { HeldUploadWire.lock.unlock() }; return HeldUploadWire.cancelled }
+
+    var session: URLSession {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [HeldUploadWire.self]
+        return URLSession(configuration: config)
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        if request.url?.path == VoiceSharingUploadTransport.uploadPath {
+            HeldUploadWire.lock.lock()
+            HeldUploadWire.requestSeen = true
+            HeldUploadWire.lock.unlock()
+            // DELIBERATELY never completes: the body is held open so the transfer stays in flight
+            // until the transport cancels it. Answering here would make this a completed upload.
+            return
+        }
+        let body: [String: Any] = ["access_token": "tok-1", "refresh_token": "chain",
+                                   "expires_in": 900, "token_type": "Bearer"]
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: (try? JSONSerialization.data(withJSONObject: body)) ?? Data())
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    /// Called by the transport's cancellation. This is the callback the claim is about.
+    override func stopLoading() {
+        HeldUploadWire.lock.lock()
+        HeldUploadWire.cancelled = true
+        HeldUploadWire.lock.unlock()
+    }
 }
 
 /// A token provider that hands back a fixed credential without a network round trip, so the control
