@@ -39,18 +39,28 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
 
     /// A CONFORMER WITHOUT A CLOUD SINK IS A SUPPORTED CASE, NOT A CRASH.
     ///
-    /// The executor type is widened to `any VoiceIntentExecuting`, and the protocol now has more
-    /// than one conformer. Production read the cloud sink by force-downcasting the executor to the
-    /// one concrete type, so any other conformer reaching a barge-in or suppression check trapped the
-    /// process. The sink is now reached through an optional protocol member that defaults to nil, so
-    /// an executor with no sink degrades to "no cloud step" instead of killing the app.
+    /// The executor type is widened to `any VoiceIntentExecuting` and the protocol has more than one
+    /// conformer, but production reached the cloud sink by force-downcasting to the concrete type at
+    /// three live sites (barge-in and two suppression checks). Any other conformer reaching those
+    /// sites trapped the process.
+    ///
+    /// The sink is now reached through an optional protocol member defaulting to nil. This control
+    /// asserts what the production sites actually depend on: that the lookup is reachable and yields
+    /// the safe answer for a conformer that has no sink. It deliberately does NOT claim to exercise
+    /// the service's barge-in/suppression bodies, which need the full audio wiring; those are covered
+    /// by source inspection, as review noted.
+    @MainActor
     func test_anExecutorWithoutACloudSinkIsHandledRatherThanTrapped() {
-        let plain = StubExecutor()
-        // The protocol contract: a conformer that does not declare a sink reports nil, and asking is
-        // not a crash. Before the forced downcast was removed this call site could not be reached
-        // for this type at all.
-        XCTAssertNil((plain as any VoiceIntentExecuting).cloudRouteSinkAccess,
-                     "a conformer without a sink states nil rather than trapping")
+        let plain: any VoiceIntentExecuting = StubExecutor()
+        let sink = plain.cloudRouteSinkAccess
+        XCTAssertNil(sink, "a conformer that declares no sink reports nil rather than trapping")
+        // The exact optional-chaining the production sites perform. A missing sink must read as
+        // "not suppressed" and "not interrupted" — never as a denial or an interruption.
+        XCTAssertFalse(sink?.isSuppressedForTesting(nil) ?? false,
+                       "no sink must not be read as a suppression")
+        let interrupted: String? = sink.map { _ in "impossible" }
+        XCTAssertNil(interrupted, "no sink yields no interruption")
+        XCTAssertFalse(interrupted != nil, "so the caller reports not-interrupted")
     }
 
     // MARK: - Harness
