@@ -217,8 +217,9 @@ class VoiceAsrEngine {
     /// different instants: silence began first and the score arrived later, or the score was
     /// already held when silence began. Two copies would let one path drift and silently stop
     /// opening for the utterances it exists for.
-    private func openEarlyConnectionIfRoutableDuringTrailingSilence(result: WakeWordResult?) {
-        guard segmenter.isInTrailingSilence else { return }
+    @discardableResult
+    private func openEarlyConnectionIfRoutableDuringTrailingSilence(result: WakeWordResult?) -> String? {
+        guard segmenter.isInTrailingSilence else { return nil }
         let positive: Bool = {
             if case .detected? = result { return true }
             return false
@@ -230,12 +231,10 @@ class VoiceAsrEngine {
         let duringGrace = gracePeriodSignal.isActive
         guard positive || duringGrace else {
             FileLog.shared.addMessage("[VoicePipeline] trailing silence — not routable (wake positive=\(positive), grace=\(duringGrace)), no early open")
-            return
+            return nil
         }
         FileLog.shared.addMessage("[VoicePipeline] opening early connection (wake positive=\(positive), grace=\(duringGrace))")
-        // The tag rides with the utterance from here: it identifies the connection this speech
-        // opened, and travels to delivery so nothing has to be looked up later.
-        currentEarlyConnectionTag = onAddressedTrailingSilenceBegan?()
+        return onAddressedTrailingSilenceBegan?()
     }
 
     /// Called on every positive detection so the service can reset grace and
@@ -249,13 +248,14 @@ class VoiceAsrEngine {
     /// the handshake can overlap the hangover and the ASR work instead of following them. It is
     /// deliberately NOT the wake decision, which happens after the endpoint and therefore after
     /// the wait this exists to remove.
-    /// Opens the early connection for the utterance now ending its speech, returning the tag that
-    /// identifies the connection it opened (nil when none was opened).
+    /// Opens the early connection for the utterance now ending its speech, and returns the tag that
+    /// identifies it.
+    ///
+    /// Called on the audio thread. The implementation must therefore be non-blocking and must not
+    /// assume a main actor; the tag it returns is stored by the segmenter with the utterance and
+    /// delivered with the audio, so it cannot be confused with a later utterance's.
     var onAddressedTrailingSilenceBegan: (() -> String?)?
 
-    /// The tag of the connection opened for the utterance currently being processed. Set at the
-    /// open, cleared once it has been handed on, so it cannot describe a later utterance.
-    private var currentEarlyConnectionTag: String?
     /// Called when a positive wake result leaves no routable transcript, i.e. the
     /// user woke the assistant and said nothing else. Silent by contract: the wake
     /// is the start of a session, not a failed question, so nothing is played.
@@ -470,7 +470,7 @@ class VoiceAsrEngine {
     /// Single definition of the capture wiring, so the fault forwarding cannot exist on one path
     /// and be missing on another.
     private func wireCaptureCallbacks() {
-        segmenter.onUtterance = { [weak self] utterance, capturedAt, earlyWakeResult in
+        segmenter.onUtterance = { [weak self] utterance, capturedAt, earlyWakeResult, earlyConnectionTag in
             guard let self else { return }
             // Fenced as well as the notifications: an utterance emitted from a stopped session
             // is stale PCM, and suppressing only its UI event would still let that audio reach
@@ -495,7 +495,10 @@ class VoiceAsrEngine {
                     utterance,
                     capturedAt: capturedAt,
                     frozenContext: frozen,
-                    earlyWakeResult: self.segmenter.earlyWakeResultForCurrentUtterance
+                    earlyWakeResult: earlyWakeResult,
+                    // Travels WITH the utterance, captured before this task was launched: a later
+                    // utterance's open cannot overwrite it, because it is not read from a slot.
+                    earlyConnectionTag: earlyConnectionTag
                 )
             }
         }
@@ -550,13 +553,13 @@ class VoiceAsrEngine {
         // silence; whether the utterance is addressed is this engine's judgement, made from the
         // early wake score it already holds.
         segmenter.onTrailingSilenceBegan = { [weak self] in
-            guard let self else { return }
+            guard let self else { return nil }
             let session = self.segmenter.currentSession ?? self.currentSession()
-            guard session == self.currentSession() else { return }
+            guard session == self.currentSession() else { return nil }
             // When the score is already held, it decides; when it is not (a short utterance with
             // no early prefix), grace alone can still make the utterance routable, and the late
             // result path opens if the score arrives before the silence ends.
-            self.openEarlyConnectionIfRoutableDuringTrailingSilence(
+            return self.openEarlyConnectionIfRoutableDuringTrailingSilence(
                 result: self.segmenter.earlyWakeResultForCurrentUtterance
             )
         }
@@ -737,7 +740,7 @@ class VoiceAsrEngine {
     /// sites attribute their observations to. Test-visible so a control can report against the same capture.
     private(set) var lastUtteranceContextForTesting: VoiceSharingCollector.CaptureContext?
 
-    func processUtterance(_ utterance: [Float], capturedAt: MonotonicTime? = nil, frozenContext: VoiceSharingCollector.CaptureContext? = nil, earlyWakeResult: WakeWordResult? = nil) async {
+    func processUtterance(_ utterance: [Float], capturedAt: MonotonicTime? = nil, frozenContext: VoiceSharingCollector.CaptureContext? = nil, earlyWakeResult: WakeWordResult? = nil, earlyConnectionTag: String? = nil) async {
         // The early result ARRIVED with this utterance, so it cannot belong to another by
         // construction. Every exit below simply stops using it.
         let earlyResult = earlyWakeResult
@@ -903,7 +906,7 @@ class VoiceAsrEngine {
             // utterances that had no earlier opportunity.
             if earlyResult == nil {
                 FileLog.shared.addMessage("[VoicePipeline] short utterance routable — opening early connection before ASR")
-                currentEarlyConnectionTag = onAddressedTrailingSilenceBegan?()
+                onAddressedTrailingSilenceBegan?()
             }
             if detected {
                 onWakeWordDetected?()
@@ -926,10 +929,9 @@ class VoiceAsrEngine {
         // capture (bleed, no grace, wake error) has already returned, so it cannot gain
         // eligibility; an empty utterance is excluded by the guard above.
         let admittedOrigin = gracePeriodSignal.currentGeneration()
-        // The connection this utterance opened, carried to both its exits: admission pins it to
-        // this utterance's turn, and a drop closes exactly this one.
-        let turnEarlyConnectionTag = currentEarlyConnectionTag
-        currentEarlyConnectionTag = nil
+        // The connection this utterance opened, carried THROUGH it to both its exits: admission
+        // pins it to this utterance's turn, and a drop closes exactly this one.
+        let turnEarlyConnectionTag = earlyConnectionTag
         onTurnAdmitted?(utteranceId, admittedOrigin, turnEarlyConnectionTag)
         // The reservation is owned for exactly as long as this turn is in the engine. Every exit
         // below — backend failure, wake-only, empty/non-content transcript, translation failure,

@@ -34,7 +34,7 @@ final class StartOfCapturePreservationControl: XCTestCase {
         // real timeout is wall-clock, and a test feeds frames faster than real time.
         let segmenter = NativeVadSegmenter(silenceTimeoutMs: -1)
         var utterances: [[Float]] = []
-        segmenter.onUtterance = { utterance, _, _ in utterances.append(utterance) }
+        segmenter.onUtterance = { utterance, _, _, _ in utterances.append(utterance) }
 
         // A distinct marker in the FIRST frame, then continued speech, then silence to close.
         let frameCount = 320
@@ -64,7 +64,7 @@ final class StartOfCapturePreservationControl: XCTestCase {
     func testMeasuresRetentionAtCaptureStart() {
         let segmenter = NativeVadSegmenter(silenceTimeoutMs: -1)
         var utterances: [[Float]] = []
-        segmenter.onUtterance = { utterance, _, _ in utterances.append(utterance) }
+        segmenter.onUtterance = { utterance, _, _, _ in utterances.append(utterance) }
 
         let frameCount = 320
         let totalSpeechFrames = 25
@@ -97,7 +97,7 @@ final class StartOfCapturePreservationControl: XCTestCase {
     func testCommandAfterLeadingSilenceIsUnaffected() {
         let segmenter = NativeVadSegmenter(silenceTimeoutMs: -1)
         var utterances: [[Float]] = []
-        segmenter.onUtterance = { utterance, _, _ in utterances.append(utterance) }
+        segmenter.onUtterance = { utterance, _, _, _ in utterances.append(utterance) }
 
         let frameCount = 320
         let marker: Float = 0.9

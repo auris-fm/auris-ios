@@ -29,6 +29,11 @@ class NativeVadSegmenter {
     /// launches an asynchronous task, so an engine-side slot could be overwritten by the next
     /// utterance before that task read it — one command's score addressing another's audio.
     var earlyWakeResultForCurrentUtterance: WakeWordResult?
+
+    /// The tag of the connection opened for the utterance now being spoken, minted at its trailing
+    /// silence and delivered with it. Cleared on delivery and on every reset, so abandonment cannot
+    /// leave a tag behind for the next utterance to inherit.
+    private var earlyConnectionTagForCurrentUtterance: String?
     private var speechFrameCount = 0
     /// Audio that arrived while the classifier had not yet reported speech.
     ///
@@ -84,7 +89,7 @@ class NativeVadSegmenter {
     /// Carrying the first buffer's instant is what lets the echo filter place the segment
     /// against the emitted reference; using the completing buffer's time would shift it by
     /// the segment's own length.
-    var onUtterance: (([Float], MonotonicTime?, WakeWordResult?) -> Void)?
+    var onUtterance: (([Float], MonotonicTime?, WakeWordResult?, String?) -> Void)?
 
     /// Delivers the audio of an in-progress utterance once enough exists to score the wake word
     /// definitively, so detection can run while the user is still speaking.
@@ -106,7 +111,10 @@ class NativeVadSegmenter {
     /// Deliberately carries no wake information: the segmenter does not know whether an utterance
     /// is addressed, and giving it that judgement would put routing semantics inside audio
     /// segmentation. The consumer decides using its own state.
-    var onTrailingSilenceBegan: (() -> Void)?
+    /// Returns the tag of the connection opened for this utterance, if one was opened.
+    ///
+    /// Runs on the audio thread, so it must not block or assume a main actor.
+    var onTrailingSilenceBegan: (() -> String?)?
 
     /// True while an utterance is open and its trailing silence has begun but not yet ended.
     ///
@@ -342,7 +350,11 @@ class NativeVadSegmenter {
                 // Fires once per silence run, not once per silent frame: the flag above is what
                 // makes the consumer see the BEGINNING of the silence rather than a steady stream
                 // of "still silent" notifications.
-                onTrailingSilenceBegan?()
+                // The tag identifies the connection this speech's turn will use. Minted HERE, on
+                // the audio thread, and stored with the utterance: the consumer hands it to a
+                // different thread, so anything read later from a shared slot could already
+                // belong to the next utterance.
+                earlyConnectionTagForCurrentUtterance = onTrailingSilenceBegan?()
             }
             // While stuck-active nothing accumulates: the audio is discarded, not dispatched.
             if !isStuckActive {
@@ -409,6 +421,9 @@ class NativeVadSegmenter {
         // Keeping it would let a long positive utterance that is never dispatched lend its score to
         // the next short utterance — a command addressed by audio that was discarded.
         earlyWakeResultForCurrentUtterance = nil
+        // The connection opened for this utterance goes with it too: the next utterance must open
+        // its own rather than pin a tag belonging to audio that was thrown away.
+        earlyConnectionTagForCurrentUtterance = nil
         // Discard the captured audio and refuse to dispatch any of it.
         buffer.removeAll(keepingCapacity: true)
         preRoll.removeAll(keepingCapacity: true)
@@ -502,7 +517,11 @@ class NativeVadSegmenter {
         // describes, so nothing can be inherited by the next one.
         let carriedWakeResult = earlyWakeResultForCurrentUtterance
         earlyWakeResultForCurrentUtterance = nil
-        onUtterance?(utterance, utteranceCapturedAt, carriedWakeResult)
+        // Same rule as the wake result: the tag leaves with the utterance it describes, so nothing
+        // can be inherited by the next one.
+        let carriedEarlyConnectionTag = earlyConnectionTagForCurrentUtterance
+        earlyConnectionTagForCurrentUtterance = nil
+        onUtterance?(utterance, utteranceCapturedAt, carriedWakeResult, carriedEarlyConnectionTag)
     }
 
     func reset() {
@@ -512,6 +531,7 @@ class NativeVadSegmenter {
         isStuckActive = false
         wakeScorablePrefixEmitted = false
         earlyWakeResultForCurrentUtterance = nil
+        earlyConnectionTagForCurrentUtterance = nil
         preRoll.removeAll()
         preRollInstants.removeAll()
         preRollCapturedAt = nil

@@ -100,7 +100,7 @@ final class EarlyWakeResultUsageControl: XCTestCase {
             classifier: classifier
         )
         var delivered: [WakeWordResult?] = []
-        segmenter.onUtterance = { _, _, result in delivered.append(result) }
+        segmenter.onUtterance = { _, _, result, _ in delivered.append(result) }
 
         // Speak past the ceiling without ever going silent: the utterance is abandoned.
         let frame = 320
@@ -138,7 +138,7 @@ final class EarlyWakeResultUsageControl: XCTestCase {
         let classifier = SwitchableClassifier()
         let segmenter = NativeVadSegmenter(threshold: 0.0, silenceTimeoutMs: 500, classifier: classifier)
         var delivered: [WakeWordResult?] = []
-        segmenter.onUtterance = { _, _, result in delivered.append(result) }
+        segmenter.onUtterance = { _, _, result, _ in delivered.append(result) }
 
         let frame = 320
         func speak(briefly: Bool, result: WakeWordResult?) {

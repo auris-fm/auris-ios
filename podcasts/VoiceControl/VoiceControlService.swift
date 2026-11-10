@@ -815,15 +815,18 @@ class VoiceControlService: ObservableObject {
         // remaining wait instead of following it. Opening at the wake decision would be too late —
         // that decision happens after the endpoint. The turn reuses the connection if it is still
         // fresh and replaces it silently if not, so opening early can never cost correctness.
-        // The tag identifies THIS connection. It is returned here and carried by the engine to
-        // the turn's own exits, so the connection is pinned to the utterance that will use it and
-        // a drop closes exactly its own — never a successor's.
+        // The tag identifies THIS connection and is returned synchronously so the segmenter can
+        // carry it with the utterance. The tag is minted HERE, off-main, because that is where
+        // this runs (audio thread): minting needs no actor. The open itself touches the sink, so
+        // it hops to main — a real hop, not `assumeIsolated`, which does not switch executors and
+        // would trap when called from the audio thread.
         asrEngine.onAddressedTrailingSilenceBegan = { [weak self] in
-            // Hop to the main actor: the sink is main-actor isolated, and the segmenter callback
-            // is not. The engine needs the answer synchronously to carry it, so this is the one
-            // place the open is bridged; nil means no connection was opened.
             guard let self else { return nil }
-            return MainActor.assumeIsolated { self.executor.beginEarlyCloudConnection() }
+            let tag = CloudRouteSink.mintEarlyConnectionTag()
+            DispatchQueue.main.async {
+                self.executor.beginEarlyCloudConnection(tag: tag)
+            }
+            return tag
         }
         // A turn is ADMITTED the moment the engine has settled its window origin and before the
         // backend wait, so a slow (cold-start) recognition cannot let the deadline retire it
@@ -832,9 +835,10 @@ class VoiceControlService: ObservableObject {
         asrEngine.onTurnAdmitted = { [weak self] utteranceId, origin, earlyConnectionTag in
             self?.gracePeriodSignal.admitInFlightTurn(utteranceId: utteranceId, origin: origin)
             // Pin the connection to this utterance at the first instant its identity exists, so
-            // this turn's cloud route may take it and any other utterance is refused it.
+            // this turn's cloud route may take it and any other utterance is refused it. A real
+            // hop: this runs on whatever thread the engine's task is on.
             guard let self, let tag = earlyConnectionTag else { return }
-            MainActor.assumeIsolated {
+            DispatchQueue.main.async {
                 self.executor.claimEarlyCloudConnection(tag: tag, utteranceId: utteranceId)
             }
         }
@@ -847,8 +851,8 @@ class VoiceControlService: ObservableObject {
             // The turn left the engine without reaching routing, so the connection it opened will
             // never be used. Close it — fenced by the tag it carries, so a drop that arrives after
             // a successor opened leaves the successor's socket alone.
-            Task { @MainActor [weak self] in
-                self?.executor.discardEarlyCloudConnection(tag: tag, reason: "turn released without routing")
+            DispatchQueue.main.async {
+                self.executor.discardEarlyCloudConnection(tag: tag, reason: "turn released without routing")
             }
         }
         // Silent by contract: a wake-only capture is the user opening a session,

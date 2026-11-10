@@ -139,7 +139,7 @@ final class SileroSegmenterIntegrationControl: XCTestCase {
     /// Records every emission so coverage can be measured, not counted.
     private func collectEmissions(_ segmenter: NativeVadSegmenter) -> () -> [[Float]] {
         var emissions: [[Float]] = []
-        segmenter.onUtterance = { utterance, _, _ in emissions.append(utterance) }
+        segmenter.onUtterance = { utterance, _, _, _ in emissions.append(utterance) }
         return { emissions }
     }
 
@@ -316,7 +316,7 @@ final class SileroSegmenterIntegrationControl: XCTestCase {
             classifier: ScriptedSpeechClassifier(silentFrames: silentFrames, speechFrames: 4)
         )
         var captured: [([Float], MonotonicTime?)] = []
-        segmenter.onUtterance = { utterance, instant, _ in captured.append((utterance, instant)) }
+        segmenter.onUtterance = { utterance, instant, _, _ in captured.append((utterance, instant)) }
 
         // Second-resolution instants make the sample offset unambiguous.
         for i in 0..<silentFrames { segmenter.process(frame(i), capturedAt: MonotonicTime(i)) }
@@ -361,7 +361,7 @@ final class SileroSegmenterIntegrationControl: XCTestCase {
             classifier: script
         )
         var dispatched: [[Float]] = []
-        segmenter.onUtterance = { utterance, _, _ in dispatched.append(utterance) }
+        segmenter.onUtterance = { utterance, _, _, _ in dispatched.append(utterance) }
         segmenter.onStuckActiveFault = { _ in }
 
         for _ in 0..<((240_000 / 20) + 10) { segmenter.process(frame) }
@@ -409,7 +409,7 @@ final class SileroSegmenterIntegrationControl: XCTestCase {
         )
         var dispatched: [[Float]] = []
         var faults: [NativeVadSegmenter.StuckActiveFault] = []
-        segmenter.onUtterance = { utterance, _, _ in dispatched.append(utterance) }
+        segmenter.onUtterance = { utterance, _, _, _ in dispatched.append(utterance) }
         segmenter.onStuckActiveFault = { faults.append($0) }
 
         // 25 unconfirmed frames (0.5 s, the pre-roll bound) are held, then positives run to the
@@ -453,7 +453,7 @@ final class SileroSegmenterIntegrationControl: XCTestCase {
         )
         var dispatched: [[Float]] = []
         var faults: [NativeVadSegmenter.StuckActiveFault] = []
-        segmenter.onUtterance = { (utterance: [Float], _: MonotonicTime?, _: WakeWordResult?) in dispatched.append(utterance) }
+        segmenter.onUtterance = { (utterance: [Float], _: MonotonicTime?, _: WakeWordResult?, _: String?) in dispatched.append(utterance) }
         segmenter.onStuckActiveFault = { faults.append($0) }
 
         for _ in 0..<(framesToCeiling - 10) { segmenter.process(frame) }
@@ -495,7 +495,7 @@ final class SileroSegmenterIntegrationControl: XCTestCase {
         var faults: [NativeVadSegmenter.ClassifierUnavailableFault] = []
         var dispatched: [[Float]] = []
         segmenter.onClassifierUnavailable = { faults.append($0) }
-        segmenter.onUtterance = { utterance, _, _ in dispatched.append(utterance) }
+        segmenter.onUtterance = { utterance, _, _, _ in dispatched.append(utterance) }
 
         segmenter.reportClassifierUnavailable("silero_vad.onnx could not be loaded")
 
@@ -536,7 +536,7 @@ final class SileroSegmenterIntegrationControl: XCTestCase {
             classifier: ScriptedSpeechClassifier(silentFrames: 5, speechFrames: 7)
         )
         var captured: [[Float]] = []
-        segmenter.onUtterance = { utterance, _, _ in captured.append(utterance) }
+        segmenter.onUtterance = { utterance, _, _, _ in captured.append(utterance) }
         // Twelve indexed frames, then real silence long enough to trigger the endpoint.
         // `silenceTimeoutMs: 0` alone is not enough: the comparison is wall-clock based, so the
         // silence must actually span time rather than assume the clock advanced between calls.
@@ -583,7 +583,7 @@ final class SileroSegmenterIntegrationControl: XCTestCase {
             classifier: ScriptedSpeechClassifier(silentFrames: silentFrames, speechFrames: 4)
         )
         var captured: [([Float], MonotonicTime?)] = []
-        segmenter.onUtterance = { utterance, instant, _ in captured.append((utterance, instant)) }
+        segmenter.onUtterance = { utterance, instant, _, _ in captured.append((utterance, instant)) }
 
         // Each frame is stamped with its own instant so eviction is provable by value.
         for i in 0..<silentFrames { segmenter.process(frame(i), capturedAt: MonotonicTime(i)) }
@@ -629,7 +629,7 @@ final class SileroSegmenterIntegrationControl: XCTestCase {
         )
         var dispatched: [[Float]] = []
         var faults: [NativeVadSegmenter.StuckActiveFault] = []
-        segmenter.onUtterance = { utterance, _, _ in dispatched.append(utterance) }
+        segmenter.onUtterance = { utterance, _, _, _ in dispatched.append(utterance) }
         segmenter.onStuckActiveFault = { faults.append($0) }
 
         for _ in 0..<(framesToCeiling + 10) { segmenter.process(frame) }
@@ -663,7 +663,7 @@ final class SileroSegmenterIntegrationControl: XCTestCase {
             classifier: script
         )
         var dispatched: [[Float]] = []
-        segmenter.onUtterance = { utterance, _, _ in dispatched.append(utterance) }
+        segmenter.onUtterance = { utterance, _, _, _ in dispatched.append(utterance) }
         segmenter.onStuckActiveFault = { _ in }
 
         // Past the ceiling, then keep speaking: the tail must not become a command.

@@ -193,9 +193,10 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
     /// Only the concrete sink can do this: the protocol has no early-open operation, because a
     /// sink that never talks to the cloud has nothing to open. A non-concrete sink therefore
     /// skips it rather than being forced to implement a no-op.
-    /// Opens a connection for the utterance now being spoken and returns its tag, or nil.
-    @MainActor @discardableResult func beginEarlyCloudConnection() -> String? {
-        (cloudRouteSink as? CloudRouteSink)?.beginEarlyConnection()
+    /// Opens a connection carrying `tag`, which the caller minted so it could travel with the
+    /// utterance while this call hops to main.
+    @MainActor func beginEarlyCloudConnection(tag: String) {
+        (cloudRouteSink as? CloudRouteSink)?.beginEarlyConnection(tag: tag)
     }
 
     /// Pins the held connection to the utterance whose turn will use it, at admission.

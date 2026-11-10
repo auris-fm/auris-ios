@@ -142,8 +142,15 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     ///
     /// Replacing a held connection rather than skipping is what keeps the tag honest: a held
     /// connection belongs to ONE utterance, so a new utterance must never inherit it.
+    nonisolated static func mintEarlyConnectionTag() -> String { UUID().uuidString }
+
+    /// Opens a connection carrying `tag`, without an owner.
+    ///
+    /// The owning utterance is pinned separately at admission. A connection that no turn admits
+    /// therefore has no owner: it is not taken by anyone, and is replaced by the next open rather
+    /// than being closed on a guess.
     @discardableResult
-    func beginEarlyConnection() -> String? {
+    func beginEarlyConnection(tag: String) -> String? {
         if let held = earlyRouteClient {
             FileLog.shared.addMessage(
                 "[CloudRoute] early connection replaced — one was held by \(earlyRouteUtteranceId ?? "no utterance yet")"
@@ -159,10 +166,15 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         }
         let client = clientFactory()
         guard client.openEarlyConnection() else { return nil }
-        let tag = UUID().uuidString
         earlyRouteClient = client
         earlyRouteTag = tag
-        earlyRouteUtteranceId = nil
+        // Honour a claim that was already waiting for this connection.
+        if let pending = pendingEarlyConnectionClaim, pending.tag == tag {
+            earlyRouteUtteranceId = pending.utteranceId
+            pendingEarlyConnectionClaim = nil
+        } else {
+            earlyRouteUtteranceId = nil
+        }
         return tag
     }
 
@@ -172,10 +184,22 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// connection belongs to exactly that utterance: only a drop carrying the same tag may close
     /// it, and only that utterance's turn may take it.
     func claimEarlyConnection(tag: String?, utteranceId: String) {
-        guard let tag, tag == earlyRouteTag, earlyRouteClient != nil else { return }
+        guard let tag else { return }
+        // The claim can be enqueued before the open it belongs to: both are submitted to main from
+        // the audio thread and independently. Recording the intent lets the open honour it, so the
+        // connection is not left unowned just because of which hop ran first.
+        if earlyRouteClient == nil {
+            pendingEarlyConnectionClaim = (tag: tag, utteranceId: utteranceId)
+            return
+        }
+        guard tag == earlyRouteTag else { return }
         guard earlyRouteUtteranceId == nil else { return }
         earlyRouteUtteranceId = utteranceId
+        pendingEarlyConnectionClaim = nil
     }
+
+    /// A claim that arrived before its connection opened, applied when it does.
+    private var pendingEarlyConnectionClaim: (tag: String, utteranceId: String)?
 
     /// Abandons a connection that its own utterance did not end up using.
     ///
@@ -945,7 +969,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // by the transport that holds it, so creating a second client here would discard the
         // handshake the early open paid for and leave its socket orphaned.
         let client: CloudRouteClient
-        if let earlyClient = earlyRouteClient {
+        // ONE CONNECTION, ONE TURN: the connection may only be consumed by the utterance it
+        // belongs to. A turn that arrives while another utterance owns it takes a fresh client
+        // instead of sending on a socket opened for a different command — and leaves that
+        // connection for its own turn, or for the server to close.
+        if let earlyClient = earlyRouteClient, earlyRouteUtteranceId != nil, earlyRouteUtteranceId == utteranceId {
             client = earlyClient
             // The connection now belongs to this turn. The tag and owner go with it, so a
             // predecessor settling later cannot claim or close what this turn is using.
@@ -953,6 +981,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             earlyRouteTag = nil
             earlyRouteUtteranceId = nil
         } else {
+            if earlyRouteClient != nil {
+                FileLog.shared.addMessage(
+                    "[CloudRoute] early connection not taken — owned by \(earlyRouteUtteranceId ?? "none"), "
+                        + "not \(utteranceId ?? "-")"
+                )
+            }
             MainActor.assumeIsolated { clientCreationCountForTesting += 1 }
             client = clientFactory()
         }

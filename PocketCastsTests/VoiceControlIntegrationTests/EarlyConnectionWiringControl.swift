@@ -44,6 +44,15 @@ final class EarlyConnectionWiringControl: XCTestCase {
         )
     }
 
+    /// Drains main, where the service performs the socket work. The callbacks are invoked from the
+    /// audio thread in production and hop to main, so asserting without this observes the state
+    /// before the hop, not after it.
+    private func drainMain() async {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+    }
+
     private func start(_ service: VoiceControlService) async throws {
         service.startIfAllowed()
         let deadline = Date().addingTimeInterval(5)
@@ -86,7 +95,9 @@ final class EarlyConnectionWiringControl: XCTestCase {
         // First utterance: the engine opens at its trailing silence and the turn is admitted.
         let firstTag = open()
         XCTAssertNotNil(firstTag, "the first utterance must open a connection")
+        await drainMain()
         admit("utterance-local", 0, firstTag)
+        await drainMain()
         XCTAssertEqual(sink.earlyConnectionOwnerForTesting, "utterance-local",
                        "admission must pin the connection to the utterance that owns it")
 
@@ -97,7 +108,9 @@ final class EarlyConnectionWiringControl: XCTestCase {
         let secondTag = open()
         XCTAssertNotNil(secondTag, "the next utterance must open a connection of its own")
         XCTAssertNotEqual(secondTag, firstTag, "it must not reuse the predecessor's connection")
+        await drainMain()
         admit("utterance-next", 1, secondTag)
+        await drainMain()
         XCTAssertEqual(sink.earlyConnectionOwnerForTesting, "utterance-next")
     }
 
@@ -118,11 +131,15 @@ final class EarlyConnectionWiringControl: XCTestCase {
 
         // The predecessor opens and is admitted, then its turn dies and schedules its drop.
         let predecessorTag = open()
+        await drainMain()
         admit("utterance-predecessor", 0, predecessorTag)
+        await drainMain()
 
         // Before that drop runs, the successor opens and is admitted.
         let successorTag = open()
+        await drainMain()
         admit("utterance-successor", 1, successorTag)
+        await drainMain()
         XCTAssertEqual(sink.earlyConnectionOwnerForTesting, "utterance-successor")
 
         // Now the predecessor's drop lands.
@@ -134,5 +151,83 @@ final class EarlyConnectionWiringControl: XCTestCase {
                       "a predecessor's delayed drop must not close the successor's connection")
         XCTAssertEqual(sink.earlyConnectionOwnerForTesting, "utterance-successor",
                        "the successor must still own its connection after the late drop")
+    }
+
+    /// A connection may only be consumed by the utterance it belongs to.
+    ///
+    /// Without the owner check the turn takes any held connection, so a predecessor's socket is
+    /// used to send a successor's request — the same "one utterance using another's state" defect
+    /// the tag was introduced to end, arriving from the other side.
+    func test_aTurnDoesNotTakeAConnectionOwnedByAnotherUtterance() async throws {
+        guard let service = makeService() else {
+            return XCTFail("the assembly built no service, so the case proves nothing")
+        }
+        try await start(service)
+
+        let engine = service.asrEngineForTesting
+        let sink = service.executorForTesting.cloudRouteSinkForTesting
+        let open = try XCTUnwrap(engine.onAddressedTrailingSilenceBegan)
+        let admit = try XCTUnwrap(engine.onTurnAdmitted)
+
+        // The predecessor opens and owns the connection.
+        let predecessorTag = try XCTUnwrap(open())
+        await drainMain()
+        admit("utterance-predecessor", 0, predecessorTag)
+        await drainMain()
+        XCTAssertEqual(sink.earlyConnectionOwnerForTesting, "utterance-predecessor")
+
+        // A different utterance routes to the cloud. It must not take that connection.
+        // The conversation bound refuses a turn whose origin is not live, which would refuse the
+        // route before the take is ever reached — the case would then pass or fail for a reason of
+        // its own making. Make the dispatched origin live.
+        service.liveOriginManagerForTesting.registerLiveOrigin(1)
+        let createdBefore = sink.clientCreationCountForTesting
+        let result = await sink.routeToCloud(
+            request: "play that",
+            tier: .free,
+            context: PlaybackContext(
+                episodeId: "ep", podcastId: "pod",
+                referencePositionMs: 1_000, clientPositionMs: 1_100,
+                recentReferencePositions: [], previousReferencePositionMs: nil
+            ),
+            origin: 1,
+            selection: nil,
+            utteranceId: "utterance-other"
+        )
+
+        XCTAssertGreaterThan(sink.clientCreationCountForTesting, createdBefore,
+                             "a turn must open its own connection, not send on one owned by another utterance "
+                                 + "(result=\(String(describing: result)) owner=\(String(describing: sink.earlyConnectionOwnerForTesting)))")
+        XCTAssertEqual(sink.earlyConnectionOwnerForTesting, "utterance-predecessor",
+                       "the predecessor's connection must be left for its own turn")
+    }
+
+    /// The open is invoked from the audio processing thread in production, not from main.
+    ///
+    /// A control that calls it from `@MainActor` cannot fail on a main-actor assumption, which is
+    /// exactly how `assumeIsolated` in this path went unnoticed. This case calls the installed
+    /// callback from a background queue, as capture does.
+    func test_openIsSafeToCallFromTheCaptureThread() async throws {
+        guard let service = makeService() else {
+            return XCTFail("the assembly built no service, so the case proves nothing")
+        }
+        try await start(service)
+
+        let engine = service.asrEngineForTesting
+        let sink = service.executorForTesting.cloudRouteSinkForTesting
+        let open = try XCTUnwrap(engine.onAddressedTrailingSilenceBegan)
+
+        // Off the main actor, on a labelled background queue: the trap an `assumeIsolated` would
+        // hit here would fail this case rather than the whole suite.
+        let tag: String? = await withCheckedContinuation { continuation in
+            DispatchQueue(label: "fm.auris.audio.processing").async {
+                continuation.resume(returning: open())
+            }
+        }
+
+        XCTAssertNotNil(tag, "the open must produce a tag when called off main")
+        await drainMain()
+        XCTAssertTrue(sink.hasEarlyConnectionForTesting,
+                      "the connection opened off main must reach the sink on main")
     }
 }

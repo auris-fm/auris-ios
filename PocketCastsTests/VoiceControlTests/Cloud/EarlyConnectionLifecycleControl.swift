@@ -52,14 +52,14 @@ final class EarlyConnectionLifecycleControl: XCTestCase {
     func test_localCommandThenNextUtteranceOpensItsOwnConnection() {
         let sink = makeSink()
 
-        let firstTag = sink.beginEarlyConnection()
+        let firstTag = sink.beginEarlyConnection(tag: CloudRouteSink.mintEarlyConnectionTag())
         XCTAssertNotNil(firstTag)
         sink.claimEarlyConnection(tag: firstTag, utteranceId: "utterance-local")
         XCTAssertEqual(sink.earlyConnectionOwnerForTesting, "utterance-local")
 
         // The command is answered locally, so nothing takes the connection. The next utterance
         // speaks and opens its own.
-        let secondTag = sink.beginEarlyConnection()
+        let secondTag = sink.beginEarlyConnection(tag: CloudRouteSink.mintEarlyConnectionTag())
         XCTAssertNotNil(secondTag, "the next utterance must open a connection, not be refused by a stale one")
         XCTAssertNotEqual(secondTag, firstTag, "it must be a NEW connection, not the predecessor's")
         XCTAssertNil(sink.earlyConnectionOwnerForTesting,
@@ -74,12 +74,12 @@ final class EarlyConnectionLifecycleControl: XCTestCase {
     func test_delayedDropFromPredecessorDoesNotCloseTheSuccessorsConnection() {
         let sink = makeSink()
 
-        let predecessorTag = try! XCTUnwrap(sink.beginEarlyConnection())
+        let predecessorTag = try! XCTUnwrap(sink.beginEarlyConnection(tag: CloudRouteSink.mintEarlyConnectionTag()))
         sink.claimEarlyConnection(tag: predecessorTag, utteranceId: "utterance-predecessor")
 
         // The predecessor's turn dies and schedules its drop. Before it runs, the successor opens
         // and is admitted.
-        let successorTag = try! XCTUnwrap(sink.beginEarlyConnection())
+        let successorTag = try! XCTUnwrap(sink.beginEarlyConnection(tag: CloudRouteSink.mintEarlyConnectionTag()))
         sink.claimEarlyConnection(tag: successorTag, utteranceId: "utterance-successor")
 
         // The predecessor's drop finally runs.
@@ -99,7 +99,7 @@ final class EarlyConnectionLifecycleControl: XCTestCase {
     func test_turnDoesNotClaimAnUnclaimedConnectionWithAStaleTag() {
         let sink = makeSink()
 
-        let heldTag = try! XCTUnwrap(sink.beginEarlyConnection())
+        let heldTag = try! XCTUnwrap(sink.beginEarlyConnection(tag: CloudRouteSink.mintEarlyConnectionTag()))
         XCTAssertNil(sink.earlyConnectionOwnerForTesting, "not pinned until an utterance is admitted")
 
         // A different utterance arrives carrying a tag that is not the held one.
@@ -114,7 +114,7 @@ final class EarlyConnectionLifecycleControl: XCTestCase {
     func test_pinnedConnectionIsNotReassignedToAnotherUtterance() {
         let sink = makeSink()
 
-        let heldTag = try! XCTUnwrap(sink.beginEarlyConnection())
+        let heldTag = try! XCTUnwrap(sink.beginEarlyConnection(tag: CloudRouteSink.mintEarlyConnectionTag()))
         sink.claimEarlyConnection(tag: heldTag, utteranceId: "utterance-owner")
         sink.claimEarlyConnection(tag: heldTag, utteranceId: "utterance-other")
 
