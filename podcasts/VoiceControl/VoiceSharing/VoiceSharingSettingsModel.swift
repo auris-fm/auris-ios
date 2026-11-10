@@ -67,6 +67,30 @@ final class VoiceSharingSettingsModel {
         }
         let disposition: Disposition
 
+        /// The user-facing summary. It lives HERE, not in the view, so the sentence can be tested
+        /// against the disposition it describes: a surface that over-states what a purge achieved is
+        /// a consent problem, not a formatting one. Every branch states only what is known.
+        var summary: String {
+            switch disposition {
+            case .reconciled(let removed, let remaining):
+                var text = "Removed \(removed) recording\(removed == 1 ? "" : "s") from this device."
+                if remaining > 0 {
+                    // Survivors are ordinary queue entries: they were NOT durably disqualified, so
+                    // they remain eligible and a later drain may still upload them. Saying they
+                    // "will never be uploaded" would promise something the code does not do.
+                    text += " \(remaining) could not be deleted and \(remaining == 1 ? "is" : "are") still "
+                        + "queued on this device."
+                }
+                return text
+            case .incomplete(let removed, let survivorsUnknown):
+                return "Removed \(removed). \(survivorsUnknown) could not be confirmed as revoked and "
+                    + "are still on this device — try again while connected."
+            case .refused:
+                return "Could not check this device's stored recordings, so nothing was deleted. "
+                    + "Please try again."
+            }
+        }
+
         /// True only when storage was fully enumerated AND no survivor remains unconfirmed.
         var isFullyResolvedLocally: Bool {
             switch disposition {
@@ -134,6 +158,12 @@ final class VoiceSharingSettingsModel {
     /// account-wide deletion — accepted data on the server is a separate operation the client does
     /// not perform here (spec: local removal never stands for server completion).
     func deletePendingRecordingsOnThisDevice() async -> DeleteResult {
+        // An unreadable queue CANNOT be enumerated, so a count of 0 would mean "could not look",
+        // not "nothing there". Reporting that as `.reconciled(removed: 0)` would tell the user their
+        // recordings are gone (or that none existed) on the strength of a failed read.
+        guard await queue.isReadable else {
+            return DeleteResult(disposition: .refused)
+        }
         let before = await queue.count()
         await queue.deleteAll(reason: "user-request")
         // A delete can fail (a file system that refuses removal). Whatever survives is reported

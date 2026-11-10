@@ -130,6 +130,12 @@ protocol VoiceIntentExecuting: AnyObject {
     /// The executor's decision site: returns the presentation AND the executor's own verdict
     /// for the same turn. A returned response alone is a presentation choice; this is the fact.
     func executeWithVerdict(_ intent: any VoiceIntent) async -> (response: VoiceResponse, verdict: ExecutionVerdict)
+
+    /// The cloud route sink behind this executor, when it has one. Optional because the protocol is
+    /// widened: a conformer that does not route cloud turns has no sink and must be able to say so.
+    /// Production paths read this instead of force-downcasting `self`, so an unfamiliar conformer
+    /// degrades to "no sink" rather than trapping the process.
+    var cloudRouteSinkAccess: CloudRouteSink? { get }
 }
 
 extension VoiceIntentExecuting {
@@ -138,6 +144,7 @@ extension VoiceIntentExecuting {
     @MainActor func takeReleasedInterruptionFollowUp() -> CloudInterruptionState.ReleasedFollowUp? { nil }
     @MainActor func releaseRetainedAdmittedDispatch(utteranceId: String, origin: Int) {}
     @MainActor func retireRetainedDispatchesIfWindowChanged(to origin: Int?) {}
+    var cloudRouteSinkAccess: CloudRouteSink? { nil }
     /// Default bridge for conformers that have not adopted structured verdicts. CORRECTION (spec
     /// 6a033773): only the executor's OWN decisions are stated here — the error earcon is the
     /// failure the executor itself logs and acts on, and confirm-required is the executor's own
@@ -173,7 +180,11 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
 
     /// The sink this executor routes cloud playback through, so a test can reach the real
     /// producer the app built rather than constructing its own.
-    var cloudRouteSinkForTesting: CloudRouteSink { cloudRouteSink as! CloudRouteSink }
+    var cloudRouteSinkForTesting: CloudRouteSink { cloudRouteSinkAccess! }
+
+    /// See `VoiceIntentExecuting.cloudRouteSinkAccess`. This executor always has one, but the
+    /// cast stays conditional so the protocol contract holds for every conformer.
+    var cloudRouteSinkAccess: CloudRouteSink? { cloudRouteSink as? CloudRouteSink }
 
     /// Retires the sink's retained dispatches on the window boundary (production wiring). The
     /// sink transition is lock-guarded and nonisolated, so this stays synchronous — the window

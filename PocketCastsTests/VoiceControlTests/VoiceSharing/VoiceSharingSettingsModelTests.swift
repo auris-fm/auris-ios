@@ -112,6 +112,52 @@ final class VoiceSharingSettingsModelTests: XCTestCase {
                        "a recording still on the device means the deletion is not resolved")
     }
 
+    /// AN UNREADABLE STORE IS A REFUSAL, NOT "Removed 0".
+    ///
+    /// `count()` returns 0 when the folder cannot be listed, so before this control an unlistable
+    /// queue produced `.reconciled(removed: 0, ...)` — the surface then told the user "Removed 0
+    /// recordings from this device", which reads as a successful purge of an empty device. The truth
+    /// is that nothing could be enumerated and nothing was proven. The queue already exposes
+    /// `isReadable` for exactly this distinction; the delete path simply was not consulting it.
+    func test_unreadableQueueReportsRefusalRatherThanRemovingZero() async throws {
+        _ = await VoiceSharingSettingsFixture.makeEntry(in: queue, root: root)
+        // A folder that cannot be enumerated at all.
+        final class UnlistableFM: FileManager {
+            override func contentsOfDirectory(atPath path: String) throws -> [String] {
+                throw CocoaError(.fileReadNoPermission)
+            }
+        }
+        let unlistable = VoiceSharingQueue(root: root, fileManager: UnlistableFM())
+        let readable = await unlistable.isReadable
+        XCTAssertFalse(readable, "premise: this store cannot be read")
+        let result = await model(queue: unlistable).deletePendingRecordingsOnThisDevice()
+        XCTAssertEqual(result.disposition, .refused,
+                       "a purge that could not look must not report a count it did not measure")
+        XCTAssertFalse(result.isFullyResolvedLocally,
+                       "and nothing was proven, so it is not resolved")
+        let text = result.summary
+        XCTAssertFalse(text.contains("Removed 0"),
+                       "the surface must never claim a successful removal it did not perform: \(text)")
+    }
+
+    /// THE SURVIVOR SENTENCE STATES ONLY WHAT THE CODE DOES.
+    ///
+    /// Survivors of a failed delete are ordinary queue entries: they were not durably disqualified,
+    /// so a later drain may still upload them. The surface used to promise they "will never be
+    /// uploaded and remain marked for cleanup" — a guarantee no code implements, in the one place a
+    /// user decides whether their recordings are gone.
+    func test_survivorTextDoesNotPromiseAnUploadBlockThatDoesNotExist() async throws {
+        let result = VoiceSharingSettingsModel.DeleteResult(
+            disposition: .reconciled(removed: 2, durablyDisqualified: 1))
+        let text = result.summary
+        XCTAssertFalse(text.lowercased().contains("never be uploaded"),
+                       "survivors stay queued and may still upload; the surface must not claim otherwise: \(text)")
+        XCTAssertFalse(text.lowercased().contains("marked for cleanup"),
+                       "no such marking exists: \(text)")
+        XCTAssertTrue(text.contains("2"), "the removal is still reported: \(text)")
+        XCTAssertTrue(text.contains("1"), "the survivor is still named: \(text)")
+    }
+
     /// A REFUSED purge reports refusal — never "0 removed / 0 retained", which would read as a
     /// measurement of an empty device.
     func test_refusedDeletionIsReportedAsRefusal() async throws {

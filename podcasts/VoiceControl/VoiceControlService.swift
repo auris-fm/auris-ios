@@ -137,6 +137,11 @@ class VoiceControlService: ObservableObject {
     /// The executor this service routes validated intents through.
     var executorForTesting: VoiceIntentExecutor { executor as! VoiceIntentExecutor }
 
+    /// The cloud route sink behind the executor, or nil for a conformer that has none.
+    /// Production paths read this instead of force-downcasting, so an unexpected executor skips the
+    /// cloud-specific step rather than crashing.
+    var cloudRouteSink: CloudRouteSink? { executor.cloudRouteSinkAccess }
+
     /// The dialog manager, so a control can BEGIN a dialog through the production `handle` path
     /// and prove a dialog-pending turn keeps its OWN admitted identity on the wire (spec 0443b70).
     var dialogManagerForTesting: VoiceDialogManager { dialogManager }
@@ -766,8 +771,8 @@ class VoiceControlService: ObservableObject {
         else { return false }
         // The retained record carries the COMPLETE admitted input — including the selection this
         // capture was admitted under — because the follow-up submitter reconstructs its submission
-        // from it, not from whatever is live later (reviewer ca629c34: preserve provenance).
-        let interrupted = await executorForTesting.cloudRouteSinkForTesting.emitBargeIn(
+        // from it, not from whatever is live later.
+        let interrupted = await cloudRouteSink?.emitBargeIn(
             request: input.routerTranscript,
             utteranceId: input.utteranceId,
             origin: origin,
@@ -1083,7 +1088,7 @@ class VoiceControlService: ObservableObject {
         // while this turn is still queued or classifying, which is exactly the ordering measured
         // here (B entered, A's refusal arrived 110ms later).
         if await MainActor.run(body: {
-            executorForTesting.cloudRouteSinkForTesting.isSuppressedForTesting(utteranceId)
+            cloudRouteSink?.isSuppressedForTesting(utteranceId) ?? false
         }) {
             FileLog.shared.addMessage(
                 "[VoicePipeline] suppressed utterance \(utteranceId) — its interruption was refused"
@@ -1182,7 +1187,7 @@ class VoiceControlService: ObservableObject {
             // RE-CHECK suppression immediately before dispatch: a refusal that landed while this
             // turn was queued or classifying must still stop it from reaching the wire.
             if await MainActor.run(body: {
-                executorForTesting.cloudRouteSinkForTesting.isSuppressedForTesting(input.utteranceId)
+                cloudRouteSink?.isSuppressedForTesting(input.utteranceId) ?? false
             }) {
                 FileLog.shared.addMessage(
                     "[VoicePipeline] suppressed at dispatch \(input.utteranceId ?? "-") — "

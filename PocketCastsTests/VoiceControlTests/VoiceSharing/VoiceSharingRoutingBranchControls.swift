@@ -37,6 +37,22 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         }
     }
 
+    /// A CONFORMER WITHOUT A CLOUD SINK IS A SUPPORTED CASE, NOT A CRASH.
+    ///
+    /// The executor type is widened to `any VoiceIntentExecuting`, and the protocol now has more
+    /// than one conformer. Production read the cloud sink by force-downcasting the executor to the
+    /// one concrete type, so any other conformer reaching a barge-in or suppression check trapped the
+    /// process. The sink is now reached through an optional protocol member that defaults to nil, so
+    /// an executor with no sink degrades to "no cloud step" instead of killing the app.
+    func test_anExecutorWithoutACloudSinkIsHandledRatherThanTrapped() {
+        let plain = StubExecutor()
+        // The protocol contract: a conformer that does not declare a sink reports nil, and asking is
+        // not a crash. Before the forced downcast was removed this call site could not be reached
+        // for this type at all.
+        XCTAssertNil((plain as any VoiceIntentExecuting).cloudRouteSinkAccess,
+                     "a conformer without a sink states nil rather than trapping")
+    }
+
     // MARK: - Harness
 
     private var collected: [VoiceSharingCollector.SegmentEvent] = []

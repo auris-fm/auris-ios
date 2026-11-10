@@ -163,25 +163,10 @@ struct VoiceSharingSettingsView: View {
         .navigationTitle(L10n.voiceSharingSectionTitle)
     }
 
-    /// Reports the purge's own disposition. Every branch states exactly what is known — in
-    /// particular a refusal is not rendered as "0 deleted", and durably-disqualified survivors are
-    /// named rather than folded into a bare deletion count.
+    /// The purge's own disposition, worded by the model so the sentence is tested against the
+    /// result it describes rather than living untested in the view.
     private func deleteSummary(_ result: VoiceSharingSettingsModel.DeleteResult) -> String {
-        switch result.disposition {
-        case .reconciled(let removed, let durablyDisqualified):
-            var text = "Removed \(removed) recording\(removed == 1 ? "" : "s") from this device."
-            if durablyDisqualified > 0 {
-                text += " \(durablyDisqualified) could not be deleted but will never be uploaded "
-                    + "and remain marked for cleanup."
-            }
-            return text
-        case .incomplete(let removed, let survivorsUnknown):
-            return "Removed \(removed). \(survivorsUnknown) could not be confirmed as revoked and "
-                + "are still on this device — try again while connected."
-        case .refused:
-            return "Could not check this device's stored recordings, so nothing was deleted. "
-                + "Please try again."
-        }
+        result.summary
     }
 
     private func row(_ label: String, value: String, tint: Color) -> some View {
