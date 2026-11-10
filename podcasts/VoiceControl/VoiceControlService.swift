@@ -119,8 +119,15 @@ class VoiceControlService: ObservableObject {
             .sink { [weak self] active in
                 guard let self else { return }
                 let origin: Int? = active ? self.gracePeriodSignal.currentGeneration() : nil
-                MainActor.assumeIsolated {
-                    self.executor.retireRetainedDispatchesIfWindowChanged(to: origin)
+                let retire = {
+                    MainActor.assumeIsolated {
+                        self.executor.retireRetainedDispatchesIfWindowChanged(to: origin)
+                    }
+                }
+                if Thread.isMainThread {
+                    MainActor.assumeIsolated(retire)
+                } else {
+                    DispatchQueue.main.sync(execute: retire)
                 }
             }
             .store(in: &cancellables)
