@@ -59,6 +59,14 @@ final class VoiceSharingCollector {
     /// Defined HERE because this is the site that actually made the decision.
     static let bleedSkipReason = "rejected_by_bleed"
 
+    /// The enumerated ASR reason stating an observed wake decision skipped recognition.
+    static let wakeSkipReason = "rejected_by_wake"
+
+    /// The reason for a stage the pipeline never dispatched: a rejected wake word stops the turn
+    /// before routing and execution are reached. Naming it is a fact the app OWNS, so these stages are
+    /// `not_run` rather than `unknown` — they did not fail to be observed, they did not happen.
+    static let notDispatchedReason = "not_dispatched"
+
     /// Immutable association token handed to the engine at confirmed start and REQUIRED on every later
     /// outcome for that segment. Association by argument, not by "whatever is current": utterance B starting
     /// before A's rejection arrives cannot make A's callback land on B, because A's Task holds A's context
@@ -766,6 +774,17 @@ return }
         if kind == .rejectedBleed {
             event.reportedStages["asr"] = VoiceSharingContributionEncoder.StageOutcome(
                 state: "not_run", reason: Self.bleedSkipReason)
+        } else if kind == .rejectedWake {
+            // The wake word was rejected, so recognition never ran and the turn was never routed or
+            // executed. Each is a KNOWN skip. Reporting the encoder's `unknown` /
+            // `observation_unavailable` default would claim the app could not tell, which is false,
+            // and would disagree with the same event recorded by the other client.
+            event.reportedStages["asr"] = VoiceSharingContributionEncoder.StageOutcome(
+                state: "not_run", reason: Self.wakeSkipReason)
+            event.reportedStages["routing"] = VoiceSharingContributionEncoder.StageOutcome(
+                state: "not_run", reason: Self.notDispatchedReason)
+            event.reportedStages["execution"] = VoiceSharingContributionEncoder.StageOutcome(
+                state: "not_run", reason: Self.notDispatchedReason)
         }
         lock.unlock()
         submit(event)

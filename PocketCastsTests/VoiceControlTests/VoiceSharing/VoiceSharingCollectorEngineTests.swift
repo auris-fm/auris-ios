@@ -1752,6 +1752,57 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         engine.stop()
     }
 
+    /// PRODUCTION chain for a WAKE rejection: real engine wake branch → real collector → REAL sink →
+    /// REAL encoder → queue entry → read back from the persisted record.
+    ///
+    /// A segment that fails the wake word never reaches recognition, routing or the executor. Those
+    /// stages did not merely go unreported — the app knows they did not run, so the record must say
+    /// `not_run` with a reason. Leaving them as the encoder's default `unknown` /
+    /// `observation_unavailable` claims the app could not tell, which understates what it knows and
+    /// disagrees with what Android records for the same event.
+    func test_realEngineWakeRejectionPersistsNotRunForEveryStageThatNeverRan() async throws {
+        let claims: [String: VoiceSharingContributionEncoder.StageOutcome] = [:]
+        let chain = makeChain(wake: NotDetectedWake(), claims: { claims })
+        let engine = chain.engine
+        chain.backend.emitSpeech(level: 0.6, totalSamples: 5 * 160)
+        let frozen = chain.engine.contributionCollector?.currentCaptureContextForTesting
+        await engine.processUtterance(Array(repeating: 0.6, count: 5 * 160), capturedAt: 0, frozenContext: frozen)
+        XCTAssertEqual(chain.backend.transcribeCalls, 0,
+                       "premise: a wake rejection performs no recognition, so ASR never ran")
+
+        let ready = await waitForReadyEntries(1)
+        XCTAssertEqual(ready.count, 1, "the wake-rejected segment remains a collectable record")
+        let expectedID = try XCTUnwrap(frozen?.id.uuidString)
+        let record = try XCTUnwrap(ready.compactMap { entry -> [String: Any]? in
+            let url = entry.url.appendingPathComponent("metadata.json")
+            guard let data = try? Data(contentsOf: url),
+                let record = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                record["capture_id"] as? String == expectedID
+            else { return nil }
+            return record
+        }.first, "the persisted record for capture \(expectedID) must exist")
+
+        let observations = try XCTUnwrap(record["observations"] as? [String: Any])
+        // The detector RAN and rejected: its own measured values survive on a completed stage.
+        let wake = try XCTUnwrap(observations["wake"] as? [String: Any])
+        XCTAssertEqual(wake["state"] as? String, "completed")
+        XCTAssertEqual(wake["decision"] as? String, "rejected")
+
+        // Every stage downstream of the rejected wake is a KNOWN skip, not an unstated one.
+        for (stage, reason) in [("asr", "rejected_by_wake"),
+                                ("routing", "not_dispatched"),
+                                ("execution", "not_dispatched")] {
+            let block = try XCTUnwrap(observations[stage] as? [String: Any],
+                                      "\(stage) must be present on a wake-rejected record")
+            XCTAssertEqual(block["state"] as? String, "not_run",
+                           "\(stage) did not run, and the app knows it: not_run, not unknown")
+            XCTAssertEqual(block["reason"] as? String, reason,
+                           "\(stage) names why it did not run")
+            XCTAssertNil(block["text"], "a stage that did not run carries no transcript")
+        }
+        engine.stop()
+    }
+
     /// WAKE-only is A SUCCESSFUL recognition. The recogniser returns
     /// just the wake phrase; after the wake window is removed the command text is empty. The ASR STAGE must
     /// still report the recogniser's own transcript as completed — stripping the wake phrase is the command
