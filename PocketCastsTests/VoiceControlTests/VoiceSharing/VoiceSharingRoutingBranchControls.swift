@@ -27,6 +27,10 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         func ensureReady() async -> Result<Void, Error> { .success(()) }
     }
 
+    /// A scripted executor that keeps the PROTOCOL's own verdict bridge. The bridge is the production
+    /// rule for `.earcon(.error)` (the executor's one concluded failure) and `.earcon(.confirmRequired)`
+    /// (its one refusal); a stub that reported `failed` for every response would make an invented
+    /// verdict indistinguishable from a real one, and a control asserting on that proves nothing.
     private final class StubExecutor: VoiceIntentExecuting {
         var response: VoiceResponse = .spoken("ok")
         private(set) var executed: [String] = []
@@ -34,6 +38,19 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         func execute(_ intent: any VoiceIntent) async -> VoiceResponse {
             executed.append(String(describing: type(of: intent)))
             return response
+        }
+
+        // The protocol's OWN bridge: `execute`, then the presentation verdict it states.
+        func executeWithVerdict(_ intent: any VoiceIntent) async -> (response: VoiceResponse, verdict: ExecutionVerdict) {
+            let response = await execute(intent)
+            switch response {
+            case .earcon(.error):
+                return (response, ExecutionVerdict(state: "failed", reason: "action_failed", outcome: "failed"))
+            case .earcon(.confirmRequired):
+                return (response, ExecutionVerdict(state: "failed", reason: "client_refused", outcome: "refused"))
+            default:
+                return (response, ExecutionVerdict(state: "unknown", reason: "observation_unavailable"))
+            }
         }
     }
 
@@ -286,6 +303,10 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         XCTAssertFalse(VoiceSharingSettingsModel.surfaceEnabled)
         #endif
         store.setLocalOptIn(true)
+        // The enrollment observer refreshes from a Task, so the publication is OWED rather than
+        // synchronous. Waiting for it is the control; asserting straight after the mutation measured
+        // the schedule, not the result.
+        await waitUntil("the opt-in is published") { published.count == 1 }
         XCTAssertEqual(published.count, 1)
         XCTAssertEqual(published.last?.localOptIn, true)
         var retainedModel = weakModel
@@ -293,6 +314,8 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         XCTAssertNil(weakLifetime, "service must not cycle with its sharing dependencies")
         XCTAssertNil(weakTrigger)
         store.setLocalOptIn(false)
+        // A leaked observer would publish here; give one the same chance it was given above.
+        try? await Task.sleep(nanoseconds: 300_000_000)
         XCTAssertEqual(published.count, 1, "service teardown must remove the enrollment observer")
         XCTAssertNotNil(retainedModel, "retain the model so a leaked weak observer would still publish")
         retainedModel = nil
@@ -373,6 +396,9 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         gateOpen = false
         coordinator.consentGateLostForTesting()
         XCTAssertFalse(isCollectionPermitted())
+        await waitUntil("the retained bytes are purged") {
+            !FileManager.default.fileExists(atPath: seededDirectory.path)
+        }
         XCTAssertFalse(FileManager.default.fileExists(atPath: seededDirectory.path),
                        "retained bytes must be purged")
         let entriesAfterPurge = await queue.entries()
@@ -458,14 +484,23 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         let audio = try Data(contentsOf: entry.audioURL)
         let record = try XCTUnwrap(JSONSerialization.jsonObject(with: metadata) as? [String: Any])
         let expectedCaptureID = try XCTUnwrap(record["capture_id"] as? String)
+        // The claim is about THIS recording. The trigger is one shared loop, so "no request arrived
+        // in the pass my trigger joined" does not say this recording was withheld — a pass already
+        // running for an older recording serves it, and the pass containing this one may run after
+        // the join returns.
         weakTrigger?.trigger()
         await joinLocalSharingDrain(weakTrigger)
-        XCTAssertEqual(authority.received.count, 0, "accepted enrollment without a new lease cannot upload")
+        let uploadsBeforeEnrollment = authority.received.map(\.captureID)
+        XCTAssertEqual(uploadsBeforeEnrollment, [],
+                       "accepted enrollment without a new lease cannot upload, got \(uploadsBeforeEnrollment)")
 
         await VoiceSharingCoordinator(enrollmentStore: store).refreshProjectionFromServer(accountClient: accountClient)
         XCTAssertEqual(authority.lookupCount, 2)
         weakTrigger?.trigger()
         await joinLocalSharingDrain(weakTrigger)
+        await waitUntil("the 503 attempt for this recording") {
+            authority.received.contains { $0.captureID == expectedCaptureID }
+        }
         XCTAssertEqual(authority.received.count, 1)
         XCTAssertEqual(try Data(contentsOf: entry.metadataURL), metadata, "503 retains exact immutable metadata")
         XCTAssertEqual(try Data(contentsOf: entry.audioURL), audio, "503 retains exact immutable WAV")
@@ -501,14 +536,30 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         XCTAssertFalse(VoiceSharingSettingsModel.surfaceEnabled)
     }
 
+    /// Waits for a condition that work OFF the calling thread is going to satisfy. The production
+    /// paths this suite drives hand their writes to a Task, so a control that asserted immediately
+    /// would be measuring the scheduler rather than the behaviour.
+    @discardableResult
+    private func waitUntil(
+        _ what: String, timeout: TimeInterval = 3, _ condition: () -> Bool
+    ) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        if !condition() { XCTFail("\(what) did not happen within \(timeout)s") }
+        return condition()
+    }
+
     private func joinLocalSharingDrain(_ trigger: VoiceSharingUploadTrigger?) async {
         // The simple trigger runs its pass on its own task and exposes no handle; wait for it to
         // become idle rather than reaching into it.
         guard let trigger else { return }
-        for _ in 0..<80 where trigger.isRunningForTesting {
+        for _ in 0..<80 where trigger.hasPendingOrRunningWorkForTesting {
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
-        XCTAssertFalse(trigger.isRunningForTesting, "the configured drain must finish")
+        XCTAssertFalse(trigger.hasPendingOrRunningWorkForTesting, "the configured drain must finish")
     }
 
     /// Produces a REAL open capture the way production does — the engine's own `speechStarted` — because
@@ -551,6 +602,37 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
 
     // MARK: - Controls
 
+    /// A RECORD IS BUILT FROM THE STAGES THAT ALREADY HAPPENED, SO EARLY PUBLICATION LOSES THEM.
+    ///
+    /// Routing and execution are reported onto the capture's context, and the honest record is whatever
+    /// the collector holds when the segment closes. A control that closed the segment first and called
+    /// the service afterwards would be asserting on an empty record for its own sequencing reasons —
+    /// which is why every branch control here routes and executes first, then finishes the capture.
+    /// This control pins that order itself: one segment closes the collection while the capture is
+    /// still open and ASR is still working, and that record must carry NO routing or execution yet. If
+    /// the collector published either earlier, the stage order of the pipeline would be an illusion.
+    func test_aRecordPublishedBeforeRoutingCarriesNoRoutingOrExecutionStage() async {
+        collected = []
+        let router = StubClassifier()
+        let executor = StubExecutor()
+        let collector = makeCollector()
+        let harness = makeService(router: router, executor: executor, collector: collector)
+        guard let context = await openRealCapture(harness) else {
+            return XCTFail("a real open capture is required")
+        }
+        harness.collector.speechCompleted(
+            [Float](repeating: 0.4, count: 16_000), context: context, deferEmission: true)
+        harness.collector.finalizeDeferredCompletion(context: context)
+        let stages = publishedStages(for: context.id)
+        XCTAssertEqual(router.classifyCalls, 0,
+                       "a control that expected nothing would also pass on a classification that ran anyway")
+        for stage in ["routing", "execution"] {
+            XCTAssertNil(stages[stage],
+                         "a record closed before the turn routed must not carry a \(stage) stage, got "
+                         + "\(String(describing: stages[stage]?.state))")
+        }
+    }
+
     /// THE routing control: each real branch reports its own routing outcome AND the execution outcome
     /// that followed from the executor's returned response.
     func test_eachRealRoutingBranchReportsItsOwnRoutingAndExecutionOutcome() async {
@@ -562,6 +644,9 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
             let routingDisposition: String
             let executionState: String
             let executionReason: String?
+            /// Whether this turn reaches the executor at all. The router-declined case is refused by
+            /// policy BEFORE execution, so nothing was executed and nothing can state a verdict.
+            var executed: Bool = true
         }
         let cases: [Case] = [
             // RESTORED after a withdrawn first cut: my intermediate version
@@ -588,7 +673,8 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
             // precondition failed rather than blaming the user.
             Case(label: "no intent", result: .none,
                  response: .spoken("unused"), routingDisposition: "not_run",
-                 executionState: "not_run", executionReason: "precondition_failed"),
+                 executionState: "not_run", executionReason: "client_refused",
+                 executed: false),
         ]
 
         for testCase in cases {
@@ -641,9 +727,17 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
                 XCTAssertNil(routing.predictedIntent,
                              "\(testCase.label): an unclassified turn must not invent an intent")
             }
-            if testCase.executionState != "not_run" {
+            // The verdict is a CLOSED set, and an ABSENT verdict is its own honest claim: the
+            // encoder states `unknown`/`observation_unavailable` for a listed stage it was never told
+            // about, so an executed turn with nothing to conclude must OMIT the member rather than
+            // leave it empty. An execution the app itself skipped has no verdict to give either — a
+            // reason saying why it did not run is its whole statement.
+            if testCase.executionState == "unknown" || !testCase.executed {
+                XCTAssertNil(execution.outcome,
+                             "\(testCase.label): no verdict is possible, so the member must be omitted")
+            } else {
                 XCTAssertFalse(execution.outcome?.isEmpty ?? true,
-                               "\(testCase.label): an executed turn must state its verdict")
+                               "\(testCase.label): a concluded execution must state its verdict")
             }
         }
     }
@@ -850,7 +944,12 @@ private final class SharingLocalAuthority {
                 return try response(200, object: [
                     "schema_version": 1, "membership_revision": "local-1", "plan": "pro",
                     "voice_sharing_enrolled": true, "enrollment_epoch": "epoch-1",
-                    "accepted_disclosure_version": "2026-09", "withdrawal_state": "active"
+                    // BOTH members are required by the schema. Serving only the first made the
+                    // decoder reject the whole body as an impossible combination, so no authority
+                    // was ever applied — and every assertion after it was reading a client that had
+                    // correctly declined to trust an incomplete answer.
+                    "accepted_disclosure_version": "voice-sharing-v1",
+                    "disclosure_version": "voice-sharing-v1", "withdrawal_state": "active"
                 ])
             }
             guard head.hasPrefix("POST /api/v1/voice-recordings ") else { return try response(404, object: [:]) }

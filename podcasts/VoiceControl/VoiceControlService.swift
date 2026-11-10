@@ -1034,13 +1034,17 @@ class VoiceControlService: ObservableObject {
     /// the decision site).
     private func reportExecution(
         _ outcome: VoiceSharingContributionEncoder.StageOutcome,
-        captureContext: VoiceSharingCollector.CaptureContext?
+        captureContext: VoiceSharingCollector.CaptureContext?,
+        predictedIntent: String? = nil,
+        predictedTool: String? = nil
     ) {
         let verdict = Self.settledDisposition(for: outcome)
         contributionCollector?.engineReported(
             stage: "routing",
             outcome: .init(state: "completed", reason: nil,
-                           routingDisposition: verdict),
+                           routingDisposition: verdict,
+                           predictedIntent: predictedIntent,
+                           predictedTool: predictedTool),
             context: captureContext)
         // The executor's own verdict, from the same decision the disposition derives from the
         // `outcome` member states what execution concluded, not what was presented. The WIRE enum
@@ -1048,14 +1052,20 @@ class VoiceControlService: ObservableObject {
         // centrally in the collector too): routing's disposition tokens (failed/executed/pending/
         // refused) are a DIFFERENT vocabulary and must never leak into this member (reviewer
         // 39ac0771, server fixture refusal).
+        // A turn the executor ran but could not conclude has no verdict to state. "Nothing" is not a
+        // permitted way to say that: the record would carry an executed turn with no outcome at all,
+        // which reads as a gap rather than the honest `unknown`/`observation_unavailable` the encoder
+        // already uses for a stage it was never told about.
+        let wireVerdict = VoiceSharingContributionEncoder.StageOutcome.wireExecutionOutcome(for: outcome)
         contributionCollector?.engineReported(
             stage: "execution",
-            outcome: .init(state: outcome.state, reason: outcome.reason,
+            outcome: .init(state: wireVerdict == nil ? "unknown" : outcome.state,
+                           reason: wireVerdict == nil ? "observation_unavailable" : outcome.reason,
                            text: outcome.text, decision: outcome.decision,
                            translatedText: outcome.translatedText,
                            targetLanguage: outcome.targetLanguage,
                            routingDisposition: outcome.routingDisposition,
-                           outcome: VoiceSharingContributionEncoder.StageOutcome.wireExecutionOutcome(for: outcome)),
+                           outcome: wireVerdict),
             context: captureContext)
     }
 
@@ -1127,6 +1137,18 @@ class VoiceControlService: ObservableObject {
             FileLog.shared.addMessage(
                 "[VoicePipeline] session-start capture ← '\(transcript)' — not routed, silent"
             )
+            // The record still closes honestly: routing and execution did not run, and the
+            // app owns that decision. A wake-only capture states the enumerated `wake_only`
+            // reason; a blank capture never dispatched anything at all.
+            let skipReason = RouteInputEligibilityPolicy.decide(transcript: transcript) == .silentSessionStart
+                ? VoiceSharingCollector.wakeOnlySkipReason
+                : VoiceSharingCollector.notDispatchedReason
+            for stage in ["routing", "execution"] {
+                contributionCollector?.engineReported(
+                    stage: stage,
+                    outcome: .init(state: "not_run", reason: skipReason),
+                    context: captureContext)
+            }
             return .routed
         case .route:
             break
@@ -1178,6 +1200,21 @@ class VoiceControlService: ObservableObject {
                lastType == intentType,
                Date().timeIntervalSince(lastTime) < debounceInterval {
                 FileLog.shared.addMessage("[VoicePipeline] debounce \(intentType)")
+                // A debounce suppression is a CLIENT REFUSAL: the turn was classified and the
+                // router named its intent, but the client declined to run it. The record still
+                // settles, carrying the same refusal mapping any other client refusal takes.
+                contributionCollector?.engineReported(
+                    stage: "routing",
+                    outcome: .init(state: "completed", reason: nil,
+                                   routingDisposition: "refused",
+                                   predictedIntent: VoiceAnalytics.predictedIntentName(from: intent),
+                                   predictedTool: VoiceAnalytics.toolName(from: intent)),
+                    context: captureContext)
+                contributionCollector?.engineReported(
+                    stage: "execution",
+                    outcome: .init(state: "failed", reason: "client_refused",
+                                   outcome: "refused"),
+                    context: captureContext)
                 return .routed
             }
 
@@ -1203,7 +1240,9 @@ class VoiceControlService: ObservableObject {
                 return .suppressedByInterruption
             }
             let (response, executionVerdict) = await executor.executeWithVerdict(intent, preparedObserver: preparedObserver)
-            reportExecution(executionVerdict, captureContext: captureContext)
+            reportExecution(executionVerdict, captureContext: captureContext,
+                            predictedIntent: VoiceAnalytics.predictedIntentName(from: intent),
+                            predictedTool: VoiceAnalytics.toolName(from: intent))
             // SUBMIT the retained follow-UP (cloud-assistant.md → Interruption, ).
             // When the turn that just settled was interrupted, the interrupting utterance was held
             // until its acknowledgement — a `done` for the prior turn, even `completed`, is that
@@ -1243,7 +1282,9 @@ class VoiceControlService: ObservableObject {
                     return .routed
                 }
                 let (response, executionVerdict) = await executor.executeWithVerdict(intent, preparedObserver: preparedObserver)
-            reportExecution(executionVerdict, captureContext: captureContext)
+                reportExecution(executionVerdict, captureContext: captureContext,
+                                predictedIntent: VoiceAnalytics.predictedIntentName(from: intent),
+                                predictedTool: VoiceAnalytics.toolName(from: intent))
                 // Same bridge on every executor path: an interruption resolved by THIS turn must
                 // reach its follow-up whichever intent produced it.
                 await submitRetainedFollowUpIfAny()

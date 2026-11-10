@@ -83,6 +83,15 @@ final class VoiceSharingUploadTrigger {
         return running
     }
 
+    /// Test seam: whether a pass is running OR one has been requested and not yet served. A
+    /// `trigger()` that finds a pass already in flight only REMEMBERS the request, so waiting on
+    /// `isRunningForTesting` alone returns while that queued pass is still owed — and a control that
+    /// asserted right there would be racing the work it asked for.
+    var hasPendingOrRunningWorkForTesting: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return running || pending
+    }
+
     private func run() async {
         defer { finish() }
         guard isAuthorized() else { return }

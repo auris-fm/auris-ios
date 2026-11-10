@@ -107,6 +107,15 @@ class VoiceAnalytics {
         }
     }
 
+    /// The contribution record's `predicted_intent`: the canonical action name for a local
+    /// intent, the model's request name for a model-chosen cloud route. Argument values never
+    /// appear — a cloud FALLBACK's request is the transcript itself, so it must never be named
+    /// through this helper.
+    static func predictedIntentName(from intent: any VoiceIntent) -> String {
+        if let route = intent as? CloudRouteIntent { return route.request }
+        return actionName(from: intent)
+    }
+
     private func responseType(from response: VoiceResponse) -> String {
         switch response {
         case .silent: return "silent"

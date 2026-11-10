@@ -67,6 +67,11 @@ final class VoiceSharingCollector {
     /// `not_run` rather than `unknown` — they did not fail to be observed, they did not happen.
     static let notDispatchedReason = "not_dispatched"
 
+    /// The enumerated routing reason stating the wake-positive trim left no text, so there was
+    /// nothing to route (the session-start capture). Routing and execution were both skipped by
+    /// the same decision, so both stages carry it.
+    static let wakeOnlySkipReason = "wake_only"
+
     /// Immutable association token handed to the engine at confirmed start and REQUIRED on every later
     /// outcome for that segment. Association by argument, not by "whatever is current": utterance B starting
     /// before A's rejection arrives cannot make A's callback land on B, because A's Task holds A's context
