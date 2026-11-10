@@ -809,11 +809,15 @@ class VoiceControlService: ObservableObject {
         asrEngine.onWakeWordDetected = { [weak self] in
             self?.gracePeriodSignal.onWakeWordDetected()
             self?.audioRenderer.playEarcon(.wakeWord)
-            // Addressed speech, detected while the user may still be finishing the request: open
-            // the cloud connection now so its handshake overlaps the tail of the utterance rather
-            // than following it. The turn reuses it if it is still fresh, and replaces it silently
-            // if not, so opening early can never cost correctness.
-            // Hop to the main actor: the sink is main-actor isolated, and the wake callback is not.
+        }
+        // Trailing silence on an addressed utterance is when the connection should open: the user
+        // appears to have finished, the endpoint has not fired, so the handshake overlaps the
+        // remaining wait instead of following it. Opening at the wake decision would be too late —
+        // that decision happens after the endpoint. The turn reuses the connection if it is still
+        // fresh and replaces it silently if not, so opening early can never cost correctness.
+        asrEngine.onAddressedTrailingSilenceBegan = { [weak self] in
+            // Hop to the main actor: the sink is main-actor isolated, and the segmenter callback is
+            // not.
             Task { @MainActor [weak self] in
                 self?.executor.beginEarlyCloudConnection()
             }

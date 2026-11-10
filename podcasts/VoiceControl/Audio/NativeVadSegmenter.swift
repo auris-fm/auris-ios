@@ -21,6 +21,14 @@ class NativeVadSegmenter {
 
     /// Whether the early wake-scoring prefix has already been emitted for this utterance.
     private var wakeScorablePrefixEmitted = false
+
+    /// The wake result computed from the CURRENT utterance's early-scored prefix, if any.
+    ///
+    /// Owned here because this is where the utterance lifecycle is known: it is cleared when the
+    /// utterance is delivered, abandoned, or the session resets. The engine's capture callback
+    /// launches an asynchronous task, so an engine-side slot could be overwritten by the next
+    /// utterance before that task read it — one command's score addressing another's audio.
+    var earlyWakeResultForCurrentUtterance: WakeWordResult?
     private var speechFrameCount = 0
     /// Audio that arrived while the classifier had not yet reported speech.
     ///
@@ -62,14 +70,21 @@ class NativeVadSegmenter {
     private var utteranceCapturedAt: MonotonicTime?
 
     /// Delivers the completed utterance with the instant its **first retained sample** was
-    /// captured.
+    /// captured, and the wake result computed from that same utterance's prefix while it was still
+    /// being spoken (nil when the utterance was too short to score early).
+    ///
+    /// The result travels WITH the utterance rather than through a slot the engine shares with
+    /// these callbacks. The engine launches an asynchronous task from this callback, so a shared
+    /// slot could be overwritten by the next utterance's prefix before that task read it — an
+    /// utterance addressed by another utterance's audio. Carrying it here makes the pairing
+    /// structural instead of a timing assumption.
     ///
     /// Preserved through buffering: the segmenter appends several tap buffers before it
     /// emits, so the utterance's start is not the start of the buffer that completed it.
     /// Carrying the first buffer's instant is what lets the echo filter place the segment
     /// against the emitted reference; using the completing buffer's time would shift it by
     /// the segment's own length.
-    var onUtterance: (([Float], MonotonicTime?) -> Void)?
+    var onUtterance: (([Float], MonotonicTime?, WakeWordResult?) -> Void)?
 
     /// Delivers the audio of an in-progress utterance once enough exists to score the wake word
     /// definitively, so detection can run while the user is still speaking.
@@ -83,6 +98,15 @@ class NativeVadSegmenter {
     /// It fires at most once per utterance. A shorter utterance never reaches the threshold and is
     /// scored at end of speech, as before.
     var onWakeScorablePrefix: (([Float]) -> Void)?
+
+    /// Called once when trailing silence begins on an utterance that has active speech — the
+    /// moment the user appears to have finished talking, before the hangover elapses and before the
+    /// utterance closes.
+    ///
+    /// Deliberately carries no wake information: the segmenter does not know whether an utterance
+    /// is addressed, and giving it that judgement would put routing semantics inside audio
+    /// segmentation. The consumer decides using its own state.
+    var onTrailingSilenceBegan: (() -> Void)?
 
     /// Called when continuously-classified speech reaches the supported duration ceiling.
     ///
@@ -307,6 +331,10 @@ class NativeVadSegmenter {
         } else if speechActive || isStuckActive {
             if silenceStart == nil {
                 silenceStart = Date()
+                // Fires once per silence run, not once per silent frame: the flag above is what
+                // makes the consumer see the BEGINNING of the silence rather than a steady stream
+                // of "still silent" notifications.
+                onTrailingSilenceBegan?()
             }
             // While stuck-active nothing accumulates: the audio is discarded, not dispatched.
             if !isStuckActive {
@@ -369,6 +397,10 @@ class NativeVadSegmenter {
         let elapsedMs = activeSamples / 16
         FileLog.shared.addMessage("[VoicePipeline] vad duration-limit interruption: \(elapsedMs)ms retained; discarded \(discarded) samples without dispatching; staying in the fault state until silence")
         isStuckActive = true
+        // The utterance is abandoned, so a prefix score already computed for it must go with it.
+        // Keeping it would let a long positive utterance that is never dispatched lend its score to
+        // the next short utterance — a command addressed by audio that was discarded.
+        earlyWakeResultForCurrentUtterance = nil
         // Discard the captured audio and refuse to dispatch any of it.
         buffer.removeAll(keepingCapacity: true)
         preRoll.removeAll(keepingCapacity: true)
@@ -458,7 +490,11 @@ class NativeVadSegmenter {
         // end-of-speech scoring — the regression the whole item exists to avoid, and invisible
         // because the fallback still works.
         wakeScorablePrefixEmitted = false
-        onUtterance?(utterance, utteranceCapturedAt)
+        // Delivered with its own result, then cleared: the value leaves with the utterance it
+        // describes, so nothing can be inherited by the next one.
+        let carriedWakeResult = earlyWakeResultForCurrentUtterance
+        earlyWakeResultForCurrentUtterance = nil
+        onUtterance?(utterance, utteranceCapturedAt, carriedWakeResult)
     }
 
     func reset() {
@@ -467,6 +503,7 @@ class NativeVadSegmenter {
         activeSamples = 0
         isStuckActive = false
         wakeScorablePrefixEmitted = false
+        earlyWakeResultForCurrentUtterance = nil
         preRoll.removeAll()
         preRollInstants.removeAll()
         preRollCapturedAt = nil
