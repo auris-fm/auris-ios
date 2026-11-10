@@ -982,6 +982,9 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // count returns to zero with it.
         nodeIncarnation &+= 1
         nodeIncarnationFrames = 0
+        // The node is rebuilt here, which is the boundary between turns: the next scheduled buffer
+        // belongs to a new turn and should be logged as such.
+        cloudSchedulingLogged = false
         echoReferenceHandoff?.rotateIncarnation(for: .cloud, to: nodeIncarnation)
     }
 
@@ -1089,12 +1092,38 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// boundary exists to catch.
     private var nodeIncarnationFrames: Double = 0
 
-    /// Whether the first-audible-sound boundary has already been logged for the current turn.
-    private var firstFrameLoggedThisTurn = false
+    /// Whether this incarnation has already logged its first scheduled buffer. Reset when the
+    /// incarnation rotates (`stopEngine` rebuilds the node), which is the boundary between turns.
+    private var cloudSchedulingLogged = false
 
-    /// Called when a new turn's audio begins, so the next played frame logs the boundary again.
-    func beginTurnForTiming() {
-        firstFrameLoggedThisTurn = false
+    /// How many first-scheduled-buffer boundaries this player has logged. Exposed so a control can
+    /// assert the boundary is re-armed per turn: a flag that is never reset would log exactly once
+    /// for the whole process, which is the defect this replaced.
+    private(set) var schedulingBoundaryCount = 0
+
+    /// Re-arms the scheduling boundary. Called from `stopEngine`, which rebuilds the node — the
+    /// real boundary between turns. Exposed so the re-arm can be controlled directly, because a
+    /// test host has no audio output and therefore never schedules a buffer at all.
+    func rearmSchedulingBoundaryForTesting() {
+        cloudSchedulingLogged = false
+    }
+
+    /// Whether the next scheduled buffer would start a new turn's boundary.
+    var isSchedulingBoundaryArmedForTesting: Bool { !cloudSchedulingLogged }
+
+    /// Simulates the boundary firing, without needing an output device. It calls the SAME function
+    /// the production path calls, so the control cannot pass against counting logic that has
+    /// drifted from the real one.
+    func markSchedulingBoundaryForTesting() {
+        noteSchedulingBoundary()
+    }
+
+    /// The boundary's single implementation: log once per turn and count it.
+    private func noteSchedulingBoundary() {
+        guard !cloudSchedulingLogged else { return }
+        cloudSchedulingLogged = true
+        schedulingBoundaryCount += 1
+        FileLog.shared.addMessage("[VoicePipeline] cloudAudioScheduled first buffer scheduled (audible latency not observed)")
     }
 
     private func playFrame(_ frame: CloudAudioFrame) {
@@ -1112,17 +1141,6 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // unreliable, and on a 48 kHz device it played 24 kHz PCM at double speed.
         guard let pcmBuffer = pcmBuffer(from: frame.data, sampleRate: negotiatedSampleRate) else {
             return
-        }
-
-        // FIRST AUDIBLE SOUND. Logged once per turn rather than per frame: this is the end of the
-        // latency timeline, and the whole plan is measured against it. Every frame would bury it.
-        // `playFrame` is the boundary because it is the last point before the buffer is handed to
-        // the output node — a queued-but-unrendered frame is not yet audible, but this is the
-        // earliest instant the client can name, and calling it later would overstate our knowledge
-        // rather than understate the latency.
-        if !firstFrameLoggedThisTurn {
-            firstFrameLoggedThisTurn = true
-            FileLog.shared.addMessage("[VoicePipeline] cloudFirstAudio first frame handed to output")
         }
 
         // Publish what is about to be emitted, so the reference holds the audio the
@@ -1155,6 +1173,12 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // audible.
         node.play()
         node.scheduleBuffer(pcmBuffer)
+        // SCHEDULING, not audibility. This is the instant the first buffer is handed to the output
+        // node, and naming it "first audible sound" would claim rendered audio that has not
+        // happened yet — `scheduleBuffer` only enqueues, and the node may still be rendering
+        // earlier audio. The true first-render instant needs the node's render position and is not
+        // observed here, so audible latency stays unavailable rather than estimated.
+        noteSchedulingBoundary()
         if timingEnabled { timingScheduledFrames += Double(pcmBuffer.frameLength) }
         observeTiming("schedule")
     }

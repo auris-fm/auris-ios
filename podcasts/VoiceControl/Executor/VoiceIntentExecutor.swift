@@ -378,12 +378,17 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
             gracePeriodSignal.onCommandRecognized()
         }
 
-        // LOCAL ACTION EXECUTED — the end of the local path's latency timeline, logged for every
-        // intent including the cloud one (whose real conclusion is the first audible frame). It is
-        // deliberately after the grace bookkeeping: a reader timing this against the routing
-        // decision wants the point the action actually finished, not the point it was decided.
+        // The end of the local path's latency timeline. Deliberately after the grace bookkeeping: a
+        // reader timing this against the routing decision wants the point the action finished, not
+        // the point it was decided.
+        //
+        // FAILED AND EXECUTED ARE SEPARATE EVENTS. The only failure signal this model carries is
+        // the error earcon, and a refused or failed attempt never executed anything — reporting it
+        // as `localActionExecuted` would tell a reader the app performed an action it declined to
+        // perform, which reads as a zero-latency success.
         if !(intent is CloudRouteIntent) {
-            FileLog.shared.addMessage("[VoicePipeline] localActionExecuted intent=\(type(of: intent))")
+            let stage = response == .earcon(.error) ? "localActionFailed" : "localActionExecuted"
+            FileLog.shared.addMessage("[VoicePipeline] \(stage) intent=\(type(of: intent))")
         }
 
         return (voiceResponse, response.fact)

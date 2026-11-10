@@ -306,7 +306,11 @@ class NativeVadSegmenter {
                     reset()
                     onRecoveredFromFault?()
                 } else {
-                    emitUtterance()
+                    // The first silent frame is the acoustic end of speech; the emission happens a
+                    // whole hangover later. They are different instants and the log must not merge
+                    // them, or the endpoint decision looks instantaneous and the configured wait
+                    // disappears into the segment length.
+                    emitUtterance(acousticEnd: start)
                 }
             }
         } else if !speechActive {
@@ -382,17 +386,16 @@ class NativeVadSegmenter {
         preRollCapturedAt = preRollInstants.first.flatMap { $0 }
     }
 
-    private func emitUtterance() {
+    private func emitUtterance(acousticEnd: Date?) {
         let utterance = Array(buffer)
         let durationMs = Int(Float(utterance.count) / 16.0)
-        // The one line that marks both the acoustic end of speech and the end-of-utterance
-        // decision: they are the same instant here, because the segmenter ends the utterance when
-        // the silence hangover has elapsed. Naming the hangover makes the two distinguishable to a
-        // reader — without it, the segment length looks like the endpoint's own cost, when part of
-        // it is the configured silence wait. This is the start of the latency timeline: every other
-        // stage is measured from here.
+        // Two distinct events, reported as two. `acousticEnd` is the first silent frame; the
+        // endpoint decision is now. Their difference is the silence hangover actually waited,
+        // which is what a reader needs to separate the configured wait from the endpoint's own
+        // cost. Merging them would make the hangover vanish into the segment length.
+        let waitedMs = acousticEnd.map { Int((Date().timeIntervalSince($0) * 1000).rounded()) }
         FileLog.shared.addMessage(
-            "[VoicePipeline] vad ~\(durationMs)ms (\(utterance.count) samples) acousticEnd+endpointDecision hangover=\(silenceTimeoutMs)ms"
+            "[VoicePipeline] vad ~\(durationMs)ms (\(utterance.count) samples) acousticEnd+\(waitedMs.map { "\($0)" } ?? "?")ms hangoverLimit=\(silenceTimeoutMs)ms endpointDecision"
         )
         // A windowed classifier carries state across frames; clearing it here keeps the next
         // utterance from being biased by the one that just closed.

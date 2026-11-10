@@ -74,6 +74,51 @@ final class CloudAudioPlayerTests: XCTestCase {
         XCTAssertTrue(secondTurnDrained, "the runner must survive a finish() and serve the next turn")
     }
 
+    /// The scheduling boundary must fire once per TURN, not once per process. A flag set on the
+    /// first turn and never reset logs one line forever, which in the log is indistinguishable from
+    /// every later turn playing nothing. That was the defect in the first version of this boundary:
+    /// the reset method existed but nothing in production called it.
+    ///
+    /// Driven through the boundary's own function rather than through playback, and the reason is
+    /// stated rather than hidden: a test host has no audio output, `startEngine` returns before
+    /// creating a node, and `playFrame` refuses — so frames are consumed but never scheduled. A
+    /// test that enqueued frames and waited could only ever see zero and would prove nothing about
+    /// the re-arm, which is the property at risk.
+    func testSchedulingBoundaryFiresOncePerTurn() {
+        let player = CloudAudioPlayer()
+
+        player.markSchedulingBoundaryForTesting()
+        player.markSchedulingBoundaryForTesting()
+        XCTAssertEqual(player.schedulingBoundaryCount, 1,
+                       "the boundary must log once per turn, not once per frame")
+        XCTAssertFalse(player.isSchedulingBoundaryArmedForTesting,
+                       "the boundary must stay spent within the same turn")
+
+        // The turn boundary: the node is rebuilt, so the next turn arms the boundary again.
+        player.rearmSchedulingBoundaryForTesting()
+        XCTAssertTrue(player.isSchedulingBoundaryArmedForTesting,
+                      "a new turn must re-arm the boundary")
+
+        player.markSchedulingBoundaryForTesting()
+        XCTAssertEqual(player.schedulingBoundaryCount, 2,
+                       "a second turn must log its own boundary; a flag that never resets would stay at 1")
+    }
+
+    /// The re-arm must be wired to the real turn boundary, not only to the test hook. `stopEngine`
+    /// rebuilds the node and is where a turn's audio ends, so it is the only correct place — a
+    /// separate `beginTurn` method was the original defect because nothing called it.
+    func testSchedulingBoundaryIsRearmedByTheNodeTeardown() async {
+        let player = CloudAudioPlayer()
+        player.markSchedulingBoundaryForTesting()
+        XCTAssertFalse(player.isSchedulingBoundaryArmedForTesting)
+
+        // `finish` ends the turn and tears the node down.
+        _ = player.finish()
+        _ = await waitFor(timeout: 3.0) { player.isSchedulingBoundaryArmedForTesting }
+        XCTAssertTrue(player.isSchedulingBoundaryArmedForTesting,
+                      "ending a turn must re-arm the boundary for the next one")
+    }
+
     /// Pending output must be checked again when its timer expires, even if no socket frame,
     /// finish, or cancel arrives. Otherwise the expired deadline spins under runnerLock and
     /// blocks the main thread's next enqueue (and ASR's main-thread grace lookup).

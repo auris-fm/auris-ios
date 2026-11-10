@@ -555,18 +555,20 @@ final class CloudRouteClient {
         var req = URLRequest(url: url)
         req.timeoutInterval = requestTimeoutSeconds
 
-        // A connection this turn inherited from an early open is used only while it is still fresh.
-        // The server closes a connection that receives no first frame within 10 seconds, and the
-        // client cannot see why a connection closed — so the deadline is decided on the client's own
-        // clock, from when the upgrade request was sent.
+        // EARLY-CONNECTION SEAM — NOT AN IMPLEMENTED REPLACEMENT PATH.
         //
-        // A stale connection is DISCARDED AND REPLACED, not turned into a failure. The request here
-        // is already complete and ready to send, so ending the turn would make the user pay for an
-        // idle timeout they had no part in; the contract's answer is a fresh connection carrying the
-        // same ready request, reported only in the log.
-        let inheritedAge = inheritedConnectionAge?()
-        if let inheritedAge, !EarlyConnectionPolicy.canSend(connectionAge: inheritedAge) {
-            FileLog.shared.addMessage("[CloudRoute] \(EarlyConnectionPolicy.describe(connectionAge: inheritedAge)) — opening a fresh connection instead")
+        // There is no connection to inherit today: this transport always creates its socket below,
+        // at the moment the request is ready, so `inheritedConnectionAge` is nil in production and
+        // both branches do the same thing. What is real is the rule and its decision point: an
+        // inherited connection older than the limit must not be sent on, and the decision is made
+        // here, BEFORE any socket exists, so that implementing an early open cannot reintroduce
+        // the defect of discovering staleness on a connection already in use.
+        //
+        // Stating the limit of this honestly rather than implying a replacement happens: nothing
+        // is discarded, because nothing was inherited.
+        if let inheritedAge = inheritedConnectionAge?(),
+           !EarlyConnectionPolicy.canSend(connectionAge: inheritedAge) {
+            FileLog.shared.addMessage("[CloudRoute] \(EarlyConnectionPolicy.describe(connectionAge: inheritedAge)) — not reusing it; opening a fresh connection")
         }
 
         // The instant this connection is requested, on the client clock. This is the stamp the
