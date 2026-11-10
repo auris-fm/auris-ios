@@ -219,17 +219,24 @@ final class EarlyWakeResultUsageControl: XCTestCase {
                        "a follow-up during grace is routable, so it must open the connection")
     }
 
-    /// A short utterance has no early prefix at silence onset, so its open must happen later, when
-    /// the wake result turns positive. Without this the most common short command never opens.
-    func test_shortUtteranceOpensWhenItsResultTurnsPositive() {
+    /// A short utterance must open too — and through the real path, not a test seam.
+    ///
+    /// A short utterance never reaches the eligible span, so its silence onset has no early result
+    /// and nothing opens there. Its positive verdict only appears when the gate decides, still
+    /// before the backend wait. This drives a genuinely short segment through the endpoint and the
+    /// engine's own capture wiring, and asserts the open without calling any decision entry point
+    /// directly — an earlier version of this control did, creating an ordering production cannot
+    /// produce.
+    func test_shortUtteranceOpensThroughTheEndpointAndGate() {
         let classifier = SwitchableClassifier()
         let segmenter = NativeVadSegmenter(threshold: 0.0, silenceTimeoutMs: 500, classifier: classifier)
+        let detector = CountingDetector()
         let engine = VoiceAsrEngine(
             capture: NativeAudioCapture(),
             segmenter: segmenter,
             backend: WhisperCppBackend(modelPath: "/tmp/test"),
             signalFilter: SignalFilter(),
-            wakeWordDetector: CountingDetector(),
+            wakeWordDetector: detector,
             gracePeriodSignal: GracePeriodSignal()
         )
         var opens = 0
@@ -237,24 +244,26 @@ final class EarlyWakeResultUsageControl: XCTestCase {
         engine.installCaptureCallbacksForTesting()
 
         let frame = 320
-        // Short speech: under the eligible span, so no early prefix is emitted.
+        // SHORT speech: under the eligible span, so no early prefix is ever emitted.
         classifier.speaking = true
         for _ in 0..<(6_000 / frame) {
             segmenter.process([Float](repeating: 0.1, count: frame), capturedAt: nil)
         }
-        classifier.speaking = false
-        segmenter.process([Float](repeating: 0, count: frame), capturedAt: nil)
-        XCTAssertTrue(segmenter.isInTrailingSilence, "silence has begun")
-        XCTAssertEqual(opens, 0, "nothing can open before the result exists")
+        XCTAssertNil(segmenter.earlyWakeResultForCurrentUtterance,
+                     "a short utterance must have no early result, or this tests the wrong path")
 
-        // The result arrives while the silence is still running. This calls production's own
-        // decision function, so removing the check inside it turns this RED.
-        engine.openEarlyConnectionForLateResultForTesting(
-            result: .detected(confidence: 0.9, completionSample: 0)
-        )
+        // Close the utterance through the real endpoint, then let the engine's async task run.
+        classifier.speaking = false
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline {
+            segmenter.process([Float](repeating: 0, count: frame), capturedAt: nil)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        drainQueue()
+
         XCTAssertEqual(opens, 1,
-                       "once the result is final during silence, the open must happen — there is no "
-                           + "second onset to wait for")
+                       "the short utterance's positive gate verdict must open the connection; "
+                           + "a short command is the most common case and got no benefit before")
     }
 
     /// A result from a turn that never consumed it must not address the next turn. The failure

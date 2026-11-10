@@ -451,15 +451,6 @@ class VoiceAsrEngine {
 
     /// TEST seam: installs the capture/segmenter callbacks without opening the microphone, so a
     /// control can prove a fault reaches an observer through the engine's own forwarding.
-    /// Drives the production late-result path: the same function the prefix callback calls.
-    ///
-    /// Exposed so a control can exercise it without waiting for a real prefix to arrive after
-    /// silence has begun, which depends on frame timing the test would otherwise have to guess at.
-    /// It calls the production implementation, not a copy of its predicate.
-    func openEarlyConnectionForLateResultForTesting(result: WakeWordResult) {
-        openEarlyConnectionIfRoutableDuringTrailingSilence(result: result)
-    }
-
     func installCaptureCallbacksForTesting() {
         wireCaptureCallbacks()
     }
@@ -538,11 +529,9 @@ class VoiceAsrEngine {
             // it here until a later task read it is what let one utterance's score address another.
             self.segmenter.earlyWakeResultForCurrentUtterance = result
             FileLog.shared.addMessage("[VoicePipeline] wake scored early over \(prefix.count) samples")
-            // The prefix can finish AFTER trailing silence has already begun — a short utterance
-            // does not reach the eligible span until its own speech is nearly over. In that case
-            // the onset event has already passed, and waiting for the next one would never open,
-            // so the open happens here instead.
-            self.openEarlyConnectionIfRoutableDuringTrailingSilence(result: result)
+            // No open here: this callback runs in the SPEECH branch, so by the time a prefix is
+            // complete the utterance is still being spoken and no silence has begun. The
+            // short-utterance case — no prefix at all — is handled at the gate's forward verdict.
         }
         // Trailing silence on an ADDRESSED utterance: the user appears to have finished, so the
         // connection that the coming turn will need can be opened now. The segmenter reports the
@@ -863,6 +852,7 @@ class VoiceAsrEngine {
             contributionCollector?.segmentRejected(kind: .rejectedWake, samples: utterance.count, context: utteranceContext)
             return
         case .forward(let detected):
+<<<<<<< HEAD
             // ENGINE-PRODUCED observation: the wake decision below is made HERE, by
             // the detector, so this is the only place entitled to report the wake stage.
             // The detector RAN and returned a verdict either way. A forwarded NEGATIVE segment in
@@ -882,6 +872,18 @@ class VoiceAsrEngine {
                     decision: detected ? "detected" : "rejected",
                     score: measuredWake?.score, threshold: measuredWake?.threshold),
                 context: utteranceContext)
+||||||| parent of c4da87e1 (Open for a short utterance at its gate verdict, where it is actually reachable)
+=======
+            // The utterance is routable. If it had no early result — a short utterance, which never
+            // reaches the eligible span — this is where its positive verdict first becomes known,
+            // and it is still before the backend wait, so opening here is the only point that can
+            // still save the handshake. `earlyResult == nil` distinguishes exactly the case that
+            // was not already opened at silence onset; an early-scored utterance opened there.
+            if earlyResult == nil {
+                FileLog.shared.addMessage("[VoicePipeline] short utterance routable — opening early connection before ASR")
+                onAddressedTrailingSilenceBegan?()
+            }
+>>>>>>> c4da87e1 (Open for a short utterance at its gate verdict, where it is actually reachable)
             if detected {
                 onWakeWordDetected?()
                 detectedConfidence = confidence(of: result)
