@@ -18,6 +18,9 @@ class NativeVadSegmenter {
     private var buffer: [Float] = []
     private var speechActive = false
     private var silenceStart: Date?
+
+    /// Whether the early wake-scoring prefix has already been emitted for this utterance.
+    private var wakeScorablePrefixEmitted = false
     private var speechFrameCount = 0
     /// Audio that arrived while the classifier had not yet reported speech.
     ///
@@ -67,6 +70,19 @@ class NativeVadSegmenter {
     /// against the emitted reference; using the completing buffer's time would shift it by
     /// the segment's own length.
     var onUtterance: (([Float], MonotonicTime?) -> Void)?
+
+    /// Delivers the audio of an in-progress utterance once enough exists to score the wake word
+    /// definitively, so detection can run while the user is still speaking.
+    ///
+    /// The detector only scores classifier windows that end within the eligible span after onset —
+    /// about 1.96s. Once that much speech has been captured, every window that could contribute
+    /// exists, so scoring this prefix yields exactly the maximum the finished segment would. This
+    /// callback carries exactly that prefix: onset through the eligible span, including the
+    /// retained pre-speech context that `onUtterance` would have carried.
+    ///
+    /// It fires at most once per utterance. A shorter utterance never reaches the threshold and is
+    /// scored at end of speech, as before.
+    var onWakeScorablePrefix: (([Float]) -> Void)?
 
     /// Called when continuously-classified speech reaches the supported duration ceiling.
     ///
@@ -204,6 +220,11 @@ class NativeVadSegmenter {
     /// quietly spoken word by a consumer that only has the buffer.
     static let defaultSilenceTimeoutMs = 500
 
+    /// The span after onset within which a classifier window's final embedding must fall for the
+    /// window to be eligible. Every window that can affect the wake maximum ends inside it, so
+    /// audio past this point cannot change the result. 2 seconds at the capture rate.
+    static let wakeEligibleSpanSamples = 32_000
+
     /// The supported utterance-duration ceiling, in milliseconds.
     ///
     /// `arch/ios.md` ("Speech classification mapping"): "The iOS safety ceiling is 240 seconds,
@@ -282,6 +303,7 @@ class NativeVadSegmenter {
             }
             silenceStart = nil
             if checkRetainedCeiling() { return }
+            emitWakeScorablePrefixIfReady()
         } else if speechActive || isStuckActive {
             if silenceStart == nil {
                 silenceStart = Date()
@@ -386,6 +408,24 @@ class NativeVadSegmenter {
         preRollCapturedAt = preRollInstants.first.flatMap { $0 }
     }
 
+    /// Emits the preamble for early wake scoring, once, when the prefix that can affect the result
+    /// is complete.
+    ///
+    /// The threshold is the eligible span itself, expressed in samples at the capture rate. Using
+    /// samples rather than elapsed wall-clock time is deliberate: the comparison must be exact, and
+    /// a clock-based test could fire a frame early or late depending on scheduling, which would
+    /// make the early score differ from the finished-segment score for a reason unrelated to the
+    /// detector.
+    private func emitWakeScorablePrefixIfReady() {
+        guard !wakeScorablePrefixEmitted, let onWakeScorablePrefix else { return }
+        guard buffer.count >= Self.wakeEligibleSpanSamples else { return }
+        wakeScorablePrefixEmitted = true
+        // The prefix, not the whole buffer: only the eligible span can affect the maximum, and
+        // handing over the full in-progress buffer would make the early run depend on how long the
+        // user happened to keep talking.
+        onWakeScorablePrefix(Array(buffer.prefix(Self.wakeEligibleSpanSamples)))
+    }
+
     private func emitUtterance(silenceObserved: Date?) {
         let utterance = Array(buffer)
         let durationMs = Int(Float(utterance.count) / 16.0)
@@ -413,6 +453,11 @@ class NativeVadSegmenter {
         speechActive = false
         silenceStart = nil
         speechFrameCount = 0
+        // The next utterance scores early again. Without this only the first command in a session
+        // would ever get an early wake result, and every later one would silently fall back to
+        // end-of-speech scoring — the regression the whole item exists to avoid, and invisible
+        // because the fallback still works.
+        wakeScorablePrefixEmitted = false
         onUtterance?(utterance, utteranceCapturedAt)
     }
 
@@ -421,6 +466,7 @@ class NativeVadSegmenter {
         speechClassifier.reset()
         activeSamples = 0
         isStuckActive = false
+        wakeScorablePrefixEmitted = false
         preRoll.removeAll()
         preRollInstants.removeAll()
         preRollCapturedAt = nil

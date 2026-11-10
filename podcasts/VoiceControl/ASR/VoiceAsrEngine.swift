@@ -342,7 +342,18 @@ class VoiceAsrEngine {
     private var sessionGeneration = 0
     private let sessionLock = NSLock()
 
-    /// Serializes segmenter mutation between queued capture processing and stop/start.
+    /// The wake result computed from an utterance's eligible prefix while it was still being
+    /// spoken, waiting for the turn that closes that utterance to consume it.
+    ///
+    /// Cleared when a turn starts its wake decision, whether or not it uses the value. Leaving it
+    /// set past the turn it belongs to would let the next utterance address itself with this one's
+    /// audio — the failure would be a wrong command, not a missing one.
+    ///
+    /// Not synchronized: written from the segmenter callback and read from `processUtterance`,
+    /// which run on the same serial capture path, so no interleaving is possible.
+    private var earlyWakeResult: WakeWordResult?
+
+    /// Serializes segmenter mutation between queued capture processing and stop/start().
     private let segmenterLock = NSLock()
 
     private func currentSession() -> Int {
@@ -447,6 +458,7 @@ class VoiceAsrEngine {
                 await self.processUtterance(utterance, capturedAt: capturedAt, frozenContext: frozen)
             }
         }
+<<<<<<< HEAD
         segmenter.onSpeechStarted = { [weak self] count in
             // PHASE 2 (name schema v1): freeze the REAL grace state at segment start — this closure
             // runs on the segmenter's start delivery, before any mode change, so the value is the
@@ -471,6 +483,26 @@ class VoiceAsrEngine {
             self?.contributionCollector?.appendSamples(samples, reportedTotal: total)
         }
         segmenter.onSpeechCancelled = { [weak self] in self?.contributionCollector?.speechCancelled() }
+||||||| parent of 3093f50 (Score the wake word while the user is still speaking)
+=======
+        // Early wake scoring: score the eligible prefix while the user is still speaking, so the
+        // decision does not wait for the endpoint.
+        //
+        // The result is held and consumed by the turn this utterance closes. It is deliberately
+        // keyed to the utterance in flight: a result left over from an earlier utterance would
+        // address a command using audio that is not that command's.
+        segmenter.onWakeScorablePrefix = { [weak self] prefix in
+            guard let self else { return }
+            let session = self.segmenter.currentSession ?? self.currentSession()
+            guard session == self.currentSession() else {
+                FileLog.shared.addMessage("[VoicePipeline] dropped early wake prefix from stale session=\(session) current=\(self.currentSession())")
+                return
+            }
+            let result = self.wakeWordDetector.detect(samples: prefix, sampleRate: 16000)
+            self.earlyWakeResult = result
+            FileLog.shared.addMessage("[VoicePipeline] wake scored early over \(prefix.count) samples")
+        }
+>>>>>>> 3093f50 (Score the wake word while the user is still speaking)
         // Segmentation faults are forwarded so the interruption is observable outside this
         // component. A private flag would leave the user with unexplained silence.
         segmenter.onStuckActiveFault = { [weak self] fault in
@@ -617,6 +649,7 @@ class VoiceAsrEngine {
     }
 
     /// Exposed for focused translate-drop tests (`@testable`).
+<<<<<<< HEAD
     /// Entry point for one segmented utterance. The capture identity is frozen SYNCHRONOUSLY here — before
     /// the Task exists — so a queued-but-not-yet-running utterance A keeps A's identity even if B starts and
     /// opens its own capture before A's body ever runs. Reading "what is current" inside the async body would
@@ -655,6 +688,16 @@ class VoiceAsrEngine {
             if !captureHandedToRouting { contributionCollector?.finalizeDeferredCompletion(context: utteranceContext) }
         }
         lastUtteranceContextForTesting = utteranceContext
+||||||| parent of 3093f50 (Score the wake word while the user is still speaking)
+    func processUtterance(_ utterance: [Float], capturedAt: MonotonicTime? = nil) async {
+=======
+    func processUtterance(_ utterance: [Float], capturedAt: MonotonicTime? = nil) async {
+        // Taken unconditionally at the start of the turn, so every exit below — bleed filter,
+        // wake error, no grace, empty utterance — leaves no result for the next turn to inherit.
+        let earlyResult = earlyWakeResult
+        earlyWakeResult = nil
+
+>>>>>>> 3093f50 (Score the wake word while the user is still speaking)
         stageTimer.mark() // VAD segment ready
         // ONE identity from admission: the utterance is admitted HERE, so its
         // identity is minted here — not rebuilt later. Retries/duplicates that re-emit the SAME
@@ -711,9 +754,30 @@ class VoiceAsrEngine {
         }
 
         // The detector observes every segment in both listening modes.
+<<<<<<< HEAD
         let result = wakeWordDetector.detect(samples: utterance, sampleRate: 16000) { [weak contributionCollector] identity in
             contributionCollector?.engineUsedModel(slot: "wakeword", reference: identity, context: utteranceContext)
         }
+||||||| parent of 3093f50 (Score the wake word while the user is still speaking)
+        let result = wakeWordDetector.detect(samples: utterance, sampleRate: 16000)
+=======
+        //
+        // If the eligible prefix was already scored while the user was still speaking, that score
+        // is definitive: no window past the prefix can change the maximum, so re-running on the
+        // finished segment would cost the same latency the early scoring exists to remove and
+        // could not change the answer. A short utterance has no early result and is scored here.
+        //
+        // Consumed at the TOP of the turn, not here. The bleed filter above can return before this
+        // line, and a score left behind by a dropped utterance would then address the next one
+        // using this utterance's audio — a wrong command rather than a missing one.
+        let result: WakeWordResult
+        if let earlyResult {
+            result = earlyResult
+            FileLog.shared.addMessage("[VoicePipeline] wake used early result")
+        } else {
+            result = wakeWordDetector.detect(samples: utterance, sampleRate: 16000)
+        }
+>>>>>>> 3093f50 (Score the wake word while the user is still speaking)
         stageTimer.mark() // wake result
 
         let score = wakeScore(of: result)
