@@ -108,6 +108,14 @@ class NativeVadSegmenter {
     /// segmentation. The consumer decides using its own state.
     var onTrailingSilenceBegan: (() -> Void)?
 
+    /// True while an utterance is open and its trailing silence has begun but not yet ended.
+    ///
+    /// Exposed so a consumer that only becomes able to open a connection LATER in the silence — a
+    /// short utterance whose wake result is not final at onset — can tell whether it is already
+    /// too late to wait for another onset. Without this it would wait for an event that has
+    /// already happened and never open at all.
+    var isInTrailingSilence: Bool { speechActive && silenceStart != nil }
+
     /// Called when continuously-classified speech reaches the supported duration ceiling.
     ///
     /// `recognition-pipeline.md`: "A detector stuck active is a surfaced segmentation fault, not

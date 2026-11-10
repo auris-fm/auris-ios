@@ -206,6 +206,32 @@ class VoiceAsrEngine {
     /// backend/recognition/translation drop or a cancellation. The routing path does not call it;
     /// ownership transfers to the routing chain there.
     var onTurnReleased: ((_ utteranceId: String) -> Void)?
+    /// Opens the early connection when the utterance is routable AND its trailing silence is
+    /// already under way.
+    ///
+    /// One definition shared by both entry points, because they answer the same question at
+    /// different instants: silence began first and the score arrived later, or the score was
+    /// already held when silence began. Two copies would let one path drift and silently stop
+    /// opening for the utterances it exists for.
+    private func openEarlyConnectionIfRoutableDuringTrailingSilence(result: WakeWordResult?) {
+        guard segmenter.isInTrailingSilence else { return }
+        let positive: Bool = {
+            if case .detected? = result { return true }
+            return false
+        }()
+        // Addressed means routable, not merely wake-positive. A follow-up spoken during grace is a
+        // real turn even though its wake score is negative, and it needs the same connection:
+        // requiring a positive score would open for first commands and never for follow-ups, which
+        // is the half a user in a conversation is most likely waiting on.
+        let duringGrace = gracePeriodSignal.isActive
+        guard positive || duringGrace else {
+            FileLog.shared.addMessage("[VoicePipeline] trailing silence — not routable (wake positive=\(positive), grace=\(duringGrace)), no early open")
+            return
+        }
+        FileLog.shared.addMessage("[VoicePipeline] opening early connection (wake positive=\(positive), grace=\(duringGrace))")
+        onAddressedTrailingSilenceBegan?()
+    }
+
     /// Called on every positive detection so the service can reset grace and
     /// play the `WAKE_WORD` earcon exactly once.
     var onWakeWordDetected: (() -> Void)?
@@ -425,6 +451,15 @@ class VoiceAsrEngine {
 
     /// TEST seam: installs the capture/segmenter callbacks without opening the microphone, so a
     /// control can prove a fault reaches an observer through the engine's own forwarding.
+    /// Drives the production late-result path: the same function the prefix callback calls.
+    ///
+    /// Exposed so a control can exercise it without waiting for a real prefix to arrive after
+    /// silence has begun, which depends on frame timing the test would otherwise have to guess at.
+    /// It calls the production implementation, not a copy of its predicate.
+    func openEarlyConnectionForLateResultForTesting(result: WakeWordResult) {
+        openEarlyConnectionIfRoutableDuringTrailingSilence(result: result)
+    }
+
     func installCaptureCallbacksForTesting() {
         wireCaptureCallbacks()
     }
@@ -503,6 +538,11 @@ class VoiceAsrEngine {
             // it here until a later task read it is what let one utterance's score address another.
             self.segmenter.earlyWakeResultForCurrentUtterance = result
             FileLog.shared.addMessage("[VoicePipeline] wake scored early over \(prefix.count) samples")
+            // The prefix can finish AFTER trailing silence has already begun — a short utterance
+            // does not reach the eligible span until its own speech is nearly over. In that case
+            // the onset event has already passed, and waiting for the next one would never open,
+            // so the open happens here instead.
+            self.openEarlyConnectionIfRoutableDuringTrailingSilence(result: result)
         }
         // Trailing silence on an ADDRESSED utterance: the user appears to have finished, so the
         // connection that the coming turn will need can be opened now. The segmenter reports the
@@ -512,19 +552,12 @@ class VoiceAsrEngine {
             guard let self else { return }
             let session = self.segmenter.currentSession ?? self.currentSession()
             guard session == self.currentSession() else { return }
-            guard let early = self.segmenter.earlyWakeResultForCurrentUtterance else { return }
-            let positive: Bool = {
-                switch early {
-                case .detected: return true
-                case .notDetected, .error: return false
-                }
-            }()
-            guard positive else {
-                FileLog.shared.addMessage("[VoicePipeline] trailing silence — utterance not addressed, no early open")
-                return
-            }
-            FileLog.shared.addMessage("[VoicePipeline] trailing silence on addressed utterance — opening early connection")
-            self.onAddressedTrailingSilenceBegan?()
+            // When the score is already held, it decides; when it is not (a short utterance with
+            // no early prefix), grace alone can still make the utterance routable, and the late
+            // result path opens if the score arrives before the silence ends.
+            self.openEarlyConnectionIfRoutableDuringTrailingSilence(
+                result: self.segmenter.earlyWakeResultForCurrentUtterance
+            )
         }
         // Segmentation faults are forwarded so the interruption is observable outside this
         // component. A private flag would leave the user with unexplained silence.

@@ -127,104 +127,101 @@ final class EarlyWakeResultUsageControl: XCTestCase {
         )
     }
 
-    /// The result must travel with its own utterance even when processing is delayed, because the
-    /// capture callback launches an asynchronous task. A shared slot read later would return
-    /// whatever the NEXT utterance had already written.
+    /// The result must travel with its own utterance, exercised through the real callback
+    /// handoff.
     ///
-    /// Driven through the engine's routing entry point directly, which is exactly what the delayed
-    /// task calls: two utterances are submitted back to back with different early results, and each
-    /// must be addressed by its own.
-    func test_delayedUtteranceProcessingKeepsItsOwnEarlyResult() async {
-        let detector = CountingDetector()
+    /// @reviewer was right that the earlier version of this test called `processUtterance` with
+    /// explicit results and never touched the callback, so it could not have caught a slot being
+    /// overwritten — the defect it is named for. This drives the segmenter: two utterances are
+    /// emitted with DIFFERENT early scores, and the values the callback delivered must match them.
+    func test_twoUtterancesDeliverTheirOwnEarlyResults() {
         let classifier = SwitchableClassifier()
         let segmenter = NativeVadSegmenter(threshold: 0.0, silenceTimeoutMs: 500, classifier: classifier)
-        let engine = VoiceAsrEngine(
-            capture: NativeAudioCapture(),
-            segmenter: segmenter,
-            backend: WhisperCppBackend(modelPath: "/tmp/test"),
-            signalFilter: SignalFilter(),
-            wakeWordDetector: detector,
-            gracePeriodSignal: GracePeriodSignal()
-        )
-
-        let audio = [Float](repeating: 0.1, count: 1_600)
-        // Two submissions, each carrying its own result. If the engine held a slot instead, the
-        // second would overwrite the first before either task ran.
-        await engine.processUtterance(audio, earlyWakeResult: .detected(confidence: 0.9, completionSample: 0))
-        await engine.processUtterance(audio, earlyWakeResult: .notDetected(confidence: 0.01))
-
-        XCTAssertEqual(detector.sampleCounts.count, 0,
-                       "both utterances carried their own early result, so neither may be rescored")
-    }
-
-    /// The early open must be triggered by trailing silence on an addressed utterance, not by the
-    /// wake decision.
-    ///
-    /// The wake decision happens in `processUtterance`, after the endpoint — so triggering there
-    /// opens the connection only after the wait it exists to remove. This asserts the earlier
-    /// instant: while the utterance is still open, with speech finished and the hangover running.
-    func test_addressedTrailingSilenceOpensBeforeTheEndpoint() {
-        let classifier = SwitchableClassifier()
-        let segmenter = NativeVadSegmenter(threshold: 0.0, silenceTimeoutMs: 500, classifier: classifier)
-        // What the engine installs: silence reports, then the engine decides from its own score.
-        var opens = 0
-        segmenter.onTrailingSilenceBegan = { [weak segmenter] in
-            guard let segmenter, segmenter.earlyWakeResultForCurrentUtterance != nil else { return }
-            opens += 1
-        }
+        var delivered: [WakeWordResult?] = []
+        segmenter.onUtterance = { _, _, result in delivered.append(result) }
 
         let frame = 320
-        classifier.speaking = true
-        for _ in 0..<(10_000 / frame) {
-            segmenter.process([Float](repeating: 0.1, count: frame), capturedAt: nil)
-        }
-        // The prefix has been scored by now, so the utterance is addressed.
-        segmenter.earlyWakeResultForCurrentUtterance = .detected(confidence: 0.9, completionSample: 0)
-        XCTAssertEqual(opens, 0, "no open while speech is still being classified")
+        func speak(briefly: Bool, result: WakeWordResult?) {
+            classifier.speaking = true
+            let frames = briefly ? (6_000 / frame) : (10_000 / frame)
+            for _ in 0..<frames {
+                segmenter.process([Float](repeating: 0.1, count: frame), capturedAt: nil)
+            }
+            // The score for THIS utterance, exactly as the engine's prefix callback sets it. When
+            // nil the assignment is SKIPPED rather than writing nil: writing nil would erase a
+            // stale value and hide the very defect this control exists to catch.
+            if let result {
+                segmenter.earlyWakeResultForCurrentUtterance = result
+            }
 
-        // First silent frame: silence has begun, the endpoint has NOT fired.
-        classifier.speaking = false
-        segmenter.process([Float](repeating: 0, count: frame), capturedAt: nil)
-        XCTAssertEqual(opens, 1,
-                       "the open must happen when trailing silence begins, not after the endpoint")
-        XCTAssertFalse(segmenter.isStuckActive)
+            classifier.speaking = false
+            let deadline = Date().addingTimeInterval(1.2)
+            while Date() < deadline {
+                segmenter.process([Float](repeating: 0, count: frame), capturedAt: nil)
+                Thread.sleep(forTimeInterval: 0.02)
+            }
+        }
+
+        speak(briefly: false, result: .detected(confidence: 0.93, completionSample: 0))
+        // The second utterance's OWN value is deliberately left unset before it closes. Under the
+        // old shared-slot defect the first utterance's score was still sitting there and would be
+        // delivered as the second's; carrying the result with the utterance delivers nil instead.
+        // This is what makes the control able to tell the two designs apart.
+        speak(briefly: true, result: nil)
+
+        XCTAssertEqual(delivered.count, 2, "both utterances must be delivered")
+        guard delivered.count == 2 else { return }
+        switch delivered[0] {
+        case .detected(let confidence, _):
+            XCTAssertEqual(confidence, 0.93, accuracy: 0.0001,
+                           "the first utterance must carry its own positive score")
+        default:
+            XCTFail("the first utterance must carry the positive score, got \(String(describing: delivered[0]))")
+        }
+        XCTAssertNil(delivered[1] ?? nil,
+                     "the second utterance scored nothing, so it must carry nothing — a shared slot "
+                         + "would hand it the first utterance's positive score")
     }
 
-    /// A wake-negative utterance must not open a connection.
+    /// A wake-negative follow-up spoken during grace is a real turn and must open early.
     ///
-    /// Driven through the ENGINE's own callback wiring rather than a copy of its predicate: a test
-    /// that re-implements the guard would keep passing if production dropped the positivity check,
-    /// which is precisely the regression worth catching.
-    func test_trailingSilenceOnUnaddressedSpeechDoesNotOpen() {
+    /// Requiring a positive wake score would open for first commands and never for follow-ups,
+    /// which is the half a user in a conversation is most likely to be waiting on.
+    func test_graceFollowUpOpensDespiteNegativeWake() {
         let classifier = SwitchableClassifier()
         let segmenter = NativeVadSegmenter(threshold: 0.0, silenceTimeoutMs: 500, classifier: classifier)
+        let grace = GracePeriodSignal()
         let engine = VoiceAsrEngine(
             capture: NativeAudioCapture(),
             segmenter: segmenter,
             backend: WhisperCppBackend(modelPath: "/tmp/test"),
             signalFilter: SignalFilter(),
             wakeWordDetector: CountingDetector(),
-            gracePeriodSignal: GracePeriodSignal()
+            gracePeriodSignal: grace
         )
         var opens = 0
         engine.onAddressedTrailingSilenceBegan = { opens += 1 }
         engine.installCaptureCallbacksForTesting()
+
+        // Grace is active: the session was opened by a previous command.
+        grace.onWakeWordDetected()
 
         let frame = 320
         classifier.speaking = true
         for _ in 0..<(10_000 / frame) {
             segmenter.process([Float](repeating: 0.1, count: frame), capturedAt: nil)
         }
-        // A negative score: this utterance is not addressed.
         segmenter.earlyWakeResultForCurrentUtterance = .notDetected(confidence: 0.01)
 
         classifier.speaking = false
         segmenter.process([Float](repeating: 0, count: frame), capturedAt: nil)
-        XCTAssertEqual(opens, 0, "an unaddressed utterance must not open a cloud connection")
+        XCTAssertEqual(opens, 1,
+                       "a follow-up during grace is routable, so it must open the connection")
     }
 
-    /// The positive case on the same wiring: an addressed utterance DOES open on silence onset.
-    func test_addressedTrailingSilenceOpensThroughTheEngine() {
+    /// A short utterance has no early prefix at silence onset, so its open must happen later, when
+    /// the wake result turns positive. Without this the most common short command never opens.
+    func test_shortUtteranceOpensWhenItsResultTurnsPositive() {
         let classifier = SwitchableClassifier()
         let segmenter = NativeVadSegmenter(threshold: 0.0, silenceTimeoutMs: 500, classifier: classifier)
         let engine = VoiceAsrEngine(
@@ -240,15 +237,24 @@ final class EarlyWakeResultUsageControl: XCTestCase {
         engine.installCaptureCallbacksForTesting()
 
         let frame = 320
+        // Short speech: under the eligible span, so no early prefix is emitted.
         classifier.speaking = true
-        for _ in 0..<(10_000 / frame) {
+        for _ in 0..<(6_000 / frame) {
             segmenter.process([Float](repeating: 0.1, count: frame), capturedAt: nil)
         }
-        segmenter.earlyWakeResultForCurrentUtterance = .detected(confidence: 0.9, completionSample: 0)
-
         classifier.speaking = false
         segmenter.process([Float](repeating: 0, count: frame), capturedAt: nil)
-        XCTAssertEqual(opens, 1, "an addressed utterance must open on the first silent frame")
+        XCTAssertTrue(segmenter.isInTrailingSilence, "silence has begun")
+        XCTAssertEqual(opens, 0, "nothing can open before the result exists")
+
+        // The result arrives while the silence is still running. This calls production's own
+        // decision function, so removing the check inside it turns this RED.
+        engine.openEarlyConnectionForLateResultForTesting(
+            result: .detected(confidence: 0.9, completionSample: 0)
+        )
+        XCTAssertEqual(opens, 1,
+                       "once the result is final during silence, the open must happen — there is no "
+                           + "second onset to wait for")
     }
 
     /// A result from a turn that never consumed it must not address the next turn. The failure
