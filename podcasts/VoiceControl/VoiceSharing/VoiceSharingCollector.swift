@@ -770,22 +770,7 @@ return }
         // OBSERVED playback bleed and skipped it — a known skip, not an absent observation. The bleed
         // stage keeps its own observed decision from the contract enum (`overlap` here); this fact says
         // only why ASR did not run.
-        var event = makeEvent(kind: kind, from: c)
-        if kind == .rejectedBleed {
-            event.reportedStages["asr"] = VoiceSharingContributionEncoder.StageOutcome(
-                state: "not_run", reason: Self.bleedSkipReason)
-        } else if kind == .rejectedWake {
-            // The wake word was rejected, so recognition never ran and the turn was never routed or
-            // executed. Each is a KNOWN skip. Reporting the encoder's `unknown` /
-            // `observation_unavailable` default would claim the app could not tell, which is false,
-            // and would disagree with the same event recorded by the other client.
-            event.reportedStages["asr"] = VoiceSharingContributionEncoder.StageOutcome(
-                state: "not_run", reason: Self.wakeSkipReason)
-            event.reportedStages["routing"] = VoiceSharingContributionEncoder.StageOutcome(
-                state: "not_run", reason: Self.notDispatchedReason)
-            event.reportedStages["execution"] = VoiceSharingContributionEncoder.StageOutcome(
-                state: "not_run", reason: Self.notDispatchedReason)
-        }
+        let event = makeEvent(kind: kind, from: c)
         lock.unlock()
         submit(event)
     }
@@ -1068,7 +1053,7 @@ return }
         // A cancellation is a content-free DISPOSAL record in every case: a genuinely cancelled partial
         // can never become a contribution, so its record states identity + counts and carries no audio.
         let audio = kind == .cancelled ? [] : c.retained
-        return SegmentEvent(kind: kind, captureID: c.id, enrollmentEpoch: c.epoch,
+        var event = SegmentEvent(kind: kind, captureID: c.id, enrollmentEpoch: c.epoch,
                             wakeRequired: c.wakeRequired,
                             authorizationSession: c.session, retainedSamples: c.retained.count,
                             truncated: !dropped.isEmpty, droppedSpans: dropped,
@@ -1079,6 +1064,41 @@ return }
                                                   asr: c.modelReferences["asr"], translation: c.modelReferences["translation"],
                                                   router: c.modelReferences["router"]),
                             metadataByteCeiling: c.metadataByteCeiling)
+        Self.applySkipMapping(to: &event, kind: kind)
+        return event
+    }
+
+    /// Stages a rejection is KNOWN to have prevented, stated as `not_run` with a reason.
+    ///
+    /// A segment that fails the wake word never reaches recognition, translation, routing or the
+    /// executor; a bleed rejection skips recognition alone. The app decided that, so these are facts it
+    /// owns. Leaving them to the encoder's default would record `unknown` /
+    /// `observation_unavailable` — the opposite claim, that the app could not tell — and would
+    /// disagree with the same event recorded by the other client.
+    ///
+    /// Applied HERE, at the single funnel every emission path builds its event through, because the
+    /// same rejection reaches the encoder by two routes: the ordinary one, and the late-outcome path
+    /// for a capture already completed with deferred emission. Mapping at a call site covers only the
+    /// first.
+    private static func applySkipMapping(to event: inout SegmentEvent, kind: SignalKind) {
+        switch kind {
+        case .rejectedBleed:
+            event.reportedStages["asr"] = VoiceSharingContributionEncoder.StageOutcome(
+                state: "not_run", reason: bleedSkipReason)
+        case .rejectedWake:
+            for stage in ["asr", "translation"] {
+                event.reportedStages[stage] = VoiceSharingContributionEncoder.StageOutcome(
+                    state: "not_run", reason: wakeSkipReason)
+            }
+            for stage in ["routing", "execution"] {
+                event.reportedStages[stage] = VoiceSharingContributionEncoder.StageOutcome(
+                    state: "not_run", reason: notDispatchedReason)
+            }
+        case .started, .completed, .cancelled:
+            // Nothing is known to have been skipped: these kinds either run downstream stages or
+            // carry no contribution at all, and the engine reports what actually happened.
+            break
+        }
     }
 
     // MARK: - Bounded non-blocking handoff

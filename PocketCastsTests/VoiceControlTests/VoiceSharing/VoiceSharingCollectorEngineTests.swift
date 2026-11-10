@@ -556,6 +556,40 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
         XCTAssertTrue(added.contains("capture decisions segments="),
                       "the running seen-vs-emitted counters are reported alongside the decision")
     }
+    /// The SAME rejection reaches the encoder by a second route: a capture that completed with
+    /// deferred emission sits in the terminal ring, so the wake rejection is delivered as a LATE
+    /// outcome. That path builds its own event and returns before the ordinary one, which is exactly
+    /// how the skip mapping can be applied to one route and silently missed on the other. This drives
+    /// the deferred route directly and asserts the same facts.
+    func test_lateWakeRejectionOnADeferredCaptureAlsoRecordsNotRunForSkippedStages() async throws {
+        openGate(enrolled: true)
+        let collector = makeCollector()
+        guard let ctx = collector.speechStarted(confirmationFrameSamples: 160, wakeRequired: true) else {
+            return XCTFail("premise: a capture must open")
+        }
+        // The segment ends and defers: the capture is terminal and ring-resident, not yet emitted.
+        collector.speechCompleted([Float](repeating: 0.5, count: 1600), context: ctx, deferEmission: true)
+        // Now the wake result arrives LATE, against the already-terminal capture.
+        collector.segmentRejected(kind: .rejectedWake, samples: 1600, context: ctx)
+
+        let rejections = snapshot().filter { $0.kind == .rejectedWake }
+        XCTAssertEqual(rejections.count, 1, "the late rejection is emitted exactly once")
+        let observed = try XCTUnwrap(rejections.first)
+        XCTAssertEqual(observed.captureID, ctx.id, "it travels the LATE path: the ring-resident capture")
+        let stages = observed.reportedStages
+        for (stage, reason) in [("asr", "rejected_by_wake"),
+                                ("translation", "rejected_by_wake"),
+                                ("routing", "not_dispatched"),
+                                ("execution", "not_dispatched")] {
+            let outcome = try XCTUnwrap(stages[stage], "\(stage) must be stated on a late wake rejection")
+            XCTAssertEqual(outcome.state, "not_run",
+                           "\(stage) did not run on the LATE path either: not_run, not unknown")
+            XCTAssertEqual(outcome.reason, reason,
+                           "\(stage) names why it did not run on the late path")
+        }
+    }
+
+
 }
 
 // MARK: - Stubs
@@ -1787,9 +1821,16 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         let wake = try XCTUnwrap(observations["wake"] as? [String: Any])
         XCTAssertEqual(wake["state"] as? String, "completed")
         XCTAssertEqual(wake["decision"] as? String, "rejected")
+        // A rejection is an OBSERVATION, so its measurement must reach the record in both numbers.
+        // Asserting only state/decision would pass a record that dropped the score entirely, which is
+        // the exact defect that was corrected upstream: the rejection path carries score and threshold,
+        // and nil is right only on a detector error.
+        XCTAssertNotNil(wake["score"] as? Double, "a rejected wake states its measured score")
+        XCTAssertNotNil(wake["threshold"] as? Double, "a rejected wake states the threshold it fell below")
 
         // Every stage downstream of the rejected wake is a KNOWN skip, not an unstated one.
         for (stage, reason) in [("asr", "rejected_by_wake"),
+                                ("translation", "rejected_by_wake"),
                                 ("routing", "not_dispatched"),
                                 ("execution", "not_dispatched")] {
             let block = try XCTUnwrap(observations[stage] as? [String: Any],
