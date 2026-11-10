@@ -123,7 +123,43 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         }
     }
 
+    /// Begins the cloud connection for the utterance the user is finishing.
+    ///
+    /// Called when trailing silence begins on addressed speech — the wake result is already
+    /// positive, the endpoint has not fired — so the handshake overlaps the tail of the utterance
+    /// rather than following it. The turn that follows reuses this connection if it is still
+    /// fresh, and replaces it silently if not.
+    ///
+    /// Idempotent: a second call while a connection is held does nothing, because only one can be
+    /// handed to a turn and opening another would orphan the first.
+    func beginEarlyConnection() {
+        guard earlyRouteClient == nil else { return }
+        guard isConfigured() else {
+            FileLog.shared.addMessage("[VoicePipeline] early connection skipped — cloud not configured")
+            return
+        }
+        let client = clientFactory()
+        guard client.openEarlyConnection() else { return }
+        earlyRouteClient = client
+    }
+
+    /// Abandons a connection opened for an utterance that produced no turn.
+    ///
+    /// An empty utterance or one gated out before routing leaves the early socket with no owner.
+    /// Closing it here is what keeps the early open from becoming a leak for the life of the
+    /// process.
+    func discardEarlyConnection(reason: String) {
+        guard let client = earlyRouteClient else { return }
+        earlyRouteClient = nil
+        client.discardEarlyConnection(reason: reason)
+    }
+
     private let clientFactory: () -> CloudRouteClient
+
+    /// The client holding a connection opened before this turn existed, waiting to be used or
+    /// replaced. Cleared when a turn takes it, so one connection cannot span two turns.
+    private var earlyRouteClient: CloudRouteClient?
+
     private let isConfigured: () -> Bool
     /// Prepares the conversation identity for each turn.
     private let conversationManager: CloudConversationManager
@@ -823,8 +859,17 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             preparedObserver?(prepared)
         }
 
-        MainActor.assumeIsolated { clientCreationCountForTesting += 1 }
-        let client = clientFactory()
+        // The client that opened early is the client this turn uses: a connection is only usable
+        // by the transport that holds it, so creating a second client here would discard the
+        // handshake the early open paid for and leave its socket orphaned.
+        let client: CloudRouteClient
+        if let earlyClient = earlyRouteClient {
+            client = earlyClient
+            earlyRouteClient = nil
+        } else {
+            MainActor.assumeIsolated { clientCreationCountForTesting += 1 }
+            client = clientFactory()
+        }
         let routeContext = CloudRouteContext(from: context)
 
         // GRACE contract, acquisition at the ADMITTED dispatch: the window's expiry is held from

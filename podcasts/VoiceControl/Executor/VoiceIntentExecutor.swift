@@ -186,6 +186,24 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
     /// cast stays conditional so the protocol contract holds for every conformer.
     var cloudRouteSinkAccess: CloudRouteSink? { cloudRouteSink as? CloudRouteSink }
 
+    /// Opens the cloud connection for an utterance the user has just finished speaking, before its
+    /// turn exists (production wiring). The wake result is already positive and the endpoint has
+    /// not fired, so the handshake overlaps the tail of the utterance instead of following it.
+    ///
+    /// Only the concrete sink can do this: the protocol has no early-open operation, because a
+    /// sink that never talks to the cloud has nothing to open. A non-concrete sink therefore
+    /// skips it rather than being forced to implement a no-op.
+    @MainActor func beginEarlyCloudConnection() {
+        (cloudRouteSink as? CloudRouteSink)?.beginEarlyConnection()
+    }
+
+    /// Closes a connection opened for an utterance that produced no turn — empty audio, or gated
+    /// out before routing. Without this the early socket would outlive the utterance that asked
+    /// for it.
+    @MainActor func discardEarlyCloudConnection(reason: String) {
+        (cloudRouteSink as? CloudRouteSink)?.discardEarlyConnection(reason: reason)
+    }
+
     /// Retires the sink's retained dispatches on the window boundary (production wiring). The
     /// sink transition is lock-guarded and nonisolated, so this stays synchronous — the window
     /// transition is atomic with the manager's origin clear (reviewer a2723c92).

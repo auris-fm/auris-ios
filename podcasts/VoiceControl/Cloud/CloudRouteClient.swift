@@ -33,15 +33,17 @@ final class CloudRouteClient {
     private let webSocketTaskFactory: ((URLRequest) -> WebSocketTasking)?
 
     /// Reports the age of a connection this turn inherited from an early open, or nil when the
-    /// connection is opened here. Once an early-open path exists, the sink supplies this; the
-    /// freshness rule is decided from it before any socket is created, so a stale connection is
-    /// replaced rather than sent on.
+    /// connection is opened here. The freshness rule is decided from it before any socket is
+    /// created, so a stale connection is replaced rather than sent on.
     private let inheritedConnectionAge: (() -> TimeInterval)?
 
     /// Seam for the clock that times the early-connection age. The limit is nine seconds, so a real
     /// clock makes the guard untestable except by a nine-second sleep — which is why the age rule
     /// needs an injectable clock rather than a test that simply takes a long time.
     private let now: () -> Date
+
+    /// A connection opened before its turn existed, waiting to be used or replaced.
+    private var earlyConnection: (task: WebSocketTasking, requestedAt: Date)?
 
     /// The state of the most recent PRODUCTION-created task, readable by a test. Exists because the
     /// injected-factory tests bypass the default path entirely.
@@ -131,6 +133,61 @@ final class CloudRouteClient {
     /// Routes a turn AND hands back the handle its `app_operation_result` sends must travel by:
     /// the handle binds to the ORIGINAL socket registration, so late results from a retired turn
     /// are undelivered rather than routed onto a successor that reused the request id.
+    /// Opens a connection now, before a turn exists, so the handshake overlaps the tail of the
+    /// utterance instead of following it.
+    ///
+    /// Called when trailing silence begins on addressed speech: the user has finished talking, the
+    /// endpoint has not yet fired, and the connection will be needed either way. The socket is held
+    /// with the instant it was requested, and the turn that follows either uses it or replaces it.
+    ///
+    /// Returns nil when an early connection is already held. Opening a second would leak the first,
+    /// since only one can be handed to a turn.
+    @discardableResult
+    func openEarlyConnection() -> Bool {
+        guard earlyConnection == nil else {
+            FileLog.shared.addMessage("[CloudRoute] early open skipped — one is already held")
+            return false
+        }
+        guard let url = Self.webSocketURL(baseURL: baseURL, path: Self.routePath) else {
+            FileLog.shared.addMessage("[CloudRoute] early open skipped — websocket URL could not be built")
+            return false
+        }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = requestTimeoutSeconds
+
+        let requestedAt = now()
+        let task: WebSocketTasking
+        if let injected = webSocketTaskFactory?(req) {
+            task = injected
+        } else {
+            let production = session.webSocketTask(with: req)
+            production.resume()
+            task = production
+        }
+        earlyConnection = (task: task, requestedAt: requestedAt)
+        FileLog.shared.addMessage(
+            "[VoicePipeline] early connection opened (age limit \(Int(EarlyConnectionPolicy.maximumAgeSeconds))s)"
+        )
+        return true
+    }
+
+    /// Discards a held early connection.
+    ///
+    /// Called when the utterance that motivated it turns out not to need a turn — empty audio, or
+    /// gated out before routing. Holding it would leave a socket open for the life of the process.
+    func discardEarlyConnection(reason: String) {
+        guard let held = earlyConnection else { return }
+        earlyConnection = nil
+        held.task.cancel(with: .goingAway, reason: nil)
+        FileLog.shared.addMessage("[CloudRoute] early connection discarded — \(reason)")
+    }
+
+    /// The age of the held early connection, or nil when none is held.
+    private func heldConnectionAge() -> TimeInterval? {
+        guard let held = earlyConnection else { return nil }
+        return now().timeIntervalSince(held.requestedAt)
+    }
+
     func routeWithResultSocket(
         request: String,
         context: CloudRouteContext,
@@ -555,27 +612,40 @@ final class CloudRouteClient {
         var req = URLRequest(url: url)
         req.timeoutInterval = requestTimeoutSeconds
 
-        // EARLY-CONNECTION SEAM — NOT AN IMPLEMENTED REPLACEMENT PATH.
+        // Take the early connection if one was opened while the utterance was still being spoken.
         //
-        // There is no connection to inherit today: this transport always creates its socket below,
-        // at the moment the request is ready, so `inheritedConnectionAge` is nil in production and
-        // both branches do the same thing. What is real is the rule and its decision point: an
-        // inherited connection older than the limit must not be sent on, and the decision is made
-        // here, BEFORE any socket exists, so that implementing an early open cannot reintroduce
-        // the defect of discovering staleness on a connection already in use.
-        //
-        // Stating the limit of this honestly rather than implying a replacement happens: nothing
-        // is discarded, because nothing was inherited.
-        if let inheritedAge = inheritedConnectionAge?(),
-           !EarlyConnectionPolicy.canSend(connectionAge: inheritedAge) {
-            FileLog.shared.addMessage("[CloudRoute] \(EarlyConnectionPolicy.describe(connectionAge: inheritedAge)) — not reusing it; opening a fresh connection")
+        // The freshness rule is applied here, BEFORE the socket is used, and a stale connection is
+        // REPLACED rather than failed: the request is already built and the user has already
+        // spoken, so ending the turn for an idle socket would charge them for a timeout they did
+        // not cause. Deciding it here is what makes replacement possible at all — a check after
+        // the first send could only report the failure.
+        let inheritedAge = heldConnectionAge() ?? inheritedConnectionAge?()
+        var inheritedTask: WebSocketTasking?
+        if let age = inheritedAge {
+            if EarlyConnectionPolicy.canSend(connectionAge: age) {
+                inheritedTask = earlyConnection?.task
+                FileLog.shared.addMessage(
+                    "[CloudRoute] using the early connection (\(EarlyConnectionPolicy.describe(connectionAge: age)))"
+                )
+            } else {
+                FileLog.shared.addMessage(
+                    "[CloudRoute] \(EarlyConnectionPolicy.describe(connectionAge: age)) — not reusing it; opening a fresh connection"
+                )
+                earlyConnection?.task.cancel(with: .goingAway, reason: nil)
+            }
         }
+        // Cleared whether or not it was usable: a connection belongs to exactly one turn, and
+        // leaving it set would offer a consumed socket to the next turn.
+        earlyConnection = nil
 
         // The instant this connection is requested, on the client clock. This is the stamp the
         // freshness rule is measured from, and it is taken for every connection, inherited or not.
         let upgradeRequestedAt = now()
         let wsTask: WebSocketTasking
-        if let injected = webSocketTaskFactory?(req) {
+        if let inheritedTask {
+            // Already connecting since the early open: no new handshake, which is the whole point.
+            wsTask = inheritedTask
+        } else if let injected = webSocketTaskFactory?(req) {
             // A test double. It owns its own readiness, so nothing is resumed here.
             wsTask = injected
         } else {

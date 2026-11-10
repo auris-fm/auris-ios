@@ -809,6 +809,14 @@ class VoiceControlService: ObservableObject {
         asrEngine.onWakeWordDetected = { [weak self] in
             self?.gracePeriodSignal.onWakeWordDetected()
             self?.audioRenderer.playEarcon(.wakeWord)
+            // Addressed speech, detected while the user may still be finishing the request: open
+            // the cloud connection now so its handshake overlaps the tail of the utterance rather
+            // than following it. The turn reuses it if it is still fresh, and replaces it silently
+            // if not, so opening early can never cost correctness.
+            // Hop to the main actor: the sink is main-actor isolated, and the wake callback is not.
+            Task { @MainActor [weak self] in
+                self?.executor.beginEarlyCloudConnection()
+            }
         }
         // A turn is ADMITTED the moment the engine has settled its window origin and before the
         // backend wait, so a slow (cold-start) recognition cannot let the deadline retire it
@@ -822,6 +830,12 @@ class VoiceControlService: ObservableObject {
         // reservation here, so it cannot leak for the life of the process.
         asrEngine.onTurnReleased = { [weak self] utteranceId in
             self?.gracePeriodSignal.releaseInFlightTurn(utteranceId: utteranceId)
+            // The turn left the engine without reaching routing — backend failure, wake-only,
+            // empty or non-content transcript. Any connection opened for it will never be claimed,
+            // so close it here rather than leaving a socket open for the life of the process.
+            Task { @MainActor [weak self] in
+                self?.executor.discardEarlyCloudConnection(reason: "turn released without routing")
+            }
         }
         // Silent by contract: a wake-only capture is the user opening a session,
         // not a failed question, so it plays nothing. The "command not understood"

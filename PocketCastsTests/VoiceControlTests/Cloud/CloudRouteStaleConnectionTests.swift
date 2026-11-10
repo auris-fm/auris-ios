@@ -95,6 +95,116 @@ final class CloudRouteStaleConnectionTests: XCTestCase {
         XCTAssertFalse(task.sentTextFrames.isEmpty)
     }
 
+    /// A connection opened early, while the user was still speaking, must be the connection the
+    /// turn sends on — otherwise the handshake was paid for and thrown away.
+    func test_turnUsesTheConnectionOpenedEarly() async {
+        let task = StubWebSocketTask(textFrames: [])
+        var factoryCalls = 0
+        let clock = SteppableClock()
+        let client = CloudRouteClient(
+            baseURL: "https://cloud.test",
+            userId: userId,
+            tokenProvider: StubTokenProvider(token: "test_token"),
+            webSocketTaskFactory: { _ in factoryCalls += 1; return task },
+            now: { clock.read() }
+        )
+
+        XCTAssertTrue(client.openEarlyConnection(), "the early open must create a connection")
+        XCTAssertEqual(factoryCalls, 1, "opening early creates exactly one socket")
+
+        _ = await collect(client.route(
+            request: "skip forward", context: sampleContext, turn: makeTurn()
+        ))
+
+        XCTAssertEqual(factoryCalls, 1,
+                       "the turn must reuse the early socket, not open a second one")
+        XCTAssertFalse(task.sentTextFrames.isEmpty, "the turn must send on it")
+    }
+
+    /// A second early open while one is held does nothing. Opening another would orphan the first
+    /// socket, which no turn could then claim or close.
+    func test_secondEarlyOpenIsRefusedWhileOneIsHeld() {
+        let task = StubWebSocketTask(textFrames: [])
+        let clock = SteppableClock()
+        let client = CloudRouteClient(
+            baseURL: "https://cloud.test",
+            userId: userId,
+            tokenProvider: StubTokenProvider(token: "test_token"),
+            webSocketTaskFactory: { _ in task },
+            now: { clock.read() }
+        )
+
+        XCTAssertTrue(client.openEarlyConnection())
+        XCTAssertFalse(client.openEarlyConnection(), "a held connection must not be replaced silently")
+    }
+
+    /// A connection older than the limit is replaced, and the replacement is what sends. The turn
+    /// must still complete: the request is ready and the user has already spoken.
+    func test_staleEarlyConnectionIsReplacedNotFailed() async {
+        let fresh = StubWebSocketTask(textFrames: [])
+        var issued: [StubWebSocketTask] = []
+        let clock = SteppableClock()
+        let client = CloudRouteClient(
+            baseURL: "https://cloud.test",
+            userId: userId,
+            tokenProvider: StubTokenProvider(token: "test_token"),
+            webSocketTaskFactory: { _ in
+                if issued.isEmpty {
+                    let stale = StubWebSocketTask(textFrames: [])
+                    issued.append(stale)
+                    return stale
+                }
+                issued.append(fresh)
+                return fresh
+            },
+            now: { clock.read() }
+        )
+
+        XCTAssertTrue(client.openEarlyConnection())
+        // Age the connection past the limit without sleeping.
+        clock.set(clock.read().addingTimeInterval(EarlyConnectionPolicy.maximumAgeSeconds + 2))
+
+        let events = await collect(client.route(
+            request: "skip forward", context: sampleContext, turn: makeTurn()
+        ))
+
+        XCTAssertEqual(issued.count, 2, "a stale connection must be replaced by a fresh one")
+        XCTAssertNotNil(issued[0].cancelled, "the stale socket must be closed, not left open")
+        XCTAssertFalse(fresh.sentTextFrames.isEmpty, "the turn must send on the replacement")
+        let constructionFailure = events.contains { event in
+            if case .error(let source, _, _) = event { return source == .requestConstruction }
+            return false
+        }
+        XCTAssertFalse(constructionFailure,
+                       "a stale early connection is replaced, not turned into a failure: \(events)")
+    }
+
+    /// A discarded early connection is closed and no longer offered to a turn.
+    func test_discardedEarlyConnectionIsNotUsed() async {
+        var issued: [StubWebSocketTask] = []
+        let clock = SteppableClock()
+        let client = CloudRouteClient(
+            baseURL: "https://cloud.test",
+            userId: userId,
+            tokenProvider: StubTokenProvider(token: "test_token"),
+            webSocketTaskFactory: { _ in
+                let task = StubWebSocketTask(textFrames: [])
+                issued.append(task)
+                return task
+            },
+            now: { clock.read() }
+        )
+
+        XCTAssertTrue(client.openEarlyConnection())
+        client.discardEarlyConnection(reason: "utterance was empty")
+        XCTAssertNotNil(issued[0].cancelled, "a discarded connection must be closed")
+
+        _ = await collect(client.route(
+            request: "skip forward", context: sampleContext, turn: makeTurn()
+        ))
+        XCTAssertEqual(issued.count, 2, "the turn must open its own connection after a discard")
+    }
+
     /// With nothing inherited there is no freshness question at all: the ordinary turn path must be
     /// untouched, or this rule would have changed every cloud turn in the app.
     func test_noInheritedConnectionSendsNormally() async {
