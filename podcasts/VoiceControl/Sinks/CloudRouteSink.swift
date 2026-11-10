@@ -150,14 +150,25 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// therefore has no owner: it is not taken by anyone, and is replaced by the next open rather
     /// than being closed on a guess.
     @discardableResult
-    func beginEarlyConnection(tag: String) -> String? {
+    func beginEarlyConnection(tag: String, ownerUtteranceId: String? = nil) -> String? {
         if let held = earlyRouteClient {
+            // REPLACEMENT BELONGS TO A NEW UTTERANCE. Speech that resumes and pauses again is the
+            // same utterance still being spoken — its second pause is not a new turn — so a
+            // connection held for it stays. Discarding it would throw away a handshake already in
+            // flight and pay for it twice.
+            if earlyRouteUtteranceId == ownerUtteranceId {
+                FileLog.shared.addMessage(
+                    "[CloudRoute] early connection kept — same utterance \(earlyRouteUtteranceId ?? "none") paused again"
+                )
+                return tag
+            }
             FileLog.shared.addMessage(
                 "[CloudRoute] early connection replaced — one was held by \(earlyRouteUtteranceId ?? "no utterance yet")"
             )
             earlyRouteClient = nil
             earlyRouteTag = nil
             earlyRouteUtteranceId = nil
+            pendingEarlyConnectionClaim = nil
             held.discardEarlyConnection(reason: "replaced by a later utterance")
         }
         guard isConfigured() else {

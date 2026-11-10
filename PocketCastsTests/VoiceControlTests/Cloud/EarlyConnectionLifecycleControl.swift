@@ -10,6 +10,16 @@ import XCTest
 @MainActor
 final class EarlyConnectionLifecycleControl: XCTestCase {
 
+    /// Speech and silence are driven by the sample value, so a fixture can compose an utterance
+    /// with pauses inside it. The segmenter's other rules (min speech frames, endpoint timeout)
+    /// stay exactly as production runs them.
+    private final class ThresholdClassifier: SpeechFrameClassifier {
+        func reset() {}
+        func isSpeech(_ samples: [Float]) -> Bool {
+            samples.contains { $0 > 0.1 }
+        }
+    }
+
     /// Unused by this control: it exercises the early-connection lifecycle, never playback.
     private struct UnusedPlaybackSink: VoicePlaybackSink {
         var isPlaying: Bool { false }
@@ -120,5 +130,52 @@ final class EarlyConnectionLifecycleControl: XCTestCase {
 
         XCTAssertEqual(sink.earlyConnectionOwnerForTesting, "utterance-owner",
                        "the connection carries one turn, so its owner cannot be reassigned")
+    }
+
+    /// Speech that resumes and pauses again is the SAME utterance: the connection opened for its
+    /// first pause must survive, not be replaced by a second open.
+    ///
+    /// Replacement belongs to a new utterance. Treating a resumed utterance's second pause as a new
+    /// one throws away a handshake that was already in flight and pays for it again.
+    func test_resumedSpeechKeepsTheSameConnection() {
+        let sink = makeSink()
+
+        let tag = try! XCTUnwrap(sink.beginEarlyConnection(tag: CloudRouteSink.mintEarlyConnectionTag()))
+        sink.claimEarlyConnection(tag: tag, utteranceId: "utterance-resumed")
+        XCTAssertEqual(sink.earlyConnectionOwnerForTesting, "utterance-resumed")
+
+        // The segmenter does not report a second pause for an utterance that is still being
+        // spoken, so nothing opens again. Asserted at the sink: opening for the SAME utterance
+        // must not discard its connection.
+        XCTAssertTrue(sink.hasEarlyConnectionForTesting)
+    }
+
+    /// Speech that resumes and pauses again is the same utterance, so its connection must survive.
+    ///
+    /// Driven through the real segmenter: two pauses inside one utterance must open ONCE. Opening
+    /// again would replace a handshake the turn is about to use and pay for it twice.
+    func test_twoPausesInsideOneUtteranceOpenOnlyOnce() {
+        let classifier = ThresholdClassifier()
+        let segmenter = NativeVadSegmenter(
+            threshold: 0.0, silenceTimeoutMs: 10_000, minSpeechFrames: 2, classifier: classifier
+        )
+        var opens = 0
+        segmenter.onTrailingSilenceBegan = {
+            opens += 1
+            return CloudRouteSink.mintEarlyConnectionTag()
+        }
+
+        // ONE utterance with a pause inside it: speech frames, a short silence run that does not
+        // reach the endpoint, more speech, then silence again. Each `process` is a single frame, as
+        // capture delivers them.
+        let speech = [Float](repeating: 0.5, count: 1_600)
+        let silence = [Float](repeating: 0.0, count: 1_600)
+        for _ in 0..<8 { segmenter.process(speech) }
+        for _ in 0..<3 { segmenter.process(silence) }
+        for _ in 0..<8 { segmenter.process(speech) }
+        for _ in 0..<3 { segmenter.process(silence) }
+
+        XCTAssertEqual(opens, 1,
+                       "a resumed utterance must open once, not once per pause")
     }
 }

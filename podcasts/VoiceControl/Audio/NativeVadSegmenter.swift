@@ -354,7 +354,15 @@ class NativeVadSegmenter {
                 // the audio thread, and stored with the utterance: the consumer hands it to a
                 // different thread, so anything read later from a shared slot could already
                 // belong to the next utterance.
-                earlyConnectionTagForCurrentUtterance = onTrailingSilenceBegan?()
+                //
+                // Only the FIRST pause of an utterance opens. Speech that resumes and pauses
+                // again is the same utterance still being spoken, and its connection is already
+                // in flight: opening again would replace a handshake the turn is about to use and
+                // pay for it twice. The tag is cleared when the utterance is delivered, so the
+                // next utterance starts without one.
+                if earlyConnectionTagForCurrentUtterance == nil {
+                    earlyConnectionTagForCurrentUtterance = onTrailingSilenceBegan?()
+                }
             }
             // While stuck-active nothing accumulates: the audio is discarded, not dispatched.
             if !isStuckActive {
