@@ -102,16 +102,22 @@ final class StreamingWakeScoreEqualityTests: XCTestCase {
     /// The same property on recorded human speech, which is what the control has to hold for.
     ///
     /// The synthetic tone above scores near zero for every input, so an equality there could hold
-    /// for a trivial reason. This uses the public speech fixture and asserts the score is actually
+    /// for a trivial reason. This uses a checked-in speech fixture and asserts the score is actually
     /// non-trivial, so the equality is a real one.
+    ///
+    /// Provenance of the fixture: a TTS-synthesized "hey livekit" positive from the upstream
+    /// `livekit-wakeword` project (its positive-clip pipeline is Piper VITS / VoxCPM2 synthesis),
+    /// added there in that project's Swift-package PR. Not a recording of any project participant.
     func test_earlyScoreEqualsFinishedSegmentScoreOnRecordedSpeech() async throws {
         let detector = try makeDetector()
         defer { detector.release() }
 
-        let fixture = URL(fileURLWithPath: "/Users/dev/code/auris/livekit-wakeword/swift/Tests/"
-            + "LiveKitWakeWordTests/Fixtures/positive.wav")
-        try XCTSkipUnless(FileManager.default.fileExists(atPath: fixture.path),
-                          "public speech fixture not present at \(fixture.path)")
+        let bundle = Bundle(for: type(of: self))
+        let fixture = try XCTUnwrap(
+            bundle.url(forResource: "positive", withExtension: "wav", subdirectory: "Fixtures")
+                ?? bundle.url(forResource: "positive", withExtension: "wav"),
+            "checked-in speech fixture not found in the test bundle"
+        )
 
         // The fixture is exactly 2.0s — the same length as the eligible span — so on its own it
         // could not distinguish "audio past the span is ignored" from "there is no audio past the
