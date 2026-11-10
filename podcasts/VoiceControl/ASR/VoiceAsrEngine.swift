@@ -716,6 +716,19 @@ class VoiceAsrEngine {
         }
         stageTimer.mark() // wake result
 
+        // Whether the end-of-speech decision had to wait for the detector, and how long that wait
+        // would have been. This is what streaming detection removes: on a long utterance the final
+        // window is already scored when the user stops, so there is nothing to wait for. Logged
+        // because the benefit is otherwise invisible — a turn that waits and one that does not
+        // produce identical output.
+        let speechSeconds = Double(utterance.count) / 16_000
+        if StreamingWakePolicy.mustWaitAtEndOfSpeech(speechSeconds: speechSeconds) {
+            let waitMs = Int((StreamingWakePolicy.endOfSpeechWaitSeconds(speechSeconds: speechSeconds) * 1000).rounded())
+            FileLog.shared.addMessage(
+                "[VoicePipeline] wake waited up to \(waitMs)ms for the final window (speech \(String(format: "%.2f", speechSeconds))s < \(StreamingWakePolicy.finalWindowEndSeconds)s)"
+            )
+        }
+
         let score = wakeScore(of: result)
         // PHASE 2 (name schema v1): whenever the detector ran it MEASURED a score against a threshold,
         // and the record must carry both values rather than `na`. A detector error measured nothing,
