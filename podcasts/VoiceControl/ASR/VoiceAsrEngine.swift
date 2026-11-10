@@ -852,7 +852,6 @@ class VoiceAsrEngine {
             contributionCollector?.segmentRejected(kind: .rejectedWake, samples: utterance.count, context: utteranceContext)
             return
         case .forward(let detected):
-<<<<<<< HEAD
             // ENGINE-PRODUCED observation: the wake decision below is made HERE, by
             // the detector, so this is the only place entitled to report the wake stage.
             // The detector RAN and returned a verdict either way. A forwarded NEGATIVE segment in
@@ -872,8 +871,6 @@ class VoiceAsrEngine {
                     decision: detected ? "detected" : "rejected",
                     score: measuredWake?.score, threshold: measuredWake?.threshold),
                 context: utteranceContext)
-||||||| parent of c4da87e1 (Open for a short utterance at its gate verdict, where it is actually reachable)
-=======
             // The utterance is routable. If it had no early result — a short utterance, which never
             // reaches the eligible span — this is where its positive verdict first becomes known,
             // and it is still before the backend wait, so opening here is the only point that can
@@ -883,7 +880,6 @@ class VoiceAsrEngine {
                 FileLog.shared.addMessage("[VoicePipeline] short utterance routable — opening early connection before ASR")
                 onAddressedTrailingSilenceBegan?()
             }
->>>>>>> c4da87e1 (Open for a short utterance at its gate verdict, where it is actually reachable)
             if detected {
                 onWakeWordDetected?()
                 detectedConfidence = confidence(of: result)

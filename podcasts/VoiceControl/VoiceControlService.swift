@@ -1262,11 +1262,29 @@ class VoiceControlService: ObservableObject {
                 )
                 return .suppressedByInterruption
             }
+            // Claim the early connection for this utterance BEFORE it can settle. A locally
+            // answered command never reaches the cloud branch, so claiming there would leave the
+            // connection unowned and the cleanup below unable to match it — the leak this fixes.
+            await MainActor.run {
+                executor.claimEarlyCloudConnection(for: input.utteranceId)
+            }
             let (response, executionVerdict) = await executor.executeWithVerdict(intent, preparedObserver: preparedObserver)
             reportExecution(executionVerdict, captureContext: captureContext,
                             predictedIntent: VoiceAnalytics.predictedIntentName(from: intent),
                             predictedTool: VoiceAnalytics.predictedToolName(from: intent))
             // SUBMIT the retained follow-UP (cloud-assistant.md → Interruption, ).
+            // Routing has settled for THIS utterance. If it was answered locally — or refused —
+            // the connection opened for it was never consumed: close it, or it stays held, blocks
+            // the next utterance's open, and sits idle for a turn that will not come. Fenced by
+            // the utterance's identity, so a late predecessor settling after a successor has
+            // opened cannot close the successor's socket. A cloud turn took the connection inside
+            // `routeToCloud` and cleared its identity there, so this is a no-op for it.
+            await MainActor.run {
+                executor.discardEarlyCloudConnection(
+                    openedBy: input.utteranceId,
+                    reason: "routing settled without consuming it"
+                )
+            }
             // When the turn that just settled was interrupted, the interrupting utterance was held
             // until its acknowledgement — a `done` for the prior turn, even `completed`, is that
             // acknowledgement. It is submitted here ONCE on its own socket, through the ordinary

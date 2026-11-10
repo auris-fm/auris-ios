@@ -197,11 +197,24 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
         (cloudRouteSink as? CloudRouteSink)?.beginEarlyConnection()
     }
 
+    /// Records which utterance owns the early connection, at the point its identity is minted.
+    @MainActor func claimEarlyCloudConnection(for utteranceId: String) {
+        (cloudRouteSink as? CloudRouteSink)?.claimEarlyConnection(for: utteranceId)
+    }
+
     /// Closes a connection opened for an utterance that produced no turn — empty audio, or gated
     /// out before routing. Without this the early socket would outlive the utterance that asked
     /// for it.
     @MainActor func discardEarlyCloudConnection(reason: String) {
         (cloudRouteSink as? CloudRouteSink)?.discardEarlyConnection(reason: reason)
+    }
+
+    /// Closes the early connection opened by `utteranceId` when routing settled without a cloud
+    /// turn — a locally answered command never consumes it, and leaving it held blocks the next
+    /// utterance's open and leaves a socket idle for a turn that will not come.
+    @MainActor func discardEarlyCloudConnection(openedBy utteranceId: String?, reason: String) {
+        (cloudRouteSink as? CloudRouteSink)?
+            .discardEarlyConnection(openedBy: utteranceId, reason: reason)
     }
 
     /// Retires the sink's retained dispatches on the window boundary (production wiring). The

@@ -141,7 +141,26 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         let client = clientFactory()
         guard client.openEarlyConnection() else { return }
         earlyRouteClient = client
+        // No owner yet: the connection opened while the utterance was still being spoken, so its
+        // identity did not exist. `claimEarlyConnection(for:)` assigns it when the utterance is
+        // admitted.
+        earlyRouteUtteranceId = nil
     }
+
+    /// Records which utterance owns the held early connection.
+    ///
+    /// Called at admission, where the identity is minted. Until then the connection has no owner,
+    /// and cleanup fenced on identity leaves it alone — correct, because a turn that has not been
+    /// admitted cannot have settled.
+    func claimEarlyConnection(for utteranceId: String) {
+        guard earlyRouteClient != nil, earlyRouteUtteranceId == nil else { return }
+        earlyRouteUtteranceId = utteranceId
+    }
+
+    /// Whether an early connection is currently held (and therefore has no owner yet, or is owned
+    /// by the utterance it names). Used by controls and by the claim decision.
+    var hasEarlyConnectionForTesting: Bool { earlyRouteClient != nil }
+    var earlyConnectionOwnerForTesting: String? { earlyRouteUtteranceId }
 
     /// Abandons a connection opened for an utterance that produced no turn.
     ///
@@ -151,6 +170,28 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     func discardEarlyConnection(reason: String) {
         guard let client = earlyRouteClient else { return }
         earlyRouteClient = nil
+        earlyRouteUtteranceId = nil
+        client.discardEarlyConnection(reason: reason)
+    }
+
+    /// Closes an early connection that its own utterance ended up not using — a command answered
+    /// locally, or routing that settled without a cloud turn.
+    ///
+    /// Fenced by identity: cleanup is only honoured for the utterance that opened the connection.
+    /// A late predecessor settling after a successor has already opened must not close the
+    /// successor's socket, which would leave the user waiting on a handshake that was cancelled
+    /// underneath them.
+    func discardEarlyConnection(openedBy utteranceId: String?, reason: String) {
+        guard let client = earlyRouteClient else { return }
+        guard earlyRouteUtteranceId == utteranceId else {
+            FileLog.shared.addMessage(
+                "[CloudRoute] early connection kept — cleanup for \(utteranceId ?? "-") does not own it "
+                    + "(\(earlyRouteUtteranceId ?? "-"))"
+            )
+            return
+        }
+        earlyRouteClient = nil
+        earlyRouteUtteranceId = nil
         client.discardEarlyConnection(reason: reason)
     }
 
@@ -158,7 +199,14 @@ final class CloudRouteSink: VoiceCloudRouteSink,
 
     /// The client holding a connection opened before this turn existed, waiting to be used or
     /// replaced. Cleared when a turn takes it, so one connection cannot span two turns.
+    ///
+    /// Tagged with the utterance that opened it. Without the tag, cleanup for a predecessor that
+    /// never reached the cloud could close a successor's socket — the same "one utterance using
+    /// another's state" defect the early result had, in the opposite direction.
     private var earlyRouteClient: CloudRouteClient?
+
+    /// The utterance whose early open produced `earlyRouteClient`, or nil when none is held.
+    private var earlyRouteUtteranceId: String?
 
     private let isConfigured: () -> Bool
     /// Prepares the conversation identity for each turn.
@@ -865,7 +913,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         let client: CloudRouteClient
         if let earlyClient = earlyRouteClient {
             client = earlyClient
+            // The connection now belongs to this turn. The identity goes with it, so a predecessor
+            // settling later cannot claim or close what this turn is using.
             earlyRouteClient = nil
+            earlyRouteUtteranceId = nil
         } else {
             MainActor.assumeIsolated { clientCreationCountForTesting += 1 }
             client = clientFactory()
