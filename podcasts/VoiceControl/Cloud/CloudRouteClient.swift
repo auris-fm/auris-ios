@@ -32,6 +32,12 @@ final class CloudRouteClient {
     private let playbackTimingFactory: (String) -> CloudPlaybackTiming?
     private let webSocketTaskFactory: ((URLRequest) -> WebSocketTasking)?
 
+    /// Reports the age of a connection this turn inherited from an early open, or nil when the
+    /// connection is opened here. Once an early-open path exists, the sink supplies this; the
+    /// freshness rule is decided from it before any socket is created, so a stale connection is
+    /// replaced rather than sent on.
+    private let inheritedConnectionAge: (() -> TimeInterval)?
+
     /// Seam for the clock that times the early-connection age. The limit is nine seconds, so a real
     /// clock makes the guard untestable except by a nine-second sleep — which is why the age rule
     /// needs an injectable clock rather than a test that simply takes a long time.
@@ -73,9 +79,11 @@ final class CloudRouteClient {
         tokenProvider: CloudTokenProviding? = nil,
         webSocketTaskFactory: ((URLRequest) -> WebSocketTasking)? = nil,
         playbackTimingFactory: @escaping (String) -> CloudPlaybackTiming? = CloudPlaybackTiming.make,
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        inheritedConnectionAge: (() -> TimeInterval)? = nil
     ) {
         self.now = now
+        self.inheritedConnectionAge = inheritedConnectionAge
         self.baseURL = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         // Seam (slice 5, design-only): the credential comes from one place so the
         // trusted-issuer swap (task #26) is a provider change. Default preserves
@@ -546,9 +554,23 @@ final class CloudRouteClient {
 
         var req = URLRequest(url: url)
         req.timeoutInterval = requestTimeoutSeconds
-        // The instant the upgrade request is sent, on the client clock. The server closes a
-        // connection that receives no first frame within 10 seconds and the client cannot see why
-        // a connection closed, so reuse is decided from this stamp and nothing else.
+
+        // A connection this turn inherited from an early open is used only while it is still fresh.
+        // The server closes a connection that receives no first frame within 10 seconds, and the
+        // client cannot see why a connection closed — so the deadline is decided on the client's own
+        // clock, from when the upgrade request was sent.
+        //
+        // A stale connection is DISCARDED AND REPLACED, not turned into a failure. The request here
+        // is already complete and ready to send, so ending the turn would make the user pay for an
+        // idle timeout they had no part in; the contract's answer is a fresh connection carrying the
+        // same ready request, reported only in the log.
+        let inheritedAge = inheritedConnectionAge?()
+        if let inheritedAge, !EarlyConnectionPolicy.canSend(connectionAge: inheritedAge) {
+            FileLog.shared.addMessage("[CloudRoute] \(EarlyConnectionPolicy.describe(connectionAge: inheritedAge)) — opening a fresh connection instead")
+        }
+
+        // The instant this connection is requested, on the client clock. This is the stamp the
+        // freshness rule is measured from, and it is taken for every connection, inherited or not.
         let upgradeRequestedAt = now()
         let wsTask: WebSocketTasking
         if let injected = webSocketTaskFactory?(req) {
@@ -660,18 +682,11 @@ final class CloudRouteClient {
             // admitted. The conservative reading is the correct one here: once the send is
             // INVOKED, admission is possible, so only a failure BEFORE entry proves the frame
             // never left.
-            // A connection opened before the request was ready is only worth reusing while it is
-            // still fresh. Refusing here leaves the turn un-admitted rather than sending into a
-            // connection the server has probably already closed, so the turn can be retried on a
-            // fresh connection instead of being lost with no explanation.
-            let connectionAge = now().timeIntervalSince(upgradeRequestedAt)
-            guard EarlyConnectionPolicy.canSend(connectionAge: connectionAge) else {
-                FileLog.shared.addMessage("[CloudRoute] \(EarlyConnectionPolicy.describe(connectionAge: connectionAge)) — not submitting")
-                continuation.yield(.error(source: .requestConstruction, code: "connection_stale", message: "the connection was too old to use"))
-                continuation.finish()
-                return true
-            }
             try await wsTask.send(.string(authText))
+            // CLOUD REQUEST SENT — the first instant the client can honestly say the turn is on
+            // the wire. Logged AFTER the send returns, so a failed send is never reported as sent,
+            // and before any response is awaited, so it marks our send rather than the reply.
+            FileLog.shared.addMessage("[VoicePipeline] cloudRequestSent request_id=\(turn.requestId)")
 
             // THE REPORT IS NOW SPENT — confirmed only HERE, after the frame actually reached the
             // transport (reviewer ff00457c item 4). A URL/auth/encoding failure above throws before

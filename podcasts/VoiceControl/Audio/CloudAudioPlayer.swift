@@ -1089,6 +1089,14 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// boundary exists to catch.
     private var nodeIncarnationFrames: Double = 0
 
+    /// Whether the first-audible-sound boundary has already been logged for the current turn.
+    private var firstFrameLoggedThisTurn = false
+
+    /// Called when a new turn's audio begins, so the next played frame logs the boundary again.
+    func beginTurnForTiming() {
+        firstFrameLoggedThisTurn = false
+    }
+
     private func playFrame(_ frame: CloudAudioFrame) {
         if timingEnabled { timingActive = frame.timingReceipt?.trace }
         guard let node = playerNode, let engine else {
@@ -1104,6 +1112,17 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // unreliable, and on a 48 kHz device it played 24 kHz PCM at double speed.
         guard let pcmBuffer = pcmBuffer(from: frame.data, sampleRate: negotiatedSampleRate) else {
             return
+        }
+
+        // FIRST AUDIBLE SOUND. Logged once per turn rather than per frame: this is the end of the
+        // latency timeline, and the whole plan is measured against it. Every frame would bury it.
+        // `playFrame` is the boundary because it is the last point before the buffer is handed to
+        // the output node — a queued-but-unrendered frame is not yet audible, but this is the
+        // earliest instant the client can name, and calling it later would overstate our knowledge
+        // rather than understate the latency.
+        if !firstFrameLoggedThisTurn {
+            firstFrameLoggedThisTurn = true
+            FileLog.shared.addMessage("[VoicePipeline] cloudFirstAudio first frame handed to output")
         }
 
         // Publish what is about to be emitted, so the reference holds the audio the

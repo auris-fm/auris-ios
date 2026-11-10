@@ -385,7 +385,15 @@ class NativeVadSegmenter {
     private func emitUtterance() {
         let utterance = Array(buffer)
         let durationMs = Int(Float(utterance.count) / 16.0)
-        FileLog.shared.addMessage("[VoicePipeline] vad ~\(durationMs)ms (\(utterance.count) samples)")
+        // The one line that marks both the acoustic end of speech and the end-of-utterance
+        // decision: they are the same instant here, because the segmenter ends the utterance when
+        // the silence hangover has elapsed. Naming the hangover makes the two distinguishable to a
+        // reader — without it, the segment length looks like the endpoint's own cost, when part of
+        // it is the configured silence wait. This is the start of the latency timeline: every other
+        // stage is measured from here.
+        FileLog.shared.addMessage(
+            "[VoicePipeline] vad ~\(durationMs)ms (\(utterance.count) samples) acousticEnd+endpointDecision hangover=\(silenceTimeoutMs)ms"
+        )
         // A windowed classifier carries state across frames; clearing it here keeps the next
         // utterance from being biased by the one that just closed.
         speechClassifier.reset()

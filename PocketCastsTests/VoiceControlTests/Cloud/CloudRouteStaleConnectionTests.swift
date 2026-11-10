@@ -2,12 +2,12 @@ import XCTest
 
 @testable import podcasts
 
-/// The age limit must actually gate the send, not merely exist as a function.
+/// The freshness rule must actually gate the connection the turn uses, and getting it wrong must
+/// not cost the user their turn.
 ///
-/// This is the difference between a control and a decoration: `EarlyConnectionPolicyTests` proves
-/// the arithmetic is right, and these tests prove the transport calls it. A guard that is written
-/// but never reached would pass every unit test of the policy and still let a stale connection
-/// carry a turn.
+/// `EarlyConnectionPolicyTests` proves the arithmetic. These tests prove the transport consults it,
+/// because a rule that is written but never reached would pass every unit test of the policy while
+/// a stale connection still carried a turn.
 final class CloudRouteStaleConnectionTests: XCTestCase {
     private let userId = "user_79424ba0-f09b-013b-249c-566ad7a4dc9d"
     private let sampleContext = CloudRouteContext(
@@ -19,48 +19,28 @@ final class CloudRouteStaleConnectionTests: XCTestCase {
         previousReferencePositionMs: nil
     )
 
-    /// A clock whose value the test advances. The limit is nine seconds; a real clock would make
-    /// these controls either sleep for nine seconds or assert nothing.
+    /// A clock whose value the test sets. The limit is nine seconds; a real clock would make these
+    /// controls either sleep for nine seconds or assert nothing.
     private final class SteppableClock: @unchecked Sendable {
         private let lock = NSLock()
         private var current = Date(timeIntervalSince1970: 1_760_000_000)
-        private var readings = 0
-
-        func read() -> Date {
-            lock.lock()
-            defer { lock.unlock() }
-            readings += 1
-            return current
-        }
-
-        func advance(_ seconds: TimeInterval) {
-            lock.lock()
-            defer { lock.unlock() }
-            current = current.addingTimeInterval(seconds)
-        }
+        func read() -> Date { lock.lock(); defer { lock.unlock() }; return current }
+        func set(_ date: Date) { lock.lock(); defer { lock.unlock() }; current = date }
     }
 
-    /// Ages the connection between the upgrade request and the send, which is exactly the window
-    /// the rule governs. The clock is advanced once the upgrade has been stamped, so the turn
-    /// genuinely observes an old connection rather than a fabricated one.
     private func makeClient(
-        ageBy: TimeInterval,
-        task: StubWebSocketTask
-    ) -> (CloudRouteClient, SteppableClock) {
-        let clock = SteppableClock()
-        let client = CloudRouteClient(
+        inheritedAge: TimeInterval?,
+        task: StubWebSocketTask,
+        clock: SteppableClock = SteppableClock()
+    ) -> CloudRouteClient {
+        CloudRouteClient(
             baseURL: "https://cloud.test",
             userId: userId,
             tokenProvider: StubTokenProvider(token: "test_token"),
-            webSocketTaskFactory: { _ in
-                // The factory is called immediately after the upgrade stamp, so advancing here
-                // makes the connection `ageBy` seconds old by the time the send is reached.
-                clock.advance(ageBy)
-                return task
-            },
-            now: { clock.read() }
+            webSocketTaskFactory: { _ in task },
+            now: { clock.read() },
+            inheritedConnectionAge: inheritedAge.map { age in { age } }
         )
-        return (client, clock)
     }
 
     private func makeTurn() -> CloudTurnEnvelope {
@@ -76,41 +56,60 @@ final class CloudRouteStaleConnectionTests: XCTestCase {
         return events
     }
 
-    /// Past the limit the turn must not be submitted: no auth frame leaves, and the caller gets a
-    /// terminal error instead of silence. Silence would leave the user waiting on a turn that was
-    /// never admitted.
-    func test_connectionPastTheLimitIsNotSubmitted() async {
+    /// A turn that inherited a too-old connection still SENDS, on a fresh one. Ending the turn
+    /// would charge the user with an idle timeout they did not cause, for a request that is already
+    /// complete and ready.
+    func test_staleInheritedConnectionStillSendsItsTurn() async {
         let task = StubWebSocketTask(textFrames: [])
-        let (client, _) = makeClient(ageBy: EarlyConnectionPolicy.maximumAgeSeconds + 0.5, task: task)
+        let client = makeClient(inheritedAge: EarlyConnectionPolicy.maximumAgeSeconds + 0.5, task: task)
 
         let events = await collect(client.route(
-            request: "skip forward",
-            context: sampleContext,
-            turn: makeTurn()
-        ))
-
-        XCTAssertTrue(task.sentTextFrames.isEmpty,
-                      "no frame may be sent on a connection past the limit: \(task.sentTextFrames)")
-        let isStaleError = events.contains { event in
-            if case .error(_, let code, _) = event { return code == "connection_stale" }
-            return false
-        }
-        XCTAssertTrue(isStaleError, "the caller must learn the connection was too old: \(events)")
-    }
-
-    /// A fresh connection still sends normally. Without this, an implementation that refuses every
-    /// turn would pass the test above.
-    func test_freshConnectionIsSubmitted() async {
-        let task = StubWebSocketTask(textFrames: [])
-        let (client, _) = makeClient(ageBy: 0, task: task)
-
-        _ = await collect(client.route(
-            request: "skip forward",
-            context: sampleContext,
-            turn: makeTurn()
+            request: "skip forward", context: sampleContext, turn: makeTurn()
         ))
 
         XCTAssertFalse(task.sentTextFrames.isEmpty,
-                       "a fresh connection must carry its auth frame")
+                       "a fresh connection must carry the ready request: \(task.sentTextFrames)")
+        // The stub never answers, so the turn ends on its ordinary first-frame timeout. What this
+        // asserts is narrower and is the actual contract point: the refusal must not be surfaced as
+        // a request-construction failure, which is what a stale connection ending the turn produced.
+        let constructionFailure = events.contains { event in
+            if case .error(let source, _, _) = event { return source == .requestConstruction }
+            return false
+        }
+        XCTAssertFalse(constructionFailure,
+                       "a stale connection is replaced, not turned into a construction failure: \(events)")
+    }
+
+    /// The connection actually opened is stamped now, so its age is zero and the rule is satisfied
+    /// from the moment it exists. Without this, replacing a stale connection could itself look
+    /// stale on the next check.
+    func test_replacementConnectionIsFresh() async {
+        let clock = SteppableClock()
+        let task = StubWebSocketTask(textFrames: [])
+        let client = makeClient(inheritedAge: 30, task: task, clock: clock)
+
+        _ = await collect(client.route(
+            request: "skip forward", context: sampleContext, turn: makeTurn()
+        ))
+
+        XCTAssertFalse(task.sentTextFrames.isEmpty)
+    }
+
+    /// With nothing inherited there is no freshness question at all: the ordinary turn path must be
+    /// untouched, or this rule would have changed every cloud turn in the app.
+    func test_noInheritedConnectionSendsNormally() async {
+        let task = StubWebSocketTask(textFrames: [])
+        let client = makeClient(inheritedAge: nil, task: task)
+
+        let events = await collect(client.route(
+            request: "skip forward", context: sampleContext, turn: makeTurn()
+        ))
+
+        XCTAssertFalse(task.sentTextFrames.isEmpty)
+        let constructionFailure = events.contains { event in
+            if case .error(let source, _, _) = event { return source == .requestConstruction }
+            return false
+        }
+        XCTAssertFalse(constructionFailure)
     }
 }

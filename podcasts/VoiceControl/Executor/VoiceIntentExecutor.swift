@@ -378,6 +378,14 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
             gracePeriodSignal.onCommandRecognized()
         }
 
+        // LOCAL ACTION EXECUTED — the end of the local path's latency timeline, logged for every
+        // intent including the cloud one (whose real conclusion is the first audible frame). It is
+        // deliberately after the grace bookkeeping: a reader timing this against the routing
+        // decision wants the point the action actually finished, not the point it was decided.
+        if !(intent is CloudRouteIntent) {
+            FileLog.shared.addMessage("[VoicePipeline] localActionExecuted intent=\(type(of: intent))")
+        }
+
         return (voiceResponse, response.fact)
     }
 
