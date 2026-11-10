@@ -1119,6 +1119,10 @@ class VoiceAsrEngine {
             backend: backend.requiredModel.id
         ) else { return }
         onStageTiming?(timing)
+        // The same measurements also go to the persisted log. Analytics needs a build to read back;
+        // the log is what a person can inspect on a device after the fact, and a latency
+        // investigation could not measure these stages at all when they existed only here.
+        FileLog.shared.addMessage("[VoicePipeline] stages \(timing.logField)")
     }
 
     private func confidenceMargin(_ confidence: Float?) -> String? {
