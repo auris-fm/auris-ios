@@ -310,7 +310,7 @@ class NativeVadSegmenter {
                     // whole hangover later. They are different instants and the log must not merge
                     // them, or the endpoint decision looks instantaneous and the configured wait
                     // disappears into the segment length.
-                    emitUtterance(acousticEnd: start)
+                    emitUtterance(silenceObserved: start)
                 }
             }
         } else if !speechActive {
@@ -386,16 +386,22 @@ class NativeVadSegmenter {
         preRollCapturedAt = preRollInstants.first.flatMap { $0 }
     }
 
-    private func emitUtterance(acousticEnd: Date?) {
+    private func emitUtterance(silenceObserved: Date?) {
         let utterance = Array(buffer)
         let durationMs = Int(Float(utterance.count) / 16.0)
-        // Two distinct events, reported as two. `acousticEnd` is the first silent frame; the
-        // endpoint decision is now. Their difference is the silence hangover actually waited,
-        // which is what a reader needs to separate the configured wait from the endpoint's own
-        // cost. Merging them would make the hangover vanish into the segment length.
-        let waitedMs = acousticEnd.map { Int((Date().timeIntervalSince($0) * 1000).rounded()) }
+        // Two distinct events, reported as two, and named for what they actually measure rather
+        // than for the nearest capture concept.
+        //
+        // `silenceObserved` is the instant VAD first PROCESSED a frame as silence. It is not the
+        // instant of the last captured speech sample: the two differ by the capture-to-process
+        // latency, which this file does not measure. The interval below is therefore the
+        // process-side dwell in silence, which is what the endpoint logic actually waits on.
+        // Calling it the acoustic end of speech would claim a capture-domain measurement that does
+        // not exist here — the per-sample capture instants are monotonic and are not mixed into
+        // this wall-clock interval.
+        let dwellMs = silenceObserved.map { Int((Date().timeIntervalSince($0) * 1000).rounded()) }
         FileLog.shared.addMessage(
-            "[VoicePipeline] vad ~\(durationMs)ms (\(utterance.count) samples) acousticEnd+\(waitedMs.map { "\($0)" } ?? "?")ms hangoverLimit=\(silenceTimeoutMs)ms endpointDecision"
+            "[VoicePipeline] vad ~\(durationMs)ms (\(utterance.count) samples) silenceDwell=\(dwellMs.map { "\($0)" } ?? "?")ms hangoverLimit=\(silenceTimeoutMs)ms endpointDecision"
         )
         // A windowed classifier carries state across frames; clearing it here keeps the next
         // utterance from being biased by the one that just closed.

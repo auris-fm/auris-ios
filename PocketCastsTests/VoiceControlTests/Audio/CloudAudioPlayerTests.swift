@@ -102,6 +102,29 @@ final class CloudAudioPlayerTests: XCTestCase {
         player.markSchedulingBoundaryForTesting()
         XCTAssertEqual(player.schedulingBoundaryCount, 2,
                        "a second turn must log its own boundary; a flag that never resets would stay at 1")
+
+        // A mid-turn rebuild must not add a third: only a real turn boundary re-arms.
+        player.markSchedulingBoundaryForTesting()
+        XCTAssertEqual(player.schedulingBoundaryCount, 2,
+                       "an extra frame inside the same turn must not log another boundary")
+    }
+
+    /// A mid-turn node rebuild must NOT re-arm the boundary. `stopEngine` also runs for underrun,
+    /// render catch-up, render timeout and restart, all inside one turn — treating those as turn
+    /// boundaries logged several "first buffer" events for a single turn, which would report more
+    /// cloud turns than the user made.
+    ///
+    /// Asserted on the reason classification, which is the decision, plus the reasons seen in
+    /// production: the four mid-turn ones must be false and the four turn-ending ones true.
+    func testMidTurnNodeRebuildsDoNotEndATurn() {
+        for reason in ["underrun", "render_caught_up", "render_timeout", "restart"] {
+            XCTAssertFalse(CloudAudioPlayer.reasonEndsTurn(reason),
+                           "`\(reason)` rebuilds the node inside a turn and must not re-arm the boundary")
+        }
+        for reason in ["finish", "cancel", "cancel_during_finish", "shutdown"] {
+            XCTAssertTrue(CloudAudioPlayer.reasonEndsTurn(reason),
+                          "`\(reason)` ends a turn and must re-arm the boundary")
+        }
     }
 
     /// The re-arm must be wired to the real turn boundary, not only to the test hook. `stopEngine`

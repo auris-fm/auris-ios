@@ -944,6 +944,22 @@ final class CloudAudioPlayer: @unchecked Sendable {
         }
     }
 
+    /// Whether this teardown reason ends a turn, as opposed to rebuilding the node inside one.
+    ///
+    /// The distinction is the whole point of the per-turn scheduling boundary: `underrun`,
+    /// `render_caught_up`, `render_timeout` and `restart` are mid-turn node rebuilds, and treating
+    /// them as turn boundaries reported more first-buffer events than there were turns. Named
+    /// reasons rather than a `terminal` flag, because `finish` and `cancel` are terminal while
+    /// `shutdown` is terminal too but ends no turn that could follow.
+    static func reasonEndsTurn(_ reason: String) -> Bool {
+        switch reason {
+        case "finish", "cancel", "cancel_during_finish", "shutdown":
+            return true
+        default:
+            return false
+        }
+    }
+
     private func stopEngine(reason: String, terminal: Bool = false) {
         // Either natural branch can observe catch-up: the early underrun check can win
         // before the later render_caught_up check. Capture the actual position before either
@@ -982,9 +998,13 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // count returns to zero with it.
         nodeIncarnation &+= 1
         nodeIncarnationFrames = 0
-        // The node is rebuilt here, which is the boundary between turns: the next scheduled buffer
-        // belongs to a new turn and should be logged as such.
-        cloudSchedulingLogged = false
+        // NOT every teardown ends a turn. `stopEngine` also runs for underrun, render catch-up,
+        // render timeout and restart, all of which happen WITHIN one turn while the node is
+        // rebuilt. Re-arming there would log several "first buffer" events for a single turn, so
+        // the boundary is limited to the reasons that actually end one.
+        if Self.reasonEndsTurn(reason) {
+            cloudSchedulingLogged = false
+        }
         echoReferenceHandoff?.rotateIncarnation(for: .cloud, to: nodeIncarnation)
     }
 

@@ -386,8 +386,16 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
         // the error earcon, and a refused or failed attempt never executed anything — reporting it
         // as `localActionExecuted` would tell a reader the app performed an action it declined to
         // perform, which reads as a zero-latency success.
+        //
+        // STATED LIMIT: the error earcon is not how the LOCAL sinks report most failures. They
+        // return `.silent` or `.earcon(.success)` even when the action could not be performed — a
+        // pause with nothing playing still returns `.earcon(.success)`. So `localActionExecuted`
+        // means "the executor returned a non-error response", not "the app performed the action".
+        // The only local path reaching the error earcon today is the unrecognised-intent `default`.
+        // This line therefore separates the two events where the model can distinguish them; it
+        // does not make the executed case a measurement of effect.
         if !(intent is CloudRouteIntent) {
-            let stage = response == .earcon(.error) ? "localActionFailed" : "localActionExecuted"
+            let stage = Self.localActionStage(for: response)
             FileLog.shared.addMessage("[VoicePipeline] \(stage) intent=\(type(of: intent))")
         }
 
@@ -442,6 +450,14 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
     }
 
     private func executePlayback(_ intent: PlaybackIntent) -> (response: VoiceResponse, fact: SinkActionFact?) {
+    /// Names what the local path did, from the only signal the response model carries. Split out
+    /// so the classification can be controlled without capturing log output, and so the limit is
+    /// in one place: "executed" states that the executor returned a non-error response, not that
+    /// the app performed the action.
+    static func localActionStage(for response: VoiceResponse) -> String {
+        response == .earcon(.error) ? "localActionFailed" : "localActionExecuted"
+    }
+
         switch intent {
         case .pause:
             return playbackSink.pauseWithFact()
