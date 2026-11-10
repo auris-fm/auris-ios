@@ -638,9 +638,6 @@ final class CloudRouteClient {
         // leaving it set would offer a consumed socket to the next turn.
         earlyConnection = nil
 
-        // The instant this connection is requested, on the client clock. This is the stamp the
-        // freshness rule is measured from, and it is taken for every connection, inherited or not.
-        let upgradeRequestedAt = now()
         let wsTask: WebSocketTasking
         if let inheritedTask {
             // Already connecting since the early open: no new handshake, which is the whole point.
