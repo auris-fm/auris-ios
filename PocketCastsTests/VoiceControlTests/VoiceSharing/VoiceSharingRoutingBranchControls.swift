@@ -172,13 +172,21 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
             conversionVersion: "v1")
     }
 
-    private func makeCollector() -> VoiceSharingCollector {
+    /// A collector whose gate and sink are the caller's. The default sink only RECORDS, which is
+    /// fine for controls about the collector itself but is a trap for any control that asserts on
+    /// what reaches the queue: a recording sink cannot create a queue entry, so its absence would
+    /// prove nothing.
+    private func makeCollector(
+        isCollectionPermitted: @escaping () -> Bool = { true },
+        sink: ((VoiceSharingCollector.SegmentEvent) -> Void)? = nil
+    ) -> VoiceSharingCollector {
         let collector = VoiceSharingCollector(
-            isCollectionPermitted: { true }, outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
+            isCollectionPermitted: isCollectionPermitted,
+            outcomeWaitLimit: .init(milliseconds: 60_000, ceilingMilliseconds: 60_000),
             membership: { [weak self] in self?.state ?? VoiceSharingEnrollmentStore.State() },
             epochProvider: { "epoch-1" },
             sessionIdentity: { "gen-A" },
-            sink: { [weak self] event in self?.collected.append(event) })
+            sink: sink ?? { [weak self] event in self?.collected.append(event) })
         collector.deliversSynchronouslyForTesting = true
         return collector
     }
@@ -334,6 +342,12 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
     /// the second guard produces the same outcome. Isolation was tried and is not observable here; the
     /// spec accepts that, and defence in depth is intended, so the honest claim is the outcome rather
     /// than a mechanism this suite cannot name.
+    ///
+    /// The third outcome the spec names — an upload already in flight is CANCELLED — is not asserted
+    /// here, because it needs a transfer genuinely suspended mid-flight. It is covered by
+    /// `VoiceSharingGateLossScopeControls.test_fActualLossStopsASuspendedDrainBeforeTheWire`, which
+    /// holds a real drain at credential acquisition across the production consent-loss fan-out and
+    /// asserts zero requests reach the wire.
     func test_consentLossRetainsNoRecordingAndSendsNoRequest() async throws {
         let suite = "routing-lifetime-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
@@ -386,12 +400,20 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
                 isAuthorized: { [weak self] in self?.gateOpen ?? false })
             trigger = t
             weakTrigger = t
-            collector = makeCollector()
-            weakCollector = collector
             sink = VoiceSharingDirectSink(
                 queue: queue, isEnabled: { [weak self] in self?.gateOpen ?? false },
                 encoderProvenance: { self.provenance }, requestUploadDrain: {})
             weakSink = sink
+            // The collector feeds the REAL sink and reads the same gate the rest of the pipeline
+            // does. Without that connection a completed segment cannot reach the queue at all, so
+            // "no queue entry" would hold whether or not consent was ever checked.
+            collector = makeCollector(
+                isCollectionPermitted: { [weak self] in self?.gateOpen ?? false },
+                sink: { [weak sink] event in
+                    let capture: VoiceSharingDirectSink? = sink
+                    Task { await capture?.handle(event) }
+                })
+            weakCollector = collector
             let model = VoiceSharingSettingsModel(
                 queue: queue, isCollectionPermitted: { [weak self] in self?.gateOpen ?? false },
                 isAccountEnrolled: { true }, isLocallyOptedIn: { false },
@@ -406,6 +428,14 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
             weakLifetime = service?.voiceSharingLifetime
         }
         XCTAssertEqual(coordinator.gateLostHandlerCountForTesting, registryBaseline + 1)
+
+        // A capture is opened while consent is still real, so the completion below has a genuine
+        // in-progress segment to refuse. Opening it AFTER the loss would be refused at
+        // `speechStarted` and would say nothing about the completion path.
+        guard let openContext = collector.speechStarted(confirmationFrameSamples: 640) else {
+            return XCTFail("setup: a permitted collector must open a capture")
+        }
+
 
         // Consent ends through the PRODUCTION fan-out, exactly as a withdrawal or sign-out reaches
         // every pipeline owner.
@@ -427,22 +457,32 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         // cancelled. Whether an object is still resident is not a claim this suite can make — the
         // retention assertions here were measuring ARC and the build configuration, not consent.
         //
-        // A newly completed segment must create no queue entry.
-        let sentBefore = withdrawnSendCount
-        // A started segment, closed after consent is gone, must not become a kept recording. It is
-        // started first so there is a real in-progress capture to refuse — starting it after the gate
-        // closed would be refused at open and prove nothing about the completion path.
-        collector.speechStarted(confirmationFrameSamples: 640)
-        let segmentsBeforeLoss = collected.count
-        gateOpen = false
-        coordinator.consentGateLostForTesting()
-        collector.speechCompleted([Float](repeating: 0.4, count: 16_000), context: nil)
+        // A segment opened before the loss and closed after it must be kept nowhere. The collector is
+        // wired to the REAL sink here, so a segment that survived would become a QUEUE ENTRY — not
+        // merely an in-memory event this suite happens to hold.
+        //
+        // The completion is refused at the first guard it meets, not at one in particular: consent
+        // loss has already made the open capture terminal, so the late outcome is emitted as a
+        // cancellation and the sink drops it. Isolation between those guards is not observable, and
+        // the spec accepts the outcome instead of a named mechanism.
+        collector.speechCompleted([Float](repeating: 0.4, count: 16_000), context: openContext)
+        // The sink is off-callback and delivers on a Task, so give the handoff a chance to land
+        // before asserting absence — otherwise the empty queue is the scheduler's timing.
+        try? await Task.sleep(nanoseconds: 300_000_000)
         let entriesAfterConsentLoss = await queue.entries()
         XCTAssertTrue(entriesAfterConsentLoss.isEmpty,
                       "a segment completed after consent loss must be kept nowhere")
-        // A trigger must produce no request.
+
+        // A trigger must produce no request — with work of its own to refuse, so a zero here is
+        // authorization being checked and not an empty queue.
+        let sentBefore = withdrawnSendCount
+        _ = try await AudioFixture.makeReadyEntry(in: queue)
+        let refusedWork = await queue.count()
+        XCTAssertEqual(refusedWork, 1, "setup: the refusal below must have a recording to refuse")
         trigger?.trigger()
-        await waitUntil("the post-consent-loss pass settles", timeout: 1.5) { !(trigger?.hasPendingOrRunningWorkForTesting ?? false) }
+        await waitUntil("the post-consent-loss pass settles", timeout: 2) {
+            !(trigger?.hasPendingOrRunningWorkForTesting ?? false)
+        }
         XCTAssertEqual(withdrawnSendCount, sentBefore,
                        "no upload request may leave after consent loss")
         // The behaviour above is the contract. A registration or a resident object still being held
