@@ -45,22 +45,29 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
     /// sites trapped the process.
     ///
     /// The sink is now reached through an optional protocol member defaulting to nil. This control
-    /// asserts what the production sites actually depend on: that the lookup is reachable and yields
-    /// the safe answer for a conformer that has no sink. It deliberately does NOT claim to exercise
-    /// the service's barge-in/suppression bodies, which need the full audio wiring; those are covered
-    /// by source inspection, as review noted.
+    /// drives the PRODUCTION lookup — the service's `cloudRouteSink`, which reads the protocol
+    /// member — over the full assembled service with a conformer that has no sink. A control that
+    /// only read the protocol member directly could not fail if production went back to a
+    /// downcast: the downcast lives in the service, not the protocol. Through the service, a
+    /// restored `as!` traps on exactly this executor and the control fails.
+    /// It deliberately does NOT claim to exercise the service's barge-in/suppression bodies, which
+    /// need the full audio wiring; those are covered by source inspection, as review noted.
     @MainActor
     func test_anExecutorWithoutACloudSinkIsHandledRatherThanTrapped() {
         let plain: any VoiceIntentExecuting = StubExecutor()
         let sink = plain.cloudRouteSinkAccess
         XCTAssertNil(sink, "a conformer that declares no sink reports nil rather than trapping")
         // The exact optional-chaining the production sites perform. A missing sink must read as
-        // "not suppressed" and "not interrupted" — never as a denial or an interruption.
+        // "not suppressed" — never as a denial.
         XCTAssertFalse(sink?.isSuppressedForTesting(nil) ?? false,
                        "no sink must not be read as a suppression")
-        let interrupted: String? = sink.map { _ in "impossible" }
-        XCTAssertNil(interrupted, "no sink yields no interruption")
-        XCTAssertFalse(interrupted != nil, "so the caller reports not-interrupted")
+
+        // The REAL lookup path, assembled as the app assembles it. Traps if the optional member
+        // is ever replaced by a downcast again.
+        let service = VoiceControlAssembly().buildVoiceControlService(injectedExecutor: plain)
+        XCTAssertNotNil(service, "the assembly must build a service around a conformer with no sink")
+        XCTAssertNil(service?.cloudRouteSink,
+                     "the service must read the sink through the protocol member, not a downcast")
     }
 
     // MARK: - Harness

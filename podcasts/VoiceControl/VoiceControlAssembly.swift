@@ -48,6 +48,10 @@ class VoiceControlAssembly {
         onInputTerminal: (@Sendable (IntentRoutingInput, VoiceControlService.InputTerminalOutcome) -> Void)? = nil,
         parsedIntentObserverFactory: (@Sendable (IntentRoutingInput) -> VoiceControlService.ParsedIntentObserver?)? = nil,
         preparedObserverFactory: (@Sendable (IntentRoutingInput) -> CloudRouteSink.PreparedObserver?)? = nil,
+        // Test-only injection: a control that must prove the service reads the sink through the
+        // protocol's optional member (never a downcast) supplies a conformer that has no sink.
+        // Nil in production — the real executor is built unchanged.
+        injectedExecutor: (any VoiceIntentExecuting)? = nil,
         isPlaybackActive: @escaping () -> Bool = { PlaybackManager.shared.isAudioSessionInUse },
         // Test-only injection: a control replaces the MODEL's decision while keeping the rest of
         // the pipeline (capture registration, routing, provenance) real. Without this a control
@@ -347,7 +351,7 @@ class VoiceControlAssembly {
         // the router classified from an English utterance) supplies a recording sink. Nil in
         // production — the real manager-backed sink is used unchanged.
         let playbackSink = injectedPlaybackSink ?? PlaybackManagerSink(playbackManager: playbackManager)
-        let executor = VoiceIntentExecutor(
+        let executor = injectedExecutor ?? VoiceIntentExecutor(
             playbackSink: playbackSink,
             effectsSink: EffectsManagerSink(playbackManager: playbackManager),
             volumeSink: VolumeManagerSink(),
