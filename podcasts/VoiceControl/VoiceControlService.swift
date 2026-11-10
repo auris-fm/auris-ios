@@ -1208,7 +1208,7 @@ class VoiceControlService: ObservableObject {
                     outcome: .init(state: "completed", reason: nil,
                                    routingDisposition: "refused",
                                    predictedIntent: VoiceAnalytics.predictedIntentName(from: intent),
-                                   predictedTool: VoiceAnalytics.toolName(from: intent)),
+                                   predictedTool: VoiceAnalytics.predictedToolName(from: intent)),
                     context: captureContext)
                 contributionCollector?.engineReported(
                     stage: "execution",
@@ -1242,7 +1242,7 @@ class VoiceControlService: ObservableObject {
             let (response, executionVerdict) = await executor.executeWithVerdict(intent, preparedObserver: preparedObserver)
             reportExecution(executionVerdict, captureContext: captureContext,
                             predictedIntent: VoiceAnalytics.predictedIntentName(from: intent),
-                            predictedTool: VoiceAnalytics.toolName(from: intent))
+                            predictedTool: VoiceAnalytics.predictedToolName(from: intent))
             // SUBMIT the retained follow-UP (cloud-assistant.md → Interruption, ).
             // When the turn that just settled was interrupted, the interrupting utterance was held
             // until its acknowledgement — a `done` for the prior turn, even `completed`, is that
@@ -1284,7 +1284,7 @@ class VoiceControlService: ObservableObject {
                 let (response, executionVerdict) = await executor.executeWithVerdict(intent, preparedObserver: preparedObserver)
                 reportExecution(executionVerdict, captureContext: captureContext,
                                 predictedIntent: VoiceAnalytics.predictedIntentName(from: intent),
-                                predictedTool: VoiceAnalytics.toolName(from: intent))
+                                predictedTool: VoiceAnalytics.predictedToolName(from: intent))
                 // Same bridge on every executor path: an interruption resolved by THIS turn must
                 // reach its follow-up whichever intent produced it.
                 await submitRetainedFollowUpIfAny()

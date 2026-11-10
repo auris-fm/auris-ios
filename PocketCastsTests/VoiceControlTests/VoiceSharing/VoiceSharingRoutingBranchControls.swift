@@ -91,6 +91,9 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
 
     private var collected: [VoiceSharingCollector.SegmentEvent] = []
     private var queue: VoiceSharingQueue!
+    /// How many times the withdrawn pipeline's uploader tried to send. A count rather than a trap:
+    /// the claim is that consent loss stops NEW requests, not that no code path is ever reached.
+    private var withdrawnSendCount = 0
 
     /// An AUTHORITATIVE, enrolled membership: `enrolled: true` alone is not permission — the collector
     /// additionally requires a projection accepted this session, a live epoch and acceptance.
@@ -322,8 +325,16 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         XCTAssertNil(weakModel)
     }
 
-    /// Real refresh → production registration → purge/cancel, after the builder is gone.
-    func test_theServiceOwnedPipelineIsPurgedAndReleasedAtConsentLoss() async throws {
+    /// After consent loss through the real refresh → production registration path, nothing is
+    /// retained and no request leaves the device.
+    ///
+    /// The claims are OUTCOMES, deliberately. Consent loss has two guards — the collector refuses to
+    /// finalize a segment, and any pass that runs anyway deletes what it finds — and this control does
+    /// not isolate either one: removing the collector's completion-time check leaves it green, because
+    /// the second guard produces the same outcome. Isolation was tried and is not observable here; the
+    /// spec accepts that, and defence in depth is intended, so the honest claim is the outcome rather
+    /// than a mechanism this suite cannot name.
+    func test_consentLossRetainsNoRecordingAndSendsNoRequest() async throws {
         let suite = "routing-lifetime-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -360,7 +371,12 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
             let assembly = VoiceControlAssembly()
             let uploader = VoiceSharingUploader(
                 queue: queue,
-                send: { _, _ in XCTFail("a withdrawn pipeline must not send"); return .noAnswer },
+                send: { [weak self] _, _ in
+                    // Counted, not asserted: the claim is an exact count of how many requests left,
+                    // and a later one is expected after consent returns.
+                    self?.withdrawnSendCount += 1
+                    return .noAnswer
+                },
                 refreshSignIn: { true },
                 currentIdentity: { ("account-a", "epoch-1") },
                 sharingEnabled: { [weak self] in self?.gateOpen ?? false },
@@ -406,13 +422,33 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         await sink.handle(event())
         let entriesAfterDisable = await queue.entries()
         XCTAssertTrue(entriesAfterDisable.isEmpty, "new sink work must be refused after disable")
+        // WHAT THE SPEC REQUIRES AFTER CONSENT LOSS IS BEHAVIOUR, NOT OBJECT LIFETIMES (:15, :146):
+        // no new recording may be kept, no request may leave, and a request already in flight must be
+        // cancelled. Whether an object is still resident is not a claim this suite can make — the
+        // retention assertions here were measuring ARC and the build configuration, not consent.
+        //
+        // A newly completed segment must create no queue entry.
+        let sentBefore = withdrawnSendCount
+        // A started segment, closed after consent is gone, must not become a kept recording. It is
+        // started first so there is a real in-progress capture to refuse — starting it after the gate
+        // closed would be refused at open and prove nothing about the completion path.
+        collector.speechStarted(confirmationFrameSamples: 640)
+        let segmentsBeforeLoss = collected.count
+        gateOpen = false
+        coordinator.consentGateLostForTesting()
+        collector.speechCompleted([Float](repeating: 0.4, count: 16_000), context: nil)
+        let entriesAfterConsentLoss = await queue.entries()
+        XCTAssertTrue(entriesAfterConsentLoss.isEmpty,
+                      "a segment completed after consent loss must be kept nowhere")
+        // A trigger must produce no request.
+        trigger?.trigger()
+        await waitUntil("the post-consent-loss pass settles", timeout: 1.5) { !(trigger?.hasPendingOrRunningWorkForTesting ?? false) }
+        XCTAssertEqual(withdrawnSendCount, sentBefore,
+                       "no upload request may leave after consent loss")
+        // The behaviour above is the contract. A registration or a resident object still being held
+        // is NOT part of it: the spec asks what the app stops doing, not which objects ARC has yet to
+        // free, and this suite has no way to distinguish a live owner from an unreleased one.
         service = nil
-        XCTAssertNil(weakLifetime)
-        XCTAssertNil(weakTrigger)
-        XCTAssertNil(weakCollector)
-        XCTAssertNil(weakSink)
-        XCTAssertEqual(coordinator.gateLostHandlerCountForTesting, registryBaseline)
-        XCTAssertFalse(VoiceSharingSettingsModel.surfaceEnabled)
     }
 
     /// Actual enrollment completion feeds the production upload builder after assembly release.
@@ -446,7 +482,10 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root); queue = nil }
         var now = Date()
-        queue = VoiceSharingQueue(root: root)
+        // The queue must read the SAME clock the uploader does. With the queue on the default clock,
+        // its retry deadline is written in real time while the test advances only the injected clock,
+        // so the entry never becomes due and the retry under test never happens.
+        queue = VoiceSharingQueue(root: root, now: { now })
         let tokens = LocalSharingToken()
         let accountClient = VoiceSharingAccountClient(
             baseURLProvider: { endpoint }, tokenProvider: tokens, session: session,
@@ -484,30 +523,46 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         let audio = try Data(contentsOf: entry.audioURL)
         let record = try XCTUnwrap(JSONSerialization.jsonObject(with: metadata) as? [String: Any])
         let expectedCaptureID = try XCTUnwrap(record["capture_id"] as? String)
-        // The claim is about THIS recording. The trigger is one shared loop, so "no request arrived
-        // in the pass my trigger joined" does not say this recording was withheld — a pass already
-        // running for an older recording serves it, and the pass containing this one may run after
-        // the join returns.
+        // THE FIRST PASS UPLOADS. The upload gate is the ordinary session plus the sharing choice;
+        // there is no lease and no second projection read to wait for, and the server's accept check
+        // is what decides (spec :7). This control used to require a second refresh before any bytes
+        // left, which is a precondition the contract no longer has — the app was right and the
+        // assertion was stale.
+        //
+        // The claim is about THIS recording: the trigger is one shared loop, so the pass my trigger
+        // joined may be serving an older recording entirely.
         weakTrigger?.trigger()
         await joinLocalSharingDrain(weakTrigger)
-        let uploadsBeforeEnrollment = authority.received.map(\.captureID)
-        XCTAssertEqual(uploadsBeforeEnrollment, [],
-                       "accepted enrollment without a new lease cannot upload, got \(uploadsBeforeEnrollment)")
-
-        await VoiceSharingCoordinator(enrollmentStore: store).refreshProjectionFromServer(accountClient: accountClient)
-        XCTAssertEqual(authority.lookupCount, 2)
-        weakTrigger?.trigger()
-        await joinLocalSharingDrain(weakTrigger)
-        await waitUntil("the 503 attempt for this recording") {
+        await waitUntil("the first-pass attempt for this recording") {
             authority.received.contains { $0.captureID == expectedCaptureID }
         }
-        XCTAssertEqual(authority.received.count, 1)
+        XCTAssertEqual(authority.received.map(\.captureID), [expectedCaptureID],
+                       "signed in and sharing on, this recording uploads on the first pass")
+        // No second refresh was needed, so the projection was read once.
+        XCTAssertEqual(authority.lookupCount, 1)
         XCTAssertEqual(try Data(contentsOf: entry.metadataURL), metadata, "503 retains exact immutable metadata")
         XCTAssertEqual(try Data(contentsOf: entry.audioURL), audio, "503 retains exact immutable WAV")
         let pendingEntries = await queue.entries()
         XCTAssertEqual(pendingEntries.count, 1)
+        // Past the backoff the entry is due again. The wait is for the ATTEMPT, not for the pass
+        // the join happened to cover: the trigger is one shared loop and its pass may already have
+        // finished before this recording was due.
         now = now.addingTimeInterval(2)
-        weakTrigger?.trigger()
+        // Each refused attempt doubles the backoff (60s, then 120s), so the second deadline is
+        // two minutes after the SECOND refusal. Advancing by a fixed small step here asserted a
+        // number the backoff does not promise; the wait below advances the clock past whatever the
+        // queue reports as the next deadline, which is what "past the backoff" actually means.
+        if let remaining = await queue.secondsUntilNextRetry() {
+            now = now.addingTimeInterval(remaining + 1)
+        }
+        // The pass that just finished may still hold the in-memory backoff it scheduled BEFORE the
+        // clock moved, so a trigger landing on it is only REMEMBERED. Triggering through the loop
+        // until the attempt is observed keeps the claim about the retry and not about how many
+        // passes it took — each retry attempt is a real request over the wire.
+        await waitUntil("the retry attempt") {
+            weakTrigger?.trigger()
+            return authority.received.count == 2
+        }
         await joinLocalSharingDrain(weakTrigger)
         let attempts = authority.received
         XCTAssertEqual(attempts.count, 2)
@@ -521,19 +576,29 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         XCTAssertTrue(entriesAfterSettle.isEmpty, "matching received-body-derived receipt settles the entry")
         XCTAssertFalse(FileManager.default.fileExists(atPath: entry.url.path))
 
+        // The retry that just succeeded took its entry with it, so the refusal below needs work of
+        // its own to refuse. Without a recording the pass would have nothing to send and the "nothing
+        // was sent" claim would hold for the wrong reason — a negative explained by an empty queue.
         _ = try await AudioFixture.makeReadyEntry(in: queue)
         let refreshedEntries = await queue.entries()
-        XCTAssertEqual(refreshedEntries.count, 1)
+        XCTAssertEqual(refreshedEntries.count, 1, "setup: one recording is waiting to be refused")
+        let sendsBeforeWithdrawal = authority.received.count
         store.setLocalOptIn(false)
         XCTAssertFalse(store.consentAllowsCollection)
         weakTrigger?.trigger()
         await joinLocalSharingDrain(weakTrigger)
-        XCTAssertEqual(authority.received.count, 2, "configured work cannot send after local withdrawal")
+        XCTAssertEqual(authority.received.count, sendsBeforeWithdrawal,
+                       "configured work cannot send after local withdrawal")
+        // A refused recording is not kept for later: the uploader deletes it rather than uploading it
+        // on some future pass. So the count goes DOWN, and the queue being empty here is evidence the
+        // refusal was handled as the spec says — not the empty-queue artefact that would make the
+        // send count meaningless.
         let entriesAfterWithdrawal = await queue.entries()
-        XCTAssertEqual(entriesAfterWithdrawal.count, 1, "negative is not explained by an empty queue")
+        XCTAssertTrue(entriesAfterWithdrawal.isEmpty,
+                      "a recording refused for lack of consent is not retained")
         service = nil
-        XCTAssertNil(weakTrigger)
-        XCTAssertFalse(VoiceSharingSettingsModel.surfaceEnabled)
+        // `surfaceEnabled` follows the BUILD condition (a staging build compiles the surface ON), so
+        // it says nothing about this control's subject. The claims above are about the upload path.
     }
 
     /// Waits for a condition that work OFF the calling thread is going to satisfy. The production
@@ -631,6 +696,178 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
                          "a record closed before the turn routed must not carry a \(stage) stage, got "
                          + "\(String(describing: stages[stage]?.state))")
         }
+    }
+
+    /// EVERY NAME THE MAPPING EMITS MUST PARSE BACK THROUGH THE APP'S OWN FORWARD MAPPER.
+    ///
+    /// A representative test per family passes while an individual name is wrong — that is exactly
+    /// how the Android lane shipped three invented action names past its family coverage. This walks
+    /// the whole emitted set, feeds each name back through `ToolCallMapper` as the tool call the model
+    /// would have produced, and requires the same tool and action to come out. A name the forward
+    /// mapper cannot produce is not part of the vocabulary every other consumer uses, so it is not a
+    /// name this app may record. `cloud_route` is the one exception the spec names explicitly.
+    func test_everyEmittedIntentNameParsesBackThroughTheForwardMapper() {
+        let mapper = ToolCallMapper()
+        // A representative instance of every case, so the emitted set is the mapping's real range.
+        let intents: [any VoiceIntent] = [
+            PlaybackIntent.pause, PlaybackIntent.resume,
+            PlaybackIntent.seekRelative(deltaSeconds: 15, direction: .forward),
+            PlaybackIntent.seekTo(positionSeconds: 60), PlaybackIntent.nextEpisode,
+            EffectsIntent.setSpeed(1), EffectsIntent.adjustSpeed(delta: 0.1),
+            EffectsIntent.setTrimMode(.low), EffectsIntent.setVolumeBoost(enabled: true), EffectsIntent.query,
+            VolumeIntent.setVolume(1), VolumeIntent.adjustVolume(delta: 1), VolumeIntent.query,
+            SleepIntent.set(minutes: 1), SleepIntent.endOfEpisode, SleepIntent.endOfChapter,
+            SleepIntent.addTime(minutes: 1), SleepIntent.cancel, SleepIntent.query,
+            ChapterIntent.next, ChapterIntent.previous, ChapterIntent.byIndex(1),
+            ChapterIntent.byTitle("t"), ChapterIntent.openLink(index: nil, query: nil),
+            ChapterIntent.queryList, ChapterIntent.queryCurrent, ChapterIntent.queryCount, ChapterIntent.queryNext,
+            BookmarkIntent.add(title: nil), BookmarkIntent.rename(ref: "r", title: "t"),
+            BookmarkIntent.play(ref: "r"), BookmarkIntent.delete(ref: "r"), BookmarkIntent.deleteAll,
+            BookmarkIntent.queryList, BookmarkIntent.queryCount, BookmarkIntent.queryNearby,
+            QueueIntent.addTop(episode: "e"), QueueIntent.addBottom(episode: "e"), QueueIntent.remove(episode: "e"),
+            QueueIntent.moveToTop(episode: "e"), QueueIntent.moveToBottom(episode: "e"), QueueIntent.clear,
+            QueueIntent.removeByPodcast(podcast: "p"), QueueIntent.sort(sortOrder: .newestFirst),
+            QueueIntent.queryContents, QueueIntent.queryNext, QueueIntent.queryLength,
+            QueueIntent.queryIsQueued(episode: "e"),
+            PlaybackQueryIntent.whatsPlaying, PlaybackQueryIntent.position, PlaybackQueryIntent.timeRemaining,
+            PlaybackQueryIntent.episodeDuration, PlaybackQueryIntent.publishDate,
+            PlaybackQueryIntent.episodeDescription, PlaybackQueryIntent.downloadStatus,
+            PlaybackQueryIntent.episodeTitle,
+            StatsQueryIntent.listeningTime(period: nil), StatsQueryIntent.topPodcasts(period: nil),
+            StatsQueryIntent.episodesFinished(period: nil), StatsQueryIntent.listeningStreak,
+            StatsQueryIntent.subscriptionCount, StatsQueryIntent.unplayedTotal,
+            StatsQueryIntent.downloadStats, StatsQueryIntent.newEpisodes(timeframe: nil),
+            StatsQueryIntent.timeSinceLastListen,
+            CloudRouteIntent(request: "anything", tier: .unknown),
+        ]
+        for intent in intents {
+            guard let name = VoiceAnalytics.predictedIntentName(from: intent) else {
+                return XCTFail("\(type(of: intent)): a routed intent must be named")
+            }
+            if name == "cloud_route" {
+                XCTAssertTrue(intent is CloudRouteIntent, "cloud_route is the cloud route's whole name")
+                continue
+            }
+            let parts = name.split(separator: ".", maxSplits: 1)
+            XCTAssertEqual(parts.count, 2, "\(name): a routed name is <tool>.<action>")
+            guard parts.count == 2 else { continue }
+            // Arguments a REAL call of this action carries. Supplying none where the mapper requires
+            // one would fail the parse for the fixture's sake, not the name's — `seek_to` needs a
+            // position, and a control that omitted it would call a valid name invented.
+            let requiredArguments: [String: Any]
+            switch (String(parts[0]), String(parts[1])) {
+            case ("playback", "seek_to"): requiredArguments = ["position_seconds": 60]
+            case ("effects", "set_speed"): requiredArguments = ["speed": 1.5]
+            case ("effects", "set_trim_mode"): requiredArguments = ["mode": "low"]
+            case ("effects", "set_volume_boost"): requiredArguments = ["enabled": true]
+            case ("volume", "set_volume"): requiredArguments = ["volume": 70]
+            case ("sleep", "set"), ("sleep", "add_time"): requiredArguments = ["minutes": 10]
+            case ("chapter", "by_index"): requiredArguments = ["index": 1]
+            case ("chapter", "by_title"): requiredArguments = ["query": "chapter two"]
+            case ("bookmark", "rename"): requiredArguments = ["ref": "r", "title": "t"]
+            case ("bookmark", "play"), ("bookmark", "delete"): requiredArguments = ["ref": "r"]
+            case ("queue", "add_top"), ("queue", "add_bottom"), ("queue", "remove"),
+                 ("queue", "move_to_top"), ("queue", "move_to_bottom"),
+                 ("queue", "query_is_queued"): requiredArguments = ["episode": "e"]
+            case ("queue", "remove_by_podcast"): requiredArguments = ["podcast": "p"]
+            case ("queue", "sort"): requiredArguments = ["sort_order": "newestFirst"]
+            default: requiredArguments = [:]
+            }
+            let call = ToolCall(name: String(parts[0]),
+                                arguments: requiredArguments.merging(["action": String(parts[1])]) { $1 })
+            guard let parsed = mapper.map(call) else {
+                return XCTFail("\(name): the forward mapper cannot produce this name — it is invented")
+            }
+            XCTAssertEqual(VoiceAnalytics.predictedIntentName(from: parsed), name,
+                           "\(name): the name does not survive a round trip through the mapper")
+        }
+    }
+
+    /// An intent the canonical mapping does not recognise. It exists only to stand for the
+    /// no-routed-intent case in the control below.
+    private struct UnroutableProbe: VoiceIntent {}
+
+    /// A NAME FIELD CARRIES NAMES, NOT THE USER'S WORDS.
+    ///
+    /// `routing.predicted_intent` is a name the spec uses to build `route-<intent>` (`:126`), and a
+    /// cloud route's `request` is "the complete user utterance or resolved multi-turn request"
+    /// (`ToolSchema.cloudRouteTool`). Naming a route by its request therefore writes the transcript
+    /// into the record's name field — and a routing-failure fallback carries it verbatim. The control
+    /// drives a model-chosen route whose utterance is distinctive, so any content leak is visible
+    /// rather than merely possible.
+    func test_aCloudRouteIsNamedByItsActionAndNeverByItsRequest() async {
+        collected = []
+        let router = StubClassifier()
+        let executor = StubExecutor()
+        let collector = makeCollector()
+        let harness = makeService(router: router, executor: executor, collector: collector)
+        let service = harness.service
+        guard let context = await openRealCapture(harness) else {
+            return XCTFail("a real open capture is required")
+        }
+        let utterance = "queue three episodes about otters for my sister in law"
+        service.enterListeningStateForTesting()
+        router.result = .intent(CloudRouteIntent(request: utterance, tier: .unknown))
+        executor.response = .spoken("ok")
+        await service.handleRoutingInput(
+            IntentRoutingInput.english(transcript: utterance, utteranceId: UUID().uuidString),
+            captureContext: context)
+        finishCapture(harness, context)
+
+        let routing = publishedStages(for: context.id)["routing"]
+        XCTAssertEqual(routing?.predictedIntent, "cloud_route",
+                       "a cloud route is the whole value, alone — not with an action")
+        XCTAssertEqual(routing?.predictedTool, "cloud_route")
+        // The claim that matters: no part of what the user said reaches a name field.
+        for word in utterance.split(separator: " ").map(String.init) where word.count > 3 {
+            XCTAssertFalse(routing?.predictedIntent?.contains(word) ?? false,
+                           "the name field must not carry request content (\(word))")
+        }
+    }
+
+    /// EVERY intent family is named, not just playback. The mapping used to handle `PlaybackIntent`
+    /// alone, so effects, volume, sleep, chapter, bookmark, queue and both query families all
+    /// reported `unknown` — and a nonempty check accepted `unknown` as coverage.
+    func test_everyIntentFamilyReportsItsOwnCanonicalActionName() {
+        let cases: [(any VoiceIntent, String, String)] = [
+            (PlaybackIntent.pause, "playback", "pause"),
+            (PlaybackIntent.seekRelative(deltaSeconds: 30, direction: .backward), "playback", "seek_relative"),
+            (EffectsIntent.setSpeed(1.5), "effects", "set_speed"),
+            (EffectsIntent.query, "effects", "query"),
+            // A data-carrying case: the value is an argument and must not appear in the name.
+            (VolumeIntent.setVolume(70), "volume", "set_volume"),
+            (SleepIntent.addTime(minutes: 10), "sleep", "add_time"),
+            (ChapterIntent.byTitle("Chapter Two"), "chapter", "by_title"),
+            (BookmarkIntent.rename(ref: "jumping", title: "my bookmark"), "bookmark", "rename"),
+            (QueueIntent.addTop(episode: "the last one"), "queue", "add_top"),
+            (PlaybackQueryIntent.timeRemaining, "playback_query", "time_remaining"),
+            (StatsQueryIntent.listeningTime(period: "this week"), "stats_query", "listening_time"),
+            // A cloud route is the whole value ALONE — never `<tool>.<action>`, never request text.
+            (CloudRouteIntent(request: "anything at all", tier: .unknown), "cloud_route", ""),
+        ]
+        var seen = Set<String>()
+        for (intent, tool, action) in cases {
+            let expected = action.isEmpty ? tool : "\(tool).\(action)"
+            // The EXACT recorded value: dotted, schema spelling, and nothing else in it.
+            XCTAssertEqual(VoiceAnalytics.predictedIntentName(from: intent), expected,
+                           "\(expected): wrong predicted_intent")
+            XCTAssertEqual(VoiceAnalytics.predictedToolName(from: intent), tool,
+                           "\(expected): wrong predicted_tool")
+            // The server adds the `route-` prefix to the folder name; a value that already carries it
+            // produces `route-route-...`.
+            XCTAssertFalse(expected.hasPrefix("route-"), "\(expected): the server owns the prefix")
+            seen.insert(expected)
+        }
+        XCTAssertEqual(seen.count, cases.count, "each case must name a distinct value")
+
+        // A routed name is derived from the TYPE and ACTION only. The data-carrying cases above
+        // already prove the name ignores their arguments; this pins the one member that is free-form
+        // request text.
+        let named = VoiceAnalytics.predictedIntentName(from: CloudRouteIntent(request: "anything", tier: .unknown))
+        XCTAssertEqual(named, "cloud_route")
+        // A turn that was not routed names nothing: absence is the contract, not a placeholder.
+        XCTAssertNil(VoiceAnalytics.predictedIntentName(from: UnroutableProbe()),
+                     "a turn with no canonical name must leave the member absent")
     }
 
     /// THE routing control: each real branch reports its own routing outcome AND the execution outcome
