@@ -1,0 +1,88 @@
+# Weekly whole-repo review: redundancy, inconsistency and simplification.
+#
+# The PR review (`claude-code-review.yml`) only sees one diff at a time, so duplicated
+# mechanisms and rules that drift apart across files slip past it. This job reads the
+# whole Auris-owned code once a week and files one issue with what it finds. It changes
+# no code. The same file, differing only in the scope paragraph, lives in `core`,
+# `auris-ios` and `auris-android`; keep the three in step.
+
+name: Weekly Code Review
+
+on:
+  schedule:
+    - cron: "0 1 * * 1" # Mondays 01:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: weekly-code-review
+  cancel-in-progress: false
+
+jobs:
+  weekly-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Require configured review model
+        env:
+          REVIEW_MODEL: ${{ secrets.ANTHROPIC_MODEL }}
+        run: |
+          if [ -z "$REVIEW_MODEL" ]; then
+            echo '::error::ANTHROPIC_MODEL must be configured; no model substitution is permitted.'
+            exit 1
+          fi
+
+      - name: Checkout default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - name: Run weekly review
+        uses: anthropics/claude-code-action@833fb0f8c9f6686b33d963a8bae0a94f4936ab2a # v1.0.211
+        env:
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            COMMIT: ${{ github.sha }}
+
+            Read AGENTS.md first; it carries this repo's conventions.
+
+            Review the Auris-owned code only: `podcasts/VoiceControl/` and `PocketCastsTests/VoiceControlTests/`, plus any other file whose history shows Auris changes. The rest is upstream Pocket Casts; leave it alone unless Auris code duplicates it.
+
+            The specs live in the private `auris-fm/core` repo and are not checked out here; use the spec paths and rules the code and AGENTS.md cite, and flag code that contradicts them or that disagrees with another part of this repo.
+
+            Look for, in this order:
+            1. Redundancy: two mechanisms doing one job (two retention paths, two
+               duplicate guards, a client check the server already enforces), dead
+               code, unused configuration, routes or fields nothing reads, and docs
+               that restate a rule kept elsewhere.
+            2. Inconsistency: code that contradicts the spec or plan it implements,
+               two places in the repo that state or implement the same rule
+               differently, and comments that describe code that no longer exists.
+            3. Significant simplification: a smaller design that keeps the required
+               behaviour. Name what can be deleted and what must stay.
+
+            Skip style, formatting, naming taste and anything a linter or the PR
+            review already covers. Do not report correctness bugs unless they come
+            from a redundancy or inconsistency above. Never describe a file you did
+            not read or a command you did not run.
+
+            Output: create exactly one GitHub issue with
+            `gh issue create --title "Weekly code review $(date -u +%F)" --body-file <file>`.
+            The body opens with two or three sentences of overall verdict, then one
+            section per category above. Each finding is one bullet: `path:line`, what
+            is redundant or inconsistent, and the concrete removal or consolidation,
+            with the behaviour that must remain. Order findings by how much they
+            remove. Skip an empty section. If there are no findings, still create the
+            issue and say so in one sentence.
+          claude_args: |
+            --model ${{ secrets.ANTHROPIC_MODEL }}
+            --allowedTools "Read,Glob,Grep,Write,Bash(git log:*),Bash(git show:*),Bash(git ls-files:*),Bash(date:*),Bash(gh issue create:*)"
+
