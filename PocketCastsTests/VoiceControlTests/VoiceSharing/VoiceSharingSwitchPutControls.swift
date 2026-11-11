@@ -57,7 +57,7 @@ final class VoiceSharingSwitchPutControls: XCTestCase {
         super.tearDown()
     }
 
-    private func projectionBody(_ revision: String, enrolled: Bool, epoch: String?) -> [String: Any] {
+    private func projectionBody(enrolled: Bool, epoch: String?) -> [String: Any] {
         var body: [String: Any] = [
             "schema_version": 1, "plan": "pro",
             "voice_sharing_enrolled": enrolled,
@@ -98,7 +98,7 @@ final class VoiceSharingSwitchPutControls: XCTestCase {
     /// disclosure — and nothing about the transition the server should take.
     func test_switchOnSendsOnePutWithTheDesiredStateAndTheDisclosure() async throws {
         VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
-            Reply(status: 200, body: projectionBody("r8", enrolled: true, epoch: "e8"))
+            Reply(status: 200, body: projectionBody(enrolled: true, epoch: "e8"))
         let op = try XCTUnwrap(client.beginMembership(
             enrolled: true, acceptedDisclosureVersion: "2026-09"))
         let outcome = await client.perform(op)
@@ -122,7 +122,7 @@ final class VoiceSharingSwitchPutControls: XCTestCase {
     /// consent belongs to the enrollment the user is leaving.
     func test_switchOffSendsTheSamePutWithEnrolledFalseAndNoDisclosure() async throws {
         VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
-            Reply(status: 200, body: projectionBody("r9", enrolled: false, epoch: nil))
+            Reply(status: 200, body: projectionBody(enrolled: false, epoch: nil))
         let op = try XCTUnwrap(client.beginMembership(
             enrolled: false, acceptedDisclosureVersion: nil))
         let outcome = await client.perform(op)
@@ -143,7 +143,7 @@ final class VoiceSharingSwitchPutControls: XCTestCase {
     /// is what makes "resend" meaningful.
     func test_repeatOnResendsTheIdenticalBytes() async throws {
         VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
-            Reply(status: 200, body: projectionBody("r8", enrolled: true, epoch: "e8"))
+            Reply(status: 200, body: projectionBody(enrolled: true, epoch: "e8"))
         let op = try XCTUnwrap(client.beginMembership(
             enrolled: true, acceptedDisclosureVersion: "2026-09"))
         _ = await client.perform(op)
@@ -159,12 +159,12 @@ final class VoiceSharingSwitchPutControls: XCTestCase {
 
     // MARK: - 409 is terminal
 
-    /// A stale precondition is answered with 409 and the CURRENT projection. The client surfaces that state
-    /// and stops: it must not replay the same desired state against the newer revision, because renewing
+    /// A conflict is answered with 409 and the CURRENT projection. The client surfaces that state
+    /// and stops: it must not replay the same desired state, because renewing
     /// sharing is fresh user intent, not a retry.
-    func test_staleRevisionConflictSurfacesTheCurrentStateAndDoesNotReplay() async throws {
+    func test_conflictSurfacesTheCurrentStateAndDoesNotReplay() async throws {
         VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
-            Reply(status: 409, body: projectionBody("r12", enrolled: false, epoch: nil))
+            Reply(status: 409, body: projectionBody(enrolled: false, epoch: nil))
         let op = try XCTUnwrap(client.beginMembership(
             enrolled: true, acceptedDisclosureVersion: "2026-09"))
         let outcome = await client.perform(op)
@@ -181,7 +181,7 @@ final class VoiceSharingSwitchPutControls: XCTestCase {
     /// exactly the moment the server is telling them what the state really is.
     func test_conflictBodyIsThePlainProjectionShapeThatGetReturns() async throws {
         VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
-            Reply(status: 409, body: projectionBody("r12", enrolled: false, epoch: nil))
+            Reply(status: 409, body: projectionBody(enrolled: false, epoch: nil))
         let op = try XCTUnwrap(client.beginMembership(
             enrolled: true, acceptedDisclosureVersion: "2026-09"))
         let outcome = await client.perform(op)

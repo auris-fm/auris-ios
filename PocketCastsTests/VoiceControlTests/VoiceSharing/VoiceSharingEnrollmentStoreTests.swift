@@ -100,6 +100,8 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
     }
 
     // MARK: - Opt-in requires backend authority, not a gesture
+
+    /// The server no longer issues `membership_revision`: a current-format projection carries none, and
     /// the decoder supplies an empty one. A relaunch must still restore the remembered epoch and plan
     /// from what was persisted, without a fetch — sharing may not depend on a successful GET after
     /// every restart just because a retired field went missing.

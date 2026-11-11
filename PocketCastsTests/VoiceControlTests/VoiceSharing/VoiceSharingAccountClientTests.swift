@@ -72,7 +72,7 @@ private func deletionReceipt(_ id: String, status: String = "deletion_pending", 
     ["schema_version": version, "deletion_request_id": id, "status": status]
 }
 
-private func projection(_ revision: String, enrolled: Bool, epoch: String?, withdrawal: String) -> [String: Any] {
+private func projection(enrolled: Bool, epoch: String?, withdrawal: String) -> [String: Any] {
     var body: [String: Any] = [
         "schema_version": 1,
 
@@ -205,7 +205,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
     /// opt-in intent would be sent under account B's credential, and the server could not tell.
     func test_operationBegunUnderSessionA_refusesToRunUnderSessionB_beforeTransport() async {
         VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
-            Reply(status: 200, body: projection("r14", enrolled: true, epoch: "e14", withdrawal: "active"))
+            Reply(status: 200, body: projection(enrolled: true, epoch: "e14", withdrawal: "active"))
         let client = makeClient()
         guard let op = client.beginMembership(enrolled: true, acceptedDisclosureVersion: "2026-09") else {
             return XCTFail("no session to begin under")
@@ -223,7 +223,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
     /// from new. Begin under the first login, then move to a NEW login for the SAME account.
     func test_sameAccountNewLogin_supersedesOperationsFromTheOldLogin() async {
         VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
-            Reply(status: 200, body: projection("r6", enrolled: false, epoch: nil, withdrawal: "withdrawn"))
+            Reply(status: 200, body: projection(enrolled: false, epoch: nil, withdrawal: "withdrawn"))
         let client = makeClient()
         guard let op = client.beginMembership(enrolled: false, acceptedDisclosureVersion: nil) else {
             return XCTFail("no session")
@@ -252,7 +252,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
     /// to send at all, and reachable because the transition lands while the request is in flight.
     func test_responseArrivingAfterSessionChange_isNotApplied() async {
         VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
-            Reply(status: 200, body: projection("r13", enrolled: true, epoch: "e13", withdrawal: "active"))
+            Reply(status: 200, body: projection(enrolled: true, epoch: "e13", withdrawal: "active"))
         VoiceSharingStubProtocol.responseDelay = 0.05
         let client = makeClient()
         guard let op = client.beginMembership(enrolled: true, acceptedDisclosureVersion: "2026-09") else {
@@ -270,7 +270,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
     func test_sameAccountSameEpochNewLogin_refreshesOnceAndKeepsTheEpoch() async throws {
         VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] = Reply(
             status: 200,
-            body: projection("r8", enrolled: true, epoch: "e1", withdrawal: "active"))
+            body: projection(enrolled: true, epoch: "e1", withdrawal: "active"))
         let client = makeClient()
         // Install the membership under the FIRST login (epoch e1).
         let firstFetch = await client.fetchProjection()
@@ -304,7 +304,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
     /// account's projection. Also asserts no request at all when there is no authenticated session.
     func test_getProjection_transitionDuringFetch_isDropped() async {
         VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] =
-            Reply(status: 200, body: projection("r7", enrolled: true, epoch: "e1", withdrawal: "active"))
+            Reply(status: 200, body: projection(enrolled: true, epoch: "e1", withdrawal: "active"))
         let client = makeClient()
         VoiceSharingStubProtocol.onRequest = { [weak self] in
             self?.identity = "gen-B"
@@ -324,7 +324,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
     /// read as enrollment, so the strict boolean check rejects it before any decision is made.
     func test_projection_numericBoolBridging_isRejected() {
         func bytes(_ o: [String: Any]) -> Data { (try? JSONSerialization.data(withJSONObject: o)) ?? Data() }
-        var numeric = projection("r1", enrolled: true, epoch: "e1", withdrawal: "active")
+        var numeric = projection(enrolled: true, epoch: "e1", withdrawal: "active")
         numeric["voice_sharing_enrolled"] = 1          // integer masquerading as JSON true
         XCTAssertNil(VoiceSharingAccountClient.decodeProjection(bytes(numeric)),
                      "an Int 1 must not bridge into permission")
@@ -332,14 +332,14 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         XCTAssertNil(VoiceSharingAccountClient.decodeProjection(bytes(numeric)))
 
         // Empty-but-present values are not "present": they carry no authority.
-        var blanks = projection("r1", enrolled: true, epoch: "", withdrawal: "active")
+        var blanks = projection(enrolled: true, epoch: "", withdrawal: "active")
         XCTAssertNil(VoiceSharingAccountClient.decodeProjection(bytes(blanks)))
         // Active enrollment whose accepted disclosure is missing cannot be honored.
-        var noDisclosure = projection("r1", enrolled: true, epoch: "e1", withdrawal: "active")
+        var noDisclosure = projection(enrolled: true, epoch: "e1", withdrawal: "active")
         noDisclosure.removeValue(forKey: "accepted_disclosure_version")
         XCTAssertNil(VoiceSharingAccountClient.decodeProjection(bytes(noDisclosure)))
         // enrolled=true with withdrawal_state=withdrawn is a contradiction, not permission.
-        XCTAssertNil(VoiceSharingAccountClient.decodeProjection(bytes(projection("r1", enrolled: true, epoch: "e1", withdrawal: "withdrawn"))))
+        XCTAssertNil(VoiceSharingAccountClient.decodeProjection(bytes(projection(enrolled: true, epoch: "e1", withdrawal: "withdrawn"))))
     }
 
 
@@ -411,13 +411,13 @@ final class VoiceSharingAccountClientTests: XCTestCase {
     /// `intValue` truncates: a schema_version of 1.5 must not read as 1.
     func test_schemaVersion_rejectsFractionalAndBridgedValues() {
         func bytes(_ o: [String: Any]) -> Data { (try? JSONSerialization.data(withJSONObject: o)) ?? Data() }
-        var fractional = projection("r1", enrolled: true, epoch: "e1", withdrawal: "active")
+        var fractional = projection(enrolled: true, epoch: "e1", withdrawal: "active")
         fractional["schema_version"] = 1.5
         XCTAssertNil(VoiceSharingAccountClient.decodeProjection(bytes(fractional)), "1.5 must not satisfy schema 1")
-        var boolish = projection("r1", enrolled: true, epoch: "e1", withdrawal: "active")
+        var boolish = projection(enrolled: true, epoch: "e1", withdrawal: "active")
         boolish["schema_version"] = true      // bridges to Int 1 under `as? Int`/intValue
         XCTAssertNil(VoiceSharingAccountClient.decodeProjection(bytes(boolish)))
-        var stringy = projection("r1", enrolled: true, epoch: "e1", withdrawal: "active")
+        var stringy = projection(enrolled: true, epoch: "e1", withdrawal: "active")
         stringy["schema_version"] = "1"
         XCTAssertNil(VoiceSharingAccountClient.decodeProjection(bytes(stringy)))
 
@@ -431,7 +431,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
 
     func test_getProjection_decodesAuthoritativeFields() async {
         VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] =
-            Reply(status: 200, body: projection("r7", enrolled: true, epoch: "e1", withdrawal: "active"))
+            Reply(status: 200, body: projection(enrolled: true, epoch: "e1", withdrawal: "active"))
         let fetched = await makeClient().fetchProjection()
         let membership = fetched?.membership
         XCTAssertEqual(membership?.enrollmentEpoch, "e1")
@@ -448,9 +448,9 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         XCTAssertNil(VoiceSharingAccountClient.decodeProjection(bytes(["schema_version": 2])))
         XCTAssertNil(VoiceSharingAccountClient.decodeProjection(bytes(["nothing": "relevant"])))
         // enrolled=true with no epoch cannot authorize collection (records key on epoch).
-        XCTAssertNil(VoiceSharingAccountClient.decodeProjection(bytes(projection("r1", enrolled: true, epoch: nil, withdrawal: "active"))))
+        XCTAssertNil(VoiceSharingAccountClient.decodeProjection(bytes(projection(enrolled: true, epoch: nil, withdrawal: "active"))))
         // withdrawn + not enrolled is a legal shape and must parse as not-enrolled.
-        let ok = VoiceSharingAccountClient.decodeProjection(bytes(projection("r2", enrolled: false, epoch: nil, withdrawal: "withdrawn")))
+        let ok = VoiceSharingAccountClient.decodeProjection(bytes(projection(enrolled: false, epoch: nil, withdrawal: "withdrawn")))
         XCTAssertEqual(ok?.voiceSharingEnrolled, false)
         XCTAssertEqual(ok?.withdrawalState, .withdrawn)
     }
@@ -462,11 +462,11 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty, "no bearer means no call at all")
     }
 
-    /// Spec rule: a 409 conflict returns the current projection and must not be auto-replayed against the
-    /// newer revision — renewed opt-in requires fresh user intent. Assert exactly one request was made.
+    /// Spec rule: a 409 conflict returns the current projection and must not be auto-replayed —
+    /// renewed opt-in requires fresh user intent. Assert exactly one request was made.
     func test_conflict_returnsCurrentProjection_andNeverAutoReplays() async {
         VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
-            Reply(status: 409, body: projection("r9", enrolled: false, epoch: nil, withdrawal: "withdrawn"))
+            Reply(status: 409, body: projection(enrolled: false, epoch: nil, withdrawal: "withdrawn"))
         guard let op = clientForTest.beginMembership(enrolled: true, acceptedDisclosureVersion: "2026-09") else { return XCTFail("no session to begin under") }
         let outcome = await clientForTest.perform(op)
         switch outcome {
@@ -537,12 +537,12 @@ final class VoiceSharingAccountClientTests: XCTestCase {
 
     // MARK: - Race controls named by the spec
 
-    /// Delayed FIRST delivery of an earlier opt-in landing after a withdrawal: the server rejects it via the
-    /// stale expected revision, and the client shows the conflict without resurrecting enrollment.
+    /// Delayed FIRST delivery of an earlier opt-in landing after a withdrawal: the server answers it with
+    /// 409 and the current projection, and the client shows the conflict without resurrecting enrollment.
     func test_delayedFirstDeliveryEnrollment_afterWithdrawal_cannotReactivate() async {
-        // User withdrew; server advanced to r9 with withdrawal_state=withdrawn.
+        // User withdrew; the server's current state has withdrawal_state=withdrawn.
         VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
-            Reply(status: 409, body: projection("r9", enrolled: false, epoch: nil, withdrawal: "withdrawn"))
+            Reply(status: 409, body: projection(enrolled: false, epoch: nil, withdrawal: "withdrawn"))
         guard let op = clientForTest.beginMembership(enrolled: true, acceptedDisclosureVersion: "2026-09") else { return XCTFail("no session") }
         let late = await clientForTest.perform(op)
         guard case .conflict(current: let current, issuedUnder: _) = late else { return XCTFail("late first delivery must conflict") }
@@ -550,11 +550,11 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         XCTAssertFalse(current?.voiceSharingEnrolled == true, "a delayed opt-in may not undo a later opt-out")
     }
 
-    /// Withdrawal while already inactive still advances the revision, which is what fences later
+    /// Withdrawal while already inactive still produces an authoritative 200, which is what fences later
     /// first-delivery opt-ins. Client must treat that 200 as authoritative state, not a no-op.
-    func test_withdrawalFromInactiveProjection_advancesRevision() async {
+    func test_withdrawalFromInactiveProjection_isAuthoritativeState() async {
         VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
-            Reply(status: 200, body: projection("r10", enrolled: false, epoch: nil, withdrawal: "withdrawn"))
+            Reply(status: 200, body: projection(enrolled: false, epoch: nil, withdrawal: "withdrawn"))
         guard let op = clientForTest.beginMembership(enrolled: false, acceptedDisclosureVersion: nil) else { return XCTFail("no session") }
         let outcome = await clientForTest.perform(op)
         guard case .applied(membership: let m, issuedUnder: _) = outcome else { return XCTFail("withdrawal from inactive must apply") }
@@ -571,7 +571,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
             return id
         })
         VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
-            Reply(status: 200, body: projection("r8", enrolled: true, epoch: "e8", withdrawal: "active"))
+            Reply(status: 200, body: projection(enrolled: true, epoch: "e8", withdrawal: "active"))
 
         // Begin ONCE, then perform twice. The whole point of the immutable operation is that a retry after a
         // lost response carries the same request_id and body — calling begin… again would mint new intent.
@@ -610,7 +610,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
 
         // Now the same operation is retried and succeeds.
         VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
-            Reply(status: 200, body: projection("r6", enrolled: false, epoch: nil, withdrawal: "withdrawn"))
+            Reply(status: 200, body: projection(enrolled: false, epoch: nil, withdrawal: "withdrawn"))
         _ = await client.perform(lostOp)     // retry reuses the SAME operation identity
         // URLSession gives a body-driven request an httpBodySTREAM, so the bytes are read from whichever
         // carrier the request actually carries.
@@ -633,7 +633,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         // Case B: no active epoch -> accepted, and it fences outstanding opt-ins.
         VoiceSharingStubProtocol.reset()
         VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
-            Reply(status: 200, body: projection("r6", enrolled: false, epoch: nil, withdrawal: "withdrawn"))
+            Reply(status: 200, body: projection(enrolled: false, epoch: nil, withdrawal: "withdrawn"))
         guard let opB = clientForTest.beginMembership(enrolled: false, acceptedDisclosureVersion: nil) else { return XCTFail("no session") }
         let b = await clientForTest.perform(opB)
         guard case .applied(membership: let m, issuedUnder: _) = b else { return XCTFail("null epoch withdrawal should apply when nothing is active") }
@@ -644,7 +644,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
     /// the request is in flight — the shape that actually happens when sign-out lands mid-mutation.
     func test_responseForObsoleteSession_isDroppedNotApplied() async {
         VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
-            Reply(status: 200, body: projection("r11", enrolled: true, epoch: "e11", withdrawal: "active"))
+            Reply(status: 200, body: projection(enrolled: true, epoch: "e11", withdrawal: "active"))
         VoiceSharingStubProtocol.onRequest = { [weak self] in
             self?.identity = "gen-B"   // a different session exists mid-flight
         }
@@ -694,7 +694,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
     /// "enrolled"; only the fence stops it. This drives the whole production path — client stamps the token,
     func test_delayedGETReply_cannotReEnableThroughTheStore() async {
         VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] =
-            Reply(status: 200, body: projection("opaque-token-AAA", enrolled: true, epoch: "e1", withdrawal: "active"))
+            Reply(status: 200, body: projection(enrolled: true, epoch: "e1", withdrawal: "active"))
         let client = makeClient()
         testStore.setLocalOptIn(true)
 
@@ -714,7 +714,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
 
         // A read issued after the withdrawal is still usable, so this is staleness, not a dead store.
         VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] =
-            Reply(status: 200, body: projection("opaque-token-ZZZ", enrolled: true, epoch: "e9", withdrawal: "active"))
+            Reply(status: 200, body: projection(enrolled: true, epoch: "e9", withdrawal: "active"))
         let fresh = await client.fetchProjection()!
         testStore.setLocalOptIn(true)
         let afterOptIn = testStore.projectionToken()!
@@ -727,7 +727,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
     /// an old token anyway, the lifecycle half of the fence refuses it.
     func test_accountSwitchDuringRead_leavesStoreUnapplied() async {
         VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] =
-            Reply(status: 200, body: projection("r1", enrolled: true, epoch: "e1", withdrawal: "active"))
+            Reply(status: 200, body: projection(enrolled: true, epoch: "e1", withdrawal: "active"))
         VoiceSharingStubProtocol.responseDelay = 0.05
         let client = makeClient()
         // Token taken before the request, as every caller must.
@@ -744,13 +744,13 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         VoiceSharingStubProtocol.onRequest = nil
         XCTAssertNil(fetched, "the client does not return a reply that crossed an account change")
         let handRolled = VoiceSharingAccountClient.decodeProjection(
-            projectionData("r1", enrolled: true, epoch: "e1", withdrawal: "active"))!
+            projectionData(enrolled: true, epoch: "e1", withdrawal: "active"))!
         XCTAssertFalse(testStore.apply(authoritative: handRolled, readUnder: stale),
                        "nor may a pre-switch token apply one by hand")
     }
 
-    private func projectionData(_ revision: String, enrolled: Bool, epoch: String?, withdrawal: String) -> Data {
-        try! JSONSerialization.data(withJSONObject: projection(revision, enrolled: enrolled, epoch: epoch, withdrawal: withdrawal))
+    private func projectionData(enrolled: Bool, epoch: String?, withdrawal: String) -> Data {
+        try! JSONSerialization.data(withJSONObject: projection(enrolled: enrolled, epoch: epoch, withdrawal: withdrawal))
     }
 
     // MARK: - Mutation outcomes carry their issuing fence
@@ -762,7 +762,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
     /// outcome hands that same value back.
     func test_delayedEnrollSuccess_afterWithdrawal_cannotBeAppliedWithItsOwnToken() async {
         VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
-            Reply(status: 200, body: projection("opaque-ENROLL-7", enrolled: true, epoch: "e7", withdrawal: "active"))
+            Reply(status: 200, body: projection(enrolled: true, epoch: "e7", withdrawal: "active"))
         VoiceSharingStubProtocol.responseDelay = 0.05
         let client = makeClient()
         testStore.setLocalOptIn(true)
@@ -798,7 +798,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
     /// adopting the conflict payload under a token minted after the reply.
     func test_delayedConflict_afterNewIntent_isRefusedAndNeverAutoReplayed() async {
         VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
-            Reply(status: 409, body: projection("opaque-CONFLICT-Z", enrolled: true, epoch: "eZ", withdrawal: "active"))
+            Reply(status: 409, body: projection(enrolled: true, epoch: "eZ", withdrawal: "active"))
         VoiceSharingStubProtocol.responseDelay = 0.05
         let client = makeClient()
         testStore.setLocalOptIn(true)
@@ -827,7 +827,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
     /// retry are both judged against the instant the user actually acted.
     func test_retryKeepsTheSameIssuingFence() async {
         VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
-            Reply(status: 200, body: projection("opaque-RETRY-1", enrolled: true, epoch: "e1", withdrawal: "active"))
+            Reply(status: 200, body: projection(enrolled: true, epoch: "e1", withdrawal: "active"))
         let client = makeClient()
         guard let op = client.beginMembership(enrolled: true, acceptedDisclosureVersion: "2026-09") else {
             return XCTFail("no session to begin under")
@@ -843,7 +843,7 @@ final class VoiceSharingAccountClientTests: XCTestCase {
     /// later opt-in gesture must not overwrite the newer intent with the older answer.
     func test_withdrawalReply_afterLaterOptIn_usesItsOwnIssuingFence() async {
         VoiceSharingStubProtocol.replies["PUT /api/v1/account/voice-sharing"] =
-            Reply(status: 200, body: projection("opaque-W-1", enrolled: false, epoch: nil, withdrawal: "withdrawn"))
+            Reply(status: 200, body: projection(enrolled: false, epoch: nil, withdrawal: "withdrawn"))
         VoiceSharingStubProtocol.responseDelay = 0.05
         let client = makeClient()
         testStore.setLocalOptIn(true)
@@ -953,8 +953,8 @@ final class VoiceSharingAccountModelTests: XCTestCase {
         await model.enroll(disclosureConfirmed: true)
         XCTAssertEqual(model.membershipStatus, .disclosureUnavailable)
         XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty)
-        VoiceSharingStubProtocol.replies["PUT " + VoiceSharingAccountClient.membershipPath] = .init(status: 200, body: projection("r1", enrolled: false, epoch: "old-epoch", withdrawal: "withdrawn"))
-        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 200, body: projection("r1", enrolled: false, epoch: "old-epoch", withdrawal: "withdrawn"))
+        VoiceSharingStubProtocol.replies["PUT " + VoiceSharingAccountClient.membershipPath] = .init(status: 200, body: projection(enrolled: false, epoch: "old-epoch", withdrawal: "withdrawn"))
+        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 200, body: projection(enrolled: false, epoch: "old-epoch", withdrawal: "withdrawn"))
         await model.withdraw()
         XCTAssertFalse(harness.store.currentEffectiveEnrolled)
         XCTAssertEqual(model.membershipStatus, .withdrawnServerConfirmed)
@@ -986,9 +986,9 @@ final class VoiceSharingAccountModelTests: XCTestCase {
         let entry = try await AudioFixture.makeReadyEntry(in: queue)
         let settings = VoiceSharingSettingsModel(queue: queue, isCollectionPermitted: { false }, isAccountEnrolled: { harness.store.currentEnrollmentAnswer }, isLocallyOptedIn: { harness.store.currentState.localOptIn })
         let model = harness.model(purge: { await settings.deletePendingRecordingsOnThisDevice() })
-        VoiceSharingStubProtocol.replies["PUT " + VoiceSharingAccountClient.membershipPath] = .init(status: 200, body: projection("old-enroll", enrolled: true, epoch: "late", withdrawal: "active"))
-        VoiceSharingStubProtocol.replies["PUT " + VoiceSharingAccountClient.membershipPath] = .init(status: 200, body: projection("r1", enrolled: false, epoch: nil, withdrawal: "withdrawn"))
-        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 200, body: projection("r1", enrolled: false, epoch: nil, withdrawal: "withdrawn"))
+        VoiceSharingStubProtocol.replies["PUT " + VoiceSharingAccountClient.membershipPath] = .init(status: 200, body: projection(enrolled: true, epoch: "late", withdrawal: "active"))
+        VoiceSharingStubProtocol.replies["PUT " + VoiceSharingAccountClient.membershipPath] = .init(status: 200, body: projection(enrolled: false, epoch: nil, withdrawal: "withdrawn"))
+        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 200, body: projection(enrolled: false, epoch: nil, withdrawal: "withdrawn"))
         let enrollment = Task { await model.enroll(disclosureConfirmed: true) }
         await fulfillment(of: [entered], timeout: 3)
         XCTAssertTrue(model.busy)
@@ -1018,10 +1018,10 @@ final class VoiceSharingAccountModelTests: XCTestCase {
         harness.seed()
         let model = harness.model()
         VoiceSharingStubProtocol.replies["PUT " + VoiceSharingAccountClient.membershipPath] = .init(status: 503, body: [:])
-        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 200, body: projection("r0", enrolled: false, epoch: nil, withdrawal: "not_enrolled"))
+        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 200, body: projection(enrolled: false, epoch: nil, withdrawal: "not_enrolled"))
         await model.enroll(disclosureConfirmed: true)
         XCTAssertEqual(model.membershipStatus, .unavailable)
-        let currentProjection = projection("r-new", enrolled: false, epoch: nil, withdrawal: "not_enrolled")
+        let currentProjection = projection(enrolled: false, epoch: nil, withdrawal: "not_enrolled")
         VoiceSharingStubProtocol.replies["PUT " + VoiceSharingAccountClient.membershipPath] = .init(status: 409, body: currentProjection)
         VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 200, body: currentProjection)
         await model.retryMembership()
@@ -1044,7 +1044,7 @@ final class VoiceSharingAccountModelTests: XCTestCase {
         defer { harness.close() }
         harness.seed()
         let model = harness.model()
-        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 200, body: projection("old", enrolled: true, epoch: "old", withdrawal: "active"))
+        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 200, body: projection(enrolled: true, epoch: "old", withdrawal: "active"))
         let fetch = Task { await model.refresh() }
         await fulfillment(of: [entered], timeout: 3)
         harness.switchAccount("session-B")
@@ -1088,7 +1088,7 @@ extension VoiceSharingAccountModelTests {
         XCTAssertEqual(model.membership?.plan, .pro, "retain last known display data")
         XCTAssertTrue(model.refreshUnavailable)
         XCTAssertEqual(model.membershipStatus, .unavailable)
-        VoiceSharingStubProtocol.replies["PUT " + VoiceSharingAccountClient.membershipPath] = .init(status: 200, body: projection("confirmed", enrolled: false, epoch: "old-epoch", withdrawal: "withdrawn"))
+        VoiceSharingStubProtocol.replies["PUT " + VoiceSharingAccountClient.membershipPath] = .init(status: 200, body: projection(enrolled: false, epoch: "old-epoch", withdrawal: "withdrawn"))
         await model.withdraw()
         XCTAssertEqual(model.membershipStatus, .withdrawnServerConfirmed, "failed follow-up GET cannot erase server acknowledgement")
         XCTAssertTrue(model.refreshUnavailable)
@@ -1163,7 +1163,7 @@ final class VoiceSharingAccountNavigationTests: XCTestCase {
         let harness = SharingAccountModelHarness()
         defer { harness.close() }
         harness.seed(enrolled: true)
-        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 200, body: projection("r0", enrolled: true, epoch: "old-epoch", withdrawal: "active"))
+        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 200, body: projection(enrolled: true, epoch: "old-epoch", withdrawal: "active"))
         let model = harness.model(version: nil)
         let controller = try XCTUnwrap(AccountViewController.makeVoiceSharingController(surfaceEnabled: { true }, signedIn: { true }, accountModel: { model }, localModel: { nil }))
         let navigation = UINavigationController(rootViewController: controller)
@@ -1216,7 +1216,7 @@ extension VoiceSharingAccountNavigationTests {
         // Still on the same actor turn: queued action Tasks have not started.
         harness.switchAccount("session-B")
         harness.seed()
-        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 200, body: projection("B", enrolled: false, epoch: nil, withdrawal: "not_enrolled"))
+        VoiceSharingStubProtocol.replies["GET " + VoiceSharingAccountClient.projectionPath] = .init(status: 200, body: projection(enrolled: false, epoch: nil, withdrawal: "not_enrolled"))
         await model.refresh()
         await queuedEnrollment?.value
         await queuedDeletion?.value

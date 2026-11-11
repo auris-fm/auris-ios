@@ -536,14 +536,14 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
     func test_hConsecutiveBenignProjectionsLeaveConsentTruthPermitted() throws {
         store.transitionToAccount(signedIn: true)
         store.setLocalOptIn(true)
-        for revision in ["rev-1", "rev-2", "rev-3"] {
+        for epoch in ["epoch-1", "epoch-2", "epoch-3"] {
             store.apply(
                 authoritative: VoiceSharingMembership(
                     plan: .free, voiceSharingEnrolled: true,
-                    enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "voice-sharing-v1",
+                    enrollmentEpoch: epoch, acceptedDisclosureVersion: "voice-sharing-v1",
                     withdrawalState: .active),
                 readUnder: try XCTUnwrap(store.projectionToken()))
-            XCTAssertTrue(store.consentAllowsCollection, "benign projection \(revision) lost consent")
+            XCTAssertTrue(store.consentAllowsCollection, "benign projection \(epoch) lost consent")
         }
     }
 
