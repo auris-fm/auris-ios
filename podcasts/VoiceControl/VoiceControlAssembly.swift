@@ -242,11 +242,6 @@ class VoiceControlAssembly {
             coherenceAccount: { ServerSettings.userId },
             coherenceGeneration: { VoiceSharingEnrollmentStore.shared.currentEnrollmentGeneration },
             coherenceVersion: { VoiceSharingEnrollmentStore.shared.activeEnrollmentEpoch })
-        // Time-driven freshness: the queue's next age boundary.
-        settingsModel.nextAgeBoundarySeconds = { 0 }
-        settingsModel.scheduleTimeDrivenRefresh = { delay, body in
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: body)
-        }
         // A published recording IS uploadable work: encoding happens here, then the queue publishes
         // the folder in one rename, then a drain is requested.
         let contributionSink = VoiceSharingDirectSink(

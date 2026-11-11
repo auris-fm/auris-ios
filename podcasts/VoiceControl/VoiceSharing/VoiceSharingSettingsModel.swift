@@ -8,9 +8,9 @@ import PocketCastsUtils
 /// Every control here is either a local, non-authorizing preference or a read-only projection of
 /// the live policy. Specifically:
 ///
-/// - There is NO path from this view to `permitsCollection`. The remote switch and the account
-/// enrollment remain the only inputs to that decision, so a user toggling anything here cannot
-/// enable collection.
+/// - There is NO path from this view to `permitsCollection`. The sharing decision — the account's
+/// enrollment and the remote switch, read only through the injected authority closures — remains
+/// the only input to that decision, so a user toggling anything here cannot enable collection.
 /// - The delete control goes through the queue's owner-wide purge (the same fail-explicit path
 /// consent loss uses), so "delete my contributions" cannot silently succeed while storage is
 /// unreconciled — the outcome is reported back, not swallowed.
@@ -225,7 +225,8 @@ final class VoiceSharingSettingsModel {
     enum StoppedReason: Equatable {
         /// The live policy permits collection and no other blocker applies.
         case notStopped
-        /// The live policy does not currently permit collection: the app must fetch again.
+        /// The live sharing decision does not currently permit collection. No user action is
+        /// offered here: the choice lives in enrollment and the remote switch, not in this surface.
         case notPermitted
         /// Server membership is withdrawn or the account is not enrolled.
         case notEnrolled
@@ -312,88 +313,6 @@ final class VoiceSharingSettingsModel {
     /// control can hold an older read open while a newer one completes.
     var afterReadBeforeCommitForTesting: (() -> Void)?
 
-    // MARK: - Time-driven freshness
-
-    /// Schedules the call that refreshes when TIME (not a mutation) makes the displayed state
-    /// stale: an entry crossing the queue-age bound. Without this the surface
-    /// only changed when something else pushed, so an idle screen kept showing a count that had
-    /// silently stopped being served.
-    var scheduleTimeDrivenRefresh: ((_ after: TimeInterval, _ body: @escaping () -> Void) -> Void)?
-
-    /// Seconds until the nearest time-caused transition that is still IN THE future: the next age
-    /// boundary. Generous +1s margin so the refresh lands after the transition, never before it.
-    ///
-    /// Transitions already in the past are EXCLUDED: a past transition reports a negative delay,
-    /// and turning that into a 50 ms delay re-armed the timer forever, once per fire. A past
-    /// transition is not a reason to wake again — its refresh already happened.
-    private func secondsUntilNextTimeTransition() -> TimeInterval? {
-        var candidates: [TimeInterval] = []
-        if let age = nextAgeBoundarySeconds?() { candidates.append(age) }
-        let future = candidates.filter { $0 > 0 }
-        guard let soonest = future.min() else { return nil }
-        return soonest + 1
-    }
-
-    /// Injected source for the time-driven refresh: the queue's next age boundary. Nil by
-    /// default, so nothing is scheduled when unset.
-    var nextAgeBoundarySeconds: (() -> TimeInterval?)?
-
-    /// Arms ONE pending time-driven refresh, replacing any previous one (newest wins), so a clock
-    /// change cannot leave a stale timer behind.
-    private var pendingTimeRefreshToken = 0
-    /// The read sequence the current timer was armed for. Scheduling refuses anything older, so a
-    /// slow read cannot replace a newer deadline.
-    private var armedForSequence = 0
-
-    /// Arms from the LATEST accepted read.
-    ///
-    /// not safe to call with `changeLock` HELD — this method takes that lock itself and `NSLock` is
-    /// not recursive, so a caller holding it would deadlock. Every caller unlocks first and passes
-    /// the sequence it accepted.
-    func armTimeDrivenRefresh() {
-        armTimeDrivenRefresh(afterAcceptedSequence: currentSequence)
-    }
-
-    /// Test seam for the ordering control: an EXPLICIT sequence, as a read that was accepted earlier
-    /// would present when it resumes and tries to arm.
-    func armTimeDrivenRefreshForTesting(afterAcceptedSequence sequence: Int) {
-        armTimeDrivenRefresh(afterAcceptedSequence: sequence)
-    }
-
-    /// Arms the timer, FENCED by the read sequence it belongs to. An accepted
-    /// read used to release `changeLock` and arm afterwards, so it could pause between the two: a
-    /// NEWER read would arm the correct deadline, then the older one would invalidate it and how
-    /// long it happened to wait before pausing decided the schedule. The delay is therefore measured
-    /// and the token committed under ONE hold, and a sequence older than the armed one is refused.
-    private func armTimeDrivenRefresh(afterAcceptedSequence sequence: Int) {
-        changeLock.lock()
-        guard sequence >= armedForSequence else {
-            changeLock.unlock()
-            return
-        }
-        // INVALIDATE first, always: even when nothing is due, any previously
-        // armed timer must be superseded — otherwise a stale timer from an earlier, longer delay
-        // keeps ownership and the newer deadline is never scheduled.
-        pendingTimeRefreshToken &+= 1
-        let token = pendingTimeRefreshToken
-        armedForSequence = sequence
-        let delay = secondsUntilNextTimeTransition()
-        let schedule = scheduleTimeDrivenRefresh
-        changeLock.unlock()
-        guard let schedule, let delay else { return }
-        schedule(delay) { [weak self] in
-            guard let self else { return }
-            self.changeLock.lock()
-            let isCurrent = self.pendingTimeRefreshToken == token
-            self.changeLock.unlock()
-            guard isCurrent else { return }  // superseded: a newer timer owns the next refresh
-            // `refreshLiveState` is the SINGLE owner of arming: it re-arms on
-            // both the published and the unchanged path, so calling `armTimeDrivenRefresh` here as
-            // well queued two closures per fire.
-            Task { await self.refreshLiveState() }
-        }
-    }
-
     func refreshLiveState() async {
         // SERIALIZED: the comparison AND the commit of `lastPublishedState` happen under the same
         // lock as the observer list, so two concurrent refreshes cannot both decide to publish, and
@@ -420,18 +339,7 @@ final class VoiceSharingSettingsModel {
             return
         }
         lastPublishedSequence = sequence
-        guard state != lastPublishedState else {
-            // NO CHANGE in displayed state, BUT the deadline may have moved:
-            // the queue-age boundary advances while permission, count and guidance stay identical.
-            // The timer must be re-armed even when
-            // nothing is published, or the OLD deadline keeps ownership. This read is still the
-            // newest accepted one (`sequence > lastPublishedSequence` held above), so an obsolete
-            // read cannot supersede newer scheduling.
-            let armedSequence = sequence
-            changeLock.unlock()
-            armTimeDrivenRefresh(afterAcceptedSequence: armedSequence)
-            return
-        }
+        guard state != lastPublishedState else { changeLock.unlock(); return }
         lastPublishedState = state
         currentSequence = sequence
         let observers = Array(changeObservers.values)
@@ -439,11 +347,6 @@ final class VoiceSharingSettingsModel {
 
         let sent = SentLiveState(sequence: sequence, state: state)
         for observer in observers { observer(sent) }
-        // RE-ARM on every authoritative update: an initially empty visible
-        // queue schedules nothing, so the entry added right after it would never be given an expiry
-        // timer, and a SOONER age boundary could be missed. Re-arming here covers every source —
-        // queue and enrollment — because they all refresh through here.
-        armTimeDrivenRefresh(afterAcceptedSequence: sequence)
     }
 
     /// The sequence of the most recently committed publication; seeded on subscribe so a new

@@ -71,7 +71,6 @@ struct VoiceSharingSettingsView: View {
         case .notStopped: return L10n.voiceSharingStatusOn
         case .notPermitted, .unknown: return L10n.voiceSharingStatusPaused
         case .notEnrolled, .turnedOffLocally: return L10n.voiceSharingStatusOff
-        case .notEnrolled: return L10n.voiceSharingStatusStopped
         }
     }
 
