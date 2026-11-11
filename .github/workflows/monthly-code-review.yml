@@ -157,6 +157,7 @@ jobs:
           SHA: ${{ steps.head.outputs.sha }}
           DAY: ${{ steps.head.outputs.date }}
           FIXES: ${{ runner.temp }}/monthly-fixes.md
+          SCOPE: ${{ runner.temp }}/scope.txt
           BASE: ${{ github.event.repository.default_branch }}
         run: |
           git checkout -- .github 2>/dev/null || true
