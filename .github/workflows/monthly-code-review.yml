@@ -157,10 +157,23 @@ jobs:
           SHA: ${{ steps.head.outputs.sha }}
           DAY: ${{ steps.head.outputs.date }}
           FIXES: ${{ runner.temp }}/monthly-fixes.md
+          SCOPE: ${{ runner.temp }}/scope.txt
           BASE: ${{ github.event.repository.default_branch }}
         run: |
           git checkout -- .github 2>/dev/null || true
           git clean -fdq .github
+          # Only files in scope may reach the PR. Edits elsewhere are saved for the issue and dropped here.
+          git add -A
+          git diff --cached --name-only | grep -vxF -f <(tail -n +2 "$SCOPE") > "$RUNNER_TEMP/out-of-scope.txt" || true
+          if [ -s "$RUNNER_TEMP/out-of-scope.txt" ]; then
+            git diff --cached -- $(cat "$RUNNER_TEMP/out-of-scope.txt") > "$RUNNER_TEMP/out-of-scope.diff"
+          fi
+          git reset -q
+          if [ -s "$RUNNER_TEMP/out-of-scope.txt" ]; then
+            tracked=$(git ls-files -- $(cat "$RUNNER_TEMP/out-of-scope.txt"))
+            if [ -n "$tracked" ]; then git checkout -- $tracked; fi
+            git clean -fdq -- $(cat "$RUNNER_TEMP/out-of-scope.txt")
+          fi
           if [ -z "$(git status --porcelain)" ]; then
             # A rerun that no longer has fixes closes the draft PR an earlier attempt opened.
             old=$(gh pr list --head "$BRANCH" --state open --json url -q '.[0].url')
@@ -196,7 +209,15 @@ jobs:
           DAY: ${{ steps.head.outputs.date }}
           PR_URL: ${{ steps.pr.outputs.url }}
           RUN_ID: ${{ github.run_id }}
+          OUT_DIFF: ${{ runner.temp }}/out-of-scope.diff
         run: |
+          if [ -s "$OUT_DIFF" ]; then
+            {
+              echo; echo "## Out-of-scope edits not applied"; echo
+              echo "The review edited these files outside its scope; they were left out of the PR:"; echo
+              sed 's/^/- /' "$RUNNER_TEMP/out-of-scope.txt"; echo; echo '```diff'; head -c 50000 "$OUT_DIFF"; echo '```'
+            } >> "$REPORT"
+          fi
           title="Monthly code review $DAY (run $RUN_ID)"
           # A rerun of the same run finds its own issue by exact title.
           existing=$(gh issue list --state open --limit 200 --json number,title             | jq -r --arg t "$title" '.[] | select(.title == $t) | .number' | head -n 1)
