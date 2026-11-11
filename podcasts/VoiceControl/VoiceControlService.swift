@@ -1055,12 +1055,17 @@ class VoiceControlService: ObservableObject {
         // A turn the executor ran but could not conclude has no verdict to state. "Nothing" is not a
         // permitted way to say that: the record would carry an executed turn with no outcome at all,
         // which reads as a gap rather than the honest `unknown`/`observation_unavailable` the encoder
-        // already uses for a stage it was never told about.
+        // already uses for a stage it was never told about. The substitution is owed ONLY to a
+        // verdict that itself states nothing (`state == "unknown"`): an observed not_run — the sink's
+        // declined `precondition_failed` — is a fact about the turn, and collapsing it into
+        // "unobserved" would discard what the executor actually decided (reviewer/spec, bot round on
+        // 41859c63d). Its outcome member stays absent: not_run has no wire token.
         let wireVerdict = VoiceSharingContributionEncoder.StageOutcome.wireExecutionOutcome(for: outcome)
+        let statesNothing = outcome.state == "unknown"
         contributionCollector?.engineReported(
             stage: "execution",
-            outcome: .init(state: wireVerdict == nil ? "unknown" : outcome.state,
-                           reason: wireVerdict == nil ? "observation_unavailable" : outcome.reason,
+            outcome: .init(state: statesNothing ? "unknown" : outcome.state,
+                           reason: statesNothing ? "observation_unavailable" : outcome.reason,
                            text: outcome.text, decision: outcome.decision,
                            translatedText: outcome.translatedText,
                            targetLanguage: outcome.targetLanguage,

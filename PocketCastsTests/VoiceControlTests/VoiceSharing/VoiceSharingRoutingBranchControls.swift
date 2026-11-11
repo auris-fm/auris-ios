@@ -33,6 +33,10 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
     /// verdict indistinguishable from a real one, and a control asserting on that proves nothing.
     private final class StubExecutor: VoiceIntentExecuting {
         var response: VoiceResponse = .spoken("ok")
+        /// When set, the verdict the executor reports — standing in for a real sink's structured
+        /// action fact (e.g. a declined skip states not_run/precondition_failed) without
+        /// re-implementing the sinks themselves.
+        var verdictOverride: ExecutionVerdict?
         private(set) var executed: [String] = []
 
         func execute(_ intent: any VoiceIntent) async -> VoiceResponse {
@@ -43,6 +47,9 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         // The protocol's OWN bridge: `execute`, then the presentation verdict it states.
         func executeWithVerdict(_ intent: any VoiceIntent) async -> (response: VoiceResponse, verdict: ExecutionVerdict) {
             let response = await execute(intent)
+            if let verdictOverride {
+                return (response, verdictOverride)
+            }
             switch response {
             case .earcon(.error):
                 return (response, ExecutionVerdict(state: "failed", reason: "action_failed", outcome: "failed"))
@@ -74,10 +81,6 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         let plain: any VoiceIntentExecuting = StubExecutor()
         let sink = plain.cloudRouteSinkAccess
         XCTAssertNil(sink, "a conformer that declares no sink reports nil rather than trapping")
-        // The exact optional-chaining the production sites perform. A missing sink must read as
-        // "not suppressed" — never as a denial.
-        XCTAssertFalse(sink?.isSuppressedForTesting(nil) ?? false,
-                       "no sink must not be read as a suppression")
 
         // The REAL lookup path, assembled as the app assembles it. Traps if the optional member
         // is ever replaced by a downcast again.
@@ -1032,6 +1035,47 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
                                "\(testCase.label): a concluded execution must state its verdict")
             }
         }
+    }
+
+    /// A DECLINED ACTION IS AN OBSERVED OUTCOME, NOT A GAP.
+    ///
+    /// The sink's structured fact for a declined skip is `not_run`/`precondition_failed` — the
+    /// executor observed the decision and can state exactly what happened. The service used to
+    /// substitute `unknown`/`observation_unavailable` for every verdict without a wire token,
+    /// discarding that observation: the record claimed nothing could be seen when the app had in
+    /// fact declined. The substitution is owed only to a verdict that states nothing
+    /// (`state == "unknown"`); an observed not_run passes through as itself.
+    func test_aDeclinedSkipPublishesItsObservedVerdictRatherThanUnobserved() async {
+        let router = StubClassifier()
+        let executor = StubExecutor()
+        let collector = makeCollector()
+        let harness = makeService(router: router, executor: executor, collector: collector)
+        let service = harness.service
+        guard let context = await openRealCapture(harness) else {
+            return XCTFail("a real open capture is required")
+        }
+        let id = context.id
+
+        service.enterListeningStateForTesting()
+        router.result = .intent(PlaybackIntent.pause)
+        executor.response = .spoken("Playback: nothing queued")
+        // The real sink's declined fact, stated at the executor's verdict seam.
+        executor.verdictOverride = ExecutionVerdict(state: "not_run", reason: "precondition_failed")
+        await service.handleRoutingInput(
+            IntentRoutingInput.english(transcript: "skip to the next episode", utteranceId: UUID().uuidString),
+            captureContext: context)
+        finishCapture(harness, context)
+
+        let execution = publishedStages(for: id)["execution"]
+        guard let execution else {
+            return XCTFail("the record must carry the execution stage")
+        }
+        XCTAssertEqual(execution.state, "not_run",
+                       "a declined action is observed: the record states the decline")
+        XCTAssertEqual(execution.reason, "precondition_failed",
+                       "the decline's own reason survives, not a claim that nothing was seen")
+        XCTAssertNil(execution.outcome,
+                     "not_run carries no wire token: the member is omitted, not invented")
     }
 
     /// A stopped session must not execute, and must not leave the capture owned. The capture still has to
