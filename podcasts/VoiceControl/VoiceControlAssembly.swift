@@ -161,8 +161,8 @@ class VoiceControlAssembly {
         // until the owner approves activation; wiring exists so consent loss acts on real audio the
         // moment anything upstream produces it.
         // The queue-backed contribution sink (round 62/63): collector event → encoder → durable
-        // queue entry. The gate reads the live policy on every event and the remote switch
-        // defaults to disabled, so no upload work is minted until owner-approved activation.
+        // queue entry. The gate reads the user's sharing decision on every event, so no upload
+        // work is minted until the user shares and the owner approves activation.
         // Encode/queue failures are logged (opaque IDs only) and dropped — never into the
         // recognition pipeline.
         let queueRoot = VoiceSharingQueue.defaultRoot()

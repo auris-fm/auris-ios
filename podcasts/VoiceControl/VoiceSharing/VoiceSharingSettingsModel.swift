@@ -6,11 +6,12 @@ import PocketCastsUtils
 ///
 /// What this exists to make impossible: a settings screen that can turn collection on by itself.
 /// Every control here is either a local, non-authorizing preference or a read-only projection of
-/// the live policy. Specifically:
+/// the live sharing decision. Specifically:
 ///
-/// - There is NO path from this view to `permitsCollection`. The sharing decision — the account's
-/// enrollment and the remote switch, read only through the injected authority closures — remains
-/// the only input to that decision, so a user toggling anything here cannot enable collection.
+/// - There is NO path from this view to `permitsCollection`. The sharing decision — the user's
+/// sharing choice for the signed-in account, read only through the injected authority closures —
+/// remains the only input to that decision, so a user toggling anything here cannot enable
+/// collection.
 /// - The delete control goes through the queue's owner-wide purge (the same fail-explicit path
 /// consent loss uses), so "delete my contributions" cannot silently succeed while storage is
 /// unreconciled — the outcome is reported back, not swallowed.
@@ -45,7 +46,7 @@ final class VoiceSharingSettingsModel {
             case unknown
         }
         let storage: Storage
-        /// True when the live policy currently permits collection. Read-only projection.
+        /// True when the live sharing decision currently permits collection. Read-only projection.
         let collectionPermitted: Bool
     }
 
@@ -191,7 +192,7 @@ final class VoiceSharingSettingsModel {
     /// the caller cannot determine it, and an undeterminable reason renders as `.unknown` rather
     /// than as an accusation or an invented pause.
     struct LiveState: Equatable {
-        /// Whether the live policy currently permits collection. `nil` = unknown.
+        /// Whether the live sharing decision currently permits collection. `nil` = unknown.
         var policyPermits: Bool?
         /// Server-authoritative enrollment. `nil` = not read yet/unknown.
         var enrolled: Bool?
@@ -223,10 +224,11 @@ final class VoiceSharingSettingsModel {
     /// Why collection is not running. Every case is derived from `LiveState` — the surface reports
     /// what the app can actually verify, and `unknown` is reachable by construction.
     enum StoppedReason: Equatable {
-        /// The live policy permits collection and no other blocker applies.
+        /// The live sharing decision permits collection and no other blocker applies.
         case notStopped
         /// The live sharing decision does not currently permit collection. No user action is
-        /// offered here: the choice lives in enrollment and the remote switch, not in this surface.
+        /// offered here: the choice lives in the user's sharing decision for the signed-in
+        /// account, not in this surface.
         case notPermitted
         /// Server membership is withdrawn or the account is not enrolled.
         case notEnrolled

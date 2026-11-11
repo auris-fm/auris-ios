@@ -49,7 +49,7 @@ final class VoiceSharingSettingsModelTests: XCTestCase {
                        "the model reports exactly what the build compiled — no runtime override")
     }
 
-    /// No settings control may enable collection: the reported value is exactly the live policy's.
+    /// No settings control may enable collection: the reported value is exactly the live sharing decision's.
     func test_reportedPermissionIsOnlyEverTheLivePolicy() async {
         let denyModel = model(permitted: false)
         let denyStatus = await denyModel.status()

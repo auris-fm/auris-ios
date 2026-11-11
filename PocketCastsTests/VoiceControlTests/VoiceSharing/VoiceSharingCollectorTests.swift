@@ -502,7 +502,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         XCTAssertEqual(collector.pendingCountForTesting, 2, "premise: B's start also queued; B is open")
         XCTAssertNotNil(collector.currentCaptureContextForTesting, "premise: B is the open partial")
 
-        // Remote switch flips OFF with identity unchanged. The identity-based dequeue check alone would pass
+        // Sharing stops being permitted with identity unchanged. The identity-based dequeue check alone would pass
         // this queued work; gateLost must purge it NOW.
         deactivateLease()
         collector.gateLost()
@@ -523,7 +523,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
     }
 
     /// And the LIVE dequeue check as a second line of defense: if gateLost was not called (e.g. the signal
-    /// raced), a queued event still must not be delivered after the lease died, because drainNext consults
+    /// raced), a queued event still must not be delivered after sharing was withdrawn, because drainNext consults
     /// the policy, not just identity.
     func test_dequeueChecksLivePolicy_notOnlyIdentity() {
         activateLease()
@@ -558,7 +558,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         XCTAssertTrue(collector.waitForDrain())
         deliverLock.lock(); let got = delivered; deliverLock.unlock()
         XCTAssertFalse(got.contains { $0.kind == .completed },
-                       "the live policy check at dequeue refuses work whose lease has expired")
+                       "the sharing check at dequeue refuses work whose collection permission was withdrawn")
     }
 
     /// Normal overlap, no artificial cancel: A completes (its audio ownership detaches synchronously),
