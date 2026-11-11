@@ -1,10 +1,14 @@
 # Weekly whole-repo review: redundancy, inconsistency and simplification.
 #
 # The PR review (`claude-code-review.yml`) only sees one diff at a time, so duplicated
-# mechanisms and rules that drift apart across files slip past it. This job reads the
-# whole Auris-owned code once a week and files one issue with what it finds. It changes
-# no code: the job has read-only repository access and nothing is pushed, so the model's
-# only output is a report file, which the last step validates and files as the issue.
+# mechanisms and rules that drift apart across files slip past it. Once a week this job
+# reads the Auris-owned code, applies the mechanical fixes on a branch and opens one
+# draft PR for them, and files one issue for the findings that need a decision. The
+# PR goes through CI and the PR review like any other; nothing merges automatically.
+#
+# Pushing and opening the PR use a token minted from the `auris-weekly-review` GitHub
+# App, because PRs opened with the built-in token do not trigger CI. The app has no
+# workflows permission, so the job also refuses to commit anything under `.github/`.
 # The same file, differing only in the scope paragraph, lives in `core`, `auris-ios`
 # and `auris-android`; keep the three in step.
 
@@ -22,10 +26,9 @@ concurrency:
 jobs:
   weekly-review:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     permissions:
       contents: read
-      issues: write
     steps:
       - name: Require configured review model
         env:
@@ -36,15 +39,28 @@ jobs:
             exit 1
           fi
 
+      - name: Mint app token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: Iv23li4F3Q0PrzmgQeMj # auris-weekly-review; a client ID is not secret
+          private-key: ${{ secrets.WEEKLY_REVIEW_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+
       - name: Checkout default branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
+          token: ${{ steps.app.outputs.token }}
 
       - name: Record reviewed commit
         id: head
-        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "branch=weekly-fixes/$(date -u +%F)" >> "$GITHUB_OUTPUT"
 
       - name: Run weekly review
         uses: anthropics/claude-code-action@833fb0f8c9f6686b33d963a8bae0a94f4936ab2a # v1.0.211
@@ -64,43 +80,82 @@ jobs:
             The specs live in the private `auris-fm/core` repo and are not available to this job, so do not judge conformance to them. Report only inconsistencies inside this repo: two places that implement or state the same rule differently, and comments or docs that disagree with the code.
 
             Look for, in this order:
-            1. Redundancy: two mechanisms doing one job (two retention paths, two
-               duplicate guards, a client check the server already enforces), dead
-               code, unused configuration, routes or fields nothing reads, and docs
-               that restate a rule kept elsewhere.
+            1. Redundancy: two mechanisms doing one job, dead code, unused
+               configuration, routes or fields nothing reads, and docs that restate a
+               rule kept elsewhere.
             2. Inconsistency: code that contradicts the spec or plan it implements,
-               two places in the repo that state or implement the same rule
-               differently, and comments that describe code that no longer exists.
+               two places that state or implement the same rule differently, and
+               comments that describe code that no longer exists.
             3. Significant simplification: a smaller design that keeps the required
-               behaviour. Name what can be deleted and what must stay.
+               behaviour.
 
             Skip style, formatting, naming taste and anything a linter or the PR
-            review already covers. Do not report correctness bugs unless they come
-            from a redundancy or inconsistency above. Never describe a file you did
-            not read or a command you did not run.
+            review already covers. Never describe a file you did not read.
 
-            Output: write the report, as Markdown, to ${{ runner.temp }}/weekly-review.md
-            and nothing else; a later step files it as the issue. Do not edit any
-            other file. The report opens with two or three sentences of overall
-            verdict, then one section per category above. Each finding is one bullet:
-            `path:line`, what is redundant or inconsistent, and the concrete removal or
-            consolidation, with the behaviour that must remain. Order findings by how
-            much they remove. Skip an empty section. If there are no findings, say so
-            in one sentence.
+            Then sort every finding into exactly one of two groups.
+
+            APPLY, by editing the working tree, only findings that cannot change
+            behaviour: deleting code, configuration or files that nothing references
+            (check with Grep that there is no caller, including tests you would then
+            also delete), correcting comments and docs to match the code, fixing stale
+            line references, and replacing a duplicated helper with an existing one of
+            identical behaviour. Never edit anything under `.github/`. Never change a
+            public contract, a spec's stated rule, a default value or a test's
+            expectation of live behaviour. When unsure, do not apply it.
+
+            REPORT everything else: behaviour changes, spec-versus-code disagreements
+            where you cannot tell which side is right, and design simplifications.
+
+            Write two Markdown files and nothing else outside the working tree:
+            - ${{ runner.temp }}/weekly-fixes.md: one bullet per applied fix,
+              `path:line` and what was removed or corrected. Empty if none.
+            - ${{ runner.temp }}/weekly-review.md: two or three sentences of verdict,
+              then one bullet per reported finding: `path:line`, the problem, the
+              proposed change and the behaviour that must remain. Order by how much it
+              would remove. Do not repeat anything you applied. Empty if none.
           claude_args: |
             --model ${{ secrets.ANTHROPIC_MODEL }}
-            --allowedTools "Read,Glob,Grep,Write,Bash(git log:*),Bash(git show:*),Bash(git ls-files:*)"
+            --allowedTools "Read,Glob,Grep,Edit,Write,Bash(git log:*),Bash(git show:*),Bash(git ls-files:*),Bash(git diff:*),Bash(git grep:*)"
 
-      - name: File the report as one issue
+      - name: Open the fix PR
+        id: pr
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPORT: ${{ runner.temp }}/weekly-review.md
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          BRANCH: ${{ steps.head.outputs.branch }}
           SHA: ${{ steps.head.outputs.sha }}
+          FIXES: ${{ runner.temp }}/weekly-fixes.md
         run: |
-          if [ ! -s "$REPORT" ]; then
-            echo '::error::The review produced no report.'
+          git checkout -- .github 2>/dev/null || true
+          git clean -fdq .github
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No mechanical fixes."
+            exit 0
+          fi
+          if [ ! -s "$FIXES" ]; then
+            echo '::error::The working tree changed but no fix summary was written.'
             exit 1
           fi
-          { echo "Reviewed commit: $SHA"; echo; cat "$REPORT"; } > "$RUNNER_TEMP/issue.md"
+          git switch -c "$BRANCH"
+          git add -A
+          git -c user.name="auris-weekly-review[bot]" -c user.email="auris-weekly-review[bot]@users.noreply.github.com" \
+            commit -q -m "Weekly review: mechanical fixes for $SHA"
+          git push -q origin "$BRANCH"
+          { echo "Mechanical fixes from the weekly review of $SHA. Each removes or corrects something that nothing depends on; CI and the PR review check it."; echo; cat "$FIXES"; } > "$RUNNER_TEMP/pr.md"
+          url=$(gh pr create --draft --base "${{ github.event.repository.default_branch }}" --head "$BRANCH" \
+            --title "Weekly review fixes $(date -u +%F)" --body-file "$RUNNER_TEMP/pr.md")
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: File the remaining findings as one issue
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          REPORT: ${{ runner.temp }}/weekly-review.md
+          SHA: ${{ steps.head.outputs.sha }}
+          PR_URL: ${{ steps.pr.outputs.url }}
+        run: |
+          if [ ! -s "$REPORT" ]; then
+            echo "No findings beyond the fix PR."
+            exit 0
+          fi
+          { echo "Reviewed commit: $SHA"; [ -n "$PR_URL" ] && echo "Mechanical fixes: $PR_URL"; echo; cat "$REPORT"; } > "$RUNNER_TEMP/issue.md"
           gh issue create --title "Weekly code review $(date -u +%F)" --body-file "$RUNNER_TEMP/issue.md"
 
