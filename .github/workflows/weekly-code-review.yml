@@ -3,8 +3,10 @@
 # The PR review (`claude-code-review.yml`) only sees one diff at a time, so duplicated
 # mechanisms and rules that drift apart across files slip past it. This job reads the
 # whole Auris-owned code once a week and files one issue with what it finds. It changes
-# no code. The same file, differing only in the scope paragraph, lives in `core`,
-# `auris-ios` and `auris-android`; keep the three in step.
+# no code: the job has read-only repository access and nothing is pushed, so the model's
+# only output is a report file, which the last step validates and files as the issue.
+# The same file, differing only in the scope paragraph, lives in `core`, `auris-ios`
+# and `auris-android`; keep the three in step.
 
 name: Weekly Code Review
 
@@ -40,23 +42,26 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
 
+      - name: Record reviewed commit
+        id: head
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Run weekly review
         uses: anthropics/claude-code-action@833fb0f8c9f6686b33d963a8bae0a94f4936ab2a # v1.0.211
         env:
           ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           prompt: |
             REPO: ${{ github.repository }}
-            COMMIT: ${{ github.sha }}
+            COMMIT: ${{ steps.head.outputs.sha }}
 
             Read AGENTS.md first; it carries this repo's conventions.
 
             Review the Auris-owned code only: `podcasts/VoiceControl/` and `PocketCastsTests/VoiceControlTests/`, plus any other file whose history shows Auris changes. The rest is upstream Pocket Casts; leave it alone unless Auris code duplicates it.
 
-            The specs live in the private `auris-fm/core` repo and are not checked out here; use the spec paths and rules the code and AGENTS.md cite, and flag code that contradicts them or that disagrees with another part of this repo.
+            The specs live in the private `auris-fm/core` repo and are not available to this job, so do not judge conformance to them. Report only inconsistencies inside this repo: two places that implement or state the same rule differently, and comments or docs that disagree with the code.
 
             Look for, in this order:
             1. Redundancy: two mechanisms doing one job (two retention paths, two
@@ -74,15 +79,28 @@ jobs:
             from a redundancy or inconsistency above. Never describe a file you did
             not read or a command you did not run.
 
-            Output: create exactly one GitHub issue with
-            `gh issue create --title "Weekly code review $(date -u +%F)" --body-file <file>`.
-            The body opens with two or three sentences of overall verdict, then one
-            section per category above. Each finding is one bullet: `path:line`, what
-            is redundant or inconsistent, and the concrete removal or consolidation,
-            with the behaviour that must remain. Order findings by how much they
-            remove. Skip an empty section. If there are no findings, still create the
-            issue and say so in one sentence.
+            Output: write the report, as Markdown, to ${{ runner.temp }}/weekly-review.md
+            and nothing else; a later step files it as the issue. Do not edit any
+            other file. The report opens with two or three sentences of overall
+            verdict, then one section per category above. Each finding is one bullet:
+            `path:line`, what is redundant or inconsistent, and the concrete removal or
+            consolidation, with the behaviour that must remain. Order findings by how
+            much they remove. Skip an empty section. If there are no findings, say so
+            in one sentence.
           claude_args: |
             --model ${{ secrets.ANTHROPIC_MODEL }}
-            --allowedTools "Read,Glob,Grep,Write,Bash(git log:*),Bash(git show:*),Bash(git ls-files:*),Bash(date:*),Bash(gh issue create:*)"
+            --allowedTools "Read,Glob,Grep,Write,Bash(git log:*),Bash(git show:*),Bash(git ls-files:*)"
+
+      - name: File the report as one issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPORT: ${{ runner.temp }}/weekly-review.md
+          SHA: ${{ steps.head.outputs.sha }}
+        run: |
+          if [ ! -s "$REPORT" ]; then
+            echo '::error::The review produced no report.'
+            exit 1
+          fi
+          { echo "Reviewed commit: $SHA"; echo; cat "$REPORT"; } > "$RUNNER_TEMP/issue.md"
+          gh issue create --title "Weekly code review $(date -u +%F)" --body-file "$RUNNER_TEMP/issue.md"
 
