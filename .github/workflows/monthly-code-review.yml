@@ -1,7 +1,7 @@
-# Weekly whole-repo review: redundancy, inconsistency and simplification.
+# Monthly whole-repo review: redundancy, inconsistency and simplification.
 #
 # The PR review (`claude-code-review.yml`) only sees one diff at a time, so duplicated
-# mechanisms and rules that drift apart across files slip past it. Once a week this job
+# mechanisms and rules that drift apart across files slip past it. Once a month this job
 # reads the Auris-owned code, applies the mechanical fixes on a branch and opens one
 # draft PR for them, and files one issue for the findings that need a decision. The
 # PR goes through CI and the PR review like any other; nothing merges automatically.
@@ -14,19 +14,19 @@
 # The same file, differing only in the scope paragraph, lives in `core`, `auris-ios`
 # and `auris-android`; keep the three in step.
 
-name: Weekly Code Review
+name: Monthly Code Review
 
 on:
   schedule:
-    - cron: "0 17 * * 0" # Mondays 01:00 UTC+8 (Sundays 17:00 UTC)
+    - cron: "0 1 1 * *" # the 1st of each month, 09:00 UTC+8 (01:00 UTC)
   workflow_dispatch:
 
 concurrency:
-  group: weekly-code-review
+  group: monthly-code-review
   cancel-in-progress: false
 
 jobs:
-  weekly-review:
+  monthly-review:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
@@ -52,10 +52,10 @@ jobs:
         id: head
         run: |
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "branch=weekly-fixes/${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+          echo "branch=monthly-fixes/${{ github.run_id }}" >> "$GITHUB_OUTPUT"
           echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"
 
-      - name: Run weekly review
+      - name: Run monthly review
         uses: anthropics/claude-code-action@833fb0f8c9f6686b33d963a8bae0a94f4936ab2a # v1.0.211
         env:
           ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
@@ -100,9 +100,9 @@ jobs:
             where you cannot tell which side is right, and design simplifications.
 
             Write two Markdown files and nothing else outside the working tree:
-            - ${{ runner.temp }}/weekly-fixes.md: one bullet per applied fix,
+            - ${{ runner.temp }}/monthly-fixes.md: one bullet per applied fix,
               `path:line` and what was removed or corrected. Empty if none.
-            - ${{ runner.temp }}/weekly-review.md: two or three sentences of verdict,
+            - ${{ runner.temp }}/monthly-review.md: two or three sentences of verdict,
               then one bullet per reported finding: `path:line`, the problem, the
               proposed change and the behaviour that must remain. Order by how much it
               would remove. Do not repeat anything you applied. Empty if none.
@@ -112,8 +112,8 @@ jobs:
 
       - name: Require both review outputs
         env:
-          FIXES: ${{ runner.temp }}/weekly-fixes.md
-          REPORT: ${{ runner.temp }}/weekly-review.md
+          FIXES: ${{ runner.temp }}/monthly-fixes.md
+          REPORT: ${{ runner.temp }}/monthly-review.md
         run: |
           for f in "$FIXES" "$REPORT"; do
             if [ ! -e "$f" ]; then
@@ -139,7 +139,7 @@ jobs:
           BRANCH: ${{ steps.head.outputs.branch }}
           SHA: ${{ steps.head.outputs.sha }}
           DAY: ${{ steps.head.outputs.date }}
-          FIXES: ${{ runner.temp }}/weekly-fixes.md
+          FIXES: ${{ runner.temp }}/monthly-fixes.md
           BASE: ${{ github.event.repository.default_branch }}
         run: |
           git checkout -- .github 2>/dev/null || true
@@ -159,28 +159,28 @@ jobs:
           fi
           git switch -C "$BRANCH"
           git add -A
-          git -c user.name="auris-weekly-review[bot]" -c user.email="auris-weekly-review[bot]@users.noreply.github.com"             commit -q -m "Weekly review: mechanical fixes for $SHA"
+          git -c user.name="auris-weekly-review[bot]" -c user.email="auris-weekly-review[bot]@users.noreply.github.com"             commit -q -m "Monthly review: mechanical fixes for $SHA"
           # A rerun of the same run replaces its own branch; no other run uses this name.
           git push -q --force "https://x-access-token:$GH_TOKEN@github.com/${{ github.repository }}.git" "HEAD:refs/heads/$BRANCH"
-          { echo "Mechanical fixes from the weekly review of $SHA. Each removes or corrects something that nothing depends on; CI and the PR review check it."; echo; cat "$FIXES"; } > "$RUNNER_TEMP/pr.md"
+          { echo "Mechanical fixes from the monthly review of $SHA. Each removes or corrects something that nothing depends on; CI and the PR review check it."; echo; cat "$FIXES"; } > "$RUNNER_TEMP/pr.md"
           url=$(gh pr list --head "$BRANCH" --state open --json url -q '.[0].url')
           if [ -n "$url" ]; then
             gh pr edit "$url" --body-file "$RUNNER_TEMP/pr.md" >/dev/null
           else
-            url=$(gh pr create --draft --base "$BASE" --head "$BRANCH"               --title "Weekly review fixes $DAY" --body-file "$RUNNER_TEMP/pr.md")
+            url=$(gh pr create --draft --base "$BASE" --head "$BRANCH"               --title "Monthly review fixes $DAY" --body-file "$RUNNER_TEMP/pr.md")
           fi
           echo "url=$url" >> "$GITHUB_OUTPUT"
 
       - name: File the remaining findings as one issue
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
-          REPORT: ${{ runner.temp }}/weekly-review.md
+          REPORT: ${{ runner.temp }}/monthly-review.md
           SHA: ${{ steps.head.outputs.sha }}
           DAY: ${{ steps.head.outputs.date }}
           PR_URL: ${{ steps.pr.outputs.url }}
           RUN_ID: ${{ github.run_id }}
         run: |
-          title="Weekly code review $DAY (run $RUN_ID)"
+          title="Monthly code review $DAY (run $RUN_ID)"
           # A rerun of the same run finds its own issue by exact title.
           existing=$(gh issue list --state open --limit 200 --json number,title             | jq -r --arg t "$title" '.[] | select(.title == $t) | .number' | head -n 1)
           if [ ! -s "$REPORT" ]; then
