@@ -145,6 +145,8 @@ jobs:
         with:
           client-id: Iv23li4F3Q0PrzmgQeMj # auris-weekly-review; a client ID is not secret
           private-key: ${{ secrets.WEEKLY_REVIEW_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }},core
           permission-contents: write
           permission-pull-requests: write
           permission-issues: write
@@ -153,6 +155,7 @@ jobs:
         id: pr
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_REPO: ${{ github.repository }}
           BRANCH: ${{ steps.head.outputs.branch }}
           SHA: ${{ steps.head.outputs.sha }}
           DAY: ${{ steps.head.outputs.date }}
@@ -211,6 +214,7 @@ jobs:
       - name: File the remaining findings as one issue
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_REPO: ${{ github.repository_owner }}/core
           REPORT: ${{ runner.temp }}/monthly-review.md
           SHA: ${{ steps.head.outputs.sha }}
           DAY: ${{ steps.head.outputs.date }}
@@ -225,7 +229,7 @@ jobs:
               sed 's/^/- /' "$RUNNER_TEMP/out-of-scope.txt"; echo; echo '```diff'; head -c 50000 "$OUT_DIFF"; echo '```'
             } >> "$REPORT"
           fi
-          title="Monthly code review $DAY (run $RUN_ID)"
+          title="${{ github.event.repository.name }}: Monthly code review $DAY (run $RUN_ID)"
           # A rerun of the same run finds its own issue by exact title.
           existing=$(gh issue list --state open --limit 200 --json number,title             | jq -r --arg t "$title" '.[] | select(.title == $t) | .number' | head -n 1)
           if [ ! -s "$REPORT" ]; then
@@ -235,7 +239,7 @@ jobs:
             echo "No findings beyond the fix PR."
             exit 0
           fi
-          { echo "Reviewed commit: $SHA"; if [ -n "$PR_URL" ]; then echo "Mechanical fixes: $PR_URL"; fi; echo; cat "$REPORT"; } > "$RUNNER_TEMP/issue.md"
+          { echo "Reviewed commit: ${{ github.repository }}@$SHA"; if [ -n "$PR_URL" ]; then echo "Mechanical fixes: $PR_URL"; fi; echo; cat "$REPORT"; } > "$RUNNER_TEMP/issue.md"
           if [ -n "$existing" ]; then
             gh issue edit "$existing" --body-file "$RUNNER_TEMP/issue.md"
           else
