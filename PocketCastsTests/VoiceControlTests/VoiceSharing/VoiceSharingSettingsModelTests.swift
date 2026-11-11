@@ -83,6 +83,18 @@ final class VoiceSharingSettingsModelTests: XCTestCase {
                        "a root that cannot be listed is unknown, not an empty device")
     }
 
+    /// The live snapshot must not show "Waiting 0" for a queue it cannot list: an unreadable
+    /// root yields `knownReadyCount: nil`, the same honesty `status()` applies.
+    func test_anUnlistableQueueRootYieldsANilKnownReadyCount() async throws {
+        let otherRoot = root.appendingPathComponent("unlistable-live")
+        // A FILE where a directory is expected: enumeration cannot succeed.
+        try Data("not a directory".utf8).write(to: otherRoot)
+        let unlistable = VoiceSharingQueue(root: otherRoot)
+        let live = await model(queue: unlistable).liveState()
+        XCTAssertNil(live.knownReadyCount,
+                     "an unlistable root must not report a zero ready count")
+    }
+
     /// LOCAL deletion: a reconciled purge with survivors keeps them VISIBLE as durably disqualified
     /// rather than folding them into a bare deletion count.
     func test_reconciledDeletionWithSurvivorsKeepsThemVisible() async throws {

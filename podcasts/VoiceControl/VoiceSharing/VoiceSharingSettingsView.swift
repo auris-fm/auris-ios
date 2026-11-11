@@ -54,9 +54,6 @@ struct VoiceSharingSettingsView: View {
                     }
                     if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
                 }
-                // ONE entry point: refreshLiveState publishes AND arms the time-driven refresh
-                // (an aged entry crossing its bound changes the display with no other event), so
-                // appearance does not need a second arm.
                 Task { await model.refreshLiveState() }
             }
             .onDisappear {
@@ -128,8 +125,8 @@ struct VoiceSharingSettingsView: View {
                     Button("Delete", role: .destructive) {
                         Task {
                             lastDelete = await model.deletePendingRecordingsOnThisDevice()
-                            // A purge moves the queue's hold generation: refresh so the surface
-                            // shows the post-purge truth rather than the pre-purge snapshot.
+                            // Refresh so the surface shows the post-purge truth rather than the
+                            // pre-purge snapshot.
                             await model.refreshLiveState()
                         }
                     }

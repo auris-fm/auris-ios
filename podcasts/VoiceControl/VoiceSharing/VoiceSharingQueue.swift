@@ -121,12 +121,6 @@ actor VoiceSharingQueue {
         (try? fileManager.contentsOfDirectory(atPath: root.path)) != nil
     }
 
-    /// Seconds until the OLDEST recording expires, or nil when nothing is retained. The surface
-    /// arms one timer from this so the age bound is observed without polling.
-    func secondsUntilNextAgeBoundary() -> TimeInterval? {
-        guard let oldest = entries().map(\.createdAt).min() else { return nil }
-        return max(0, VoiceSharingQueue.maximumAge + oldest.timeIntervalSince(now()))
-    }
 
     /// Seconds until the earliest entry leaves its backoff window, or nil when nothing is waiting.
     /// The trigger arms ONE wake from this, so a retry happens when it is due rather than only when

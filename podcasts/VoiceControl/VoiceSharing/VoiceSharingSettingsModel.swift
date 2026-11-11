@@ -365,9 +365,9 @@ final class VoiceSharingSettingsModel {
         // between the queue coverage read and the first stamp used to be invisible. No read happens
         // outside the interval.
         let before = coherenceStamp()
-        // Folders are the only state, so there is no "unknown coverage" to report: the count is a
-        // direct read of the directory.
-        let readyCount: Int? = await queue.count()
+        // The count is a direct read of the directory — but only when it CAN be read: an
+        // unlistable root reports `nil` (unknown), never a zero that would show "Waiting 0".
+        let readyCount: Int? = await queue.isReadable ? await queue.count() : nil
         let permits = isCollectionPermitted()
         let enrolled = isEnrolled()
         let optedIn = isOptedIn()
