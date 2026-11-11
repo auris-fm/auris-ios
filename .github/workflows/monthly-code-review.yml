@@ -18,7 +18,7 @@ name: Monthly Code Review
 
 on:
   schedule:
-    - cron: "0 1 1 * *" # the 1st of each month, 09:00 UTC+8 (01:00 UTC)
+    - cron: "0 17 1 * *" # the 1st of each month, 17:00 UTC (01:00 UTC+8 on the 2nd)
   workflow_dispatch:
 
 concurrency:
