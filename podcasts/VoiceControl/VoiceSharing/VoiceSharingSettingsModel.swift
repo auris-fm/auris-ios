@@ -8,9 +8,9 @@ import PocketCastsUtils
 /// Every control here is either a local, non-authorizing preference or a read-only projection of
 /// the live policy. Specifically:
 ///
-/// - There is NO path from this view to `permitsCollection`. The remote switch, the lease and the
-/// account enrollment remain the only inputs to that decision (see `VoiceSharingSnapshot`), so a
-/// user toggling anything here cannot enable collection.
+/// - There is NO path from this view to `permitsCollection`. The remote switch and the account
+/// enrollment remain the only inputs to that decision, so a user toggling anything here cannot
+/// enable collection.
 /// - The delete control goes through the queue's owner-wide purge (the same fail-explicit path
 /// consent loss uses), so "delete my contributions" cannot silently succeed while storage is
 /// unreconciled — the outcome is reported back, not swallowed.
@@ -41,12 +41,8 @@ final class VoiceSharingSettingsModel {
         enum Storage: Equatable {
             /// Known ready-to-upload count (queue coverage is known and the owner is not held).
             case knownReady(Int)
-            /// Could not DETERMINE the count (listing/stat/read/durability failure). Not evidence
-            /// that a revocation failed.
+            /// Could not DETERMINE the count (listing/stat/read/durability failure).
             case unknown
-            /// The owner is HELD by an unproven revocation: stored recordings may survive because
-            /// the revocation's barriers did not reconcile.
-            case revocationInDoubt
         }
         let storage: Storage
         /// True when the live policy currently permits collection. Read-only projection.
@@ -112,8 +108,6 @@ final class VoiceSharingSettingsModel {
     private let coherenceAccount: () -> String?
     private let coherenceGeneration: () -> Int?
     private let coherenceVersion: () -> String?
-    private let policyLeaseGeneration: () -> Int
-    private let queueHoldGeneration: () -> Int
 
     /// `nil`-returning reads are REQUIRED: a wiring that cannot determine enrollment or opt-in must
     /// report `unknown`, not `false`. Passing a constant `false` closure would invent an opt-out.
@@ -123,9 +117,7 @@ final class VoiceSharingSettingsModel {
          isLocallyOptedIn: @escaping () -> Bool?,
          coherenceAccount: @escaping () -> String? = { nil },
          coherenceGeneration: @escaping () -> Int? = { 0 },
-         coherenceVersion: @escaping () -> String? = { nil },
-         policyLeaseGeneration: @escaping () -> Int = { 0 },
-         queueHoldGeneration: @escaping () -> Int = { 0 }) {
+         coherenceVersion: @escaping () -> String? = { nil }) {
         self.queue = queue
         self.isCollectionPermitted = isCollectionPermitted
         self.isEnrolled = isAccountEnrolled
@@ -133,8 +125,6 @@ final class VoiceSharingSettingsModel {
         self.coherenceAccount = coherenceAccount
         self.coherenceGeneration = coherenceGeneration
         self.coherenceVersion = coherenceVersion
-        self.policyLeaseGeneration = policyLeaseGeneration
-        self.queueHoldGeneration = queueHoldGeneration
     }
 
     var isSurfaceEnabled: Bool { Self.surfaceEnabled }
@@ -207,18 +197,16 @@ final class VoiceSharingSettingsModel {
         var enrolled: Bool?
         /// The user's own opt-in gesture on this device. `nil` = unknown.
         var localOptIn: Bool?
-        /// Storage fault, already classified by the queue (never inferred from a single flag).
-        var storageFault: StoppedReason.StorageFault = .none
-        /// Ready-to-upload count from the SAME queue read that produced `storageFault`. `nil` when
-        /// coverage was unknown/held, so a count can never be invented from a second read.
+        /// Ready-to-upload count from the same coherent read. `nil` when coverage was unknown,
+        /// so a count can never be invented from a second read.
         var knownReadyCount: Int?
-        /// The account+generation+lease generation all three reads were taken under. When the
+        /// The account+generation stamps all three reads were taken under. When the
         /// stamps disagree the reads were not coherent, and every derived conclusion is unknown
         /// rather than a mix of two moments.
         var coherence: Coherence = .incoherent
 
         enum Coherence: Equatable {
-            /// Every read was taken under the same account, enrollment generation and lease epoch.
+            /// Every read was taken under the same account and enrollment generation.
             case coherent(account: String?, generation: Int, version: String?)
             /// At least one read had no stamp, or the stamps disagree.
             case incoherent
@@ -235,29 +223,14 @@ final class VoiceSharingSettingsModel {
     /// Why collection is not running. Every case is derived from `LiveState` — the surface reports
     /// what the app can actually verify, and `unknown` is reachable by construction.
     enum StoppedReason: Equatable {
-        /// Storage state that is relevant to recovery, classified at the source.
-        enum StorageFault: Equatable {
-            case none
-            /// An unproven revocation: barriers did not reconcile, intent is still on disk. The
-            /// local deletion path is the verified remedy (a successful purge retires the intent).
-            case revocationInDoubt
-            /// The store could not be read/enumerated. not a revocation failure, and not something
-            /// the user can fix by turning anything on or by deleting.
-            case unreadable
-        }
-
-        /// The live policy's snapshot permits collection and no other blocker applies.
+        /// The live policy permits collection and no other blocker applies.
         case notStopped
-        /// No usable snapshot (never fetched, fenced, or expired): the app must fetch again.
-        case noActiveLease
+        /// The live policy does not currently permit collection: the app must fetch again.
+        case notPermitted
         /// Server membership is withdrawn or the account is not enrolled.
         case notEnrolled
         /// The user turned sharing off on this device.
         case turnedOffLocally
-        /// A revocation is in doubt; local deletion is the verified remedy.
-        case storageHeld
-        /// Stored recordings could not be read — nothing is claimed about revocation.
-        case storageUnreadable
         /// Could not determine; never presented as a user action.
         case unknown
     }
@@ -287,11 +260,6 @@ final class VoiceSharingSettingsModel {
 
     /// Storage projection FROM the snapshot (not a second read of the queue).
     private func storage(for live: LiveState) -> ContributionStatus.Storage {
-        switch live.storageFault {
-        case .revocationInDoubt: return .revocationInDoubt
-        case .unreadable: return .unknown
-        case .none: break
-        }
         switch live.knownReadyCount {
         case .some(let count): return .knownReady(count)
         case .none: return .unknown
@@ -347,34 +315,31 @@ final class VoiceSharingSettingsModel {
     // MARK: - Time-driven freshness
 
     /// Schedules the call that refreshes when TIME (not a mutation) makes the displayed state
-    /// stale: an entry crossing the queue-age bound, or a lease lapsing. Without this the surface
+    /// stale: an entry crossing the queue-age bound. Without this the surface
     /// only changed when something else pushed, so an idle screen kept showing a count that had
     /// silently stopped being served.
     var scheduleTimeDrivenRefresh: ((_ after: TimeInterval, _ body: @escaping () -> Void) -> Void)?
 
     /// Seconds until the nearest time-caused transition that is still IN THE future: the next age
-    /// boundary, or the lease deadline. Generous +1s margin so the refresh lands after the
-    /// transition, never before it.
+    /// boundary. Generous +1s margin so the refresh lands after the transition, never before it.
     ///
-    /// Transitions already in the past are EXCLUDED: an expired lease reports a
-    /// negative delay, and turning that into a 50 ms delay re-armed the timer forever, once per
-    /// fire. A past transition is not a reason to wake again — its refresh already happened.
+    /// Transitions already in the past are EXCLUDED: a past transition reports a negative delay,
+    /// and turning that into a 50 ms delay re-armed the timer forever, once per fire. A past
+    /// transition is not a reason to wake again — its refresh already happened.
     private func secondsUntilNextTimeTransition() -> TimeInterval? {
         var candidates: [TimeInterval] = []
         if let age = nextAgeBoundarySeconds?() { candidates.append(age) }
-        if let lease = nextLeaseExpirySeconds?() { candidates.append(lease) }
         let future = candidates.filter { $0 > 0 }
         guard let soonest = future.min() else { return nil }
         return soonest + 1
     }
 
-    /// Injected sources for the time-driven refresh: the queue's next age boundary and the
-    /// policy's lease deadline. Defaults are nil so nothing is scheduled when unset.
+    /// Injected source for the time-driven refresh: the queue's next age boundary. Nil by
+    /// default, so nothing is scheduled when unset.
     var nextAgeBoundarySeconds: (() -> TimeInterval?)?
-    var nextLeaseExpirySeconds: (() -> TimeInterval?)?
 
     /// Arms ONE pending time-driven refresh, replacing any previous one (newest wins), so a clock
-    /// change or a renewed lease cannot leave a stale timer behind.
+    /// change cannot leave a stale timer behind.
     private var pendingTimeRefreshToken = 0
     /// The read sequence the current timer was armed for. Scheduling refuses anything older, so a
     /// slow read cannot replace a newer deadline.
@@ -457,8 +422,8 @@ final class VoiceSharingSettingsModel {
         lastPublishedSequence = sequence
         guard state != lastPublishedState else {
             // NO CHANGE in displayed state, BUT the deadline may have moved:
-            // a renewed or shortened lease changes the snapshot's stamp and its deadline while
-            // permission, count and guidance stay identical. The timer must be re-armed even when
+            // the queue-age boundary advances while permission, count and guidance stay identical.
+            // The timer must be re-armed even when
             // nothing is published, or the OLD deadline keeps ownership. This read is still the
             // newest accepted one (`sequence > lastPublishedSequence` held above), so an obsolete
             // read cannot supersede newer scheduling.
@@ -476,8 +441,8 @@ final class VoiceSharingSettingsModel {
         for observer in observers { observer(sent) }
         // RE-ARM on every authoritative update: an initially empty visible
         // queue schedules nothing, so the entry added right after it would never be given an expiry
-        // timer, and a SHORTENED or newly installed lease could miss its deadline. Re-arming here
-        // covers every source — queue, policy, enrollment — because they all refresh through here.
+        // timer, and a SOONER age boundary could be missed. Re-arming here covers every source —
+        // queue and enrollment — because they all refresh through here.
         armTimeDrivenRefresh(afterAcceptedSequence: sequence)
     }
 
@@ -491,13 +456,12 @@ final class VoiceSharingSettingsModel {
     /// `nil` from a read is preserved as `unknown` — never coerced to `false`, which would accuse
     /// the user of opting out.
     func liveState() async -> LiveState {
-        // Stamp before and after every read, INCLUDING the queue read: a hold transition or an
-        // account/enrollment move between the queue coverage read and the first stamp used to be
-        // invisible. No read happens outside the interval.
+        // Stamp before and after every read, INCLUDING the queue read: an account/enrollment move
+        // between the queue coverage read and the first stamp used to be invisible. No read happens
+        // outside the interval.
         let before = coherenceStamp()
         // Folders are the only state, so there is no "unknown coverage" to report: the count is a
         // direct read of the directory.
-        let fault: StoppedReason.StorageFault = .none
         let readyCount: Int? = await queue.count()
         let permits = isCollectionPermitted()
         let enrolled = isEnrolled()
@@ -514,12 +478,11 @@ final class VoiceSharingSettingsModel {
         return LiveState(policyPermits: permits,
                          enrolled: enrolled,
                          localOptIn: optedIn,
-                         storageFault: fault,
                          knownReadyCount: readyCount,
                          coherence: coherence)
     }
 
-    /// Account + enrollment generation + lease version, read atomically enough to detect a move
+    /// Account + enrollment generation + epoch version, read atomically enough to detect a move
     /// between two calls. `nil` when the caller cannot answer — which makes the snapshot
     /// incoherent rather than silently trusting a half-known world.
     private func coherenceStamp() -> CoherenceStamp? {
@@ -529,35 +492,17 @@ final class VoiceSharingSettingsModel {
               let generation = coherenceGeneration() else { return nil }
         return CoherenceStamp(account: account,
                               generation: generation,
-                              version: coherenceVersion(),
-                              policyLease: policyLeaseGeneration(),
-                              queueHold: queueHoldGeneration())
+                              version: coherenceVersion())
     }
 
     struct CoherenceStamp: Equatable {
         let account: String?
         let generation: Int
         let version: String?
-        /// The policy's own lease generation and the queue's hold generation: these version the
-        /// OTHER two authorities the snapshot reads, so a lease expiry/fence or a queue hold change
-        /// during the read is detected.
-        let policyLease: Int
-        let queueHold: Int
     }
 
     /// Projection over explicit live state. Pure: no reads, no writes, no cached mixing.
     func recoveryGuidance(for live: LiveState) -> RecoveryGuidance {
-        switch live.storageFault {
-        case .revocationInDoubt:
-            // VERIFIED remedy: a successful purge retires the intent and releases the hold
-            // (VoiceSharingUploadQueue.purgeLocked). Nothing else clears it.
-            return RecoveryGuidance(reason: .storageHeld, action: L10n.voiceSharingRecoveryHeld)
-        case .unreadable:
-            // No action promised: an unreadable store is not cleared by the user doing anything.
-            return RecoveryGuidance(reason: .storageUnreadable, action: nil)
-        case .none:
-            break
-        }
         guard live.isCoherent else {
             // Reads from two different moments (or an unstamped read) cannot name a reason.
             return RecoveryGuidance(reason: .unknown, action: nil)
@@ -578,7 +523,7 @@ final class VoiceSharingSettingsModel {
             return RecoveryGuidance(reason: .notEnrolled,
                                     action: L10n.voiceSharingRecoveryNotEnrolled)
         }
-        return RecoveryGuidance(reason: .noActiveLease,
+        return RecoveryGuidance(reason: .notPermitted,
                                 action: L10n.voiceSharingRecoveryPaused)
     }
 }

@@ -262,12 +262,10 @@ final class VoiceSharingRecoveryGuidanceTests: XCTestCase {
                                   coherenceAccount: { "account-a" })
     }
 
-    private func guidance(permits: Bool? = true, enrolled: Bool? = true, optedIn: Bool? = true,
-                          fault: VoiceSharingSettingsModel.StoppedReason.StorageFault = .none)
+    private func guidance(permits: Bool? = true, enrolled: Bool? = true, optedIn: Bool? = true)
         -> VoiceSharingSettingsModel.RecoveryGuidance {
         model().recoveryGuidance(
             for: .init(policyPermits: permits, enrolled: enrolled, localOptIn: optedIn,
-                       storageFault: fault,
                        coherence: .coherent(account: "account-a", generation: 1, version: "v1")))
     }
 
@@ -289,9 +287,9 @@ final class VoiceSharingRecoveryGuidanceTests: XCTestCase {
         XCTAssertNotEqual(result.reason, .turnedOffLocally)
     }
 
-    func test_missingLeaseReportsAPauseNotAUserAction() async {
+    func test_notPermittedReportsAPauseNotAUserAction() async {
         let result = guidance(permits: false, enrolled: true, optedIn: true)
-        XCTAssertEqual(result.reason, .noActiveLease)
+        XCTAssertEqual(result.reason, .notPermitted)
         XCTAssertNotNil(result.action)
     }
 
@@ -304,20 +302,6 @@ final class VoiceSharingRecoveryGuidanceTests: XCTestCase {
         XCTAssertNil(guidance(optedIn: nil).action, "no remedy can be named for an unknown")
     }
 
-    /// An UNREADABLE store is not a failed revocation: different reason, and no remedy offered.
-    func test_unreadableStorageIsNotReportedAsAFailedRevocation() async {
-        let result = guidance(fault: .unreadable)
-        XCTAssertEqual(result.reason, .storageUnreadable)
-        XCTAssertNotEqual(result.reason, .storageHeld)
-        XCTAssertNil(result.action, "nothing the user does clears an unreadable store")
-    }
-
-    /// A held owner names the verified remedy: local deletion completes the revocation.
-    func test_heldOwnerNamesLocalDeletionAsTheRemedy() async {
-        let result = guidance(fault: .revocationInDoubt)
-        XCTAssertEqual(result.reason, .storageHeld)
-        XCTAssertEqual(result.action, L10n.voiceSharingRecoveryHeld)
-    }
 }
 
 // MARK: - Change subscription
@@ -853,17 +837,17 @@ final class VoiceSharingTimerLifecycleTests: XCTestCase {
                        "an authoritative update must re-arm, or the new entry never gets a timer")
     }
 
-    /// An EXPIRED lease must not re-arm forever. The refresh happens once; a past transition is not
-    /// a reason to wake again.
-    func test_anExpiredLeaseRefreshesOnceWithoutARecurringTimer() async {
+    /// A PAST transition must not re-arm forever. The refresh happens once; a transition already
+    /// behind the clock is not a reason to wake again.
+    func test_aPastTransitionRefreshesOnceWithoutARecurringTimer() async {
         let queue = VoiceSharingQueue(root: root)
         let model = VoiceSharingSettingsModel(queue: queue,
                                              isCollectionPermitted: { true },
                                              isAccountEnrolled: { true },
                                              isLocallyOptedIn: { true },
                                              coherenceAccount: { "account-a" })
-        var leaseDelay: TimeInterval? = 30
-        model.nextLeaseExpirySeconds = { leaseDelay }
+        var ageDelay: TimeInterval? = 30
+        model.nextAgeBoundarySeconds = { ageDelay }
         var bodies: [(TimeInterval, () -> Void)] = []
         model.scheduleTimeDrivenRefresh = { delay, body in bodies.append((delay, body)) }
         await model.refreshLiveState()
@@ -871,10 +855,10 @@ final class VoiceSharingTimerLifecycleTests: XCTestCase {
         XCTAssertGreaterThan(bodies[0].0, 0, "and it is a real delay, not a 50 ms spin")
 
         // The deadline passes: the timer fires, the refresh runs, the delay is now negative.
-        leaseDelay = -5
+        ageDelay = -5
         bodies[0].1()
         XCTAssertEqual(bodies.count, 1,
-                       "an EXPIRED lease must not re-arm: that is the 50 ms loop the reviewer found")
+                       "a PAST transition must not re-arm: that is the 50 ms loop the reviewer found")
     }
 
     /// Arming again must invalidate a previously armed timer even when nothing is now due.
@@ -916,29 +900,29 @@ final class VoiceSharingDeadlineMoveTests: XCTestCase {
         try? FileManager.default.removeItem(at: root)
     }
 
-    /// A SHORTENED lease changes no displayed field — permission, count and guidance are identical —
+    /// A MOVED deadline changes no displayed field — permission, count and guidance are identical —
     /// yet the deadline moved. The timer must be re-armed anyway, or the old deadline owns the
     /// surface.
-    func test_aShortenedLeaseRearmsEvenThoughNothingDisplayedChanges() async {
+    func test_aMovedDeadlineRearmsEvenThoughNothingDisplayedChanges() async {
         let queue = VoiceSharingQueue(root: root)
         let model = VoiceSharingSettingsModel(queue: queue,
                                              isCollectionPermitted: { true },
                                              isAccountEnrolled: { true },
                                              isLocallyOptedIn: { true },
                                              coherenceAccount: { "account-a" })
-        var leaseDelay: TimeInterval? = 900
-        model.nextLeaseExpirySeconds = { leaseDelay }
+        var ageDelay: TimeInterval? = 900
+        model.nextAgeBoundarySeconds = { ageDelay }
         var scheduled: [(delay: TimeInterval, body: () -> Void)] = []
         model.scheduleTimeDrivenRefresh = { delay, body in scheduled.append((delay, body)) }
 
         await model.refreshLiveState()
         XCTAssertEqual(scheduled.count, 1)
         let firstDelay = scheduled[0].delay
-        XCTAssertGreaterThan(firstDelay, 900, "the first arm follows the long lease")
+        XCTAssertGreaterThan(firstDelay, 900, "the first arm follows the far boundary")
 
-        // Renewal shortened the lease: nothing the user SEES changes.
+        // The boundary moves closer: nothing the user SEES changes.
         let liveBefore = await model.liveState()
-        leaseDelay = 60
+        ageDelay = 60
         await model.refreshLiveState()
         let liveAfter = await model.liveState()
         XCTAssertEqual(liveAfter, liveBefore, "precondition: the displayed state is identical")
@@ -957,7 +941,7 @@ final class VoiceSharingDeadlineMoveTests: XCTestCase {
                                              isAccountEnrolled: { true },
                                              isLocallyOptedIn: { true },
                                              coherenceAccount: { "account-a" })
-        model.nextLeaseExpirySeconds = { 300 }
+        model.nextAgeBoundarySeconds = { 300 }
         var scheduled = 0
         model.scheduleTimeDrivenRefresh = { _, _ in scheduled += 1 }
 
@@ -992,7 +976,7 @@ final class VoiceSharingDeadlineMoveTests: XCTestCase {
                                              isLocallyOptedIn: { true },
                                              coherenceAccount: { "account-a" })
         var deadline: TimeInterval = 900
-        model.nextLeaseExpirySeconds = { deadline }
+        model.nextAgeBoundarySeconds = { deadline }
         var scheduled: [TimeInterval] = []
         model.scheduleTimeDrivenRefresh = { delay, _ in scheduled.append(delay) }
 
@@ -1001,7 +985,7 @@ final class VoiceSharingDeadlineMoveTests: XCTestCase {
         XCTAssertEqual(scheduled.count, 1)
         let longDelay = scheduled[0]
 
-        // The lease shortens; a NEWER read completes and arms the short deadline.
+        // The deadline moves closer; a NEWER read completes and arms the short deadline.
         deadline = 30
         await model.refreshLiveState()
         XCTAssertEqual(scheduled.count, 2)

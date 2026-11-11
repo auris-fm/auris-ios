@@ -241,9 +241,8 @@ class VoiceControlAssembly {
             // whole snapshot degrades to `unknown` rather than mixing two moments.
             coherenceAccount: { ServerSettings.userId },
             coherenceGeneration: { VoiceSharingEnrollmentStore.shared.currentEnrollmentGeneration },
-            coherenceVersion: { VoiceSharingEnrollmentStore.shared.activeEnrollmentEpoch },
-            queueHoldGeneration: { 0 })
-        // Time-driven freshness: the queue's next age boundary and the policy's lease deadline.
+            coherenceVersion: { VoiceSharingEnrollmentStore.shared.activeEnrollmentEpoch })
+        // Time-driven freshness: the queue's next age boundary.
         settingsModel.nextAgeBoundarySeconds = { 0 }
         settingsModel.scheduleTimeDrivenRefresh = { delay, body in
             DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: body)

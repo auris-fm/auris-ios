@@ -101,10 +101,9 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
 
     // MARK: - Opt-in requires backend authority, not a gesture
 
-    /// The server no longer issues `membership_revision`: a current-format projection carries none, and
-    /// the decoder supplies an empty one. A relaunch must still restore the remembered epoch and plan
-    /// from what was persisted, without a fetch — sharing may not depend on a successful GET after
-    /// every restart just because a retired field went missing.
+    /// The server no longer issues `membership_revision`: a current-format projection carries none.
+    /// A relaunch must still restore the remembered epoch and plan from what was persisted, without
+    /// a fetch — sharing may not depend on a successful GET after every restart.
     func test_coldStart_currentFormatProjectionWithoutRevision_keepsEpochAndPlan() {
         let sharedSuite = "VoiceSharingColdStart-NoRevision-\(UUID().uuidString)"
         guard let persistent = UserDefaults(suiteName: sharedSuite) else {
@@ -201,7 +200,7 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
     }
 
     /// Withdrawing while ALREADY inactive still fences, otherwise a later first-delivery
-    /// opt-in could not be fenced at all. Plan: `test_withdrawalFromInactiveProjection_advancesRevision`.
+    /// opt-in could not be fenced at all. Plan: `test_withdrawalFromInactiveProjection_isAuthoritativeState`.
     func test_withdrawalFromInactiveProjection_stillFencesLaterOptIns() {
         let store = makeStore()
         let preWithdrawal = token(store)

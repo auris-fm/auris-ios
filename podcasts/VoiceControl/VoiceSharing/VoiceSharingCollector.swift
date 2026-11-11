@@ -788,7 +788,7 @@ return }
         speechCancelled()
     }
 
-    /// Explicit gate-loss: remote switch off, lease expired, or permission withdrawn, with identity UNCHANGED
+    /// Explicit gate-loss: remote switch off or permission withdrawn, with identity UNCHANGED
     /// (so the dequeue-time epoch/session check alone would wave the queued work through). Cancels any open
     /// partial IMMEDIATELY — without waiting for the next signal — and purges every queued event: consent is
     /// gone, so nothing already in the FIFO may reach the sink either. Without this, "disable" only took

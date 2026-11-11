@@ -55,7 +55,7 @@ struct VoiceSharingSettingsView: View {
                     if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
                 }
                 // ONE entry point: refreshLiveState publishes AND arms the time-driven refresh
-                // (an aged entry or a lapsing lease changes the display with no other event), so
+                // (an aged entry crossing its bound changes the display with no other event), so
                 // appearance does not need a second arm.
                 Task { await model.refreshLiveState() }
             }
@@ -69,9 +69,9 @@ struct VoiceSharingSettingsView: View {
     private func title(for reason: VoiceSharingSettingsModel.StoppedReason) -> String {
         switch reason {
         case .notStopped: return L10n.voiceSharingStatusOn
-        case .noActiveLease, .unknown: return L10n.voiceSharingStatusPaused
+        case .notPermitted, .unknown: return L10n.voiceSharingStatusPaused
         case .notEnrolled, .turnedOffLocally: return L10n.voiceSharingStatusOff
-        case .storageHeld, .storageUnreadable: return L10n.voiceSharingStatusStopped
+        case .notEnrolled: return L10n.voiceSharingStatusStopped
         }
     }
 
@@ -114,10 +114,6 @@ struct VoiceSharingSettingsView: View {
                     Text(L10n.voiceSharingUnknownStorageExplainer)
                         .font(.caption)
                         .foregroundColor(.secondary)
-                case .revocationInDoubt:
-                    // Count is deliberately not shown: the set is unprovable until a purge
-                    // reconciles. The reason row above already offers the verified remedy.
-                    row(L10n.voiceSharingRowWaiting, value: L10n.voiceSharingValueNotConfirmed, tint: .orange)
                 }
             }
 
