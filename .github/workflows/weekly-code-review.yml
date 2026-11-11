@@ -12,7 +12,7 @@ name: Weekly Code Review
 
 on:
   schedule:
-    - cron: "0 1 * * 1" # Mondays 01:00 UTC
+    - cron: "0 17 * * 0" # Mondays 01:00 UTC+8 (Sundays 17:00 UTC)
   workflow_dispatch:
 
 concurrency:
