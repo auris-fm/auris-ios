@@ -6691,7 +6691,6 @@
 /* Message shown when a network the user tapped fails to load */
 "network_fail_to_load" = "This network couldn't be loaded";
 
-/* Voice Sharing recovery: shown when a revocation could not be proven complete; the verified remedy is deleting stored recordings on this device. */
 
 /* Voice Sharing recovery: shown when the app cannot determine whether collection is permitted. */
 "voice_sharing_recovery_paused" = "Voice Sharing is paused until the app can check its settings. Open the app with a connection to resume.";
@@ -6729,7 +6728,6 @@
 /* Voice Sharing settings value: the count could not be determined. */
 "voice_sharing_value_unknown" = "Unknown";
 
-/* Voice Sharing settings value: the stored set could not be confirmed. */
 
 /* Voice Sharing settings: unknown storage explanation. */
 "voice_sharing_unknown_storage_explainer" = "Some stored recordings cannot be checked right now. Deleting will attempt them all and tell you exactly what could not be resolved.";
