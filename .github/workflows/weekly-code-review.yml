@@ -145,6 +145,11 @@ jobs:
           git checkout -- .github 2>/dev/null || true
           git clean -fdq .github
           if [ -z "$(git status --porcelain)" ]; then
+            # A rerun that no longer has fixes closes the draft PR an earlier attempt opened.
+            old=$(gh pr list --head "$BRANCH" --state open --json url -q '.[0].url')
+            if [ -n "$old" ]; then
+              gh pr close "$old" --delete-branch --comment "A rerun of this review found no mechanical fixes."
+            fi
             echo "No mechanical fixes."
             exit 0
           fi
@@ -173,16 +178,21 @@ jobs:
           SHA: ${{ steps.head.outputs.sha }}
           DAY: ${{ steps.head.outputs.date }}
           PR_URL: ${{ steps.pr.outputs.url }}
+          RUN_ID: ${{ github.run_id }}
         run: |
+          title="Weekly code review $DAY (run $RUN_ID)"
+          # A rerun of the same run finds its own issue by exact title.
+          existing=$(gh issue list --state open --limit 200 --json number,title             | jq -r --arg t "$title" '.[] | select(.title == $t) | .number' | head -n 1)
           if [ ! -s "$REPORT" ]; then
+            if [ -n "$existing" ]; then
+              gh issue close "$existing" --comment "A rerun of this review found nothing left beyond the fix PR."
+            fi
             echo "No findings beyond the fix PR."
             exit 0
           fi
-          title="Weekly code review $DAY (run ${{ github.run_id }})"
-          { echo "Reviewed commit: $SHA"; [ -n "$PR_URL" ] && echo "Mechanical fixes: $PR_URL"; echo; cat "$REPORT"; } > "$RUNNER_TEMP/issue.md"
-          existing=$(gh issue list --state open --search "in:title "$title"" --json number,title -q ".[] | select(.title == "$title") | .number" | head -1)
+          { echo "Reviewed commit: $SHA"; if [ -n "$PR_URL" ]; then echo "Mechanical fixes: $PR_URL"; fi; echo; cat "$REPORT"; } > "$RUNNER_TEMP/issue.md"
           if [ -n "$existing" ]; then
-            gh issue edit "$existing" --body-file "$RUNNER_TEMP/issue.md" >/dev/null
+            gh issue edit "$existing" --body-file "$RUNNER_TEMP/issue.md"
           else
             gh issue create --title "$title" --body-file "$RUNNER_TEMP/issue.md"
           fi
