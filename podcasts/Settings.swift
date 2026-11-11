@@ -1537,10 +1537,7 @@ class Settings: NSObject {
         }
 
         private class func remoteMsToTime(key: String, fallback: Double) -> TimeInterval {
-            guard FirebaseApp.app() != nil,
-                  let number = RemoteConfig.remoteConfig().configValue(forKey: key).numberValue as? NSNumber else {
-                return fallback
-            }
+            guard let number = remoteConfigValue(key)?.numberValue else { return fallback }
             return TimeInterval(number.doubleValue / 1000)
         }
     #endif

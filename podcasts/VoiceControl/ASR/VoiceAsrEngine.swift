@@ -31,10 +31,6 @@ class VoiceAsrEngine {
         /// Whether the built-in-speaker correlation window may be applied.
         var appliesCorrelationWindow: Bool { self == .builtInSpeaker }
 
-        /// Whether this route is evidence that echo cannot occur. It never is: the
-        /// owning clause says an isolated route reduces exposure, not that it removes it.
-        var provesEchoImpossible: Bool { false }
-
         /// Maps an observed output port to the filter scope it implies.
         ///
         /// Only the built-in loudspeaker allows the aligned correlation window: its
@@ -1169,11 +1165,5 @@ class VoiceAsrEngine {
         // submitted is still audible while the old path drains; clearing outright would
         // leave exactly that echo unfiltered during the handover.
         echoReference?.retire(retainingAcousticTail: Self.acousticTailSeconds)
-    }
-
-    /// Whether the current route is being treated as proof that echo cannot occur.
-    /// Always `false`: no route proves that, and an isolated route only reduces exposure.
-    var echoFilterRouteConsidersEchoImpossible: Bool {
-        echoFilterRoute.provesEchoImpossible
     }
 }

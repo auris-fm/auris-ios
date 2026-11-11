@@ -39,9 +39,7 @@ class VoiceDialogManager {
         pendingDialog = PendingVoiceDialog(
             targetTool: tool,
             targetAction: actionName,
-            missingSlots: required,
-            requiredSlots: required,
-            lastQuestion: question
+            requiredSlots: required
         )
         return Result(intent: nil, question: question)
     }

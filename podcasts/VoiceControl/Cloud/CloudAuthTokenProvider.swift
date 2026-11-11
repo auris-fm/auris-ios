@@ -443,13 +443,6 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
         return tokens.accessToken
     }
 
-    private func currentRefreshToken() -> String? {
-        lock.lock()
-        defer { lock.unlock() }
-        guard let refresh = tokens?.refreshToken, !refresh.isEmpty else { return nil }
-        return refresh
-    }
-
     /// Marks the cached access token unusable while keeping the refresh token.
     private func invalidateAccessToken() {
         lock.lock()

@@ -18,13 +18,6 @@ WakeWordPipeline* wakeword_init(const char* melModelPath,
                                  const char* clsModelPath,
                                  float threshold);
 
-/// Run detection on a 2-second window of 16kHz mono float32 PCM.
-/// @return Confidence score in [0, 1].
-float wakeword_detect(WakeWordPipeline* handle,
-                       const float* samples,
-                       int sampleCount,
-                       int sampleRate);
-
 /// Runs detection on a complete VAD segment per the recognition-pipeline
 /// detection-window policy: prepends 2 seconds of virtual zero waveform
 /// context, extracts mel frames and embeddings once over the combined input,

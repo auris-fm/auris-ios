@@ -369,13 +369,6 @@ final class CloudAudioPlayer: @unchecked Sendable {
         return settled || confirmedStopEpoch() >= ticket.epoch
     }
 
-    private func confirmStopForBoundWaiter(_ epoch: Int) async -> Bool {
-        bufferLock.lock()
-        let settled = settledDisplacedIdentities.contains(epoch)
-        bufferLock.unlock()
-        return settled || confirmedStopEpoch() >= epoch
-    }
-
     // MARK: - Internal
 
     weak var delegate: Delegate?
