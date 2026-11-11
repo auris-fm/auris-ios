@@ -65,7 +65,7 @@ jobs:
             base=$(git describe --tags --abbrev=0 --match 'upstream/*' HEAD 2>/dev/null || true)
           fi
           if [ -n "$base" ]; then
-            { echo "# changed relative to upstream release ${base#upstream/}"; git diff --name-only "$base" HEAD; } > "$SCOPE"
+            { echo "# changed relative to upstream release ${base#upstream/}"; git -c core.quotePath=false diff --name-only --no-renames "$base" HEAD; } > "$SCOPE"
           else
             # Upstream unavailable: fall back to the Auris voice directories so the run is not wasted.
             { echo "# upstream unavailable; voice directories only"; git ls-files podcasts/VoiceControl PocketCastsTests/VoiceControlTests; } > "$SCOPE"
@@ -85,7 +85,7 @@ jobs:
 
             Read AGENTS.md first; it carries this repo's conventions.
 
-            Review the files listed in ${{ runner.temp }}/scope.txt: every file this fork adds or changes relative to the upstream Pocket Casts release it last merged (named on the first line), plus how those changes fit the code around them. Leave purely upstream code alone.
+            Review the files listed in ${{ runner.temp }}/scope.txt: every file this fork adds or changes relative to the upstream Pocket Casts release it last merged (named on the first line), plus how those changes fit the code around them. Leave purely upstream code alone. Edits outside that list are never applied: report problems you find in other files in the issue report instead of editing them.
 
             The specs live in the private `auris-fm/core` repo and are not available to this job, so do not judge conformance to them. Report only inconsistencies inside this repo: two places that implement or state the same rule differently, and comments or docs that disagree with the code.
 
@@ -157,22 +157,28 @@ jobs:
           SHA: ${{ steps.head.outputs.sha }}
           DAY: ${{ steps.head.outputs.date }}
           FIXES: ${{ runner.temp }}/monthly-fixes.md
-          SCOPE: ${{ runner.temp }}/scope.txt
           BASE: ${{ github.event.repository.default_branch }}
         run: |
           git checkout -- .github 2>/dev/null || true
           git clean -fdq .github
           # Only files in scope may reach the PR. Edits elsewhere are saved for the issue and dropped here.
+          # Paths are NUL-separated and literal, and renames are split into delete+add, so every path is classified.
+          export GIT_LITERAL_PATHSPECS=1
+          out="$RUNNER_TEMP/out-of-scope.nul"; : > "$out"
+          tail -n +2 "$SCOPE" > "$RUNNER_TEMP/scope-paths.txt"
           git add -A
-          git diff --cached --name-only | grep -vxF -f <(tail -n +2 "$SCOPE") > "$RUNNER_TEMP/out-of-scope.txt" || true
-          if [ -s "$RUNNER_TEMP/out-of-scope.txt" ]; then
-            git diff --cached -- $(cat "$RUNNER_TEMP/out-of-scope.txt") > "$RUNNER_TEMP/out-of-scope.diff"
+          git diff --cached --name-only --no-renames -z | while IFS= read -r -d '' f; do
+            grep -qxF -- "$f" "$RUNNER_TEMP/scope-paths.txt" || printf '%s\0' "$f" >> "$out"
+          done
+          if [ -s "$out" ]; then
+            tr '\0' '\n' < "$out" > "$RUNNER_TEMP/out-of-scope.txt"
+            xargs -0 git diff --cached --no-renames -- < "$out" > "$RUNNER_TEMP/out-of-scope.diff"
           fi
           git reset -q
-          if [ -s "$RUNNER_TEMP/out-of-scope.txt" ]; then
-            tracked=$(git ls-files -- $(cat "$RUNNER_TEMP/out-of-scope.txt"))
-            if [ -n "$tracked" ]; then git checkout -- $tracked; fi
-            git clean -fdq -- $(cat "$RUNNER_TEMP/out-of-scope.txt")
+          if [ -s "$out" ]; then
+            xargs -0 git ls-files -z -- < "$out" > "$RUNNER_TEMP/tracked.nul"
+            if [ -s "$RUNNER_TEMP/tracked.nul" ]; then git checkout --pathspec-from-file="$RUNNER_TEMP/tracked.nul" --pathspec-file-nul; fi
+            xargs -0 git clean -fdq -- < "$out"
           fi
           if [ -z "$(git status --porcelain)" ]; then
             # A rerun that no longer has fixes closes the draft PR an earlier attempt opened.
