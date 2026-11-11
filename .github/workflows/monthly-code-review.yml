@@ -55,6 +55,23 @@ jobs:
           echo "branch=monthly-fixes/${{ github.run_id }}" >> "$GITHUB_OUTPUT"
           echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"
 
+      - name: List the files Auris changed relative to upstream
+        env:
+          SCOPE: ${{ runner.temp }}/scope.txt
+        run: |
+          base=""
+          git remote add upstream https://github.com/Automattic/pocket-casts-ios.git
+          if git fetch -q --no-tags upstream '+refs/tags/*:refs/tags/upstream/*'; then
+            base=$(git describe --tags --abbrev=0 --match 'upstream/*' HEAD 2>/dev/null || true)
+          fi
+          if [ -n "$base" ]; then
+            { echo "# changed relative to upstream release ${base#upstream/}"; git diff --name-only "$base" HEAD; } > "$SCOPE"
+          else
+            # Upstream unavailable: fall back to the Auris voice directories so the run is not wasted.
+            { echo "# upstream unavailable; voice directories only"; git ls-files podcasts/VoiceControl PocketCastsTests/VoiceControlTests; } > "$SCOPE"
+          fi
+          echo "$(($(wc -l < "$SCOPE") - 1)) files in scope ($(head -n 1 "$SCOPE"))"
+
       - name: Run monthly review
         uses: anthropics/claude-code-action@833fb0f8c9f6686b33d963a8bae0a94f4936ab2a # v1.0.211
         env:
@@ -68,7 +85,7 @@ jobs:
 
             Read AGENTS.md first; it carries this repo's conventions.
 
-            Review the Auris-owned code only: `podcasts/VoiceControl/` and `PocketCastsTests/VoiceControlTests/`, plus any other file whose history shows Auris changes. The rest is upstream Pocket Casts; leave it alone unless Auris code duplicates it.
+            Review the files listed in ${{ runner.temp }}/scope.txt: every file this fork adds or changes relative to the upstream Pocket Casts release it last merged (named on the first line), plus how those changes fit the code around them. Leave purely upstream code alone.
 
             The specs live in the private `auris-fm/core` repo and are not available to this job, so do not judge conformance to them. Report only inconsistencies inside this repo: two places that implement or state the same rule differently, and comments or docs that disagree with the code.
 
