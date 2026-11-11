@@ -7,7 +7,9 @@
 # PR goes through CI and the PR review like any other; nothing merges automatically.
 #
 # Pushing and opening the PR use a token minted from the `auris-weekly-review` GitHub
-# App, because PRs opened with the built-in token do not trigger CI. The app has no
+# App, because PRs opened with the built-in token do not trigger CI. The token is minted
+# after the review, since installation tokens last one hour and the review can run longer.
+# The app has no
 # workflows permission, so the job also refuses to commit anything under `.github/`.
 # The same file, differing only in the scope paragraph, lives in `core`, `auris-ios`
 # and `auris-android`; keep the three in step.
@@ -39,28 +41,19 @@ jobs:
             exit 1
           fi
 
-      - name: Mint app token
-        id: app
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
-        with:
-          client-id: Iv23li4F3Q0PrzmgQeMj # auris-weekly-review; a client ID is not secret
-          private-key: ${{ secrets.WEEKLY_REVIEW_APP_PRIVATE_KEY }}
-          permission-contents: write
-          permission-pull-requests: write
-          permission-issues: write
-
       - name: Checkout default branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
-          token: ${{ steps.app.outputs.token }}
+          persist-credentials: false
 
       - name: Record reviewed commit
         id: head
         run: |
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "branch=weekly-fixes/$(date -u +%F)" >> "$GITHUB_OUTPUT"
+          echo "branch=weekly-fixes/${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"
 
       - name: Run weekly review
         uses: anthropics/claude-code-action@833fb0f8c9f6686b33d963a8bae0a94f4936ab2a # v1.0.211
@@ -117,13 +110,37 @@ jobs:
             --model ${{ secrets.ANTHROPIC_MODEL }}
             --allowedTools "Read,Glob,Grep,Edit,Write,Bash(git log:*),Bash(git show:*),Bash(git ls-files:*),Bash(git diff:*),Bash(git grep:*)"
 
-      - name: Open the fix PR
+      - name: Require both review outputs
+        env:
+          FIXES: ${{ runner.temp }}/weekly-fixes.md
+          REPORT: ${{ runner.temp }}/weekly-review.md
+        run: |
+          for f in "$FIXES" "$REPORT"; do
+            if [ ! -e "$f" ]; then
+              echo "::error::The review did not write $f (an empty file means no findings)."
+              exit 1
+            fi
+          done
+
+      - name: Mint app token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: Iv23li4F3Q0PrzmgQeMj # auris-weekly-review; a client ID is not secret
+          private-key: ${{ secrets.WEEKLY_REVIEW_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+
+      - name: Open or update the fix PR
         id: pr
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           BRANCH: ${{ steps.head.outputs.branch }}
           SHA: ${{ steps.head.outputs.sha }}
+          DAY: ${{ steps.head.outputs.date }}
           FIXES: ${{ runner.temp }}/weekly-fixes.md
+          BASE: ${{ github.event.repository.default_branch }}
         run: |
           git checkout -- .github 2>/dev/null || true
           git clean -fdq .github
@@ -132,17 +149,21 @@ jobs:
             exit 0
           fi
           if [ ! -s "$FIXES" ]; then
-            echo '::error::The working tree changed but no fix summary was written.'
+            echo '::error::The working tree changed but the fix summary is empty.'
             exit 1
           fi
-          git switch -c "$BRANCH"
+          git switch -C "$BRANCH"
           git add -A
-          git -c user.name="auris-weekly-review[bot]" -c user.email="auris-weekly-review[bot]@users.noreply.github.com" \
-            commit -q -m "Weekly review: mechanical fixes for $SHA"
-          git push -q origin "$BRANCH"
+          git -c user.name="auris-weekly-review[bot]" -c user.email="auris-weekly-review[bot]@users.noreply.github.com"             commit -q -m "Weekly review: mechanical fixes for $SHA"
+          # A rerun of the same run replaces its own branch; no other run uses this name.
+          git push -q --force "https://x-access-token:$GH_TOKEN@github.com/${{ github.repository }}.git" "HEAD:refs/heads/$BRANCH"
           { echo "Mechanical fixes from the weekly review of $SHA. Each removes or corrects something that nothing depends on; CI and the PR review check it."; echo; cat "$FIXES"; } > "$RUNNER_TEMP/pr.md"
-          url=$(gh pr create --draft --base "${{ github.event.repository.default_branch }}" --head "$BRANCH" \
-            --title "Weekly review fixes $(date -u +%F)" --body-file "$RUNNER_TEMP/pr.md")
+          url=$(gh pr list --head "$BRANCH" --state open --json url -q '.[0].url')
+          if [ -n "$url" ]; then
+            gh pr edit "$url" --body-file "$RUNNER_TEMP/pr.md" >/dev/null
+          else
+            url=$(gh pr create --draft --base "$BASE" --head "$BRANCH"               --title "Weekly review fixes $DAY" --body-file "$RUNNER_TEMP/pr.md")
+          fi
           echo "url=$url" >> "$GITHUB_OUTPUT"
 
       - name: File the remaining findings as one issue
@@ -150,12 +171,19 @@ jobs:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           REPORT: ${{ runner.temp }}/weekly-review.md
           SHA: ${{ steps.head.outputs.sha }}
+          DAY: ${{ steps.head.outputs.date }}
           PR_URL: ${{ steps.pr.outputs.url }}
         run: |
           if [ ! -s "$REPORT" ]; then
             echo "No findings beyond the fix PR."
             exit 0
           fi
+          title="Weekly code review $DAY (run ${{ github.run_id }})"
           { echo "Reviewed commit: $SHA"; [ -n "$PR_URL" ] && echo "Mechanical fixes: $PR_URL"; echo; cat "$REPORT"; } > "$RUNNER_TEMP/issue.md"
-          gh issue create --title "Weekly code review $(date -u +%F)" --body-file "$RUNNER_TEMP/issue.md"
+          existing=$(gh issue list --state open --search "in:title "$title"" --json number,title -q ".[] | select(.title == "$title") | .number" | head -1)
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --body-file "$RUNNER_TEMP/issue.md" >/dev/null
+          else
+            gh issue create --title "$title" --body-file "$RUNNER_TEMP/issue.md"
+          fi
 
