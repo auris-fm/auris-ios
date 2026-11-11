@@ -43,7 +43,7 @@ final class VoiceSharingRestoredSessionTests: XCTestCase {
             status: 200,
             body: [
                 "schema_version": 1,
-                "membership_revision": "r1",
+
                 "plan": "pro",
                 "voice_sharing_enrolled": true,
                 "withdrawal_state": "active",
@@ -82,8 +82,6 @@ final class VoiceSharingRestoredSessionTests: XCTestCase {
         // Consent still stands (the user asked to share; a failed GET is not a decision for them),
         // but no ACCOUNT authority is invented: nothing was learned from the server.
         XCTAssertFalse(store.currentEffectiveEnrolled, "a failed fetch grants nothing")
-        XCTAssertNil(store.expectedMembershipRevision,
-                     "and no revision is advertised for outbound mutations")
     }
 
     /// A withdrawal in the account's projection reaches consent — this is how a withdrawal made on
@@ -101,7 +99,7 @@ final class VoiceSharingRestoredSessionTests: XCTestCase {
             status: 200,
             body: [
                 "schema_version": 1,
-                "membership_revision": "r2",
+
                 "plan": "pro",
                 "voice_sharing_enrolled": false,
                 "withdrawal_state": "withdrawn",

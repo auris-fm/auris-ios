@@ -59,7 +59,7 @@ final class VoiceSharingSwitchPutControls: XCTestCase {
 
     private func projectionBody(_ revision: String, enrolled: Bool, epoch: String?) -> [String: Any] {
         var body: [String: Any] = [
-            "schema_version": 1, "membership_revision": revision, "plan": "pro",
+            "schema_version": 1, "plan": "pro",
             "voice_sharing_enrolled": enrolled,
             // Wire values are the server's snake_case enums: an enrolled membership is `active`; a
             // withdrawal states `withdrawn`. (`none` is not a wire value — the stricter fixture was mine.)
@@ -172,7 +172,6 @@ final class VoiceSharingSwitchPutControls: XCTestCase {
         guard case .conflict(let current, _) = outcome else {
             return XCTFail("expected conflict, got \(outcome)")
         }
-        XCTAssertEqual(current?.membershipRevision, "r12")
         XCTAssertEqual(current?.voiceSharingEnrolled, false)
         XCTAssertEqual(putRequests.count, 1, "a conflict must not produce a second request")
     }
@@ -191,7 +190,6 @@ final class VoiceSharingSwitchPutControls: XCTestCase {
             return XCTFail("expected conflict, got \(outcome)")
         }
         let projection = try XCTUnwrap(current, "the 409 body must decode as a projection")
-        XCTAssertEqual(projection.membershipRevision, "r12")
         XCTAssertEqual(projection.withdrawalState, .withdrawn)
         XCTAssertNil(projection.enrollmentEpoch)
     }

@@ -7,9 +7,6 @@ import Foundation
 /// vocabulary, and every field is optional-with-a-fail-closed-default so a partial or unknown response can
 /// never read as enrolled.
 struct VoiceSharingMembership: Equatable {
-    /// Server-issued opaque revision. Clients must send the value they last observed as
-    /// `expected_membership_revision`; every successfully applied mutation advances it.
-    let membershipRevision: String
     let plan: Plan
     let voiceSharingEnrolled: Bool
     /// Opaque server-issued epoch. Unknown/stale epochs cannot authorize new collection.
@@ -30,7 +27,6 @@ struct VoiceSharingMembership: Equatable {
     /// A missing/unknown projection is not enrolled: parsing failure yields this rather than throwing, so
     /// callers cannot accidentally treat garbage as permission.
     static let unavailable = VoiceSharingMembership(
-        membershipRevision: "",
         plan: .free,
         voiceSharingEnrolled: false,
         enrollmentEpoch: nil,
@@ -46,9 +42,8 @@ enum VoiceSharingMutationOutcome: Equatable {
     /// meantime. A bare projection would let any caller apply a late success under a token it grabbed after
     /// the reply, which is exactly how an opted-out user gets re-enabled.
     case applied(membership: VoiceSharingMembership, issuedUnder: VoiceSharingEnrollmentStore.ProjectionToken)
-    /// `409`: either `membership_conflict` (stale expected revision) or an idempotent-retry replay that
-    /// returned the original result. The client must not auto-replay a conflicted opt-in against the newer
-    /// revision; renewed opt-in requires fresh user intent.
+    /// `409`: either `membership_conflict` or an idempotent-retry replay that
+    /// returned the original result. Renewed opt-in requires fresh user intent.
     /// `409` with the server's current projection, again carrying the ISSUING fence for the same reason.
     case conflict(current: VoiceSharingMembership?, issuedUnder: VoiceSharingEnrollmentStore.ProjectionToken)
     /// `403` ineligible / `422` unsupported disclosure or invalid fields. Never silently enrolled.

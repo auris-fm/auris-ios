@@ -171,7 +171,7 @@ final class VoiceSharingCollectorSegmenterHookTests: XCTestCase {
         enrolled.localOptIn = true
         enrolled.hasAuthoritativeProjection = true
         enrolled.membership = VoiceSharingMembership(
-            membershipRevision: "rev", plan: .pro, voiceSharingEnrolled: true,
+            plan: .pro, voiceSharingEnrolled: true,
             enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "2026-09",
             withdrawalState: .active
         )

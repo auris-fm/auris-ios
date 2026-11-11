@@ -160,10 +160,17 @@ actor VoiceSharingQueue {
     // MARK: Deletion
 
     /// Deletes one recording. Every call logs its reason; the spec's list of reasons is exhaustive.
+    ///
+    /// A removal that fails is logged and reported, not swallowed: the caller must know the folder
+    /// is still there so it never treats the recording as gone. The next drain tries again.
     func delete(_ entry: Entry, reason: String) {
-        try? fileManager.removeItem(at: entry.url)
+        do {
+            try fileManager.removeItem(at: entry.url)
+            log("delete reason=\(reason) name=\(entry.name)")
+        } catch {
+            log("delete-failed reason=\(reason) name=\(entry.name)")
+        }
         retryAfter[entry.name] = nil
-        log("delete reason=\(reason) name=\(entry.name)")
     }
 
     /// Deletes every recording, keeping the queue folder itself. Returns how many were removed, so

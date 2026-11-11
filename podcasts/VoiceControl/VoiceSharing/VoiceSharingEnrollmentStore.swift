@@ -9,19 +9,19 @@ import PocketCastsServer
 ///
 /// * `effectiveEnrolled` is **server state AND the user's local intent**, never either alone. A remote
 /// switch or a UI gesture cannot enable collection by itself; the backend epoch must back it.
-/// * NOTHING orders or compares `membership_revision`: the contract makes it opaque, so any local
+/// * Nothing orders two replies against each other: the server publishes no ordering field, so any local
 /// comparison would be a guess that fails toward re-enabling a user who already withdrew. Instead every
 /// read and mutation is stamped with a `ProjectionToken` captured before the request — the account/session
 /// lifecycle plus a membership-operation counter — and a reply may only be applied while BOTH still match
 /// the live session. The counter bumps on each local membership move, so a delayed opt-in cannot
-/// resurrect membership after a withdrawal however its revision is spelled.
+/// resurrect membership after a withdrawal.
 /// * Withdrawal takes effect LOCALLY and immediately — new collection stops without waiting for the
 /// network — because "the user said stop" must not depend on a round trip. The server call still runs,
 /// and its result only reconciles; it is never what stops collection.
 /// * Account transitions replace the whole projection. An account switch cannot inherit the previous
 /// account's enrollment, even if both are enrolled, because the epochs belong to different accounts.
 ///
-/// Storage: app-private `UserDefaults`, opaque values only (revision/epoch/disclosure version as received).
+/// Storage: app-private `UserDefaults`, opaque values only (epoch/disclosure version as received).
 /// It deliberately does not store audio, transcripts, or credentials, and it is not the durable contribution
 /// queue — purging queued audio is Task 6's job and must run through `transitionToAccount` / `withdraw` here
 /// so both use one production transition rather than two divergent notions of "stopped".
@@ -90,7 +90,6 @@ final class VoiceSharingEnrollmentStore {
         static func scoped(_ base: String, _ accountScope: String) -> String { "\(base).\(accountScope)" }
         static let optIn = "VoiceSharing.localOptIn"
         static let optOut = "VoiceSharing.explicitOptOut"
-        static let revision = "VoiceSharing.membershipRevision"
         static let enrolled = "VoiceSharing.serverEnrolled"
         static let epoch = "VoiceSharing.enrollmentEpoch"
         static let disclosure = "VoiceSharing.acceptedDisclosureVersion"
@@ -99,8 +98,8 @@ final class VoiceSharingEnrollmentStore {
     }
 
     /// Reads the CURRENT account/session lifecycle generation. A projection is applicable only while the
-    /// lifecycle it was read under is still live — the half no local revision comparison can supply, because
-    /// an opaque revision says nothing about which session produced it.
+    /// lifecycle it was read under is still live — the half no content comparison can supply, because
+    /// a projection's fields say nothing about which session produced it.
     private let sessionIdentityProvider: () -> String?
 
     init(
@@ -168,13 +167,6 @@ final class VoiceSharingEnrollmentStore {
     var currentState: State {
         lock.lock(); defer { lock.unlock() }
         return state
-    }
-
-    /// Last server-observed revision, sent as `expected_membership_revision` on every mutation.
-    var expectedMembershipRevision: String? {
-        lock.lock(); defer { lock.unlock() }
-        return state.hasAuthoritativeProjection && !state.membership.membershipRevision.isEmpty
-            ? state.membership.membershipRevision : nil
     }
 
     var activeEnrollmentEpoch: String? {
@@ -350,11 +342,11 @@ final class VoiceSharingEnrollmentStore {
 
     /// Applies a server projection issued under `token`.
     ///
-    /// NO REVISION ordering. `membership_revision` is opaque by contract, so any local comparison would be a
-    /// guess — and this guess fails in the dangerous direction: treating a late reply as "not older" and
-    /// accepting it can restore permission a user already withdrew. A projection is applied only if the
-    /// account/session lifecycle AND the membership-operation generation it was read under are both still
-    /// current, so anything fenced since is refused regardless of how its revision is spelled.
+    /// No ordering of replies exists: the server publishes no ordering field, so comparing two replies
+    /// locally would be a guess — and this guess fails in the dangerous direction: treating a late reply
+    /// as "not older" and accepting it can restore permission a user already withdrew. A projection is
+    /// applied only if the account/session lifecycle AND the membership-operation generation it was read
+    /// under are both still current, so anything fenced since is refused.
     ///
     /// Returns false when refused so callers reconcile with a fresh GET rather than show stale state.
     @discardableResult
@@ -423,10 +415,9 @@ final class VoiceSharingEnrollmentStore {
 
     private func bumpOperationGenerationLocked() { operationGeneration += 1 }
 
-    /// Replaces the projection from a 409 conflict payload. Surfacing the real state is required; the caller
-    /// must not auto-replay the opt-in against the newer revision.
-    /// A 409 carries the server's current projection. Surfacing it is required; auto-replaying the opt-in
-    /// against the newer revision is forbidden, and reconciling happens through a NEW get under a NEW token.
+    /// Replaces the projection from a 409 conflict payload. A 409 carries the server's current projection;
+    /// surfacing it is required, but auto-replaying the opt-in is forbidden — reconciling happens through a
+    /// NEW get under a NEW token.
     func applyConflict(current projection: VoiceSharingMembership?, readUnder token: ProjectionToken) {
         guard let projection else { return }
         apply(authoritative: projection, readUnder: token)
@@ -447,13 +438,12 @@ final class VoiceSharingEnrollmentStore {
         // matches the old fence value.
         bumpOperationGenerationLocked()
         state.localOptIn = false
-        var projected = state.membership
-        projected = VoiceSharingMembership(
-            membershipRevision: projected.membershipRevision,
-            plan: projected.plan,
+        let previous = state.membership
+        let projected = VoiceSharingMembership(
+            plan: previous.plan,
             voiceSharingEnrolled: false,
-            enrollmentEpoch: projected.enrollmentEpoch,
-            acceptedDisclosureVersion: projected.acceptedDisclosureVersion,
+            enrollmentEpoch: previous.enrollmentEpoch,
+            acceptedDisclosureVersion: previous.acceptedDisclosureVersion,
             withdrawalState: .withdrawn
         )
         state.membership = projected
@@ -503,7 +493,9 @@ final class VoiceSharingEnrollmentStore {
         state.localOptIn = defaults.bool(forKey: Key.scoped(Key.optIn, s))
         state.explicitOptOut = defaults.bool(forKey: Key.scoped(Key.optOut, s))
         state.hasAuthoritativeProjection = false
-        guard let revision = defaults.string(forKey: Key.scoped(Key.revision, s)), !revision.isEmpty else {
+        // Nothing persisted yet: the display state is genuinely unknown. Anything persisted at all
+        // (any projection ever applied wrote every field) is restored as last known display state.
+        guard defaults.object(forKey: Key.scoped(Key.enrolled, s)) != nil else {
             state.membership = .unavailable
             return
         }
@@ -514,7 +506,6 @@ final class VoiceSharingEnrollmentStore {
             rawValue: defaults.string(forKey: Key.scoped(Key.plan, s)) ?? ""
         ) ?? .free
         state.membership = VoiceSharingMembership(
-            membershipRevision: revision,
             plan: plan,
             voiceSharingEnrolled: defaults.bool(forKey: Key.scoped(Key.enrolled, s)),
             enrollmentEpoch: defaults.string(forKey: Key.scoped(Key.epoch, s)),
@@ -525,7 +516,6 @@ final class VoiceSharingEnrollmentStore {
 
     private func persist(_ m: VoiceSharingMembership) {
         let s = scope
-        defaults.set(m.membershipRevision, forKey: Key.scoped(Key.revision, s))
         defaults.set(m.voiceSharingEnrolled, forKey: Key.scoped(Key.enrolled, s))
         defaults.set(m.plan.rawValue, forKey: Key.scoped(Key.plan, s))
         defaults.set(m.withdrawalState.rawValue, forKey: Key.scoped(Key.withdrawal, s))

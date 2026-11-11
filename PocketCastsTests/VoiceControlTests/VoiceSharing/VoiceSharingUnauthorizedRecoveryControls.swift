@@ -72,7 +72,7 @@ final class VoiceSharingUnauthorizedRecoveryControls: XCTestCase {
         // OPTED-IN with an ACTIVE membership: the healthy pre-incident state.
         store.setLocalOptIn(true)
         let active = VoiceSharingMembership(
-            membershipRevision: "rev-1", plan: .free, voiceSharingEnrolled: true,
+            plan: .free, voiceSharingEnrolled: true,
             enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "voice-sharing-v1",
             withdrawalState: .active)
         let token = store.projectionToken()
@@ -206,12 +206,12 @@ final class VoiceSharingUnauthorizedRecoveryControls: XCTestCase {
         var seen: [(method: String, path: String)] = []
         var activeToken = "tok-stale"
         let refreshed = VoiceSharingMembership(
-            membershipRevision: "rev-2", plan: .free, voiceSharingEnrolled: true,
+            plan: .free, voiceSharingEnrolled: true,
             enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "voice-sharing-v1",
             withdrawalState: .active)
         let refreshedJSON = try JSONSerialization.data(withJSONObject: [
             "schema_version": 1,
-            "membership_revision": "rev-2", "plan": "free", "voice_sharing_enrolled": true,
+            "plan": "free", "voice_sharing_enrolled": true,
             "enrollment_epoch": "epoch-1", "accepted_disclosure_version": "voice-sharing-v1",
             "withdrawal_state": "active",
         ])

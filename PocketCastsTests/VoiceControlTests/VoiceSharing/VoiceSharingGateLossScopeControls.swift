@@ -67,7 +67,7 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
         store.setLocalOptIn(true)
         store.apply(
             authoritative: VoiceSharingMembership(
-                membershipRevision: "rev-1", plan: .free, voiceSharingEnrolled: true,
+                plan: .free, voiceSharingEnrolled: true,
                 enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "voice-sharing-v1",
                 withdrawalState: .active),
             readUnder: try XCTUnwrap(store.projectionToken()))
@@ -84,7 +84,7 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
         // exactly what a foreground refresh applies.
         store.apply(
             authoritative: VoiceSharingMembership(
-                membershipRevision: "rev-2", plan: .free, voiceSharingEnrolled: true,
+                plan: .free, voiceSharingEnrolled: true,
                 enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "voice-sharing-v1",
                 withdrawalState: .active),
             readUnder: try XCTUnwrap(store.projectionToken()))
@@ -102,7 +102,7 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
         store.setLocalOptIn(true)
         store.apply(
             authoritative: VoiceSharingMembership(
-                membershipRevision: "rev-1", plan: .free, voiceSharingEnrolled: true,
+                plan: .free, voiceSharingEnrolled: true,
                 enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "voice-sharing-v1",
                 withdrawalState: .active),
             readUnder: try XCTUnwrap(store.projectionToken()))
@@ -115,7 +115,7 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
         // The SAME path: an authoritative projection, this time carrying a withdrawal.
         store.apply(
             authoritative: VoiceSharingMembership(
-                membershipRevision: "rev-2", plan: .free, voiceSharingEnrolled: false,
+                plan: .free, voiceSharingEnrolled: false,
                 enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "voice-sharing-v1",
                 withdrawalState: .withdrawn),
             readUnder: try XCTUnwrap(store.projectionToken()))
@@ -145,7 +145,7 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
         store.setLocalOptIn(true)
         store.apply(
             authoritative: VoiceSharingMembership(
-                membershipRevision: "rev-1", plan: .free, voiceSharingEnrolled: true,
+                plan: .free, voiceSharingEnrolled: true,
                 enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "voice-sharing-v1",
                 withdrawalState: .active),
             readUnder: try XCTUnwrap(store.projectionToken()))
@@ -164,7 +164,7 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
         accountTwo.setLocalOptIn(true)
         accountTwo.apply(
             authoritative: VoiceSharingMembership(
-                membershipRevision: "rev-2", plan: .free, voiceSharingEnrolled: true,
+                plan: .free, voiceSharingEnrolled: true,
                 enrollmentEpoch: "epoch-2", acceptedDisclosureVersion: "voice-sharing-v1",
                 withdrawalState: .active),
             readUnder: try XCTUnwrap(accountTwo.projectionToken()))
@@ -190,7 +190,7 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
         store.setLocalOptIn(true)
         store.apply(
             authoritative: VoiceSharingMembership(
-                membershipRevision: "rev-1", plan: .free, voiceSharingEnrolled: true,
+                plan: .free, voiceSharingEnrolled: true,
                 enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "voice-sharing-v1",
                 withdrawalState: .active),
             readUnder: try XCTUnwrap(store.projectionToken()))
@@ -232,7 +232,7 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
         // THE benign projection lands while the drain is suspended mid-TRANSFER-SEQUENCE.
         store.apply(
             authoritative: VoiceSharingMembership(
-                membershipRevision: "rev-2", plan: .free, voiceSharingEnrolled: true,
+                plan: .free, voiceSharingEnrolled: true,
                 enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "voice-sharing-v1",
                 withdrawalState: .active),
             readUnder: try XCTUnwrap(store.projectionToken()))
@@ -252,7 +252,7 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
         store.setLocalOptIn(true)
         store.apply(
             authoritative: VoiceSharingMembership(
-                membershipRevision: "rev-1", plan: .free, voiceSharingEnrolled: true,
+                plan: .free, voiceSharingEnrolled: true,
                 enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "voice-sharing-v1",
                 withdrawalState: .active),
             readUnder: try XCTUnwrap(store.projectionToken()))
@@ -321,7 +321,7 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
         store.setLocalOptIn(true)
         store.apply(
             authoritative: VoiceSharingMembership(
-                membershipRevision: "rev-1", plan: .free, voiceSharingEnrolled: true,
+                plan: .free, voiceSharingEnrolled: true,
                 enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "voice-sharing-v1",
                 withdrawalState: .active),
             readUnder: try XCTUnwrap(store.projectionToken()))
@@ -375,7 +375,7 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
         store.setLocalOptIn(true)
         store.apply(
             authoritative: VoiceSharingMembership(
-                membershipRevision: "rev-1", plan: .free, voiceSharingEnrolled: true,
+                plan: .free, voiceSharingEnrolled: true,
                 enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "voice-sharing-v1",
                 withdrawalState: .active),
             readUnder: try XCTUnwrap(store.projectionToken()))
@@ -419,7 +419,7 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
         store.setLocalOptIn(true)
         store.apply(
             authoritative: VoiceSharingMembership(
-                membershipRevision: "rev-1", plan: .free, voiceSharingEnrolled: true,
+                plan: .free, voiceSharingEnrolled: true,
                 enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "voice-sharing-v1",
                 withdrawalState: .active),
             readUnder: try XCTUnwrap(store.projectionToken()))
@@ -539,7 +539,7 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
         for revision in ["rev-1", "rev-2", "rev-3"] {
             store.apply(
                 authoritative: VoiceSharingMembership(
-                    membershipRevision: revision, plan: .free, voiceSharingEnrolled: true,
+                    plan: .free, voiceSharingEnrolled: true,
                     enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "voice-sharing-v1",
                     withdrawalState: .active),
                 readUnder: try XCTUnwrap(store.projectionToken()))
@@ -581,7 +581,7 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
         store.setLocalOptIn(true)
         store.apply(
             authoritative: VoiceSharingMembership(
-                membershipRevision: "rev-1", plan: .free, voiceSharingEnrolled: true,
+                plan: .free, voiceSharingEnrolled: true,
                 enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "voice-sharing-v1",
                 withdrawalState: .active),
             readUnder: try XCTUnwrap(store.projectionToken()))
@@ -610,7 +610,7 @@ final class VoiceSharingGateLossScopeControls: XCTestCase {
         store.setLocalOptIn(true)
         store.apply(
             authoritative: VoiceSharingMembership(
-                membershipRevision: "rev-1", plan: .free, voiceSharingEnrolled: true,
+                plan: .free, voiceSharingEnrolled: true,
                 enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "voice-sharing-v1",
                 withdrawalState: .active),
             readUnder: try XCTUnwrap(store.projectionToken()))
@@ -709,7 +709,7 @@ private final class GateLossWire: URLProtocol {
             // A refusal, so acceptance is not this control's subject: only the wire is.
             status = 503
         } else if path == VoiceSharingAccountClient.projectionPath {
-            body = ["schema_version": 1, "membership_revision": "rev-1", "plan": "free",
+            body = ["schema_version": 1, "plan": "free",
                     "voice_sharing_enrolled": true, "enrollment_epoch": "epoch-1",
                     "accepted_disclosure_version": "voice-sharing-v1", "withdrawal_state": "active"]
         }

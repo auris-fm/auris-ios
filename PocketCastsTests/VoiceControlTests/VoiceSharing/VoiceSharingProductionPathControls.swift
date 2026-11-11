@@ -24,7 +24,7 @@ final class VoiceSharingProductionPathControls: XCTestCase {
         storeState.localOptIn = true
         storeState.hasAuthoritativeProjection = true
         storeState.membership = VoiceSharingMembership(
-            membershipRevision: "rev", plan: .pro, voiceSharingEnrolled: true,
+            plan: .pro, voiceSharingEnrolled: true,
             enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "2026-09", withdrawalState: .active
         )
         gateOpen = true

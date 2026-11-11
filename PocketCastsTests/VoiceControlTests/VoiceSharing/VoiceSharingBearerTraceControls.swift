@@ -97,7 +97,7 @@ final class VoiceSharingBearerTraceControls: XCTestCase {
             case VoiceSharingAccountClient.projectionPath:
                 if let bearer, bearer == accepted {
                     reply(200, [
-                        "schema_version": 1, "membership_revision": "rev-2", "plan": "free",
+                        "schema_version": 1, "plan": "free",
                         "voice_sharing_enrolled": true, "enrollment_epoch": "epoch-1",
                         "accepted_disclosure_version": "voice-sharing-v1",
                         "withdrawal_state": "active"])
@@ -207,7 +207,6 @@ final class VoiceSharingBearerTraceControls: XCTestCase {
         StubServer.setStaleExchange(false)
         let retried = await client.fetchProjection()
         let fetched = try XCTUnwrap(retried, "the retried read succeeds with the recovered bearer")
-        XCTAssertEqual(fetched.membership.membershipRevision, "rev-2")
 
         let reads = StubServer.snapshot().filter { $0.path == VoiceSharingAccountClient.projectionPath }
         XCTAssertEqual(reads.map(\.bearer), ["tok-from-exchange", "tok-from-refresh"],
@@ -238,7 +237,6 @@ final class VoiceSharingBearerTraceControls: XCTestCase {
         XCTAssertTrue(applied)
         XCTAssertTrue(store.consentAllowsCollection)
         XCTAssertFalse(store.consentGoneForPurge)
-        XCTAssertEqual(store.currentAuthoritativeState?.membership.membershipRevision, "rev-2")
         XCTAssertEqual(store.currentAuthoritativeState?.membership.withdrawalState, .active)
     }
 
@@ -285,7 +283,7 @@ final class VoiceSharingBearerTraceControls: XCTestCase {
         store.setLocalOptIn(true)
         XCTAssertTrue(store.apply(
             authoritative: VoiceSharingMembership(
-                membershipRevision: "rev-1", plan: .free, voiceSharingEnrolled: true,
+                plan: .free, voiceSharingEnrolled: true,
                 enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "voice-sharing-v1",
                 withdrawalState: .active),
             readUnder: try XCTUnwrap(store.projectionToken())))
@@ -344,8 +342,7 @@ final class VoiceSharingBearerTraceControls: XCTestCase {
         XCTAssertEqual(pendingEntries, [entry], "the recording survives the identity reload")
         XCTAssertFalse(store.consentGoneForPurge, "recovery alone never closes the consent gate")
         XCTAssertTrue(purgeDecisions(logged).isEmpty, "no purge decision was taken: \(logged)")
-        XCTAssertEqual(store.currentAuthoritativeState?.membership.membershipRevision, "rev-2",
-                       "the recovered projection is applied")
+        XCTAssertTrue(store.currentEffectiveEnrolled, "the recovered projection is applied")
 
         // (b) A REFUSED read (the incident shape): still no purge, still retained, choice unchanged.
         StubServer.reset()

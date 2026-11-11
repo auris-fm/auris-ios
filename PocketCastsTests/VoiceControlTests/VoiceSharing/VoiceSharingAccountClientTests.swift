@@ -75,7 +75,7 @@ private func deletionReceipt(_ id: String, status: String = "deletion_pending", 
 private func projection(_ revision: String, enrolled: Bool, epoch: String?, withdrawal: String) -> [String: Any] {
     var body: [String: Any] = [
         "schema_version": 1,
-        "membership_revision": revision,
+
         "plan": "pro",
         "voice_sharing_enrolled": enrolled,
         "withdrawal_state": withdrawal,
@@ -434,7 +434,6 @@ final class VoiceSharingAccountClientTests: XCTestCase {
             Reply(status: 200, body: projection("r7", enrolled: true, epoch: "e1", withdrawal: "active"))
         let fetched = await makeClient().fetchProjection()
         let membership = fetched?.membership
-        XCTAssertEqual(membership?.membershipRevision, "r7")
         XCTAssertEqual(membership?.enrollmentEpoch, "e1")
         XCTAssertTrue(membership?.voiceSharingEnrolled == true)
         XCTAssertEqual(membership?.withdrawalState, .active)
@@ -472,7 +471,6 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         let outcome = await clientForTest.perform(op)
         switch outcome {
         case .conflict(current: let current, issuedUnder: _):
-            XCTAssertEqual(current?.membershipRevision, "r9")
             XCTAssertEqual(current?.voiceSharingEnrolled, false)
         default:
             XCTFail("expected conflict, got \(outcome)")
@@ -560,7 +558,6 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         guard let op = clientForTest.beginMembership(enrolled: false, acceptedDisclosureVersion: nil) else { return XCTFail("no session") }
         let outcome = await clientForTest.perform(op)
         guard case .applied(membership: let m, issuedUnder: _) = outcome else { return XCTFail("withdrawal from inactive must apply") }
-        XCTAssertEqual(m.membershipRevision, "r10", "revision must advance even when already inactive")
         XCTAssertEqual(m.withdrawalState, .withdrawn)
     }
 
@@ -584,7 +581,6 @@ final class VoiceSharingAccountClientTests: XCTestCase {
 
         let retry = await client.perform(operation)
         guard case .applied(membership: let m2, issuedUnder: _) = retry else { return XCTFail("identical retry should replay original") }
-        XCTAssertEqual(m1.membershipRevision, m2.membershipRevision, "a retry must not report different state")
         XCTAssertEqual(issued.count, 1, "begin… runs once; perform… must not mint a new request_id")
         let bodies = VoiceSharingStubProtocol.seenRequests.compactMap(requestBodyDictionary(of:))
         XCTAssertEqual(bodies.count, 2, "two PUTs were made")
@@ -696,7 +692,6 @@ final class VoiceSharingAccountClientTests: XCTestCase {
 
     /// A GET issued before a withdrawal whose reply arrives after it. The response is well-formed and says
     /// "enrolled"; only the fence stops it. This drives the whole production path — client stamps the token,
-    /// store refuses application — so nothing here depends on how `membership_revision` is spelled.
     func test_delayedGETReply_cannotReEnableThroughTheStore() async {
         VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] =
             Reply(status: 200, body: projection("opaque-token-AAA", enrolled: true, epoch: "e1", withdrawal: "active"))
@@ -921,7 +916,7 @@ private final class SharingAccountModelHarness {
     func switchAccount(_ value: String?) { rotateSessionWithoutStoreTransition(value); store.transitionToAccount(signedIn: value != nil) }
     func seed(enrolled: Bool = false) {
         store.setLocalOptIn(enrolled)
-        let value = VoiceSharingMembership(membershipRevision: "r0", plan: .pro, voiceSharingEnrolled: enrolled,
+        let value = VoiceSharingMembership(plan: .pro, voiceSharingEnrolled: enrolled,
             enrollmentEpoch: enrolled ? "old-epoch" : nil, acceptedDisclosureVersion: enrolled ? "synthetic" : nil,
             withdrawalState: enrolled ? .active : .notEnrolled)
         _ = store.apply(authoritative: value, readUnder: store.projectionToken()!)

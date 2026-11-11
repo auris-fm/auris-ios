@@ -52,7 +52,7 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
         // Server withdrawal flips the projection's withdrawal state.
         guard let t = store.projectionToken() else { return XCTFail("projection token") }
         XCTAssertTrue(store.apply(authoritative: .init(
-            membershipRevision: "rev", plan: .pro, voiceSharingEnrolled: true,
+            plan: .pro, voiceSharingEnrolled: true,
             enrollmentEpoch: "e1", acceptedDisclosureVersion: "2026-09",
             withdrawalState: .withdrawn), readUnder: t), "premise: withdrawal projection accepted")
         XCTAssertTrue(store.consentGoneForPurge, "server withdrawal is explicit consent loss")
@@ -67,7 +67,7 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
         XCTAssertTrue(store.consentAllowsCollection, "opted in; unknown projection is transient")
         guard let t = store.projectionToken() else { return XCTFail("projection token") }
         XCTAssertTrue(store.apply(authoritative: .init(
-            membershipRevision: "rev", plan: .pro, voiceSharingEnrolled: true,
+            plan: .pro, voiceSharingEnrolled: true,
             enrollmentEpoch: "e1", acceptedDisclosureVersion: "2026-09",
             withdrawalState: .withdrawn), readUnder: t))
         XCTAssertFalse(store.consentAllowsCollection, "server withdrawal stops immediately")
@@ -85,14 +85,12 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
     }
 
     private func projection(
-        revision: String,
         enrolled: Bool = true,
         epoch: String? = "e1",
         disclosure: String? = "2026-09",
         withdrawal: VoiceSharingMembership.WithdrawalState = .active
     ) -> VoiceSharingMembership {
         VoiceSharingMembership(
-            membershipRevision: revision,
             plan: .pro,
             voiceSharingEnrolled: enrolled,
             enrollmentEpoch: epoch,
@@ -102,6 +100,42 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
     }
 
     // MARK: - Opt-in requires backend authority, not a gesture
+    /// the decoder supplies an empty one. A relaunch must still restore the remembered epoch and plan
+    /// from what was persisted, without a fetch — sharing may not depend on a successful GET after
+    /// every restart just because a retired field went missing.
+    func test_coldStart_currentFormatProjectionWithoutRevision_keepsEpochAndPlan() {
+        let sharedSuite = "VoiceSharingColdStart-NoRevision-\(UUID().uuidString)"
+        guard let persistent = UserDefaults(suiteName: sharedSuite) else {
+            return XCTFail("UserDefaults suite unavailable")
+        }
+        defer { persistent.removePersistentDomain(forName: sharedSuite) }
+
+        let scope = "account-current"
+        func makeSessionStore(session: String) -> VoiceSharingEnrollmentStore {
+            VoiceSharingEnrollmentStore(
+                defaults: persistent,
+                accountScopeProvider: { scope },
+                sessionIdentityProvider: { session })
+        }
+
+        // Session 1: opt in; the server confirms with a projection that has NO membership revision.
+        let first = makeSessionStore(session: "session-1")
+        first.setLocalOptIn(true)
+        let firstToken = VoiceSharingEnrollmentStore.ProjectionToken(
+            lifecycleGeneration: "session-1",
+            operationGeneration: first.projectionToken()?.operationGeneration ?? 0)
+        XCTAssertTrue(first.apply(authoritative: projection(), readUnder: firstToken))
+        XCTAssertTrue(first.currentEffectiveEnrolled)
+
+        // Session 2: relaunch over the same defaults. No GET has happened yet.
+        let relaunched = makeSessionStore(session: "session-2")
+        XCTAssertTrue(relaunched.currentState.localOptIn, "the user's own gesture is remembered")
+        let remembered = relaunched.currentState.membership
+        XCTAssertEqual(remembered.plan, .pro, "the saved plan survives a relaunch without a revision")
+        XCTAssertEqual(remembered.enrollmentEpoch, "e1", "the saved epoch survives a relaunch without a revision")
+        XCTAssertFalse(relaunched.currentEffectiveEnrolled,
+                       "a previous session's projection is not this session's permission")
+    }
 
     /// Plan: `test_toggleRequiresDisclosureAcceptance_andBackendEpoch`.
     func test_localOptIn_aloneNeverEnablesCollection() {
@@ -115,20 +149,19 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
         // Server accepts disclosure and issues an epoch: only now is enrollment real. The GET is issued
         // after the opt-in gesture, so its token is taken at that point.
         let getIssuedAfterOptIn = token(store)
-        store.apply(authoritative: projection(revision: "r1"), readUnder: getIssuedAfterOptIn)
+        store.apply(authoritative: projection(), readUnder: getIssuedAfterOptIn)
         XCTAssertTrue(store.currentEffectiveEnrolled)
         XCTAssertEqual(store.activeEnrollmentEpoch, "e1")
-        XCTAssertEqual(store.expectedMembershipRevision, "r1")
     }
 
     /// Each half of the backend contract is independently required. A projection that claims enrollment but
     /// omits the epoch or the accepted disclosure must not be read as permission.
     func test_projectionMissingEitherAuthority_isNotEnrolled() {
         for (label, bad) in [
-            ("no epoch", projection(revision: "r1", epoch: nil)),
-            ("no disclosure", projection(revision: "r1", disclosure: nil)),
-            ("withdrawn", projection(revision: "r1", withdrawal: .withdrawn)),
-            ("not enrolled", projection(revision: "r1", enrolled: false)),
+            ("no epoch", projection(epoch: nil)),
+            ("no disclosure", projection(disclosure: nil)),
+            ("withdrawn", projection(withdrawal: .withdrawn)),
+            ("not enrolled", projection(enrolled: false)),
         ] {
             let store = makeStore()
             store.setLocalOptIn(true)
@@ -141,12 +174,12 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
 
     /// Plan: `test_delayedFirstDeliveryEnrollment_afterWithdrawal_cannotReactivate`.
     ///
-    /// The withdrawal advanced the server revision to r3. An opt-in reply still carrying r2 arrives late.
-    /// Applying it would flip an opted-out user back on, so a revision we have already moved past is refused.
-    func test_staleRevisionReply_cannotReactivateAfterWithdrawal() {
+    /// A delayed opt-in reply issued before the withdrawal arrives after it. Applying it would flip an
+    /// opted-out user back on, so the operation fence (the token it was issued under) refuses it.
+    func test_staleOperationReply_cannotReactivateAfterWithdrawal() {
         let store = makeStore()
         store.setLocalOptIn(true)
-        store.apply(authoritative: projection(revision: "r2"), readUnder: token(store))
+        store.apply(authoritative: projection(), readUnder: token(store))
         XCTAssertTrue(store.currentEffectiveEnrolled)
 
         // Capture the fence before opting out: this is the token the delayed opt-in was issued under.
@@ -154,32 +187,30 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
 
         // User opts out; the withdrawal reply advances the revision.
         _ = store.withdrawLocally(acceptedServerProjectionAfterward: true)
-        store.apply(authoritative: projection(revision: "r3", enrolled: false, withdrawal: .withdrawn), readUnder: token(store))
+        store.apply(authoritative: projection(enrolled: false, withdrawal: .withdrawn), readUnder: token(store))
         XCTAssertFalse(store.currentEffectiveEnrolled)
 
         // The delayed opt-in lands now. It was issued before the withdrawal, so it carries the pre-withdrawal
         // token — and that alone refuses it. No comparison of "r2" against "r3" is involved, which matters
         // because the contract makes revisions opaque and nothing here may assume they are orderable.
-        let accepted = store.apply(authoritative: projection(revision: "r2"), readUnder: stale)
+        let accepted = store.apply(authoritative: projection(), readUnder: stale)
         XCTAssertFalse(accepted, "a projection issued before the withdrawal must be refused")
         XCTAssertFalse(store.currentEffectiveEnrolled, "and it must not re-enable collection")
-        XCTAssertEqual(store.expectedMembershipRevision, "r3", "the newer revision survives")
     }
 
-    /// Withdrawing while ALREADY inactive must still advance the revision, otherwise a later first-delivery
+    /// Withdrawing while ALREADY inactive still fences, otherwise a later first-delivery
     /// opt-in could not be fenced at all. Plan: `test_withdrawalFromInactiveProjection_advancesRevision`.
     func test_withdrawalFromInactiveProjection_stillFencesLaterOptIns() {
         let store = makeStore()
         let preWithdrawal = token(store)
-        store.apply(authoritative: projection(revision: "r5", enrolled: false, withdrawal: .notEnrolled), readUnder: token(store))
+        store.apply(authoritative: projection(enrolled: false, withdrawal: .notEnrolled), readUnder: token(store))
         XCTAssertFalse(store.currentEffectiveEnrolled)
 
         _ = store.withdrawLocally(acceptedServerProjectionAfterward: true)
-        store.apply(authoritative: projection(revision: "r6", enrolled: false, withdrawal: .withdrawn), readUnder: token(store))
-        XCTAssertEqual(store.expectedMembershipRevision, "r6")
+        store.apply(authoritative: projection(enrolled: false, withdrawal: .withdrawn), readUnder: token(store))
 
-        // A first-delivery opt-in for the pre-withdrawal revision is now stale by construction.
-        XCTAssertFalse(store.apply(authoritative: projection(revision: "r4"), readUnder: preWithdrawal))
+        // A first-delivery opt-in issued before the withdrawal is now stale by construction.
+        XCTAssertFalse(store.apply(authoritative: projection(), readUnder: preWithdrawal))
     }
 
     // MARK: - Withdrawal takes effect locally without the network
@@ -190,7 +221,7 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
         let store = makeStore()
         store.setLocalOptIn(true)
         let getIssuedAfterOptIn = token(store)
-        store.apply(authoritative: projection(revision: "r1"), readUnder: getIssuedAfterOptIn)
+        store.apply(authoritative: projection(), readUnder: getIssuedAfterOptIn)
         XCTAssertTrue(store.currentEffectiveEnrolled)
 
         let after = store.withdrawLocally(acceptedServerProjectionAfterward: false)
@@ -199,7 +230,7 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
         XCTAssertFalse(store.currentState.localOptIn, "the remembered gesture must not survive an opt-out")
 
         // A failed/superseded server call cannot silently restore it either.
-        store.apply(authoritative: projection(revision: "r2", enrolled: false, withdrawal: .withdrawn), readUnder: token(store))
+        store.apply(authoritative: projection(enrolled: false, withdrawal: .withdrawn), readUnder: token(store))
         XCTAssertFalse(store.currentEffectiveEnrolled)
     }
 
@@ -210,7 +241,7 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
     func test_accountSwitch_replacesProjectionAndBlocksUntilReenrolled() {
         let a = makeStore(scopeOverride: "account-A")
         a.setLocalOptIn(true)
-        a.apply(authoritative: projection(revision: "r1", epoch: "epoch-A"), readUnder: token(a))
+        a.apply(authoritative: projection(epoch: "epoch-A"), readUnder: token(a))
         XCTAssertTrue(a.currentEffectiveEnrolled)
 
         // Same storage, different signed-in account.
@@ -218,12 +249,11 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
         let b = makeStore()
         XCTAssertFalse(b.currentEffectiveEnrolled,
                        "account B starts with nothing: no inherited enrollment, epoch, or opt-in")
-        XCTAssertNil(b.expectedMembershipRevision)
         XCTAssertNil(b.activeEnrollmentEpoch)
 
         // Account B enrolls on its own terms.
         b.setLocalOptIn(true)
-        b.apply(authoritative: projection(revision: "q1", epoch: "epoch-B"), readUnder: token(b))
+        b.apply(authoritative: projection(epoch: "epoch-B"), readUnder: token(b))
         XCTAssertTrue(b.currentEffectiveEnrolled)
 
         // Back to A. Cold start restores A's INTENT and last known display state, but permission needs a
@@ -234,7 +264,7 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
         XCTAssertTrue(aAgain.currentState.localOptIn, "A's own opt-in gesture is remembered")
         XCTAssertFalse(aAgain.currentEffectiveEnrolled, "but a remembered projection is not current-session authority")
 
-        aAgain.apply(authoritative: projection(revision: "r9", epoch: "epoch-A"), readUnder: token(aAgain))
+        aAgain.apply(authoritative: projection(epoch: "epoch-A"), readUnder: token(aAgain))
         XCTAssertTrue(aAgain.currentEffectiveEnrolled)
         XCTAssertEqual(aAgain.activeEnrollmentEpoch, "epoch-A", "per-account epochs must not cross over")
     }
@@ -244,19 +274,18 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
         let store = makeStore()
         store.setLocalOptIn(true)
         let getIssuedAfterOptIn = token(store)
-        store.apply(authoritative: projection(revision: "r1"), readUnder: getIssuedAfterOptIn)
+        store.apply(authoritative: projection(), readUnder: getIssuedAfterOptIn)
         XCTAssertTrue(store.currentEffectiveEnrolled)
 
         store.transitionToAccount(signedIn: false)
         XCTAssertFalse(store.currentEffectiveEnrolled, "signed out is not enrolled, whatever disk says")
-        XCTAssertNil(store.expectedMembershipRevision)
 
         // Re-authenticating the SAME account restores that account's remembered INTENT — the gesture is still
         // the user's own — but not permission: that needs a fresh server reply in the new session.
         store.transitionToAccount(signedIn: true)
         XCTAssertTrue(store.currentState.localOptIn, "the remembered gesture belongs to this account")
         XCTAssertFalse(store.currentEffectiveEnrolled, "intent alone is not authority")
-        store.apply(authoritative: projection(revision: "r2"), readUnder: token(store))
+        store.apply(authoritative: projection(), readUnder: token(store))
         XCTAssertTrue(store.currentEffectiveEnrolled, "and a current-session reply re-enables it")
     }
 
@@ -268,7 +297,7 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
         let store = makeStore()
         _ = VoiceSharingCoordinator(enrollmentStore: store)
         store.setLocalOptIn(true)
-        XCTAssertTrue(store.apply(authoritative: projection(revision: "r1"), readUnder: token(store)))
+        XCTAssertTrue(store.apply(authoritative: projection(), readUnder: token(store)))
         XCTAssertTrue(store.consentAllowsCollection, "opted in + active projection permits collection")
 
         // Withdraw: collection stops synchronously.
@@ -281,7 +310,7 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
         let store = makeStore()
         let coordinator = VoiceSharingCoordinator(enrollmentStore: store)
         store.setLocalOptIn(true)
-        XCTAssertTrue(store.apply(authoritative: projection(revision: "r1"), readUnder: token(store)))
+        XCTAssertTrue(store.apply(authoritative: projection(), readUnder: token(store)))
         var moves = 0
         let tokenID = store.addObserver { _ in moves += 1 }
         defer { store.removeObserver(tokenID) }
@@ -303,21 +332,19 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
         let id = store.addObserver { _ in notifications += 1 }
         defer { store.removeObserver(id) }
 
-        store.apply(authoritative: projection(revision: "r7"), readUnder: token(store))
+        store.apply(authoritative: projection(), readUnder: token(store))
         // THE baseline callback is delivered at registration, so the count from
         // here on measures TRANSITIONS only. Without this subtraction the replay assertion below
         // could not tell "one apply" from "one baseline".
         XCTAssertEqual(notifications, 2, "premise: baseline plus one transition")
         let firstCount = notifications
         // Same revision, same fence: an identical replay must be accepted WITHOUT announcing a transition.
-        XCTAssertTrue(store.apply(authoritative: projection(revision: "r7"), readUnder: token(store)),
+        XCTAssertTrue(store.apply(authoritative: projection(), readUnder: token(store)),
                       "replay under the current fence is accepted quietly")
         XCTAssertEqual(notifications, firstCount, "a replay must not announce a second transition")
     }
 
     // MARK: - Opaque revisions
-
-    /// The contract makes `membership_revision` OPAQUE. Nothing in the store may compare or order it, so a
     /// reply whose revision looks "older", "newer", or completely unrelated must be judged only by the fence
     /// it was issued under. This drives arbitrary opaque tokens through the real apply path.
     func test_opaqueRevisions_neverDecideAcceptance_theyAreJustData() {
@@ -327,20 +354,18 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
 
         // Any spelling is accepted when its fence is still current — including one that a numeric heuristic
         // would have called "older".
-        XCTAssertTrue(store.apply(authoritative: projection(revision: "01HQZK9F7Q"), readUnder: issuedBefore))
-        XCTAssertTrue(store.apply(authoritative: projection(revision: "aaa"), readUnder: token(store)))
-        XCTAssertTrue(store.apply(authoritative: projection(revision: "2"), readUnder: token(store)))
-        XCTAssertTrue(store.apply(authoritative: projection(revision: "r1"), readUnder: token(store)),
+        XCTAssertTrue(store.apply(authoritative: projection(), readUnder: issuedBefore))
+        XCTAssertTrue(store.apply(authoritative: projection(), readUnder: token(store)))
+        XCTAssertTrue(store.apply(authoritative: projection(), readUnder: token(store)))
+        XCTAssertTrue(store.apply(authoritative: projection(), readUnder: token(store)),
                       "a numerically-smaller token after a larger one is NOT judged by its spelling")
 
-        // And NONE of them survives a local membership move: the fence decides, not the string.
         _ = store.withdrawLocally(acceptedServerProjectionAfterward: false)
-        for revision in ["r1", "9999", "zzz-later", "01HQZK9F7Q-NEWER", "", "  "] {
-            XCTAssertFalse(store.apply(authoritative: projection(revision: revision), readUnder: issuedBefore),
-                           "pre-withdrawal projection \(revision.debugDescription) must be refused")
-            XCTAssertFalse(store.currentEffectiveEnrolled,
-                           "and none of them may re-enable collection")
-        }
+        // The fence decides, whatever the reply says.
+        XCTAssertFalse(store.apply(authoritative: projection(), readUnder: issuedBefore),
+                       "a pre-withdrawal projection must be refused")
+        XCTAssertFalse(store.currentEffectiveEnrolled,
+                       "and none of them may re-enable collection")
     }
 
     /// Cold start with a remembered ACTIVE projection plus a remembered opt-in, and the session's GET is
@@ -369,7 +394,7 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
             lifecycleGeneration: "session-1",
             operationGeneration: first.projectionToken()?.operationGeneration ?? 0
         )
-        XCTAssertTrue(first.apply(authoritative: projection(revision: "r1", epoch: "epoch-1"),
+        XCTAssertTrue(first.apply(authoritative: projection(epoch: "epoch-1"),
                                   readUnder: firstToken))
         XCTAssertEqual(first.persistedEnrollmentEpochForProvenance, "epoch-1")
 
@@ -418,7 +443,7 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
             lifecycleGeneration: "session-1",
             operationGeneration: first.projectionToken()?.operationGeneration ?? 0
         )
-        XCTAssertTrue(first.apply(authoritative: projection(revision: "r1", epoch: "epoch-1"),
+        XCTAssertTrue(first.apply(authoritative: projection(epoch: "epoch-1"),
                                   readUnder: firstToken))
         XCTAssertTrue(first.currentEffectiveEnrolled)
 
@@ -430,11 +455,10 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
             sessionIdentityProvider: { "session-2" }
         )
         XCTAssertTrue(relaunched.currentState.localOptIn, "the user's own gesture is remembered")
-        // The remembered projection stays readable for the settings UI, while `expectedMembershipRevision`
-        // (which feeds outbound mutations) and permission both stay gated until this session confirms.
-        XCTAssertEqual(relaunched.currentState.membership.membershipRevision, "r1",
+        // The remembered projection stays readable for the settings UI, while permission stays gated
+        // until this session confirms.
+        XCTAssertEqual(relaunched.currentState.membership.plan, .pro,
                        "last known state is still displayable")
-        XCTAssertNil(relaunched.expectedMembershipRevision, "not usable as an expected revision for mutations")
         XCTAssertFalse(relaunched.currentEffectiveEnrolled,
                        "but a previous session's projection is NOT this session's permission")
 
@@ -452,7 +476,7 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
 
             // The GET finally lands for THIS session, under a token taken after the opt-in gesture.
             let issued = token(relaunched)
-            XCTAssertTrue(relaunched.apply(authoritative: projection(revision: "r2", epoch: "epoch-1"), readUnder: issued))
+            XCTAssertTrue(relaunched.apply(authoritative: projection(epoch: "epoch-1"), readUnder: issued))
             XCTAssertTrue(relaunched.currentEffectiveEnrolled)
             XCTAssertTrue(relaunched.consentAllowsCollection, "only now does collection become permitted")
         }
@@ -475,14 +499,14 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
             lifecycleGeneration: "some-other-session",
             operationGeneration: store.projectionToken()?.operationGeneration ?? 0
         )
-        XCTAssertFalse(store.apply(authoritative: projection(revision: "r1"), readUnder: otherSession),
+        XCTAssertFalse(store.apply(authoritative: projection(), readUnder: otherSession),
                        "a projection read under another lifecycle cannot authorize this session")
         XCTAssertFalse(store.currentEffectiveEnrolled)
 
         // Sign-out mid-flight: the outstanding token stops matching because the lifecycle disappears.
         let outstanding = token(store)
         lifecycle = nil
-        XCTAssertFalse(store.apply(authoritative: projection(revision: "r1", enrolled: true), readUnder: outstanding),
+        XCTAssertFalse(store.apply(authoritative: projection(enrolled: true), readUnder: outstanding),
                        "a reply to a request issued before sign-out must not land after it")
     }
 
@@ -498,7 +522,7 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
         // User opts in; the confirming GET is issued after that gesture.
         store.setLocalOptIn(true)
         let issued = token(store)
-        XCTAssertTrue(store.apply(authoritative: projection(revision: "opaque-1"), readUnder: issued))
+        XCTAssertTrue(store.apply(authoritative: projection(), readUnder: issued))
         XCTAssertTrue(store.currentEffectiveEnrolled, "membership authority exists")
 
         XCTAssertTrue(store.consentAllowsCollection, "a successful enrollment must permit collection")
@@ -509,7 +533,7 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
     func test_withdrawal_disablesImmediatelyAndSurvivesALaterRefresh() {
         let store = makeStore()
         store.setLocalOptIn(true)
-        _ = store.apply(authoritative: projection(revision: "opaque-1"), readUnder: token(store))
+        _ = store.apply(authoritative: projection(), readUnder: token(store))
         XCTAssertTrue(store.consentAllowsCollection, "enabled before opting out")
 
         _ = store.withdrawLocally(acceptedServerProjectionAfterward: false)
@@ -525,7 +549,7 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
     func test_signOut_stopsConsentUntilANewLoginReEnrolls() {
         let store = makeStore()
         store.setLocalOptIn(true)
-        XCTAssertTrue(store.apply(authoritative: projection(revision: "opaque-1"), readUnder: token(store)))
+        XCTAssertTrue(store.apply(authoritative: projection(), readUnder: token(store)))
         XCTAssertTrue(store.consentAllowsCollection)
 
         lifecycle = nil
@@ -535,7 +559,7 @@ final class VoiceSharingEnrollmentStoreTests: XCTestCase {
         // Re-login plus re-enrollment restores it.
         lifecycle = "gen-2"
         store.setLocalOptIn(true)
-        XCTAssertTrue(store.apply(authoritative: projection(revision: "opaque-2"), readUnder: token(store)))
+        XCTAssertTrue(store.apply(authoritative: projection(), readUnder: token(store)))
         XCTAssertTrue(store.consentAllowsCollection)
     }
 }
@@ -559,7 +583,7 @@ final class VoiceSharingCohortPublisherTests: XCTestCase {
         let coordinator = VoiceSharingCoordinator(enrollmentStore: store, cohortPublisher: publisher)
         func drain() { while !pending.isEmpty { pending.removeFirst()() } }
         func projection(_ plan: VoiceSharingMembership.Plan, _ enrolled: Bool) -> VoiceSharingMembership {
-            VoiceSharingMembership(membershipRevision: UUID().uuidString, plan: plan, voiceSharingEnrolled: enrolled, enrollmentEpoch: enrolled ? "epoch" : nil, acceptedDisclosureVersion: enrolled ? "disclosure" : nil, withdrawalState: enrolled ? .active : .notEnrolled)
+            VoiceSharingMembership(plan: plan, voiceSharingEnrolled: enrolled, enrollmentEpoch: enrolled ? "epoch" : nil, acceptedDisclosureVersion: enrolled ? "disclosure" : nil, withdrawalState: enrolled ? .active : .notEnrolled)
         }
         store.setLocalOptIn(true)
         XCTAssertTrue(store.apply(authoritative: projection(.free, true), readUnder: try XCTUnwrap(store.projectionToken())))
@@ -608,7 +632,7 @@ final class VoiceSharingCohortPublisherTests: XCTestCase {
         let suite = "cohort-authority-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
-        let membership = VoiceSharingMembership(membershipRevision: "same", plan: .free, voiceSharingEnrolled: true, enrollmentEpoch: "e", acceptedDisclosureVersion: "d", withdrawalState: .active)
+        let membership = VoiceSharingMembership(plan: .free, voiceSharingEnrolled: true, enrollmentEpoch: "e", acceptedDisclosureVersion: "d", withdrawalState: .active)
         let first = VoiceSharingEnrollmentStore(defaults: defaults, accountScopeProvider: { "A" }, sessionIdentityProvider: { "session" })
         first.setLocalOptIn(true)
         XCTAssertTrue(first.apply(authoritative: membership, readUnder: try XCTUnwrap(first.projectionToken())))

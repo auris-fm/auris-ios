@@ -177,6 +177,57 @@ final class VoiceSharingUploaderTests: XCTestCase {
         XCTAssertTrue(log.contains { $0.contains("delete reason=unreadable") })
     }
 
+    // MARK: A drain cannot spin on an entry it cannot delete
+
+    /// A FileManager whose removals always fail, so local deletion of an accepted recording breaks.
+    private final class RefusingRemovalFileManager: FileManager {
+        var removalAttempts = 0
+        override func removeItem(at URL: URL) throws {
+            removalAttempts += 1
+            throw CocoaError(.fileWriteUnknown)
+        }
+    }
+
+    func test_anAcceptedRecordingWhoseRemovalFailsIsSentExactlyOncePerDrain() async throws {
+        let fm = RefusingRemovalFileManager()
+        let q = VoiceSharingQueue(root: root, fileManager: fm, log: { [weak self] in self?.log.append($0) })
+        _ = try await publish(q, name: "stuck")
+        var sends = 0
+        let u = uploader(q, answer: { _, _ in
+            sends += 1
+            // The first send is accepted. Any further send inside this drain means the loop is
+            // spinning on an entry it failed to delete; the retryable answer ends the probe.
+            return sends == 1 ? .response(status: 201) : .response(status: 503)
+        })
+        let outcomes = await u.drain()
+
+        XCTAssertEqual(sends, 1, "one accepted send per drain; outcomes=\(outcomes) log=\(log!)")
+        XCTAssertEqual(fm.removalAttempts, 1)
+        XCTAssertTrue(log.contains { $0.contains("delete-failed") && $0.contains("stuck") },
+                      "the failed removal is logged with the entry name; log=\(log!)")
+        let pending = await q.count()
+        XCTAssertEqual(pending, 1, "the entry stays for the next drain to try removal again")
+    }
+
+    func test_retryBookkeepingIsPrunedToTheLiveQueueAtTheStartOfEachDrain() async throws {
+        let q = queue()
+        let entry = try await publish(q, name: "gone")
+        var answers: [Int] = [503, 201]
+        let u = uploader(q, answer: { _, _ in
+            .response(status: answers.isEmpty ? 201 : answers.removeFirst())
+        })
+        // One retry (bookkeeping grows), then acceptance (the folder is deleted).
+        _ = await u.attempt(entry)
+        _ = await u.attempt(entry)
+        let pendingAfterAccept = await q.count()
+        XCTAssertEqual(pendingAfterAccept, 0, "the retry then succeeded")
+        XCTAssertEqual(u.failureCounts["gone"], 1, "precondition: bookkeeping still holds the entry")
+
+        // The next drain prunes the bookkeeping to the live folders — which no longer include it.
+        _ = await u.drain()
+        XCTAssertEqual(u.failureCounts as [String: Int], [:], "no bookkeeping may outlive its folder")
+    }
+
     // MARK: Not stalling
 
     func test_oneFailingRecordingDoesNotBlockTheOthers() async throws {

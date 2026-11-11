@@ -81,7 +81,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
         storeState.localOptIn = enrolled
         storeState.hasAuthoritativeProjection = true
         storeState.membership = VoiceSharingMembership(
-            membershipRevision: "opaque-rev", plan: .pro,
+            plan: .pro,
             voiceSharingEnrolled: enrolled,
             enrollmentEpoch: enrolled ? "epoch-1" : nil,
             acceptedDisclosureVersion: enrolled ? "2026-09" : nil,

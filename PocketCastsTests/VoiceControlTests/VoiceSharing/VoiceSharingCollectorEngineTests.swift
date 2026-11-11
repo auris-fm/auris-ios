@@ -45,7 +45,7 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
         if !enrolled { storeState.membership = .unavailable }
         if enrolled {
             storeState.membership = VoiceSharingMembership(
-                membershipRevision: "rev", plan: .pro, voiceSharingEnrolled: true,
+                plan: .pro, voiceSharingEnrolled: true,
                 enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "2026-09", withdrawalState: .active
             )
         }
@@ -895,7 +895,7 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         if !enrolled { storeState.membership = .unavailable }
         if enrolled {
             storeState.membership = VoiceSharingMembership(
-                membershipRevision: "rev", plan: .pro, voiceSharingEnrolled: true,
+                plan: .pro, voiceSharingEnrolled: true,
                 enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "2026-09",
                 withdrawalState: .active)
         }
@@ -2532,7 +2532,7 @@ final class VoiceSharingModelProvenanceTests: XCTestCase {
         membership.localOptIn = true
         membership.hasAuthoritativeProjection = true
         membership.membership = VoiceSharingMembership(
-            membershipRevision: "rev", plan: .pro, voiceSharingEnrolled: true,
+            plan: .pro, voiceSharingEnrolled: true,
             enrollmentEpoch: "epoch", acceptedDisclosureVersion: "synthetic", withdrawalState: .active)
         let latest = VoiceSharingContributionEncoder.ModelRef(id: "encode-time-global", version: "B")
         let provenance = VoiceSharingContributionEncoder.Provenance(

@@ -100,7 +100,7 @@ enum VoiceSharingDeletionFixture {
         let token = try XCTUnwrap(live.projectionToken(), "no session generation for the fence")
         XCTAssertTrue(live.apply(
             authoritative: VoiceSharingMembership(
-                membershipRevision: "rev-1", plan: .free, voiceSharingEnrolled: true,
+                plan: .free, voiceSharingEnrolled: true,
                 enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "v1",
                 withdrawalState: .active),
             readUnder: token), "the fixture must begin with a valid, authoritative lease")

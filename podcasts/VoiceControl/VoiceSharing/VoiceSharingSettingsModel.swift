@@ -714,7 +714,7 @@ final class VoiceSharingAccountModel: ObservableObject {
         let result = await refreshProjection(under: sent)
         guard current(sent) else { storeChanged(); return false }
         if result == .success {
-            // The caller now has a revision; it continues with its own operation.
+            // The caller now has the server state; it continues with its own operation.
             busy = false
             return true
         }
@@ -751,7 +751,7 @@ final class VoiceSharingAccountModel: ObservableObject {
             // Diagnostic: name WHY enrollment could not begin — the two guards above
             // are silent, and "unsupported_disclosure" from the server is indistinguishable from a
             // local precondition failure without this line.
-            FileLog.shared.addMessage("[VoiceSharing] enrollment not begun: disclosureVersion=\(disclosureVersion) revision=\(store.currentAuthoritativeState?.membership.membershipRevision ?? "none")")
+            FileLog.shared.addMessage("[VoiceSharing] enrollment not begun: disclosureVersion=\(disclosureVersion)")
             membershipStatus = .unavailable
             busy = false
             return
@@ -764,10 +764,7 @@ final class VoiceSharingAccountModel: ObservableObject {
     /// Never blocked by an enrollment/fetch in flight. Capture server preconditions before local stop.
     func withdraw() async {
         storeChanged()
-        let original = store.currentAuthoritativeState?.membership
-        // The precondition is the revision this client last READ. The epoch is no longer sent: the body
-        // states the desired state, and the server derives the epoch transition from it.
-        let revision = original?.membershipRevision
+        // The body states the desired state, and the server derives the epoch transition from it.
         serial += 1
         stamp = nil
         mutation = nil
@@ -843,7 +840,7 @@ final class VoiceSharingAccountModel: ObservableObject {
         case .conflict(let projection, let issuedUnder):
             guard issuedUnder == sent.token else { busy = false; membershipStatus = .unavailable; return }
             store.applyConflict(current: projection, readUnder: issuedUnder)
-            mutation = nil // Never replay conflicted opt-in against a newer revision.
+            mutation = nil // Never replay a conflicted opt-in; renewed opt-in needs fresh user intent.
             membershipStatus = .conflict
         case .unauthorized:
             // INCIDENT: a refused mutation used to keep `mutation`

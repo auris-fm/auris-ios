@@ -50,6 +50,9 @@ final class VoiceSharingUploader {
     /// Consecutive retryable failures, per entry, used only to grow the backoff delay.
     private var failures: [String: Int] = [:]
 
+    /// Failure counts still retained, so a control can verify that bookkeeping never outlives its folder.
+    var failureCounts: [String: Int] { failures }
+
     init(
         queue: VoiceSharingQueue,
         send: @escaping (VoiceSharingQueue.Entry, @escaping () -> Bool) async -> Answer,
@@ -86,12 +89,15 @@ final class VoiceSharingUploader {
             return []
         }
         await deleteEntriesBelongingToAnotherIdentity()
+        await pruneBookkeepingToLiveFolders()
 
         var outcomes: [Outcome] = []
-        // `dueEntries()` deletes expired recordings as a side effect, which is itself an outcome of
-        // the pass even though nothing was sent.
-        var due = await queue.dueEntries()
-        while let entry = due.first {
+        // One snapshot, one visit per entry: a recording published after the drain began waits for
+        // the next drain. Re-reading the queue here would resend an entry whose local deletion
+        // failed after a final answer — a spin the drain must never produce. The next drain resends
+        // it, the server answers 200 for the duplicate, and removal is tried again.
+        let due = await queue.dueEntries()
+        for entry in due {
             // Consent is re-read before EVERY request, not just at the start of the pass: a
             // withdrawal that lands while an earlier request is in flight must stop the next one
             // from ever reaching the network.
@@ -101,14 +107,16 @@ final class VoiceSharingUploader {
             }
             let outcome = await attempt(entry)
             outcomes.append(outcome)
-            if case .retry = outcome {
-                // This entry is now inside its backoff window; the rest of the pass continues.
-                due = await queue.dueEntries().filter { $0.name != entry.name }
-            } else {
-                due = await queue.dueEntries()
-            }
+            // A retried entry is inside its backoff window; the snapshot's remaining entries go on.
         }
         return outcomes
+    }
+
+    /// Drops failure counts for folders that no longer exist, so the process retains at most the
+    /// live queue's bookkeeping — never a stale count for a recording that is already gone.
+    private func pruneBookkeepingToLiveFolders() async {
+        let liveNames = Set(await queue.entries().map(\.name))
+        failures = failures.filter { liveNames.contains($0.key) }
     }
 
     /// Removes recordings stamped with an account or epoch that is not the current live one.

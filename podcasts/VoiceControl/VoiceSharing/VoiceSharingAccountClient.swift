@@ -24,7 +24,6 @@ final class VoiceSharingAccountClient {
     /// Wire field names, kept next to the code that reads them so a contract change is one edit.
     enum Field {
         static let schemaVersion = "schema_version"
-        static let membershipRevision = "membership_revision"
         static let plan = "plan"
         static let enrolled = "voice_sharing_enrolled"
         static let epoch = "enrollment_epoch"
@@ -172,9 +171,8 @@ final class VoiceSharingAccountClient {
     /// user consented to belongs to the enrollment, and sending one on a withdrawal would record consent
     /// for a state the user is leaving.
     ///
-    /// The body states the DESIRED state and nothing about the previous one. There is no revision
-    /// precondition: the server no longer issues `membership_revision`, so requiring one would make
-    /// every mutation impossible, and a read-before-write to obtain it would be a round trip that
+    /// The body states the DESIRED state and nothing about the previous one. The server issues no
+    /// revision to precondition on, and a read-before-write to obtain one would be a round trip that
     /// guarded nothing.
     func beginMembership(enrolled: Bool, acceptedDisclosureVersion: String?) -> MutationOperation? {
         // Refuse locally rather than let the server report it: turning sharing ON without a consent
@@ -368,8 +366,7 @@ final class VoiceSharingAccountClient {
         // schema_version must be exactly the integer 1 — not "1", not 1.0, not absent.
         guard Self.isExactInteger(object[Field.schemaVersion], 1) else { return nil }
 
-        // The server no longer issues `membership_revision`; requiring it refused every real answer.
-        let revision = nonEmptyString(object[Field.membershipRevision]) ?? ""
+        // The server no longer issues `membership_revision`, and nothing carries it any more.
         guard let planRaw = nonEmptyString(object[Field.plan]), let plan = VoiceSharingMembership.Plan(rawValue: planRaw) else { return nil }
         guard let enrolled = strictBool(object[Field.enrolled]) else { return nil }
         guard let withdrawalRaw = nonEmptyString(object[Field.withdrawalState]),
@@ -401,7 +398,6 @@ final class VoiceSharingAccountClient {
         if withdrawal == .active && disclosure == nil { return nil }
 
         return VoiceSharingMembership(
-            membershipRevision: revision,
             plan: plan,
             voiceSharingEnrolled: enrolled,
             enrollmentEpoch: epoch,

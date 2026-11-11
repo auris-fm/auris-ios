@@ -117,7 +117,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         state.localOptIn = true
         state.hasAuthoritativeProjection = true
         state.membership = VoiceSharingMembership(
-            membershipRevision: "rev", plan: .pro, voiceSharingEnrolled: true,
+            plan: .pro, voiceSharingEnrolled: true,
             enrollmentEpoch: "epoch-1", acceptedDisclosureVersion: "2026-09",
             withdrawalState: .active)
         return state
@@ -1278,7 +1278,7 @@ private final class SharingLocalAuthority {
             if head.hasPrefix("GET /api/v1/account/voice-sharing ") {
                 gets += 1
                 return try response(200, object: [
-                    "schema_version": 1, "membership_revision": "local-1", "plan": "pro",
+                    "schema_version": 1, "plan": "pro",
                     "voice_sharing_enrolled": true, "enrollment_epoch": "epoch-1",
                     // BOTH members are required by the schema. Serving only the first made the
                     // decoder reject the whole body as an impossible combination, so no authority
