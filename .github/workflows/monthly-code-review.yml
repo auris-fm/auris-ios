@@ -55,6 +55,23 @@ jobs:
           echo "branch=monthly-fixes/${{ github.run_id }}" >> "$GITHUB_OUTPUT"
           echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"
 
+      - name: List the files Auris changed relative to upstream
+        env:
+          SCOPE: ${{ runner.temp }}/scope.txt
+        run: |
+          base=""
+          git remote add upstream https://github.com/Automattic/pocket-casts-ios.git
+          if git fetch -q --no-tags upstream '+refs/tags/*:refs/tags/upstream/*'; then
+            base=$(git describe --tags --abbrev=0 --match 'upstream/*' HEAD 2>/dev/null || true)
+          fi
+          if [ -n "$base" ]; then
+            { echo "# changed relative to upstream release ${base#upstream/}"; git -c core.quotePath=false diff --name-only --no-renames "$base" HEAD; } > "$SCOPE"
+          else
+            # Upstream unavailable: fall back to the Auris voice directories so the run is not wasted.
+            { echo "# upstream unavailable; voice directories only"; git ls-files podcasts/VoiceControl PocketCastsTests/VoiceControlTests; } > "$SCOPE"
+          fi
+          echo "$(($(wc -l < "$SCOPE") - 1)) files in scope ($(head -n 1 "$SCOPE"))"
+
       - name: Run monthly review
         uses: anthropics/claude-code-action@833fb0f8c9f6686b33d963a8bae0a94f4936ab2a # v1.0.211
         env:
@@ -68,7 +85,7 @@ jobs:
 
             Read AGENTS.md first; it carries this repo's conventions.
 
-            Review the Auris-owned code only: `podcasts/VoiceControl/` and `PocketCastsTests/VoiceControlTests/`, plus any other file whose history shows Auris changes. The rest is upstream Pocket Casts; leave it alone unless Auris code duplicates it.
+            Review the files listed in ${{ runner.temp }}/scope.txt: every file this fork adds or changes relative to the upstream Pocket Casts release it last merged (named on the first line), plus how those changes fit the code around them. Leave purely upstream code alone. Edits outside that list are never applied: report problems you find in other files in the issue report instead of editing them.
 
             The specs live in the private `auris-fm/core` repo and are not available to this job, so do not judge conformance to them. Report only inconsistencies inside this repo: two places that implement or state the same rule differently, and comments or docs that disagree with the code.
 
@@ -140,10 +157,30 @@ jobs:
           SHA: ${{ steps.head.outputs.sha }}
           DAY: ${{ steps.head.outputs.date }}
           FIXES: ${{ runner.temp }}/monthly-fixes.md
+          SCOPE: ${{ runner.temp }}/scope.txt
           BASE: ${{ github.event.repository.default_branch }}
         run: |
           git checkout -- .github 2>/dev/null || true
           git clean -fdq .github
+          # Only files in scope may reach the PR. Edits elsewhere are saved for the issue and dropped here.
+          # Paths are NUL-separated and literal, and renames are split into delete+add, so every path is classified.
+          export GIT_LITERAL_PATHSPECS=1
+          out="$RUNNER_TEMP/out-of-scope.nul"; : > "$out"
+          tail -n +2 "$SCOPE" > "$RUNNER_TEMP/scope-paths.txt"
+          git add -A
+          git diff --cached --name-only --no-renames -z | while IFS= read -r -d '' f; do
+            grep -qxF -- "$f" "$RUNNER_TEMP/scope-paths.txt" || printf '%s\0' "$f" >> "$out"
+          done
+          if [ -s "$out" ]; then
+            tr '\0' '\n' < "$out" > "$RUNNER_TEMP/out-of-scope.txt"
+            xargs -0 git diff --cached --no-renames -- < "$out" > "$RUNNER_TEMP/out-of-scope.diff"
+          fi
+          git reset -q
+          if [ -s "$out" ]; then
+            xargs -0 git ls-files -z -- < "$out" > "$RUNNER_TEMP/tracked.nul"
+            if [ -s "$RUNNER_TEMP/tracked.nul" ]; then git checkout --pathspec-from-file="$RUNNER_TEMP/tracked.nul" --pathspec-file-nul; fi
+            xargs -0 git clean -fdq -- < "$out"
+          fi
           if [ -z "$(git status --porcelain)" ]; then
             # A rerun that no longer has fixes closes the draft PR an earlier attempt opened.
             old=$(gh pr list --head "$BRANCH" --state open --json url -q '.[0].url')
@@ -179,7 +216,15 @@ jobs:
           DAY: ${{ steps.head.outputs.date }}
           PR_URL: ${{ steps.pr.outputs.url }}
           RUN_ID: ${{ github.run_id }}
+          OUT_DIFF: ${{ runner.temp }}/out-of-scope.diff
         run: |
+          if [ -s "$OUT_DIFF" ]; then
+            {
+              echo; echo "## Out-of-scope edits not applied"; echo
+              echo "The review edited these files outside its scope; they were left out of the PR:"; echo
+              sed 's/^/- /' "$RUNNER_TEMP/out-of-scope.txt"; echo; echo '```diff'; head -c 50000 "$OUT_DIFF"; echo '```'
+            } >> "$REPORT"
+          fi
           title="Monthly code review $DAY (run $RUN_ID)"
           # A rerun of the same run finds its own issue by exact title.
           existing=$(gh issue list --state open --limit 200 --json number,title             | jq -r --arg t "$title" '.[] | select(.title == $t) | .number' | head -n 1)
