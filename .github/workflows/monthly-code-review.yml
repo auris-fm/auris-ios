@@ -1,0 +1,199 @@
+# Monthly whole-repo review: redundancy, inconsistency and simplification.
+#
+# The PR review (`claude-code-review.yml`) only sees one diff at a time, so duplicated
+# mechanisms and rules that drift apart across files slip past it. Once a month this job
+# reads the Auris-owned code, applies the mechanical fixes on a branch and opens one
+# draft PR for them, and files one issue for the findings that need a decision. The
+# PR goes through CI and the PR review like any other; nothing merges automatically.
+#
+# Pushing and opening the PR use a token minted from the `auris-weekly-review` GitHub
+# App, because PRs opened with the built-in token do not trigger CI. The token is minted
+# after the review, since installation tokens last one hour and the review can run longer.
+# The app has no
+# workflows permission, so the job also refuses to commit anything under `.github/`.
+# The same file, differing only in the scope paragraph, lives in `core`, `auris-ios`
+# and `auris-android`; keep the three in step.
+
+name: Monthly Code Review
+
+on:
+  schedule:
+    - cron: "0 1 1 * *" # the 1st of each month, 09:00 UTC+8 (01:00 UTC)
+  workflow_dispatch:
+
+concurrency:
+  group: monthly-code-review
+  cancel-in-progress: false
+
+jobs:
+  monthly-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - name: Require configured review model
+        env:
+          REVIEW_MODEL: ${{ secrets.ANTHROPIC_MODEL }}
+        run: |
+          if [ -z "$REVIEW_MODEL" ]; then
+            echo '::error::ANTHROPIC_MODEL must be configured; no model substitution is permitted.'
+            exit 1
+          fi
+
+      - name: Checkout default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Record reviewed commit
+        id: head
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "branch=monthly-fixes/${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+
+      - name: Run monthly review
+        uses: anthropics/claude-code-action@833fb0f8c9f6686b33d963a8bae0a94f4936ab2a # v1.0.211
+        env:
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            COMMIT: ${{ steps.head.outputs.sha }}
+
+            Read AGENTS.md first; it carries this repo's conventions.
+
+            Review the Auris-owned code only: `podcasts/VoiceControl/` and `PocketCastsTests/VoiceControlTests/`, plus any other file whose history shows Auris changes. The rest is upstream Pocket Casts; leave it alone unless Auris code duplicates it.
+
+            The specs live in the private `auris-fm/core` repo and are not available to this job, so do not judge conformance to them. Report only inconsistencies inside this repo: two places that implement or state the same rule differently, and comments or docs that disagree with the code.
+
+            Look for, in this order:
+            1. Redundancy: two mechanisms doing one job, dead code, unused
+               configuration, routes or fields nothing reads, and docs that restate a
+               rule kept elsewhere.
+            2. Inconsistency: code that contradicts the spec or plan it implements,
+               two places that state or implement the same rule differently, and
+               comments that describe code that no longer exists.
+            3. Significant simplification: a smaller design that keeps the required
+               behaviour.
+
+            Skip style, formatting, naming taste and anything a linter or the PR
+            review already covers. Never describe a file you did not read.
+
+            Then sort every finding into exactly one of two groups.
+
+            APPLY, by editing the working tree, only findings that cannot change
+            behaviour: deleting code, configuration or files that nothing references
+            (check with Grep that there is no caller, including tests you would then
+            also delete), correcting comments and docs to match the code, fixing stale
+            line references, and replacing a duplicated helper with an existing one of
+            identical behaviour. Never edit anything under `.github/`. Never change a
+            public contract, a spec's stated rule, a default value or a test's
+            expectation of live behaviour. When unsure, do not apply it.
+
+            REPORT everything else: behaviour changes, spec-versus-code disagreements
+            where you cannot tell which side is right, and design simplifications.
+
+            Write two Markdown files and nothing else outside the working tree:
+            - ${{ runner.temp }}/monthly-fixes.md: one bullet per applied fix,
+              `path:line` and what was removed or corrected. Empty if none.
+            - ${{ runner.temp }}/monthly-review.md: two or three sentences of verdict,
+              then one bullet per reported finding: `path:line`, the problem, the
+              proposed change and the behaviour that must remain. Order by how much it
+              would remove. Do not repeat anything you applied. Empty if none.
+          claude_args: |
+            --model ${{ secrets.ANTHROPIC_MODEL }}
+            --allowedTools "Read,Glob,Grep,Edit,Write,Bash(git log:*),Bash(git show:*),Bash(git ls-files:*),Bash(git diff:*),Bash(git grep:*)"
+
+      - name: Require both review outputs
+        env:
+          FIXES: ${{ runner.temp }}/monthly-fixes.md
+          REPORT: ${{ runner.temp }}/monthly-review.md
+        run: |
+          for f in "$FIXES" "$REPORT"; do
+            if [ ! -e "$f" ]; then
+              echo "::error::The review did not write $f (an empty file means no findings)."
+              exit 1
+            fi
+          done
+
+      - name: Mint app token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: Iv23li4F3Q0PrzmgQeMj # auris-weekly-review; a client ID is not secret
+          private-key: ${{ secrets.WEEKLY_REVIEW_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+
+      - name: Open or update the fix PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          BRANCH: ${{ steps.head.outputs.branch }}
+          SHA: ${{ steps.head.outputs.sha }}
+          DAY: ${{ steps.head.outputs.date }}
+          FIXES: ${{ runner.temp }}/monthly-fixes.md
+          BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          git checkout -- .github 2>/dev/null || true
+          git clean -fdq .github
+          if [ -z "$(git status --porcelain)" ]; then
+            # A rerun that no longer has fixes closes the draft PR an earlier attempt opened.
+            old=$(gh pr list --head "$BRANCH" --state open --json url -q '.[0].url')
+            if [ -n "$old" ]; then
+              gh pr close "$old" --delete-branch --comment "A rerun of this review found no mechanical fixes."
+            fi
+            echo "No mechanical fixes."
+            exit 0
+          fi
+          if [ ! -s "$FIXES" ]; then
+            echo '::error::The working tree changed but the fix summary is empty.'
+            exit 1
+          fi
+          git switch -C "$BRANCH"
+          git add -A
+          git -c user.name="auris-weekly-review[bot]" -c user.email="auris-weekly-review[bot]@users.noreply.github.com"             commit -q -m "Monthly review: mechanical fixes for $SHA"
+          # A rerun of the same run replaces its own branch; no other run uses this name.
+          git push -q --force "https://x-access-token:$GH_TOKEN@github.com/${{ github.repository }}.git" "HEAD:refs/heads/$BRANCH"
+          { echo "Mechanical fixes from the monthly review of $SHA. Each removes or corrects something that nothing depends on; CI and the PR review check it."; echo; cat "$FIXES"; } > "$RUNNER_TEMP/pr.md"
+          url=$(gh pr list --head "$BRANCH" --state open --json url -q '.[0].url')
+          if [ -n "$url" ]; then
+            gh pr edit "$url" --body-file "$RUNNER_TEMP/pr.md" >/dev/null
+          else
+            url=$(gh pr create --draft --base "$BASE" --head "$BRANCH"               --title "Monthly review fixes $DAY" --body-file "$RUNNER_TEMP/pr.md")
+          fi
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: File the remaining findings as one issue
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          REPORT: ${{ runner.temp }}/monthly-review.md
+          SHA: ${{ steps.head.outputs.sha }}
+          DAY: ${{ steps.head.outputs.date }}
+          PR_URL: ${{ steps.pr.outputs.url }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          title="Monthly code review $DAY (run $RUN_ID)"
+          # A rerun of the same run finds its own issue by exact title.
+          existing=$(gh issue list --state open --limit 200 --json number,title             | jq -r --arg t "$title" '.[] | select(.title == $t) | .number' | head -n 1)
+          if [ ! -s "$REPORT" ]; then
+            if [ -n "$existing" ]; then
+              gh issue close "$existing" --comment "A rerun of this review found nothing left beyond the fix PR."
+            fi
+            echo "No findings beyond the fix PR."
+            exit 0
+          fi
+          { echo "Reviewed commit: $SHA"; if [ -n "$PR_URL" ]; then echo "Mechanical fixes: $PR_URL"; fi; echo; cat "$REPORT"; } > "$RUNNER_TEMP/issue.md"
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --body-file "$RUNNER_TEMP/issue.md"
+          else
+            gh issue create --title "$title" --body-file "$RUNNER_TEMP/issue.md"
+          fi
+
