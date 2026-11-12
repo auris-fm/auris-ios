@@ -615,8 +615,7 @@ final class VoiceSharingCollector {
             if let deadline { scheduleOutcome(deadline.time, deadline.work) }
             return
         }
-        terminalRing[c.id]?.emitted = true
-        cancelOutcomeDeadlineLocked(c.id)
+        releaseEmittedLocked(c.id)
         let event = makeEvent(kind: .completed, from: c)
         lock.unlock()
         submit(event)
@@ -637,8 +636,7 @@ final class VoiceSharingCollector {
         if rec.noContribution {
             // A capture that can never contribute is CONSUMED, never resurrected.
             cancelOutcomeDeadlineLocked(context.id)
-            rec.emitted = true
-            terminalRing[context.id] = rec
+            terminalRing.removeValue(forKey: context.id)
             lock.unlock()
             return
         }
@@ -647,8 +645,7 @@ final class VoiceSharingCollector {
             && isCollectionPermitted()
         guard sameConsent else { lock.unlock(); return }
         cancelOutcomeDeadlineLocked(context.id)
-        rec.emitted = true
-        terminalRing[context.id] = rec
+        terminalRing.removeValue(forKey: context.id)
         let event = makeEvent(kind: .completed, from: rec.capture)
         lock.unlock()
         submit(event)
@@ -678,9 +675,7 @@ final class VoiceSharingCollector {
         if var deferred = deferredRingEntryAwaitingCancellationLocked(preferring: nil) {
             deferred.capture = consumed(deferred.capture)
             cancelOutcomeDeadlineLocked(deferred.capture.id)
-            deferred.emitted = true
-            deferred.noContribution = true
-            terminalRing[deferred.capture.id] = deferred
+            terminalRing.removeValue(forKey: deferred.capture.id)
             lock.unlock()
             return
         }
@@ -710,9 +705,7 @@ return }
         }
         rec.capture = consumed(rec.capture)
         cancelOutcomeDeadlineLocked(context.id)
-        rec.emitted = true
-        rec.noContribution = true
-        terminalRing[rec.capture.id] = rec
+        terminalRing.removeValue(forKey: rec.capture.id)
         lock.unlock()
     }
 
@@ -770,8 +763,7 @@ return }
         c.deferEmissionUntilFinalized = false
         current = nil
         markTerminal(c)
-        terminalRing[c.id]?.emitted = true
-        cancelOutcomeDeadlineLocked(c.id)
+        releaseEmittedLocked(c.id)
         // for a bleed-rejected segment the ASR stage did not run because the engine
         // OBSERVED playback bleed and skipped it — a known skip, not an absent observation. The bleed
         // stage keeps its own observed decision from the contract enum (`overlap` here); this fact says
@@ -845,6 +837,15 @@ return }
 
     private var terminalRing: [UUID: TerminalRecord] = [:]
 
+    /// An emitted record no longer occupies the ring: only records WAITING for their outcome
+    /// count toward the bound (core#157 queue-full rule). The entry is removed outright; late
+    /// reports look up by capture ID, miss, and are dropped — a record is immutable once emitted.
+    /// Caller holds the observation lock.
+    private func releaseEmittedLocked(_ id: UUID) {
+        cancelOutcomeDeadlineLocked(id)
+        terminalRing.removeValue(forKey: id)
+    }
+
     private func rememberTerminal(_ c: FrozenCapture, noContribution: Bool = false) {
         terminalSequence &+= 1
         // QUEUE-FULL RULE (core#157, spec: "when the queue is full… the new recording is
@@ -853,15 +854,20 @@ return }
         // (already emitted, or never-contributing); it never force-emits a waiting record —
         // a record emitted before its outcome uploads with every observation `unknown`, which
         // is the fact-less upload this path used to produce (the `grace_na` R2 clips).
-        while terminalRing.count >= 32, let oldest = terminalRing.first,
-              oldest.value.emitted || oldest.value.noContribution {
-            cancelOutcomeDeadlineLocked(oldest.key)
-            terminalRing.removeValue(forKey: oldest.key)
+        // Emitted entries left the ring at their emit site (only waiting records occupy the
+        // ring); what can linger anywhere is bookkeeping (emitted=nothing, noContribution), and
+        // ANY such entry is evictable — never a waiting record, and never decided by dictionary
+        // order.
+        while terminalRing.count >= 32,
+              let evictable = terminalRing.first(where: { $0.value.emitted || $0.value.noContribution }) {
+            cancelOutcomeDeadlineLocked(evictable.key)
+            terminalRing.removeValue(forKey: evictable.key)
         }
-        if terminalRing.count >= 32 {
-            // Every slot is a waiting record and the new capture cannot wait: drop the NEW
-            // capture, counted and logged. Prefer dropping a recording over machinery that
-            // would save it fact-less.
+        if terminalRing.count >= 32, !noContribution {
+            // Every slot is a waiting record and this contributing capture cannot wait: drop
+            // the NEW capture, counted and logged. Prefer dropping a recording over machinery
+            // that would save it fact-less. (A never-contributing capture is bookkeeping only,
+            // not audio worth saving: it is admitted regardless and sheds on the next insert.)
             ringDropCount += 1
             FileLog.shared.addMessage(
                 "[VoiceSharing] capture dropped: ring full of waiting records "
@@ -902,13 +908,13 @@ return }
             lock.unlock()
             return
         }
-        rec.emitted = true
         let allowed = stillPermitted(for: rec.capture)
         let event = makeEvent(kind: .completed, from: rec.capture)
         // The immutable event owns any deliverable PCM from here; the timer/ring release theirs.
         rec.capture = consumed(rec.capture)
-        rec.noContribution = !allowed
-        terminalRing[id] = rec
+        // The record leaves the ring on emission: only WAITING records occupy it (core#157).
+        // A not-permitted capture keeps no audio and contributes nothing, so removal is total.
+        terminalRing.removeValue(forKey: id)
         lock.unlock()
         if allowed {
             var expired = event
@@ -961,8 +967,7 @@ return }
         // resurrected: no late callback may turn it back into a deliverable record.
         if rec.noContribution {
             cancelOutcomeDeadlineLocked(context.id)
-            rec.emitted = true
-            terminalRing[context.id] = rec
+            terminalRing.removeValue(forKey: context.id)
             lock.unlock()
             return true
         }
@@ -982,8 +987,7 @@ return }
             return true
         }
         cancelOutcomeDeadlineLocked(context.id)
-        rec.emitted = true
-        terminalRing[context.id] = rec
+        terminalRing.removeValue(forKey: context.id)
         let event = makeEvent(kind: kind, from: rec.capture)
         lock.unlock()
         submit(event)

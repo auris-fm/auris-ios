@@ -1102,6 +1102,52 @@ final class VoiceSharingCollectorTests: XCTestCase {
             "the waiting records hold their audio in the ring")
     }
 
+    /// Reviewer's control for the ring fix: bookkeeping entries (never-contributing) may be
+    /// interleaved with the 32 waiting records, and a new capture must still be ADMITTED — the
+    /// eviction sheds bookkeeping entries anywhere in the ring, never a waiting record, and
+    /// never decided by dictionary order. A drop is correct only when ALL 32 slots are waiting.
+    func test_ringWithInterleavedBookkeepingEntries_admitsTheNewCapture_withoutADrop() {
+        activateLease()
+        enrolledState(true)
+        assertPremisesOpen()
+        let collector = makeCollector()
+        let samples = [Float](repeating: 1, count: 3_200)
+        // 20 waiting records (deferred, long deadline), then 12 never-contributing captures
+        // (cancelled partials — identity bookkeeping only) interleaved on top.
+        for _ in 0..<20 {
+            collector.speechStarted(confirmationFrameSamples: 320)
+            collector.appendSamples(samples, reportedTotal: 3_200)
+            collector.segmentationEnded(collector.currentCaptureContextForTesting)
+        }
+        for _ in 0..<12 {
+            collector.speechStarted(confirmationFrameSamples: 320)
+            collector.appendSamples(samples, reportedTotal: 3_200)
+            collector.speechCancelled()
+        }
+        XCTAssertEqual(collector.ringDropCountForTesting, 0)
+        // The 21st contributing capture: admitted by shedding bookkeeping entries — INCLUDING
+        // ones the old dictionary-order loop would never have reached.
+        collector.speechStarted(confirmationFrameSamples: 320)
+        collector.appendSamples(samples, reportedTotal: 3_200)
+        collector.segmentationEnded(collector.currentCaptureContextForTesting)
+        XCTAssertEqual(
+            collector.ringDropCountForTesting, 0,
+            "bookkeeping entries make room: the new capture is admitted, not dropped")
+        XCTAssertEqual(
+            snapshot().filter { $0.kind == .completed }.count, 0,
+            "and no waiting record was force-emitted to make room")
+        // Once the bookkeeping is shed and ALL 32 slots are waiting records, the next
+        // contributing capture IS dropped — a drop is correct only at true saturation.
+        for _ in 0..<12 {
+            collector.speechStarted(confirmationFrameSamples: 320)
+            collector.appendSamples(samples, reportedTotal: 3_200)
+            collector.segmentationEnded(collector.currentCaptureContextForTesting)
+        }
+        XCTAssertEqual(
+            collector.ringDropCountForTesting, 1,
+            "a drop happens only when every slot is a waiting record")
+    }
+
     /// The OTHER half of the ring-pressure fix: a normal grace capture that WAITS for its
     /// outcome uploads WITH the pipeline's wake decision once the outcome arrives — the whole
     /// point of not force-emitting early.
