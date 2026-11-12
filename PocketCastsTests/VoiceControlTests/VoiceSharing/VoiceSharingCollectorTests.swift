@@ -1102,10 +1102,10 @@ final class VoiceSharingCollectorTests: XCTestCase {
             "the waiting records hold their audio in the ring")
     }
 
-    /// Reviewer's control for the ring fix: bookkeeping entries (never-contributing) may be
-    /// interleaved with the 32 waiting records, and a new capture must still be ADMITTED — the
-    /// eviction sheds bookkeeping entries anywhere in the ring, never a waiting record, and
-    /// never decided by dictionary order. A drop is correct only when ALL 32 slots are waiting.
+    /// Reviewer's control for the ring fix: a never-contributing capture (a cancelled partial)
+    /// never enters the ring at all, so contributing captures interleaved with it are ADMITTED
+    /// while slots remain — no drop, no force-emit, and never anything decided by dictionary
+    /// order. A drop is correct only when ALL 32 slots are waiting records.
     func test_ringWithInterleavedBookkeepingEntries_admitsTheNewCapture_withoutADrop() {
         activateLease()
         enrolledState(true)
@@ -1125,8 +1125,8 @@ final class VoiceSharingCollectorTests: XCTestCase {
             collector.speechCancelled()
         }
         XCTAssertEqual(collector.ringDropCountForTesting, 0)
-        // The 21st contributing capture: admitted by shedding bookkeeping entries — INCLUDING
-        // ones the old dictionary-order loop would never have reached.
+        // The 21st contributing capture: admitted — the interleaved cancelled partials never
+        // counted toward the bound (they never enter the ring).
         collector.speechStarted(confirmationFrameSamples: 320)
         collector.appendSamples(samples, reportedTotal: 3_200)
         collector.segmentationEnded(collector.currentCaptureContextForTesting)
@@ -1136,8 +1136,8 @@ final class VoiceSharingCollectorTests: XCTestCase {
         XCTAssertEqual(
             snapshot().filter { $0.kind == .completed }.count, 0,
             "and no waiting record was force-emitted to make room")
-        // Once the bookkeeping is shed and ALL 32 slots are waiting records, the next
-        // contributing capture IS dropped — a drop is correct only at true saturation.
+        // Once ALL 32 slots are waiting records, the next contributing capture IS dropped —
+        // a drop is correct only at true saturation.
         for _ in 0..<12 {
             collector.speechStarted(confirmationFrameSamples: 320)
             collector.appendSamples(samples, reportedTotal: 3_200)
@@ -1178,6 +1178,32 @@ final class VoiceSharingCollectorTests: XCTestCase {
         XCTAssertEqual(
             delivered.first?.reportedStages["wakeword"]?.score, 0.123,
             "and the measured score, not `na`")
+    }
+
+    /// Bot-blocking finding on the final shape: WITHDRAWAL must not leave the ring holding
+    /// its waiting records. gateLost used to mark them noContribution and let the (now
+    /// deleted) shedder clear them; with the shedder gone they would stay forever, and after
+    /// re-sign-in every new recording would be dropped as "ring full of waiting records".
+    /// gateLost therefore REMOVES the entries outright; a late callback for one misses by
+    /// capture ID and is dropped, exactly as for a consumed entry.
+    func test_withdrawal_emptiesTheRing_evenWhenFullOfWaitingRecords() {
+        activateLease()
+        enrolledState(true)
+        assertPremisesOpen()
+        let collector = makeCollector()
+        let samples = [Float](repeating: 1, count: 3_200)
+        for _ in 0..<32 {
+            collector.speechStarted(confirmationFrameSamples: 320)
+            collector.appendSamples(samples, reportedTotal: 3_200)
+            collector.segmentationEnded(collector.currentCaptureContextForTesting)
+        }
+        XCTAssertEqual(collector.waitingRingCountForTesting, 32)
+        XCTAssertGreaterThan(collector.actualRetainedAudioBreakdownForTesting.ring, 0)
+        collector.gateLost()
+        XCTAssertEqual(
+            collector.waitingRingCountForTesting, 0,
+            "withdrawal removes every ring entry — none survives to block later recordings")
+        XCTAssertEqual(collector.pendingCountForTesting, 0)
     }
 
     /// Reviewer's control for the ring fix: a LATE report for an ALREADY-EMITTED capture must

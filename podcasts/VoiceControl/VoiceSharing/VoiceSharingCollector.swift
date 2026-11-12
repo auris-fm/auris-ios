@@ -798,7 +798,13 @@ return }
         // speech, so the bypass cannot deliver withdrawn audio.
         pending.removeAll()
         disposeRingAudio()
-        for key in terminalRing.keys { terminalRing[key]?.noContribution = true }
+        // The ring is EMPTIED, not merely marked: entries that survived as noContribution
+        // would stay forever now that no shedder exists, and after re-sign-in every new
+        // recording would be dropped as "ring full of waiting records". A removed entry makes
+        // a late callback miss by capture ID and be dropped — the same refusal a consumed
+        // entry produced (bot finding on core#157).
+        for key in terminalRing.keys { cancelOutcomeDeadlineLocked(key) }
+        terminalRing.removeAll()
         var cancelEvent: SegmentEvent?
         if var c = current, !c.terminal {
             c.terminal = true
@@ -1187,11 +1193,19 @@ return }
 
     // MARK: - Test seams (production callers never use these)
 
-    /// Samples the collector is ACTUALLY holding for the open capture — reads the buffer, not a counter.
     /// Number of events currently queued in the FIFO.
     /// Captures a FULL ring of waiting records refused (dropped, counted, logged — never
     /// force-emitted without their facts; core#157).
+    /// Captures a FULL ring of waiting records refused (dropped, counted, logged — never
+    /// force-emitted without their facts; core#157).
     private(set) var ringDropCount = 0
+
+    /// How many records currently WAIT for their outcome in the ring. Withdrawal must drive
+    /// this to 0 even when the ring was full (bot finding on core#157).
+    var waitingRingCountForTesting: Int {
+        lock.lock(); defer { lock.unlock() }
+        return terminalRing.count
+    }
 
     var ringDropCountForTesting: Int {
         lock.lock(); defer { lock.unlock() }
@@ -1203,6 +1217,7 @@ return }
         return pending.count
     }
 
+    /// Samples the collector is ACTUALLY holding for the open capture — reads the buffer, not a counter.
     /// What is actually retained right now, walked from the live buffers.
     var actualRetainedAudioBreakdownForTesting: (open: Int, fifo: Int, ring: Int) {
         lock.lock(); defer { lock.unlock() }
