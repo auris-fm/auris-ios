@@ -147,7 +147,8 @@ final class VoiceSharingAccountClientTests: XCTestCase {
     /// two moments exactly as production does.
     private var testStore: VoiceSharingEnrollmentStore!
 
-    private func makeClient(factory: (() -> String)? = nil) -> VoiceSharingAccountClient {
+    private func makeClient(factory: (() -> String)? = nil,
+                            userAgent: (() -> String)? = nil) -> VoiceSharingAccountClient {
         VoiceSharingAccountClient(
             baseURLProvider: { "https://api.example.test" },
             tokenProvider: tokens,
@@ -158,7 +159,8 @@ final class VoiceSharingAccountClientTests: XCTestCase {
                 return id
             },
             sessionIdentity: { [weak self] in self?.identity },
-            membershipStore: testStore!
+            membershipStore: testStore!,
+            userAgentProvider: userAgent ?? { "" }
         )
     }
 
@@ -318,6 +320,29 @@ final class VoiceSharingAccountClientTests: XCTestCase {
         let fetched = await makeClient().fetchProjection()
         XCTAssertNil(fetched)
         XCTAssertTrue(VoiceSharingStubProtocol.seenRequests.isEmpty, "no session means no call, not an anonymous probe")
+    }
+
+    /// The server's access log attributes uploads to a platform via the User-Agent header. Every
+    /// voice-sharing request must carry the app's standard private user agent, exactly like every
+    /// other Auris request; a missing header logs `platform=unknown` and loses the attribution.
+    func test_outgoingRequests_carryTheAppUserAgent() async {
+        VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] =
+            Reply(status: 200, body: projection(enrolled: false, epoch: nil, withdrawal: "active"))
+        let client = makeClient(userAgent: { "Pocket Casts/iOS/9.9-test" })
+        _ = await client.fetchProjection()
+        let request = try! XCTUnwrap(VoiceSharingStubProtocol.seenRequests.first)
+        XCTAssertEqual(request.value(forHTTPHeaderField: "User-Agent"), "Pocket Casts/iOS/9.9-test")
+    }
+
+    /// An empty injected user agent must not put an empty (or system-default) header on the wire:
+    /// the provider failing is not a reason to present a half-identity.
+    func test_emptyUserAgent_leavesNoHeader() async {
+        VoiceSharingStubProtocol.replies["GET /api/v1/account/voice-sharing"] =
+            Reply(status: 200, body: projection(enrolled: false, epoch: nil, withdrawal: "active"))
+        let client = makeClient(userAgent: { "" })
+        _ = await client.fetchProjection()
+        let request = try! XCTUnwrap(VoiceSharingStubProtocol.seenRequests.first)
+        XCTAssertNil(request.value(forHTTPHeaderField: "User-Agent"))
     }
 
     /// JSONSerialization bridges an INTEGER to Bool under `as? Bool`. A numeric publication must never be

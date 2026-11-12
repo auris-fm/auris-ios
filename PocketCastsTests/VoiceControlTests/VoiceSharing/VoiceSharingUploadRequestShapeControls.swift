@@ -47,6 +47,29 @@ final class VoiceSharingUploadRequestShapeControls: XCTestCase {
                      "no chunked encoding")
     }
 
+    /// The server's access log attributes uploads to a platform via the User-Agent header; uploads
+    /// must carry the app's user agent exactly like the account-surface requests.
+    func test_theUploadCarriesTheAppUserAgent() async throws {
+        RecordingWire.shared.reset()
+        let queue = VoiceSharingQueue(root: root, log: { _ in })
+        _ = await queue.publish(audio: Data(repeating: 7, count: 4_096),
+                          metadata: Data(#"{"enrollment_epoch":"epoch-1"}"#.utf8),
+                          name: "ua")
+        let published = await queue.entries()
+        let entry = try XCTUnwrap(published.first)
+
+        let transport = VoiceSharingUploadTransport(
+            baseURLProvider: { "https://unit.test" },
+            tokenProvider: RecordingTokens(),
+            session: RecordingWire.session,
+            userAgentProvider: { "Pocket Casts/iOS/9.9-test" })
+        let answer = await transport.send(entry: entry)
+        XCTAssertEqual(answer, .response(status: 201))
+
+        let request = try XCTUnwrap(RecordingWire.shared.request, "the request reached the wire")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "User-Agent"), "Pocket Casts/iOS/9.9-test")
+    }
+
     /// A STOP cancels the attempt it was asked to cancel and nothing after it. Once the user turns
     /// sharing back on, the very next send must reach the wire: a stop that also refused every later
     /// transfer would leave the feature permanently unable to upload, and nothing would report it.

@@ -56,6 +56,9 @@ final class VoiceSharingAccountClient {
     /// and the store agree on ONE counter; a second local counter would let them drift and silently accept a
     /// reply the store would have refused.
     private let membershipStore: VoiceSharingEnrollmentStore
+    /// The server's access log attributes each call to a platform via the User-Agent header; the
+    /// production default is the app's standard private user agent, matching every other Auris request.
+    private let userAgentProvider: () -> String
 
     init(
         // The CONFIGURED sharing origin, not the cutover-gated one: authentication and the requests it
@@ -68,7 +71,8 @@ final class VoiceSharingAccountClient {
         // a request belongs to. NOTE: this deliberately does not read a credential — refresh rotation
         // would look like logout, and credentials are not operation identity.
         sessionIdentity: @escaping () -> SessionIdentity? = VoiceSharingEnrollmentStore.currentSessionOwner,
-        membershipStore: VoiceSharingEnrollmentStore = .shared
+        membershipStore: VoiceSharingEnrollmentStore = .shared,
+        userAgentProvider: @escaping () -> String = { ServerConfig.shared.syncDelegate?.privateUserAgent() ?? "" }
     ) {
         self.baseURLProvider = baseURLProvider
         self.tokenProvider = tokenProvider
@@ -76,6 +80,7 @@ final class VoiceSharingAccountClient {
         self.requestIDFactory = requestIDFactory
         self.sessionIdentity = sessionIdentity
         self.membershipStore = membershipStore
+        self.userAgentProvider = userAgentProvider
     }
 
     // MARK: - GET projection
@@ -343,6 +348,8 @@ final class VoiceSharingAccountClient {
         guard let credential = await tokenProvider.token(), !credential.isEmpty else { return nil }
         request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let userAgent = userAgentProvider()
+        if !userAgent.isEmpty { request.setValue(userAgent, forHTTPHeaderField: "User-Agent") }
         if let body {
             guard let encoded = try? JSONSerialization.data(withJSONObject: body) else { return nil }
             request.httpBody = encoded

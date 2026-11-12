@@ -1,4 +1,5 @@
 import Foundation
+import PocketCastsServer
 
 /// Sends one recording as a single multipart request and reduces the answer to what the uploader
 /// decides on. There is no reservation, no second step and no receipt matching.
@@ -6,6 +7,9 @@ final class VoiceSharingUploadTransport {
 
     private let baseURLProvider: () -> String
     private let tokenProvider: CloudTokenProviding
+    /// The server's access log attributes each call to a platform via the User-Agent header; the
+    /// production default is the app's standard private user agent, matching every other Auris request.
+    private let userAgentProvider: () -> String
     private let session: URLSession
     /// The credential the last request presented, so a 401 can name what was rejected.
     private var lastPresentedToken: String?
@@ -16,8 +20,10 @@ final class VoiceSharingUploadTransport {
 
     init(baseURLProvider: @escaping () -> String,
          tokenProvider: CloudTokenProviding,
-         session: URLSession? = nil) {
+         session: URLSession? = nil,
+         userAgentProvider: @escaping () -> String = { ServerConfig.shared.syncDelegate?.privateUserAgent() ?? "" }) {
         self.baseURLProvider = baseURLProvider
+        self.userAgentProvider = userAgentProvider
         self.tokenProvider = tokenProvider
         // A session whose resource timeout IS the whole-transfer budget: it counts elapsed time
         // from start to finish rather than restarting on every trickle of bytes.
@@ -54,6 +60,8 @@ final class VoiceSharingUploadTransport {
         }
         var request = URLRequest(url: url, timeoutInterval: Self.requestTimeout)
         request.httpMethod = "POST"
+        let userAgent = userAgentProvider()
+        if !userAgent.isEmpty { request.setValue(userAgent, forHTTPHeaderField: "User-Agent") }
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("multipart/form-data; boundary=\(Self.boundary)",
                          forHTTPHeaderField: "Content-Type")
