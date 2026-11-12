@@ -490,7 +490,7 @@ final class VoiceSharingCollector {
         if var capture = current, capture.id == context.id, !capture.terminal {
             record(&capture)
             current = capture
-        } else if var entry = terminalRing[context.id], !entry.emitted, !entry.noContribution {
+        } else if var entry = terminalRing[context.id], !entry.noContribution {
             record(&entry.capture)
             terminalRing[context.id] = entry
         }
@@ -564,7 +564,7 @@ final class VoiceSharingCollector {
             current = c
             return
         }
-        if var rec = terminalRing[context.id], !rec.emitted, !rec.noContribution {
+        if var rec = terminalRing[context.id], !rec.noContribution {
             rec.capture.reportedStages[stage] = merged(rec.capture.reportedStages[stage], stage: stage)
             terminalRing[context.id] = rec
         }
@@ -575,7 +575,7 @@ final class VoiceSharingCollector {
     func speechCompleted(_ samples: [Float], context: CaptureContext?, deferEmission: Bool = false) {
         if let context, deferEmission {
             lock.lock()
-            if var rec = terminalRing[context.id], !rec.emitted, !rec.noContribution {
+            if var rec = terminalRing[context.id], !rec.noContribution {
                 rec.capture.deferEmissionUntilFinalized = true
                 terminalRing[context.id] = rec
             }
@@ -627,7 +627,7 @@ final class VoiceSharingCollector {
     func finalizeDeferredCompletion(context: CaptureContext?) {
         guard let context else { return }
         lock.lock()
-        guard var rec = terminalRing[context.id], !rec.emitted else { lock.unlock(); return }
+        guard let rec = terminalRing[context.id] else { lock.unlock(); return }
         // MIRRORS emitLateOutcomeIfTerminal: this is the SAME promotion of a terminal
         // capture into a completed record, so it must honour every safeguard that path applies. Without
         // these checks a late finalize could resurrect a capture that was genuinely cancelled or withdrawn,
@@ -724,13 +724,13 @@ return }
         // never cancelled. Named lookup therefore returns its own entry or nothing at all.
         if let context {
             guard let named = terminalRing[context.id],
-                named.capture.deferEmissionUntilFinalized || outcomeDeadlines[context.id] != nil, !named.emitted else { return nil }
+                named.capture.deferEmissionUntilFinalized || outcomeDeadlines[context.id] != nil else { return nil }
             return named
         }
         // Unnamed: the caller did not say which capture, so the most recent one is the best available
         // evidence. Recency is an explicit stamp, never dictionary iteration order.
         return terminalRing.values
-            .filter { ($0.capture.deferEmissionUntilFinalized || outcomeDeadlines[$0.capture.id] != nil) && !$0.emitted }
+            .filter { $0.capture.deferEmissionUntilFinalized || outcomeDeadlines[$0.capture.id] != nil }
             .max { $0.deferredOrder < $1.deferredOrder }
     }
 
@@ -820,11 +820,11 @@ return }
 
     /// Recently-terminal captures, bounded. A late outcome (A's Task finally runs after A was cancelled and
     /// B is open) must still complete UNDER A — attributed to A's frozen identity and A's frozen audio —
-    /// rather than being dropped as foreign or, worse, adopted by B. Each entry records whether its terminal
-    /// record was already emitted, so a duplicate late outcome emits nothing.
+    /// rather than being dropped as foreign or, worse, adopted by B. Only records WAITING for their
+    /// outcome live here: an emitted entry is removed outright at its emit site, so a duplicate late
+    /// outcome misses by capture ID and emits nothing.
     private struct TerminalRecord {
         var capture: FrozenCapture
-        var emitted: Bool
         /// A capture that can never become a contribution — genuinely cancelled partials AND
         /// consent-revoked (gate-loss) captures — is remembered for identity bookkeeping only. Its
         /// late outcomes are CONSUMED silently: never resurrected as deliverable records, never
@@ -869,14 +869,14 @@ return }
             return
         }
         terminalRing[c.id] = TerminalRecord(
-            capture: c, emitted: false, noContribution: false,
+            capture: c,
             deferredOrder: terminalSequence)
     }
 
     /// Caller holds the observation lock. Work retains identity only, never PCM or the collector.
     private func registerOutcomeDeadlineLocked(for id: UUID) -> OutcomeDeadline? {
         guard outcomeDeadlines[id] == nil, let limit = outcomeWaitLimit,
-              let record = terminalRing[id], !record.emitted, !record.noContribution else { return nil }
+              let record = terminalRing[id], !record.noContribution else { return nil }
         let deadline = OutcomeDeadline(
             time: monotonicNow() + .nanoseconds(limit.nanoseconds),
             work: DispatchWorkItem { [weak self] in self?.outcomeDeadlineReached(id) })
@@ -898,7 +898,7 @@ return }
             return
         }
         cancelOutcomeDeadlineLocked(id)
-        guard var rec = terminalRing[id], !rec.emitted, !rec.noContribution else {
+        guard var rec = terminalRing[id], !rec.noContribution else {
             lock.unlock()
             return
         }
@@ -945,7 +945,7 @@ return }
     private func resolve(_ context: CaptureContext?) -> FrozenCapture? {
         guard let context else { return nil }
         if let c = current, c.id == context.id { return c }
-        if let rec = terminalRing[context.id], !rec.emitted { return rec.capture }
+        if let rec = terminalRing[context.id] { return rec.capture }
         return nil
     }
 
@@ -953,7 +953,7 @@ return }
     /// touching current state. Returns true when handled.
     private func emitLateOutcomeIfTerminal(kind: SignalKind, context: CaptureContext?) -> Bool {
         lock.lock()
-        guard let context, var rec = terminalRing[context.id], !rec.emitted else {
+        guard let context, var rec = terminalRing[context.id] else {
             lock.unlock()
             return false
         }
