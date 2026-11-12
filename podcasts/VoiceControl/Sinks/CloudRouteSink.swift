@@ -926,7 +926,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             )
             switch resolution {
             case .acknowledged:
-                // The ONLY outcome that may submit. The follow-up was already released by the
+                // The only outcome that may submit. The follow-up was already released by the
                 // terminal branch; this turn proceeds.
                 break
             case .refused:
@@ -942,7 +942,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     forRequestId: interruptedRequestIdForThisTurn ?? ""
                 )
                 interruptedRequestIdForThisTurn = nil
-                // END LOCALLY (reviewer c38ff4ba item 2). Clearing the id and falling through
+                // END locally (reviewer c38ff4ba item 2). Clearing the id and falling through
                 // made THIS turn continue into its own dispatch, authenticating the very
                 // utterance the refusal discarded. A refusal is a server answer about the
                 // interruption; it is not settlement and it authorizes nothing, so nothing may
@@ -951,7 +951,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 return CloudRouteResult(response: .silent, outcome: .refused)
             case .failed:
                 // Timeout or an undelivered send: no acknowledgement can ever arrive, so this
-                // must END LOCALLY. It must NOT be promoted to an ordinary turn — the user's
+                // must END locally. It must not be promoted to an ordinary turn — the user's
                 // utterance was an interruption of a turn whose fate is now unknown, and
                 // submitting it would assert a settlement that never happened.
                 FileLog.shared.addMessage(
