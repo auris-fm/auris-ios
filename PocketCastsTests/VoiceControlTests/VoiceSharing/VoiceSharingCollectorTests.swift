@@ -1134,6 +1134,47 @@ final class VoiceSharingCollectorTests: XCTestCase {
             "and the measured score, not `na`")
     }
 
+    /// Reviewer's control for the ring fix: a LATE report for an ALREADY-EMITTED capture must
+    /// change nothing — the record is immutable (that is the point of the digest), the removal
+    /// of emitted entries from the ring must not let a late outcome attach elsewhere, and no
+    /// second record may appear.
+    func test_lateWakeReportForAnAlreadyEmittedCapture_changesNothing() {
+        activateLease()
+        enrolledState(true)
+        assertPremisesOpen()
+        let collector = makeCollector()
+        let samples = [Float](repeating: 1, count: 3_200)
+        collector.speechStarted(confirmationFrameSamples: 320)
+        collector.appendSamples(samples, reportedTotal: 3_200)
+        let ctx = collector.currentCaptureContextForTesting
+        collector.segmentationEnded(collector.currentCaptureContextForTesting)
+        collector.engineReported(
+            stage: "wakeword",
+            outcome: .init(state: "rejected", score: 0.123, threshold: 0.812),
+            context: ctx)
+        collector.finalizeDeferredCompletion(context: ctx)
+        var delivered = snapshot().filter { $0.kind == .completed }
+        XCTAssertEqual(delivered.count, 1)
+        let before = delivered.first
+        // The capture is emitted; its ring entry is gone. A late wake report for the same
+        // (now-removed) capture must be dropped: no amendment, no second record.
+        collector.engineReported(
+            stage: "wakeword",
+            outcome: .init(state: "detected", score: 0.999, threshold: 0.812),
+            context: ctx)
+        collector.finalizeDeferredCompletion(context: ctx)
+        delivered = snapshot().filter { $0.kind == .completed }
+        XCTAssertEqual(delivered.count, 1, "a late report must not mint a second record")
+        XCTAssertEqual(
+            delivered.first?.captureID, before?.captureID, "still the original record")
+        XCTAssertEqual(
+            delivered.first?.reportedStages["wakeword"]?.state, "rejected",
+            "the emitted record keeps its original verdict (immutable)")
+        XCTAssertEqual(
+            delivered.first?.reportedStages["wakeword"]?.score, 0.123,
+            "the late 0.999 never overwrites the digest")
+    }
+
     func test_consentClosureIsLoadBearing_evenWhenEverythingElseIsOpen() {
         var gateOpen = false
         let collector = VoiceSharingCollector(
