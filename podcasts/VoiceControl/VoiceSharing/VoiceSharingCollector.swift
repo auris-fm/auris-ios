@@ -244,7 +244,8 @@ final class VoiceSharingCollector {
         decisionsAtLastReport = segmentsSeenCount + capturesEmittedCount
         FileLog.shared.addMessage(
             "[VoiceSharing] capture decisions segments=\(segmentsSeenCount) "
-                + "captures=\(capturesEmittedCount) overflow=\(overflowCount)")
+                + "captures=\(capturesEmittedCount) overflow=\(overflowCount) "
+                + "ring_drops=\(ringDropCount)")
     }
     /// Logs the peak FIFO depth and peak retained bytes when either sets a new high.
     /// Called with `lock` HELD, at the two enqueue points, so the peaks are exact rather than
@@ -846,51 +847,30 @@ return }
 
     private func rememberTerminal(_ c: FrozenCapture, noContribution: Bool = false) {
         terminalSequence &+= 1
-        terminalRing[c.id] = TerminalRecord(
-            capture: c, emitted: false, noContribution: noContribution,
-            deferredOrder: terminalSequence)
-        while terminalRing.count > 32 {
-            guard let oldest = terminalRing.first else { break }
-            // NO-SILENT-LOSS: a record that is neither emitted nor
-            // marked non-contribution is REAL work — evicting it used to cancel its outcome
-            // deadline and discard its audio with no record and no log, so a capture could be
-            // lost forever purely because newer captures pressed the ring. Such a record is
-            // now SUBMITTED through the normal sink path at eviction (audio rides with the
-            // event; the deadline is cancelled so it can never emit twice).
-            if !oldest.value.emitted, !oldest.value.noContribution {
-                var evicted = oldest.value.capture
-                evicted.terminal = true
-                cancelOutcomeDeadlineLocked(oldest.key)
-                terminalRing.removeValue(forKey: oldest.key)
-                let event = makeEvent(kind: .completed, from: evicted)
-                let captureID = evicted.id
-                // Ledger transition: the ring's retained bytes (which include the confirmation
-                // frame, unlike the event audio) leave the ledger; the event's exact audio enters
-                // it below. The bytes are owned somewhere at every instant.
-                // the handoff must be BOUNDED and ACCOUNTED. The audio now
-                // moves through the pending FIFO under the SAME caps as every other event — the
-                // aggregate still owns these bytes (added below, never decremented early), so a
-                // blocked worker cannot grow untracked PCM outside the ledger. Pressure is counted
-                // and logged but never a reason to discard: the durable queue's
-                // record limit is the only admission gate. Withdrawal disposal drains this same
-                // FIFO at dequeue time.
-                let audioCount = event.audio.count
-                if pending.count >= Self.maxPendingSignals {
-                    overflowCount += 1
-                    FileLog.shared.addMessage(
-                        "[VoiceSharing] handoff under pressure (ring) capture=\(captureID.uuidString) "
-                            + "retained=not-dropped")
-                }
-                pending.append(event)
-                recordHighWaterLocked(capture: captureID)
-                FileLog.shared.addMessage(
-                    "[VoiceSharing] capture emitted at ring pressure capture=\(captureID.uuidString)")
-                workQueue.async { [weak self] in self?.drainNext() }
-                continue
-            }
+        // QUEUE-FULL RULE (core#157, spec: "when the queue is full… the new recording is
+        // dropped and the drop is logged with a count"): only records WAITING for their
+        // outcome count toward the ring bound. Eviction sheds bookkeeping-only entries
+        // (already emitted, or never-contributing); it never force-emits a waiting record —
+        // a record emitted before its outcome uploads with every observation `unknown`, which
+        // is the fact-less upload this path used to produce (the `grace_na` R2 clips).
+        while terminalRing.count >= 32, let oldest = terminalRing.first,
+              oldest.value.emitted || oldest.value.noContribution {
             cancelOutcomeDeadlineLocked(oldest.key)
             terminalRing.removeValue(forKey: oldest.key)
         }
+        if terminalRing.count >= 32 {
+            // Every slot is a waiting record and the new capture cannot wait: drop the NEW
+            // capture, counted and logged. Prefer dropping a recording over machinery that
+            // would save it fact-less.
+            ringDropCount += 1
+            FileLog.shared.addMessage(
+                "[VoiceSharing] capture dropped: ring full of waiting records "
+                    + "capture=\(c.id.uuidString) drops=\(ringDropCount)")
+            return
+        }
+        terminalRing[c.id] = TerminalRecord(
+            capture: c, emitted: false, noContribution: noContribution,
+            deferredOrder: terminalSequence)
     }
 
     /// Caller holds the observation lock. Work retains identity only, never PCM or the collector.
@@ -1211,6 +1191,15 @@ return }
 
     /// Samples the collector is ACTUALLY holding for the open capture — reads the buffer, not a counter.
     /// Number of events currently queued in the FIFO.
+    /// Captures a FULL ring of waiting records refused (dropped, counted, logged — never
+    /// force-emitted without their facts; core#157).
+    private(set) var ringDropCount = 0
+
+    var ringDropCountForTesting: Int {
+        lock.lock(); defer { lock.unlock() }
+        return ringDropCount
+    }
+
     var pendingCountForTesting: Int {
         lock.lock(); defer { lock.unlock() }
         return pending.count

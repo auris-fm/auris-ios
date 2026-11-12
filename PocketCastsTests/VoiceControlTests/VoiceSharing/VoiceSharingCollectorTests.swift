@@ -422,12 +422,15 @@ final class VoiceSharingCollectorTests: XCTestCase {
         XCTAssertEqual(agg.openCaptures, 0, "every segment closed")
         XCTAssertLessThanOrEqual(agg.terminalHistory, VoiceSharingCollector.maxTerminalHistoryIDs + 8,
                                  "refusal history is pruned to its floor, not grown for the session lifetime")
-        // AMENDED by: queued work is no longer dropped at the cap. The identity
-        // state this control is really about (open captures, refusal history) stays bounded; the
-        // FIFO does not, and its pressure is counted rather than silently discarded.
+        // AMENDED by, twice: (1) queued work is no longer dropped at the cap —
+        // the FIFO's pressure is counted, and the only admission gate is the durable queue's
+        // record limit. (2) core#157: force-emission at ring pressure is GONE, so with inline
+        // delivery there is no forced FIFO traffic at all: captures emit normally (synchronously
+        // here) and the ring never holds a waiting record past its eviction. The identity state
+        // this control is really about stays bounded, and the ring never manufactures pressure.
         XCTAssertEqual(agg.openCaptures, 0, "the FIFO-drain property is unchanged")
-        XCTAssertGreaterThan(collector.overflowCount, 0,
-                             "queueing past the old cap is counted pressure")
+        XCTAssertEqual(collector.ringDropCountForTesting, 0,
+                             "inline delivery leaves the ring unsaturated: nothing is dropped")
         // And the collector still works after all that pruning:
         collector.speechStarted(confirmationFrameSamples: 320)
         let ctx = collector.currentCaptureContextForTesting
@@ -1023,10 +1026,10 @@ final class VoiceSharingCollectorTests: XCTestCase {
     /// The CONSENT closure is load-bearing on its own: with everything else open, only the closure
     /// can veto. Without this control a closed consent is caught redundantly by identity checks and
     /// never exercised.
-    /// (2): ring-pressure emission must move through the bounded, accounted
-    /// handoff. With the sink worker BLOCKED, evictions fill the pending FIFO to its cap and
-    /// then DROP (counted and logged); retained audio stays inside the ledger, and withdrawal
-    /// disposal purges the queued work so nothing is delivered afterwards.
+    /// (2): REWRITTEN for the queue-full rule (core#157). With the sink worker BLOCKED, captures
+    /// wait in the ring for their outcomes: the first 32 are retained (ring-resident, audio
+    /// accounted), captures beyond the bound are DROPPED with a count — never force-emitted
+    /// fact-less. Withdrawal disposal purges the ring so nothing survives.
     func test_blockedWorkerKeepsEvictionHandoffBoundedAndWithdrawalDisposesIt() {
         activateLease()
         enrolledState(true)
@@ -1048,17 +1051,13 @@ final class VoiceSharingCollectorTests: XCTestCase {
         }
         // Give the work queue a bounded moment to block inside the first delivery.
         Thread.sleep(forTimeInterval: 0.5)
-        // AMENDED by: a blocked worker no longer makes the FIFO drop work. This
-        // fixture stays UNDER both caps (40 events x 3200 samples), so no pressure is counted —
-        // the point is that all 40 are queued and retained rather than discarded, and that
-        // WITHDRAWAL still disposes of them. Retained work is not bounded here; the ledger is what
-        // an operator can see. (The pressure path itself is asserted by
-        // `test_aggregateIdentityState_isBoundedAcrossManySegments`.)
-        XCTAssertGreaterThan(collector.pendingCountForTesting, 0,
-            "queued work is retained for delivery, not discarded")
-        XCTAssertGreaterThan(collector.actualRetainedAudioBreakdownForTesting.fifo, 0,
-            "queued work is still holding its audio")
-        // Withdrawal disposal: queued (never delivered) work dies here.
+        // Queue-full rule: the first 32 captures wait in the ring (audio accounted), the 8
+        // beyond the bound are dropped and counted — NOT emitted fact-less into the FIFO.
+        XCTAssertEqual(collector.ringDropCountForTesting, 8,
+            "captures a full ring of waiting records refuses are dropped and counted")
+        XCTAssertGreaterThan(collector.actualRetainedAudioBreakdownForTesting.ring, 0,
+            "the waiting records hold their audio in the ring")
+        // Withdrawal disposal: ring audio dies here.
         collector.gateLost()
         XCTAssertEqual(collector.pendingCountForTesting, 0, "withdrawal purges queued work")
         let purged = collector.actualRetainedAudioBreakdownForTesting
@@ -1067,39 +1066,72 @@ final class VoiceSharingCollectorTests: XCTestCase {
         gate.signal()
         Thread.sleep(forTimeInterval: 0.5)
         XCTAssertLessThanOrEqual(delivered.value_, 2,
-            "queued eviction work is disposed, not delivered after withdrawal")
+            "queued work is disposed, not delivered after withdrawal")
     }
 
-    ///, fix 2 (no-silent-loss): unemitted contributionable records under
-    /// ring pressure used to be discarded by the eviction loop — deadline cancelled, audio
-    /// dropped, no record, no log. A capture could be lost forever purely because newer
-    /// captures pressed the ring. The fix EMITS such records through the normal sink path at
-    /// eviction. Red on the parent: the overflow records never reach the sink at all.
-    func test_ringPressureEmitsUnemittedRecordsInsteadOfDiscardingThem() {
+    ///, fix (core#157 hold): under ring pressure the collector used to FORCE-EMIT the
+    /// oldest unemitted record with its outcome deadline cancelled — the record uploaded with
+    /// every observation `unknown`, even though the pipeline went on to judge that very audio
+    /// (observed live: `wake 0.123 < 0.812 → ASR (grace/continuous)` seconds after the
+    /// `na` clip landed in R2). Spec's rule is the queue-full rule: only records WAITING for
+    /// their outcome count toward the 32; when the ring is full of waiting records, the NEW
+    /// capture is DROPPED and the drop is counted and logged. None is ever emitted without
+    /// its facts.
+    func test_ringFullOfWaitingRecords_dropsTheNewCapture_countedAndLogged_noneEmittedEarly() {
         activateLease()
         enrolledState(true)
         assertPremisesOpen()
         let collector = makeCollector()
         let samples = [Float](repeating: 1, count: 3_200)
-        // 36 deferred captures: over the 32-record ring, each unemitted with a long deadline.
+        // 36 deferred captures against a 32-record ring: 32 wait for their outcomes,
+        // the 4 beyond the bound are dropped — counted, logged, never emitted early.
         for _ in 0..<36 {
             collector.speechStarted(confirmationFrameSamples: 320)
             collector.appendSamples(samples, reportedTotal: 3_200)
             collector.segmentationEnded(collector.currentCaptureContextForTesting)
         }
-        // Eviction emissions are handed off on the collector's work queue: observe over a
-        // bounded window instead of racing the delivery.
-        let deadline = Date().addingTimeInterval(4)
-        var overflow = snapshot().filter { $0.kind == .completed }
-        while overflow.count < 4 && Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.05)
-            overflow = snapshot().filter { $0.kind == .completed }
-        }
-        XCTAssertGreaterThanOrEqual(
-            overflow.count, 4,
-            "the records pressed out of the ring must be emitted, not silently discarded")
-        XCTAssertTrue(overflow.allSatisfy { !$0.audio.isEmpty },
-            "an eviction-emitted record carries its audio")
+        Thread.sleep(forTimeInterval: 0.2)
+        XCTAssertEqual(
+            snapshot().filter { $0.kind == .completed }.count, 0,
+            "a full ring of waiting records must not emit any of them early")
+        XCTAssertEqual(
+            collector.ringDropCountForTesting, 4,
+            "the captures a full ring refuses are dropped with a count, not silently")
+        XCTAssertGreaterThan(
+            collector.actualRetainedAudioBreakdownForTesting.ring, 0,
+            "the waiting records hold their audio in the ring")
+    }
+
+    /// The OTHER half of the ring-pressure fix: a normal grace capture that WAITS for its
+    /// outcome uploads WITH the pipeline's wake decision once the outcome arrives — the whole
+    /// point of not force-emitting early.
+    func test_graceCaptureWaitingForOutcome_uploadsWithWakeObservationWhenItArrives() {
+        activateLease()
+        enrolledState(true)
+        assertPremisesOpen()
+        let collector = makeCollector()
+        let samples = [Float](repeating: 1, count: 3_200)
+        collector.speechStarted(confirmationFrameSamples: 320)
+        collector.appendSamples(samples, reportedTotal: 3_200)
+        let ctx = collector.currentCaptureContextForTesting
+        collector.segmentationEnded(collector.currentCaptureContextForTesting)
+        Thread.sleep(forTimeInterval: 0.2)
+        XCTAssertEqual(
+            snapshot().filter { $0.kind == .completed }.count, 0,
+            "a deferred capture is ring-resident, not emitted before its outcome")
+        collector.engineReported(
+            stage: "wakeword",
+            outcome: .init(state: "rejected", score: 0.123, threshold: 0.812),
+            context: ctx)
+        collector.finalizeDeferredCompletion(context: ctx)
+        let delivered = snapshot().filter { $0.kind == .completed }
+        XCTAssertEqual(delivered.count, 1, "the outcome completes the capture")
+        XCTAssertEqual(
+            delivered.first?.reportedStages["wakeword"]?.state, "rejected",
+            "the uploaded record carries the wake decision")
+        XCTAssertEqual(
+            delivered.first?.reportedStages["wakeword"]?.score, 0.123,
+            "and the measured score, not `na`")
     }
 
     func test_consentClosureIsLoadBearing_evenWhenEverythingElseIsOpen() {
