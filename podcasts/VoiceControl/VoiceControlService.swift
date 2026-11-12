@@ -22,14 +22,31 @@ class VoiceControlService: ObservableObject {
     private let interruptionHandler: AudioSessionInterruptionHandler
     private let asrEngine: VoiceAsrEngine
     private let wakeWordDetector: WakeWordDetectorProtocol
-    private let intentRouter: LfmIntentRouter
-    private let executor: VoiceIntentExecutor
+    private let intentRouter: any IntentClassifying
+    private let executor: any VoiceIntentExecuting
     private let dialogManager: VoiceDialogManager
     private let audioRenderer: AudioFeedbackRenderer
     private let gracePeriodSignal: GracePeriodSignal
 
     /// The manager whose live origin follows the grace window. An EXPLICIT dependency rather than a
     /// reach-through to a test accessor: production must not depend on `…ForTesting` or a force-cast.
+    /// The collector that records this capture's observations. Optional so tests and any caller that
+    /// does not run voice-sharing work unchanged; routing/execution are reported through it when present.
+    private let contributionCollector: VoiceSharingCollector?
+    var voiceSharingLifetime: VoiceSharingLifetime?
+
+    /// The user's Voice Control enable preference, driven from Settings.
+    ///
+    /// This routes to the existing gate condition source rather than introducing a second state
+    /// holder, so "disabled in settings" stays the same condition the gate already evaluates.
+    /// Persistence lives in `LiveConditionMonitor` (UserDefaults `VoiceControl.UserEnabled`),
+    /// which restores the choice at construction.
+    func setUserEnabled(_ enabled: Bool) {
+        conditionMonitor.updateUserEnabled(enabled)
+    }
+    /// Injected for the routing/execution provenance controls; production uses `contributionCollector`.
+    var contributionCollectorForTesting: VoiceSharingCollector? { contributionCollector }
+
     private let liveOriginManager: CloudConversationManager
 
     /// The grace signal this service drives, so a test can observe a route change's effect
@@ -102,8 +119,15 @@ class VoiceControlService: ObservableObject {
             .sink { [weak self] active in
                 guard let self else { return }
                 let origin: Int? = active ? self.gracePeriodSignal.currentGeneration() : nil
-                MainActor.assumeIsolated {
-                    self.executor.retireRetainedDispatchesIfWindowChanged(to: origin)
+                let retire = {
+                    MainActor.assumeIsolated {
+                        self.executor.retireRetainedDispatchesIfWindowChanged(to: origin)
+                    }
+                }
+                if Thread.isMainThread {
+                    MainActor.assumeIsolated(retire)
+                } else {
+                    DispatchQueue.main.sync(execute: retire)
                 }
             }
             .store(in: &cancellables)
@@ -118,7 +142,12 @@ class VoiceControlService: ObservableObject {
     }
 
     /// The executor this service routes validated intents through.
-    var executorForTesting: VoiceIntentExecutor { executor }
+    var executorForTesting: VoiceIntentExecutor { executor as! VoiceIntentExecutor }
+
+    /// The cloud route sink behind the executor, or nil for a conformer that has none.
+    /// Production paths read this instead of force-downcasting, so an unexpected executor skips the
+    /// cloud-specific step rather than crashing.
+    var cloudRouteSink: CloudRouteSink? { executor.cloudRouteSinkAccess }
 
     /// The dialog manager, so a control can BEGIN a dialog through the production `handle` path
     /// and prove a dialog-pending turn keeps its OWN admitted identity on the wire (spec 0443b70).
@@ -141,7 +170,7 @@ class VoiceControlService: ObservableObject {
     /// the barrier is REACHED; `.cancelled`/`.refused` when it stops the chain.
     enum InputBarrierOutcome: Sendable { case arrived, cancelled, refused }
 
-    /// How a queued input's task TERMINATED. Reported on EVERY exit from the serial task, so a test
+    /// How a queued input's task TERMINATED. Reported on every exit from the serial task, so a test
     /// can await settlement instead of polling for an absence: `.routed` when routing was attempted,
     /// `.cancelled`/`.refused` when the barrier stopped the chain, `.dropped` when the staleness guard
     /// (or a cancelled task) discarded it before reaching the barrier.
@@ -155,8 +184,8 @@ class VoiceControlService: ObservableObject {
         /// which claims the turn reached routing.
         case suppressedByInterruption
     }
-    /// Reports how a queued input's task TERMINATED — on EVERY exit, including a refusal or a
-    /// cancellation. This is the TERMINAL ACKNOWLEDGEMENT: the input returned, which is not the same
+    /// Reports how a queued input's task TERMINATED — on every exit, including a refusal or a
+    /// cancellation. This is the TERMINAL acknowledgement: the input returned, which is not the same
     /// as an action having run. Distinct from `onInputRoutingFinished`, which reports that routing was
     /// ATTEMPTED. Nil in production.
     private let onInputTerminal: (@Sendable (IntentRoutingInput, InputTerminalOutcome) -> Void)?
@@ -180,7 +209,7 @@ class VoiceControlService: ObservableObject {
         return continuationEnqueuedForTurn.remove(utteranceId) != nil
     }
 
-    /// Awaited by the serial chain BEFORE an input is classified or executed, so a test can hold a
+    /// Awaited by the serial chain before an input is classified or executed, so a test can hold a
     /// specific input while the window state changes around it and then release it. Nil in
     /// production, where it is never set, so the chain is unmodified.
     private let testInputBarrier: (@Sendable (IntentRoutingInput) async throws -> Void)?
@@ -206,9 +235,9 @@ class VoiceControlService: ObservableObject {
             "[VoicePipeline] segmentation fault kind=\(fault.kind) elapsedMs=\(fault.elapsedMs) "
                 + "discarded=\(fault.discardedSamples) reason=\(fault.reason ?? "none")"
         )
-        // A classifier-unavailable fault is a PERSISTENT CONDITION, not a new event: the
+        // A classifier-unavailable fault is a PERSISTENT condition, not a new event: the
         // segmenter replays it to every newly wired observer, and the engine re-wires its
-        // callbacks on every start() — so each refused start would re-present the same
+        // callbacks on every start — so each refused start would re-present the same
         // unchanged condition and replay the error earcon. Present it audibly ONCE; published
         // state above still updates on every replay. Non-persistent kinds (a real ceiling
         // event, a capture failure) are distinct events and keep speaking every time.
@@ -244,7 +273,7 @@ class VoiceControlService: ObservableObject {
 
     private var cancellables = Set<AnyCancellable>()
     /// Serializes classify+generate; locked so overlapping ASR callbacks cannot
-    /// race the task-chain pointer. Bumped on `stop()` so earlier chained tasks
+    /// race the task-chain pointer. Bumped on `stop` so earlier chained tasks
     /// (which cancellation does not reach through `await previous?.value`) bail
     /// before `handleTranscript`.
     private let transcriptLock = NSLock()
@@ -299,13 +328,14 @@ class VoiceControlService: ObservableObject {
         interruptionHandler: AudioSessionInterruptionHandler,
         asrEngine: VoiceAsrEngine,
         wakeWordDetector: WakeWordDetectorProtocol,
-        intentRouter: LfmIntentRouter,
-        executor: VoiceIntentExecutor,
+        intentRouter: any IntentClassifying,
+        executor: any VoiceIntentExecuting,
         dialogManager: VoiceDialogManager,
         audioRenderer: AudioFeedbackRenderer,
         gracePeriodSignal: GracePeriodSignal,
         liveOriginManager: CloudConversationManager,
         analytics: VoiceAnalytics,
+        contributionCollector: VoiceSharingCollector? = nil,
         isPlaybackActive: @escaping () -> Bool = { PlaybackManager.shared.isAudioSessionInUse },
         /// Invoked when a queued input's routing attempt FINISHES — after it returns or is refused,
         /// and after its `defer` runs. An acknowledgement of COMPLETION, not of preparation: a
@@ -334,6 +364,7 @@ class VoiceControlService: ObservableObject {
         self.gracePeriodSignal = gracePeriodSignal
         self.liveOriginManager = liveOriginManager
         self.analytics = analytics
+        self.contributionCollector = contributionCollector
         self.isPlaybackActive = isPlaybackActive
         self.onInputRoutingFinished = onInputRoutingFinished
         self.onInputBarrierSettled = onInputBarrierSettled
@@ -364,7 +395,7 @@ class VoiceControlService: ObservableObject {
         }
 
         // Wired at construction, not at start: a route change before the first
-        // `startIfAllowed()` is still a route change, and the filter must not keep classifying
+        // `startIfAllowed` is still a route change, and the filter must not keep classifying
         // against the route it was built with. See the lifetime note on the helper.
         wireEchoFilterRoute()
         // Same lifetime reasoning: the manager must learn about windows for as long as the service
@@ -379,7 +410,7 @@ class VoiceControlService: ObservableObject {
 
         // Kick SenseVoice/Canary download+init here (not at assembly) so we only
         // pay cellular/memory once voice control is actually being armed.
-        // start() reuses the same task via preloadBackend()'s nil guard.
+        // start reuses the same task via preloadBackend's nil guard.
         asrEngine.preloadBackend()
 
         // Include grace `$isActive` so mode flips wakeWord ↔ continuous when the
@@ -407,7 +438,7 @@ class VoiceControlService: ObservableObject {
                 admitsBuiltInMicForSimulatorDiagnostic: DiagnosticMicOverride.isActive,
                 // Only ever consulted when the diagnostic is active; a real external microphone
                 // always keeps the original requirement.
-                // READ AT DECISION TIME, not cached at arm time (regression caught by
+                // READ at decision time, not cached at arm time (regression caught by
                 // testBargeInReachesTheWireWhileThePredecessorIsStillLive): the session's available
                 // inputs change as the route settles, so a value captured when the pipeline is
                 // built is stale — it reported "no external mic" while one was available and let
@@ -424,7 +455,7 @@ class VoiceControlService: ObservableObject {
             if gateDescription(previous) != gateDescription(gate.state) {
                 FileLog.shared.addMessage("[VoicePipeline] Gate: \(gateDescription(previous)) → \(gateDescription(gate.state))")
             }
-            // LABEL THE DIAGNOSTIC PATH (owner requirement): a simulator session that only reached
+            // LABEL the diagnostic path (owner requirement): a simulator session that only reached
             // listening because the built-in microphone was admitted must never be mistaken for a
             // real isolated-microphone capture when reading logs.
             if DiagnosticMicOverride.isActive, gate.state.isListening,
@@ -451,7 +482,7 @@ class VoiceControlService: ObservableObject {
                     self.cancelAcquisition()
                 }
                 // DIAGNOSTIC (Debug simulator only): the gate admits the built-in microphone
-                // BEFORE any acquisition can run, so the session would never be made
+                // before any acquisition can run, so the session would never be made
                 // input-capable and the built-in mic would have no usable route. Arm the
                 // diagnostic acquisition on the same path the `.off` case uses. `isAcquiring`
                 // marks the task so the resulting exposure flip cannot cancel it.
@@ -486,7 +517,7 @@ class VoiceControlService: ObservableObject {
         let liveGeneration = gracePeriodSignal.currentGeneration()
         // TEST HOOK (review 92de14ea/47328768): fires AFTER the grace reads and BEFORE lock
         // acquisition — the exact window the fix owns. The hook may BLOCK: a control parks the
-        // capture here while main runs stop(), then releases. Nil in production.
+        // capture here while main runs stop, then releases. Nil in production.
         captureBeforeAcquisitionBarrierForTesting?()
         transcriptLock.lock()
         defer { transcriptLock.unlock() }
@@ -494,22 +525,23 @@ class VoiceControlService: ObservableObject {
         return (admittedOrigin, retiredTurn, liveGeneration, true)
     }
 
-    /// TEST-ONLY: barrier between the grace reads and lock acquisition. Nil in production.
+    /// TEST-only: barrier between the grace reads and lock acquisition. Nil in production.
     var captureBeforeAcquisitionBarrierForTesting: (() -> Void)?
 
-    /// TEST-ONLY: barrier between the capture's return and the nil-capture guard. Nil in production.
+    /// TEST-only: barrier between the capture's return and the nil-capture guard. Nil in production.
     var enqueueAfterCaptureForTesting: (() -> Void)?
 
     private func enqueueRoutingInput(
         _ input: IntentRoutingInput,
+        captureContext: VoiceSharingCollector.CaptureContext? = nil,
         origin: Int? = nil,
         selection: CloudConversationSelection? = nil
     ) -> Bool {
             // LOCK-ORDER SAFETY (review 4d474d80): the grace-signal reads hop to main
             // synchronously when called off-main, while `stop()` takes `transcriptLock` ON main.
             // Holding `transcriptLock` across those reads is a lock-order cycle (off-main:
-            // transcriptLock → main queue; on-main stop(): main queue → transcriptLock). The
-            // shared capture operation performs the reads BEFORE the lock — still at the
+            // transcriptLock → main queue; on-main stop: main queue → transcriptLock). The
+            // shared capture operation performs the reads before the lock — still at the
             // callback, never after the queue wait — and the lock then guards only the
             // listening check, epoch and chain.
             let capture = self.captureRoutingOrigin(utteranceId: input.utteranceId)
@@ -529,7 +561,7 @@ class VoiceControlService: ObservableObject {
             let retiredTurn = capture.retired
             let liveGeneration = capture.generation
             self.transcriptLock.lock()
-            // Drop late ASR callbacks that arrive after (or during) stop(). (A stop AFTER the
+            // Drop late ASR callbacks that arrive after (or during) stop. (A stop after the
             // capture is still caught here: the capture only snapshots origin state, it does not
             // decide admission.)
             guard self.isListening else {
@@ -538,9 +570,9 @@ class VoiceControlService: ObservableObject {
             }
             let epoch = self.transcriptEpoch
             let previous = self.transcriptSerialTask
-            // Capture the turn's origin and selection HERE, at the callback, BEFORE the Task is
+            // Capture the turn's origin and selection HERE, at the callback, before the Task is
             // created — not inside `handleRoutingInput`, which runs only after this Task has
-            // awaited all previous work. A capture taken there is a capture taken AFTER the queue
+            // awaited all previous work. A capture taken there is a capture taken after the queue
             // wait, which is the attribution error this exists to prevent: a turn that queued
             // behind earlier work would be stamped with whatever window is current by the time it
             // runs, and classified by the window state then rather than by what selected it.
@@ -564,13 +596,15 @@ class VoiceControlService: ObservableObject {
             // fired during grace from a follow-up inside the same grace — both arrive with grace
             // active — so the answer has to come from the gate decision that produced this input.
             let capturedSelection = selection ?? input.selection
+            let collectorForAbandonment = self.contributionCollector
             let task = Task { [weak self] in
-                // THE TERMINAL ACKNOWLEDGEMENT IS UNCONDITIONAL: on EVERY exit the input's task
+                defer { collectorForAbandonment?.finalizeDeferredCompletion(context: captureContext) }
+                // THE terminal acknowledgement is unconditional: on every exit the input's task
                 // reports HOW it ended, because "the queued input returned" is not the same claim as
                 // "an action ran". A test can therefore await settlement instead of polling for an
                 // absence. `onInputRoutingFinished` remains the separate, narrower signal that routing
                 // was actually ATTEMPTED.
-                // CAPTURED INTO THIS TASK'S OWN STATE BEFORE THE FIRST `await`: reading `self?.hook`
+                // CAPTURED into this task'S OWN state before the first `await`: reading `self?.hook`
                 // from the `defer` would let weak service lifetime silently lose the acknowledgement
                 // on an exit that precedes the strong `self` binding — the exits taken when the chain
                 // is cancelled or `self` is already gone. The hooks belong to the INVOCATION, so they
@@ -615,7 +649,7 @@ class VoiceControlService: ObservableObject {
                 // unchanged. Echo rejection and gate ownership were already applied at admission.
                 // REVALIDATE BEFORE ANY EAGER EFFECT (reviewer b36c8ab1 item 3). The eager
                 // interruption stops playback and sends on the live predecessor's socket — real,
-                // externally visible effects. The staleness guard below only runs AFTER the queue
+                // externally visible effects. The staleness guard below only runs after the queue
                 // wait, so a service that stopped, restarted, or retired this capture in between
                 // would have already stopped the user's audio and interrupted a turn for an input
                 // that is then rejected. The same check that gates the dispatch therefore gates
@@ -647,8 +681,27 @@ class VoiceControlService: ObservableObject {
                 }
 
                 await previous?.value
-                guard !Task.isCancelled else { return }
-                guard let self else { return }
+                // This capture was handed to THIS task. If the task is abandoned while queued behind
+                // its predecessor, it still owns the record and must release it, or the capture never
+                // publishes. Reported as cancelled, because that is what happened.
+                func abandonCapture(_ collector: VoiceSharingCollector?) {
+                    guard let captureContext, let collector else { return }
+                    collector.engineReported(
+                        stage: "execution",
+                        outcome: .init(state: "cancelled", reason: "cancelled_by_user"),
+                        context: captureContext)
+                    collector.finalizeDeferredCompletion(context: captureContext)
+                }
+                guard !Task.isCancelled else {
+                    abandonCapture(self?.contributionCollector ?? collectorForAbandonment)
+                    return
+                }
+                guard let self else {
+                    // The service itself was released. The collector captured above can still report and
+                    // release the record on its behalf.
+                    abandonCapture(collectorForAbandonment)
+                    return
+                }
                 self.transcriptLock.lock()
                 let stillCurrent = self.isListening && self.transcriptEpoch == epoch
                 self.transcriptLock.unlock()
@@ -679,6 +732,7 @@ class VoiceControlService: ObservableObject {
                 let preparedObserver = self.preparedObserverFactory?(input)
                 terminal = await self.handleRoutingInput(
                     input,
+                    captureContext: captureContext,
                     origin: capturedOrigin,
                     selection: capturedSelection,
                     preparedObserver: preparedObserver,
@@ -724,8 +778,8 @@ class VoiceControlService: ObservableObject {
         else { return false }
         // The retained record carries the COMPLETE admitted input — including the selection this
         // capture was admitted under — because the follow-up submitter reconstructs its submission
-        // from it, not from whatever is live later (reviewer ca629c34: preserve provenance).
-        let interrupted = await executorForTesting.cloudRouteSinkForTesting.emitBargeIn(
+        // from it, not from whatever is live later.
+        let interrupted = await cloudRouteSink?.emitBargeIn(
             request: input.routerTranscript,
             utteranceId: input.utteranceId,
             origin: origin,
@@ -748,8 +802,8 @@ class VoiceControlService: ObservableObject {
         // ONE operation: the enqueue itself reports whether it ACCEPTED the input. A separate
         // precheck would be a different operation from the one that takes ownership, so a stop
         // landing between them would reject the enqueue with nobody left to release the turn.
-        asrEngine.onRoutingInput = { [weak self] input in
-            self?.enqueueRoutingInput(input, origin: nil) ?? false
+        asrEngine.onRoutingInputWithContext = { [weak self] input, captureContext in
+            self?.enqueueRoutingInput(input, captureContext: captureContext, origin: nil) ?? false
         }
 
         asrEngine.onWakeWordDetected = { [weak self] in
@@ -880,19 +934,19 @@ class VoiceControlService: ObservableObject {
     }
 
     /// - Parameters:
-    ///   - origin: the grace-window generation captured at the CALLBACK, before this turn queued.
-    ///     Not read here: by the time this runs, earlier work has completed and the window may
-    ///     have moved on.
-    ///   - selection: what selected the turn, captured at the same moment and for the same
-    ///     reason.
-    /// Produces a PARSED-INTENT observer FOR A SPECIFIC INPUT, so the observation is invocation-local:
+    /// - origin: the grace-window generation captured at the CALLBACK, before this turn queued.
+    /// Not read here: by the time this runs, earlier work has completed and the window may
+    /// have moved on.
+    /// - selection: what selected the turn, captured at the same moment and for the same
+    /// reason.
+    /// Produces a PARSED-INTENT observer FOR A SPECIFIC input, so the observation is invocation-local:
     /// the callback returns a fresh observer per input rather than every dispatch writing into one
     /// shared slot, which would let an overlapping turn overwrite another's observed intent.
     /// Nil in production.
     private let parsedIntentObserverFactory: (@Sendable (IntentRoutingInput) -> ParsedIntentObserver?)?
     private let preparedObserverFactory: (@Sendable (IntentRoutingInput) -> CloudRouteSink.PreparedObserver?)?
 
-    /// Reports the intent the ROUTER PARSED for a dispatch, BEFORE the executor runs it. Invocation
+    /// Reports the intent the ROUTER parsed for a dispatch, before the executor runs it. Invocation
     /// local and carried on the call, like `preparedObserver`: a sink- or service-wide slot would let
     /// an overlapping dispatch overwrite another's observed intent, so the assertion could be made
     /// against the wrong turn.
@@ -941,17 +995,113 @@ class VoiceControlService: ObservableObject {
 
     /// Returns the actual routing disposition, distinguishing capture loss from interruption suppression.
     @discardableResult
+    private static func settledDisposition(
+        for outcome: VoiceSharingContributionEncoder.StageOutcome
+    ) -> String {
+        switch outcome.state {
+        case "failed": return "failed"
+        // `completed` is stated only by a sink-side structured fact (none exists yet — the
+        // presentation-inference that briefly produced it was withdrawn, ). The
+        // mapping stays correct for when real sink facts arrive.
+        case "completed": return "executed"
+        // `unknown` cannot claim a disposition either: the turn finished, but what became of it was not
+        // observed, so the routing verdict stays honest about that rather than guessing.
+        case "unknown": return "pending"
+        default: return "refused"
+        }
+    }
+
+    #if DEBUG
+    /// Test seam: put the service in the listening state the routing branches require, without starting
+    /// audio. Only the flag moves — no route, no capture, no wake detector.
+    func enterListeningStateForTesting() {
+        isListening = true
+    }
+    #endif
+
+    #if DEBUG
+
+    static func settledDispositionForTesting(
+        _ outcome: VoiceSharingContributionEncoder.StageOutcome) -> String {
+        settledDisposition(for: outcome)
+    }
+    #endif
+
+    /// Reports BOTH stages for a turn that reached the executor. Routing's disposition is corrected
+    /// from `pending` to its terminal value, which is why it is reported a second time. The
+    /// execution stage carries the EXECUTOR'S OWN structured verdict — not a response-derived
+    /// classification (spec: the record must state what execution concluded, and the executor is
+    /// the decision site).
+    private func reportExecution(
+        _ outcome: VoiceSharingContributionEncoder.StageOutcome,
+        captureContext: VoiceSharingCollector.CaptureContext?,
+        predictedIntent: String? = nil,
+        predictedTool: String? = nil
+    ) {
+        let verdict = Self.settledDisposition(for: outcome)
+        contributionCollector?.engineReported(
+            stage: "routing",
+            outcome: .init(state: "completed", reason: nil,
+                           routingDisposition: verdict,
+                           predictedIntent: predictedIntent,
+                           predictedTool: predictedTool),
+            context: captureContext)
+        // The executor's own verdict, from the same decision the disposition derives from the
+        // `outcome` member states what execution concluded, not what was presented. The WIRE enum
+        // is {success, failure, refused, cancelled} and the mapping lives on the encoder (applied
+        // centrally in the collector too): routing's disposition tokens (failed/executed/pending/
+        // refused) are a DIFFERENT vocabulary and must never leak into this member (reviewer
+        // 39ac0771, server fixture refusal).
+        // A turn the executor ran but could not conclude has no verdict to state. "Nothing" is not a
+        // permitted way to say that: the record would carry an executed turn with no outcome at all,
+        // which reads as a gap rather than the honest `unknown`/`observation_unavailable` the encoder
+        // already uses for a stage it was never told about. The substitution is owed ONLY to a
+        // verdict that itself states nothing (`state == "unknown"`): an observed not_run — the sink's
+        // declined `precondition_failed` — is a fact about the turn, and collapsing it into
+        // "unobserved" would discard what the executor actually decided (reviewer/spec, bot round on
+        // 41859c63d). Its outcome member stays absent: not_run has no wire token.
+        let wireVerdict = VoiceSharingContributionEncoder.StageOutcome.wireExecutionOutcome(for: outcome)
+        let statesNothing = outcome.state == "unknown"
+        contributionCollector?.engineReported(
+            stage: "execution",
+            outcome: .init(state: statesNothing ? "unknown" : outcome.state,
+                           reason: statesNothing ? "observation_unavailable" : outcome.reason,
+                           text: outcome.text, decision: outcome.decision,
+                           translatedText: outcome.translatedText,
+                           targetLanguage: outcome.targetLanguage,
+                           routingDisposition: outcome.routingDisposition,
+                           outcome: wireVerdict),
+            context: captureContext)
+    }
+
+    /// FINDING a7dfe013 #3: this method took ownership of the deferred record and could return
+    /// without reporting. A capture left owned-but-unreported never publishes, so every early exit
+    /// must SETTLE it — cancelled if the turn was abandoned, else with whatever is true of that exit.
+    private func settleOwnedCapture(
+        _ context: VoiceSharingCollector.CaptureContext?,
+        cancelled: Bool,
+        reason: String?
+    ) {
+        guard let context else { return }
+        contributionCollector?.engineReported(
+            stage: "execution",
+            outcome: .init(state: cancelled ? "cancelled" : "not_run", reason: reason),
+            context: context)
+    }
+
     func handleRoutingInput(
         _ input: IntentRoutingInput,
+        captureContext: VoiceSharingCollector.CaptureContext? = nil,
         origin: Int? = nil,
         selection: CloudConversationSelection? = nil,
         preparedObserver: CloudRouteSink.PreparedObserver? = nil,
         parsedIntentObserver: ParsedIntentObserver? = nil
     ) async -> InputTerminalOutcome {
+        defer { contributionCollector?.finalizeDeferredCompletion(context: captureContext) }
         // Belt-and-suspenders with the epoch check in the serial chain: an
         // in-flight classify must not execute after capture has stopped.
         guard isListening else { return .dropped }
-        // A REFUSED INTERRUPTION SUPPRESSES ITS UTTERANCE (cloud-assistant.md → Interruption).
+        // A REFUSED interruption suppresses its utterance (cloud-assistant.md → Interruption).
         // The barge-in was emitted eagerly at admission, so its turn is already queued here.
         // After a refusal the contract forbids submitting it, so this turn must not reach the
         // wire: check the suppression the refusal recorded before doing any work.
@@ -960,7 +1110,7 @@ class VoiceControlService: ObservableObject {
         // while this turn is still queued or classifying, which is exactly the ordering measured
         // here (B entered, A's refusal arrived 110ms later).
         if await MainActor.run(body: {
-            executorForTesting.cloudRouteSinkForTesting.isSuppressedForTesting(utteranceId)
+            cloudRouteSink?.isSuppressedForTesting(utteranceId) ?? false
         }) {
             FileLog.shared.addMessage(
                 "[VoicePipeline] suppressed utterance \(utteranceId) — its interruption was refused"
@@ -973,7 +1123,7 @@ class VoiceControlService: ObservableObject {
         let capturedOrigin = origin
         // The INPUT's own provenance, falling back to the parameter. The parameter exists for the
         // serial-callback path, which captures before queuing; but a caller that stamps the input
-        // — which is where the gate decision actually lands — had its provenance SILENTLY
+        // which is where the gate decision actually lands — had its provenance SILENTLY
         // DISCARDED here, so the turn fell through to the sink's live-state provider.
         let capturedSelection = selection ?? input.selection
 
@@ -992,11 +1142,25 @@ class VoiceControlService: ObservableObject {
             FileLog.shared.addMessage(
                 "[VoicePipeline] session-start capture ← '\(transcript)' — not routed, silent"
             )
+            // The record still closes honestly: routing and execution did not run, and the
+            // app owns that decision. A wake-only capture states the enumerated `wake_only`
+            // reason; a blank capture never dispatched anything at all.
+            let skipReason = RouteInputEligibilityPolicy.decide(transcript: transcript) == .silentSessionStart
+                ? VoiceSharingCollector.wakeOnlySkipReason
+                : VoiceSharingCollector.notDispatchedReason
+            for stage in ["routing", "execution"] {
+                contributionCollector?.engineReported(
+                    stage: stage,
+                    outcome: .init(state: "not_run", reason: skipReason),
+                    context: captureContext)
+            }
             return .routed
         case .route:
             break
         }
-        let result = intentRouter.classify(input: input, pendingDialog: dialogContext)
+        let result = intentRouter.classify(input: input, pendingDialog: dialogContext) { [weak contributionCollector] identity in
+            contributionCollector?.engineUsedModel(slot: "router", reference: identity, context: captureContext)
+        }
         // Snapshot before recording: `recordPipelineLatency` consumes and clears
         // `latestRouterMetrics`, and the escalation policy must read *this* turn's
         // reason rather than nil — a cleared reason escalates even the reasons that
@@ -1006,7 +1170,7 @@ class VoiceControlService: ObservableObject {
 
         switch result {
         case .intent(let rawIntent):
-            // THE RAW CLASSIFIER RESULT, observed BEFORE the stamping below reconstructs the intent.
+            // THE raw classifier result, observed before the stamping below reconstructs the intent.
             // Firing this after the stamp would assert the reconstructed dispatch intent instead of
             // what the router actually classified, which is the point of the observation.
             await MainActor.run { parsedIntentObserver?(rawIntent) }
@@ -1023,7 +1187,7 @@ class VoiceControlService: ObservableObject {
                     // replace the original on the wire (core b6eafe25).
                     sourceTranscript: input.sourceTranscript,
                     sourceLanguage: input.sourceLanguage,
-                    // REQUEST OWNERSHIP: the captured utterance's identity travels with the turn.
+                    // REQUEST ownership: the captured utterance's identity travels with the turn.
                     utteranceId: input.utteranceId,
                     origin: route.origin,
                     // The origin captured with the INPUT, not read here: this point is after the
@@ -1041,6 +1205,21 @@ class VoiceControlService: ObservableObject {
                lastType == intentType,
                Date().timeIntervalSince(lastTime) < debounceInterval {
                 FileLog.shared.addMessage("[VoicePipeline] debounce \(intentType)")
+                // A debounce suppression is a CLIENT REFUSAL: the turn was classified and the
+                // router named its intent, but the client declined to run it. The record still
+                // settles, carrying the same refusal mapping any other client refusal takes.
+                contributionCollector?.engineReported(
+                    stage: "routing",
+                    outcome: .init(state: "completed", reason: nil,
+                                   routingDisposition: "refused",
+                                   predictedIntent: VoiceAnalytics.predictedIntentName(from: intent),
+                                   predictedTool: VoiceAnalytics.predictedToolName(from: intent)),
+                    context: captureContext)
+                contributionCollector?.engineReported(
+                    stage: "execution",
+                    outcome: .init(state: "failed", reason: "client_refused",
+                                   outcome: "refused"),
+                    context: captureContext)
                 return .routed
             }
 
@@ -1054,10 +1233,10 @@ class VoiceControlService: ObservableObject {
                 FileLog.shared.addMessage("[VoicePipeline] intent refused (admission retired) ← '\(transcript)'")
                 return .routed
             }
-            // RE-CHECK SUPPRESSION IMMEDIATELY BEFORE DISPATCH: a refusal that landed while this
+            // RE-CHECK suppression immediately before dispatch: a refusal that landed while this
             // turn was queued or classifying must still stop it from reaching the wire.
             if await MainActor.run(body: {
-                executorForTesting.cloudRouteSinkForTesting.isSuppressedForTesting(input.utteranceId)
+                cloudRouteSink?.isSuppressedForTesting(input.utteranceId) ?? false
             }) {
                 FileLog.shared.addMessage(
                     "[VoicePipeline] suppressed at dispatch \(input.utteranceId ?? "-") — "
@@ -1065,8 +1244,11 @@ class VoiceControlService: ObservableObject {
                 )
                 return .suppressedByInterruption
             }
-            let response = await executor.execute(intent, preparedObserver: preparedObserver)
-            // SUBMIT THE RETAINED FOLLOW-UP (cloud-assistant.md → Interruption, spec c5fe3416).
+            let (response, executionVerdict) = await executor.executeWithVerdict(intent, preparedObserver: preparedObserver)
+            reportExecution(executionVerdict, captureContext: captureContext,
+                            predictedIntent: VoiceAnalytics.predictedIntentName(from: intent),
+                            predictedTool: VoiceAnalytics.predictedToolName(from: intent))
+            // SUBMIT the retained follow-UP (cloud-assistant.md → Interruption, ).
             // When the turn that just settled was interrupted, the interrupting utterance was held
             // until its acknowledgement — a `done` for the prior turn, even `completed`, is that
             // acknowledgement. It is submitted here ONCE on its own socket, through the ordinary
@@ -1091,6 +1273,12 @@ class VoiceControlService: ObservableObject {
 
         case .dialogControl(let action):
             FileLog.shared.addMessage("[VoicePipeline] dialog \(action) ← '\(transcript)'")
+            // The dialog manager decided: routing ran and produced a control action.
+            contributionCollector?.engineReported(
+                stage: "routing",
+                outcome: .init(state: "completed", reason: nil,
+                               routingDisposition: "pending"),
+                context: captureContext)
             let dialogResult = dialogManager.handle(action)
 
             if let intent = dialogResult.intent {
@@ -1098,7 +1286,10 @@ class VoiceControlService: ObservableObject {
                     FileLog.shared.addMessage("[VoicePipeline] dialog intent refused (admission retired)")
                     return .routed
                 }
-                let response = await executor.execute(intent, preparedObserver: preparedObserver)
+                let (response, executionVerdict) = await executor.executeWithVerdict(intent, preparedObserver: preparedObserver)
+                reportExecution(executionVerdict, captureContext: captureContext,
+                                predictedIntent: VoiceAnalytics.predictedIntentName(from: intent),
+                                predictedTool: VoiceAnalytics.predictedToolName(from: intent))
                 // Same bridge on every executor path: an interruption resolved by THIS turn must
                 // reach its follow-up whichever intent produced it.
                 await submitRetainedFollowUpIfAny()
@@ -1122,7 +1313,7 @@ class VoiceControlService: ObservableObject {
                 // Accepted-then-transfer from the ACTUAL enqueue result: only a continuation that
                 // was really enqueued takes ownership. A refused enqueue leaves this link owning the
                 // reservation, so its own `defer` releases it rather than leaking it to a
-                // continuation that never ran. The marker is set AFTER the enqueue returns, and the
+                // continuation that never ran. The marker is set after the enqueue returns, and the
                 // enqueue releases it again if it refused — so the two can never disagree.
                 let enqueued = enqueueRoutingInput(
                     .english(transcript: reprocessValue, selection: capturedSelection, utteranceId: input.utteranceId),
@@ -1133,13 +1324,34 @@ class VoiceControlService: ObservableObject {
                     self.markContinuationEnqueued(input.utteranceId)
                 }
             } else if let question = dialogResult.question {
+                // A question means NOTHING was executed: execution did not run for this turn.
+                contributionCollector?.engineReported(
+                    stage: "execution",
+                    outcome: .init(state: "not_run", reason: "client_refused"),
+                    context: captureContext)
                 audioRenderer.render(.spoken(question))
             }
-            // If dialogResult has no intent and no question (e.g., cancel), do nothing
+            // If dialogResult has no intent and no question (e.g., cancel), nothing was executed —
+            // but the record still needs releasing.
+            if dialogResult.intent == nil && dialogResult.question == nil {
+                settleOwnedCapture(captureContext, cancelled: false, reason: "client_refused")
+            }
 
         case .none:
             let stage = turnMetrics?.failedStage ?? "?"
             let reason = turnMetrics?.reason
+            // The router RAN and returned no intent. Classifying that as "no candidates" would be a
+            // guess about WHY, so the observed fact — routing completed with a negative verdict —
+            // goes in the decision field, exactly as the wake stage does.
+            contributionCollector?.engineReported(
+                stage: "routing",
+                outcome: .init(state: "completed", reason: nil,
+                               routingDisposition: "not_run"),
+                context: captureContext)
+            contributionCollector?.engineReported(
+                stage: "execution",
+                outcome: .init(state: "not_run", reason: "client_refused"),
+                context: captureContext)
 
             // A routing failure or a deliberate `no_match` escalates through the
             // same path a chosen `cloud_route` uses — same intent, same executor —
@@ -1159,7 +1371,7 @@ class VoiceControlService: ObservableObject {
             // ternary operator.
             var dispatchGeneration: Int?
             if escalation == .escalate {
-                // Claimed AGAINST THIS INPUT'S CAPTURED ORIGIN, in one operation with the
+                // Claimed AGAINST this input'S CAPTURED origin, in one operation with the
                 // comparison (see the signal): checking liveness separately and then claiming
                 // would leave a gap in which a wake or a privacy close could land. A turn whose
                 // captured window has ended must consume NOTHING and dispatch NOTHING, rather than
@@ -1196,7 +1408,7 @@ class VoiceControlService: ObservableObject {
                 // that itself fails carries its own earcon from the sink.
                 // Marked as a fallback so the executor extends the window without
                 // restoring the allowance that permitted it.
-                let response = await executor.execute(
+                let (response, executionVerdict) = await executor.executeWithVerdict(
                     CloudRouteIntent(
                         request: transcript,
                         tier: .unknown,
@@ -1204,7 +1416,7 @@ class VoiceControlService: ObservableObject {
                         // the original utterance and its actual language when the input has them.
                         sourceTranscript: input.sourceTranscript,
                         sourceLanguage: input.sourceLanguage,
-                        // REQUEST OWNERSHIP: the fallback carries the same utterance identity.
+                        // REQUEST ownership: the fallback carries the same utterance identity.
                         utteranceId: input.utteranceId,
                         origin: .routingFailure,
                         generation: dispatchGeneration,
@@ -1234,6 +1446,8 @@ class VoiceControlService: ObservableObject {
             // the router could not do its job — and each speaks: the user asked
             // a real question and got nothing.
             audioRenderer.playEarcon(.error)
+            // Nothing was executed and no dispatch happened; release the record.
+            settleOwnedCapture(captureContext, cancelled: false, reason: "client_refused")
         }
         return .routed
     }
@@ -1328,8 +1542,8 @@ class VoiceControlService: ObservableObject {
             // synchronously into the gate sink; mark the task so `.listening`
             // does not cancel it.
             self.isAcquiring = true
-            // TEST-ONLY: park the acquisition here so a control can observe teardown joining a
-            // task that is genuinely STILL IN FLIGHT. Without a parked acquisition the task has
+            // TEST-only: park the acquisition here so a control can observe teardown joining a
+            // task that is genuinely STILL in flight. Without a parked acquisition the task has
             // always completed before teardown, so a join control could never observe the thing
             // it exists to check (reviewer `33d3a531`). Nil in production.
             if let barrier = self.acquisitionInFlightBarrierForTesting {
@@ -1378,7 +1592,7 @@ class VoiceControlService: ObservableObject {
         }
     }
 
-    /// TEST-ONLY: an awaitable barrier entered at the head of an acquisition attempt, so a
+    /// TEST-only: an awaitable barrier entered at the head of an acquisition attempt, so a
     /// control can hold a task in flight across teardown. Nil in production.
     var acquisitionInFlightBarrierForTesting: (@Sendable () async -> Void)?
 
@@ -1388,10 +1602,10 @@ class VoiceControlService: ObservableObject {
         return transcriptSerialTask
     }
 
-    /// TEST-ONLY: CAPTURE the in-flight acquisition task, before anything can clear it.
+    /// TEST-only: CAPTURE the in-flight acquisition task, before anything can clear it.
     ///
-    /// `stop()` cannot be called first: it ends capture, which releases the acquired route, which
-    /// flips the gate and runs `cancelAcquisition()` — nilling `acquisitionTask`. A helper that
+    /// `stop` cannot be called first: it ends capture, which releases the acquired route, which
+    /// flips the gate and runs `cancelAcquisition` — nilling `acquisitionTask`. A helper that
     /// looked the task up afterwards would therefore find nothing and return without joining the
     /// very task that was in flight (reviewer `33d3a531`). Teardown captures first, then stops,
     /// then awaits the captured task's real completion.
@@ -1399,10 +1613,10 @@ class VoiceControlService: ObservableObject {
         acquisitionTask
     }
 
-    /// TEST-ONLY: await a task captured earlier, with a BOUND THAT ACTUALLY BINDS.
+    /// TEST-only: await a task captured earlier, with a BOUND that actually binds.
     ///
-    /// The previous version used `withTaskGroup` and `group.cancelAll()` when the timer won. That
-    /// does NOT unblock the sibling child that is awaiting `task.value` on an independent task:
+    /// The previous version used `withTaskGroup` and `group.cancelAll` when the timer won. That
+    /// does not unblock the sibling child that is awaiting `task.value` on an independent task:
     /// leaving the task-group scope still waits for every child, so the "timeout" never returned —
     /// measured as a scripted task that never completes hanging indefinitely on a 0.3s bound.
     ///
@@ -1415,7 +1629,7 @@ class VoiceControlService: ObservableObject {
         timeout: TimeInterval
     ) async -> Bool {
         let done = CompletionSignal()
-        // The observer task records completion. It is deliberately NOT awaited or cancelled here:
+        // The observer task records completion. It is deliberately not awaited or cancelled here:
         // if the task never completes, this observer may take until the end of the process. It
         // holds no resources the bound depends on, which is the whole point of the rewrite.
         Task.detached(priority: .utility) {
@@ -1459,7 +1673,7 @@ class VoiceControlService: ObservableObject {
         // app, context loss) cancels a scheduled attempt, and the same route
         // must be retried once the blocker clears. Failure completions do not
         // call this, so a genuinely failed route is still not retried in a loop
-        // — a later physical notification is what grants the next attempt, via
+        // a later physical notification is what grants the next attempt, via
         // the epoch in the dedup key rather than by clearing it here.
         acquisitionAttemptedRoute = nil
     }
@@ -1514,9 +1728,9 @@ final class OSLogMicLifecycleSink: MicLifecycleLogSink {
 /// Owns the mic lifecycle logging rules:
 /// - capture acquired → `mic_capture_started` (INFO)
 /// - active capture stopped → `mic_capture_stopped`; INFO only for a direct,
-///   attributable user request (voice control disabled), ERROR otherwise
+/// attributable user request (voice control disabled), ERROR otherwise
 /// - blocked and never acquired → `mic_acquisition_skipped` (INFO) once on
-///   entry, again only when the blocking reason set changes
+/// entry, again only when the blocking reason set changes
 final class MicLifecycleLogger {
     private let sink: MicLifecycleLogSink
     /// Last blocking reason set logged for a blocked-never-acquired posture.

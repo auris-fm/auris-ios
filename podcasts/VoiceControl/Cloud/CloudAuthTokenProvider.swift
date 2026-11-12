@@ -6,8 +6,9 @@ import PocketCastsUtils
 /// `CloudTokenProviding`.
 ///
 /// Contract (`core` edge-particle, `53a83e2` + `28cd409`):
-/// - `POST /api/v1/auth/token` — body `{credential, device{platform, app_version}}`;
-///   the credential is the account session the app already holds. Response:
+/// - `POST /api/v1/auth/token` — body `{credential}`; the credential is the account
+///   session the app already holds. (The `device` block is gone: the server reads the
+///   platform from the request's User-Agent instead.) Response:
 ///   `{access_token, token_type, expires_in, refresh_token, refresh_expires_in, issuer, subject}`.
 /// - `POST /api/v1/auth/refresh` — body `{refresh_token}`; returns a **new**
 ///   access + refresh pair (rotation). Replaying a rotated token revokes the
@@ -79,8 +80,10 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
     /// Stable account identity (the account uuid), NOT the rotating session
     /// credential — see `Tokens.sourceIdentity`.
     private let identityProvider: () -> String?
-    private let appVersionProvider: () -> String
     private let session: URLSession
+    /// The server's access log attributes each call to a platform via the User-Agent header; the
+    /// production default is the app's standard private user agent, matching every other Auris request.
+    private let userAgentProvider: () -> String
     private let now: () -> Date
 
     private let lock = NSLock()
@@ -94,14 +97,14 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
         authBaseURLProvider: @escaping () -> String,
         credentialProvider: @escaping () -> String?,
         identityProvider: @escaping () -> String? = { ServerSettings.userId },
-        appVersionProvider: @escaping () -> String = { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown" },
         session: URLSession? = nil,
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        userAgentProvider: @escaping () -> String = { ServerConfig.shared.syncDelegate?.privateUserAgent() ?? "" }
     ) {
         self.authBaseURLProvider = authBaseURLProvider
         self.credentialProvider = credentialProvider
         self.identityProvider = identityProvider
-        self.appVersionProvider = appVersionProvider
+        self.userAgentProvider = userAgentProvider
         self.now = now
         if let session {
             self.session = session
@@ -318,10 +321,6 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
         let identity = identityProvider()
         let body: [String: Any] = [
             "credential": credential,
-            "device": [
-                "platform": platformName,
-                "app_version": appVersionProvider(),
-            ],
         ]
         let origin = authBaseURLProvider().trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         switch await post(path: Self.tokenPath, body: body, presentedIdentity: identity, presentedOrigin: origin) {
@@ -360,6 +359,8 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let userAgent = userAgentProvider()
+        if !userAgent.isEmpty { request.setValue(userAgent, forHTTPHeaderField: "User-Agent") }
         request.timeoutInterval = Self.requestTimeoutSeconds
         guard let encoded = try? JSONSerialization.data(withJSONObject: body) else {
             // Local failure: no request was sent.
@@ -482,13 +483,5 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
         inFlight = nil
         lock.unlock()
         return result
-    }
-
-    private var platformName: String {
-        #if os(iOS)
-        return "ios"
-        #else
-        return "unknown"
-        #endif
     }
 }

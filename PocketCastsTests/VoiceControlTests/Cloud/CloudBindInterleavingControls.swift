@@ -2,7 +2,7 @@ import XCTest
 
 @testable import podcasts
 
-/// DETERMINISTIC BINDING INTERLEAVINGS (PR #49, reviewer-required).
+/// DETERMINISTIC binding interleavings (PR #49, reviewer-required).
 ///
 /// The turn socket's registration is bound by the transport (`TurnSocketLifetime.bind`) and closed
 /// by the consumer (`finishTurn` → `close`). Both are separate tasks, so the ORDER between "the
@@ -10,10 +10,10 @@ import XCTest
 /// construction. These controls pin both orders explicitly — no sleeps, no polling — and assert the
 /// contract for each:
 ///
-///   - BIND FIRST, then close: the registration is live and is retired by the close.
-///   - CLOSE FIRST, then bind: the bind is REJECTED under the same lock that closed the lifetime,
-///     the registration is retired, the socket is cancelled, and the turn reports `connection_lost`
-///     — with NO auth frame ever submitted on a lifetime that was already settled.
+/// - BIND first, then close: the registration is live and is retired by the close.
+/// - CLOSE first, then bind: the bind is REJECTED under the same lock that closed the lifetime,
+/// the registration is retired, the socket is cancelled, and the turn reports `connection_lost`
+/// — with NO auth frame ever submitted on a lifetime that was already settled.
 ///
 /// The rejected-bind case is the one that cannot be reached by an accident of scheduling: it needs
 /// the close to land strictly before the bind, which is exactly what these controls arrange.
@@ -72,7 +72,7 @@ final class CloudBindInterleavingControls: XCTestCase {
 
     // MARK: - Control 1: bind precedes close (the ordinary order)
 
-    /// The registration is published BEFORE the close, so the close retires it. This is the
+    /// The registration is published before the close, so the close retires it. This is the
     /// baseline that makes the rejected-bind case meaningful: the same assertions, opposite order.
     func testRegistrationIsRetiredWhenCloseFollowsABind() async throws {
         let task = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: fixture()))
@@ -104,7 +104,7 @@ final class CloudBindInterleavingControls: XCTestCase {
         XCTAssertNotNil(socket.boundIdentity, "a live registration has a bound identity")
         XCTAssertFalse(task.isCancelledSocket, "socket must be live while the turn is open")
 
-        // CLOSE AFTER BIND: the close retires the registration and cancels the socket.
+        // CLOSE after bind: the close retires the registration and cancels the socket.
         socket.finishTurn()
         XCTAssertTrue(task.isCancelledSocket, "close must retire the live registration")
 
@@ -123,7 +123,7 @@ final class CloudBindInterleavingControls: XCTestCase {
 
     // MARK: - Control 2: close precedes bind (the rejected bind)
 
-    /// CLOSE BEFORE BIND. The lifetime is settled while the transport has not yet published its
+    /// CLOSE before bind. The lifetime is settled while the transport has not yet published its
     /// registration, so the bind must be REJECTED — not published-then-checked. This is the
     /// interleaving that a unsynchronized bind could get wrong (a close landing between the
     /// publish and the check), and it is arranged here by acting at the frame seam.
@@ -179,8 +179,8 @@ final class CloudBindInterleavingControls: XCTestCase {
 
     // MARK: - Control 3: the bind→send publication is synchronized
 
-    /// THE BIND→SEND PUBLICATION. The transport binds the registration on the PRODUCER's task
-    /// while the consumer sends a result on ITS OWN task. If `boundIdentity` were published
+    /// THE bind→SEND publication. The transport binds the registration on the PRODUCER's task
+    /// while the consumer sends a result on ITS own task. If `boundIdentity` were published
     /// unsynchronized, a send could read a stale/nil identity for a turn that IS live and report
     /// `undelivered`, or a torn value. Here many sends are dispatched CONCURRENTLY from a
     /// different task than the bind, after the bind is known published: every one must observe
@@ -230,7 +230,7 @@ final class CloudBindInterleavingControls: XCTestCase {
     // MARK: - Control 4: per-registration isolation for a reused request id
 
     /// REUSED request id: a second turn registers the SAME `request_id` while the first is still
-    /// live (a supersede). Ownership is PER REGISTRATION, so the successor's bind must not be
+    /// live (a supersede). Ownership is PER registration, so the successor's bind must not be
     /// removed by the predecessor's close, and the predecessor's close must not retire the
     /// successor's socket. The successor's own send stays `submitted`.
     func testAReusedRequestIdKeepsItsOwnRegistrationAcrossThePredecessorsClose() async throws {
@@ -252,7 +252,7 @@ final class CloudBindInterleavingControls: XCTestCase {
         await boundFlagA.value()
         let identityA = try XCTUnwrap(a.resultSocket.boundIdentity)
 
-        // The successor reuses the SAME request_id with its OWN PHYSICAL socket (taskB, issued
+        // The successor reuses the SAME request_id with its OWN physical socket (taskB, issued
         // by the factory for the second route). Its bind lands on the transport's task, so wait
         // for B's first frame (the bind is published by then).
         let routedB = client.routeWithResultSocket(
@@ -270,7 +270,7 @@ final class CloudBindInterleavingControls: XCTestCase {
             return events
         }
 
-        // The PREDECESSOR closes — its close must retire ONLY its own registration.
+        // The PREDECESSOR closes — its close must retire only its own registration.
         a.resultSocket.finishTurn()
         let frame = try XCTUnwrap(AppOperationResultFrame(
             operationId: "op-bind", outcome: .unknown, reason: OperationReason.interruptedInFlight
@@ -291,7 +291,7 @@ final class CloudBindInterleavingControls: XCTestCase {
 
     // MARK: - Control 5: the bind/close INTERLEAVING discriminator (reviewer a2723c92)
 
-    /// THE BIND/CLOSE INTERLEAVING, forced — not waited-for. Control 4 waits for each
+    /// THE bind/CLOSE interleaving, forced — not waited-for. Control 4 waits for each
     /// publication before proceeding; that proves isolation of PUBLISHED registrations but never
     /// races a close against a bind decision. Here the predecessor's close lands DETERMINISTICALLY
     /// between the successor's route start and its bind decision: the successor's transport task
@@ -348,13 +348,13 @@ final class CloudBindInterleavingControls: XCTestCase {
             return events
         }
 
-        // FORCED ORDER: close happens strictly before the bind decision resumes.
+        // FORCED order: close happens strictly before the bind decision resumes.
         await seamEntered.value()
         a.resultSocket.finishTurn()
         XCTAssertTrue(taskA.isCancelledSocket, "the close retired the predecessor's own registration")
         closeRequested.markClosed()
 
-        // The successor's bind decides AFTER the close — it must still succeed. Observed through
+        // The successor's bind decides after the close — it must still succeed. Observed through
         // the successor's OWN published identity (bounded poll), never a frame promise: the
         // predecessor's trailing fixture frame would satisfy a frame promise and say nothing
         // about the successor's bind.
@@ -365,7 +365,7 @@ final class CloudBindInterleavingControls: XCTestCase {
         )
         XCTAssertNotEqual(identityB, identityA, "each registration keeps its own identity")
 
-        // The successor's send rides ITS OWN recorded task — distinct physical sockets, each
+        // The successor's send rides ITS own recorded task — distinct physical sockets, each
         // send attributable to the registration that owns it.
         let reportB = await client.sendOperationResult(frame, via: socketB)
         XCTAssertEqual(reportB, .submitted, "the successor's send is submitted after the interleaved close")
@@ -425,7 +425,7 @@ final class CloudBindInterleavingControls: XCTestCase {
 // MARK: - Gate ticket-state controls
 
 extension CloudBindInterleavingControls {
-    /// CANCELLATION BEFORE REGISTRATION. The task is cancelled before it has run a single
+    /// CANCELLATION before registration. The task is cancelled before it has run a single
     /// instruction, so `withTaskCancellationHandler` fires `onCancel` before the operation body
     /// registers its continuation. A gate that stores a single resumable slot misses that
     /// cancellation entirely and then reports SUCCESS on release — a cancelled waiter must never
@@ -433,7 +433,7 @@ extension CloudBindInterleavingControls {
     /// the body honors it at registration time.
     func testCancellationBeforeRegistrationThrowsInsteadOfSucceedingOnRelease() async throws {
         let gate = Gate()
-        // The task is cancelled BEFORE it has run a single instruction, so the cancellation
+        // The task is cancelled before it has run a single instruction, so the cancellation
         // handler fires before the operation body can register — the exact window pinned here.
         let waiter = Task {
             try await gate.wait()
@@ -450,7 +450,7 @@ extension CloudBindInterleavingControls {
                       "expected CancellationError, got \(error)")
         // The gate itself is still closed: the cancelled waiter did not release it.
         XCTAssertFalse(gate.released, "a cancelled waiter must not open the gate")
-        // SURVIVING DELIVERY, no try?: a fresh waiter still receives the release as success.
+        // SURVIVING delivery, no try?: a fresh waiter still receives the release as success.
         let late = Task { try await gate.wait() }
         try await Task.sleep(nanoseconds: 50_000_000)
         gate.release()
@@ -461,7 +461,7 @@ extension CloudBindInterleavingControls {
         XCTAssertTrue(gate.released)
     }
 
-    /// TIMED-OUT OBSERVERS DO NOT LEAK OR CONSUME THE RELEASE. A bounded wait that loses to its
+    /// TIMED-OUT observers do not leak or consume the release. A bounded wait that loses to its
     /// own alarm removes its ticket; the subsequent release is delivered to waiters still
     /// present — and only once each. If a timed-out observer were retained, the release would be
     /// consumed (or double-delivered) and this fresh second waiter would be the control that
@@ -486,7 +486,7 @@ extension CloudBindInterleavingControls {
         XCTAssertTrue(gate.released, "the real release must reach the fresh waiter")
     }
 
-    /// THE OUTER SOCKET REGISTRY, not just the gate: a timed-out `awaitCancellation` observer
+    /// THE outer socket registry, not just the gate: a timed-out `awaitCancellation` observer
     /// removes its OWN closure from `StubWebSocketTask.cancellationWaiters`, the registry is
     /// empty after it, and a SURVIVING observer registered afterwards still fires on the real
     /// cancel and is delivered true — no leaked closures, no consumed cancellation.
@@ -513,7 +513,7 @@ extension CloudBindInterleavingControls {
 }
 
 extension CloudBindInterleavingControls {
-    /// CANCELLATION BEFORE REGISTRATION, ORDERED EXPLICITLY. `Task { … }; task.cancel()` still
+    /// CANCELLATION before registration, ORDERED explicitly. `Task { … }; task.cancel()` still
     /// races the child's start. Here the order is forced: the child first parks on a
     /// HoldLatch (which, unlike a Gate, does not throw on cancellation), the test cancels it
     /// while it is PARKED — so cancellation is already flagged when the child resumes — and
@@ -526,11 +526,11 @@ extension CloudBindInterleavingControls {
         let gate = Gate()
         let waiter = Task {
             await barrier.waitUntilReleased()   // deterministic parking spot
-            try await gate.wait()               // registration AFTER the cancel below
+            try await gate.wait()               // registration after the cancel below
         }
         // The child is now parked on the barrier, not yet at the gate.
         try await Task.sleep(nanoseconds: 50_000_000)
-        waiter.cancel()          // cancellation flagged BEFORE registration
+        waiter.cancel()          // cancellation flagged before registration
         barrier.release()        // NOW the child proceeds to register
         let outcome = await waiter.result
         guard case .failure(let error) = outcome else {
@@ -548,10 +548,10 @@ extension CloudBindInterleavingControls {
         }
     }
 
-    /// CANCELLING AN ACTUAL OBSERVER OWNER removes that observer's entry from the SOCKET
+    /// CANCELLING an actual observer owner removes that observer's entry from the SOCKET
     /// registry while a surviving observer stays registered and is delivered the real
     /// cancellation. The owner's task is cancelled — not the socket — so this pins the
-    /// ownership path (the observer cleans up after itself on ITS OWN cancellation), and the
+    /// ownership path (the observer cleans up after itself on ITS own cancellation), and the
     /// ACTUAL registry is inspected at each step.
     func testCancellingAnObserverOwnerRemovesItsRegistryEntryAndSurvivorIsDelivered() async throws {
         let task = StubWebSocketTask(textFrames: [])

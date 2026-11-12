@@ -5,56 +5,48 @@ struct VoiceControlSettingsView: View {
 
     var body: some View {
         List {
-            Section("Status") {
-                HStack {
-                    Text("Voice Control")
-                    Spacer()
-                    statusBadge
+            // Layout mirrors Android's Voice Control screen:
+            // enable switch, model readiness, one plain status line, then the sharing section.
+            Section {
+                Toggle(isOn: Binding(
+                    get: { service.gatePosture.setup.enabledByUser.isAllowed },
+                    set: { service.setUserEnabled($0) }
+                )) {
+                    Text("Enable Voice Control")
                 }
-                if case .listening(let mode) = service.gateState {
-                    HStack {
-                        Text("Listening Mode")
-                        Spacer()
-                        Text(mode == .continuous ? "Continuous" : "Wake Word")
-                            .foregroundColor(.secondary)
-                    }
-                }
+            } footer: {
+                Text("Listen for voice commands during playback")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
 
-            Section("Diagnostics") {
-                let posture = service.gatePosture
-                statusRow(label: "Gate", value: posture.allowed ? "Allowed" : "Blocked")
-                statusRow(label: "Off Reason", value: offReasonText(posture))
-                statusRow(label: "Listening Mode", value: listeningModeText(posture))
-                statusRow(label: "Mic Exposure", value: "\(posture.micExposure)")
-                statusRow(label: "Grace Period", value: posture.gracePeriodActive ? "Active" : "Inactive")
-                statusRow(label: "Context", value: "\(posture.context)")
-
-                // Per-condition breakdown
-                Section("Setup") {
-                    conditionRow(label: "User Enabled", condition: posture.setup.enabledByUser)
-                    conditionRow(label: "Device Supported", condition: posture.setup.deviceSupported)
-                    conditionRow(label: "Models Ready", condition: posture.setup.modelsReady)
-                }
-
-                Section("Conflicts") {
-                    conditionRow(label: "Not On Call", condition: posture.conflicts.notOnCall)
-                    conditionRow(label: "Not Casting", condition: posture.conflicts.notCasting)
-                    conditionRow(label: "Battery OK", condition: posture.conflicts.batteryOk)
-                    conditionRow(label: "Other App Playing", condition: posture.conflicts.otherAppPlaying)
-                }
+            Section {
+                statusRow(label: "Wake Word Model", value: readinessText(service.gatePosture.setup.modelsReady))
+                // iOS exposes one combined readiness condition for the speech stack; there is no
+                // separate published backend flag, so this reports the condition the app actually
+                // gates on rather than inventing a second source.
+                statusRow(label: "Speech Recognition Model", value: readinessText(service.gatePosture.setup.modelsReady))
             }
 
-            Section("Wake Word") {
-                HStack {
-                    Text("Wake Word")
-                    Spacer()
-                    Text("Auris")
-                        .foregroundColor(.secondary)
-                }
+            // A plain status line, not a diagnostics block. iOS-specific wording: there is no
+            // microphone-isolation requirement on this platform, so Android's "a headset or earbud
+            // microphone is required" is deliberately not reproduced here — it would state
+            // something false about this build.
+            Section {
+                statusRow(label: "Status", value: primaryStatusText(service.gatePosture))
             }
+
+            // The sharing rows embed as PLAIN sections in this single List (reviewer on
+            // b61af2897: no nested List). The host owns ONE account model for the screen
+            // lifetime via @StateObject, so a service refresh cannot replace in-flight
+            // operation/status state with a freshly constructed model.
+            VoiceSharingSectionHost(localModel: service.voiceSharingLifetime?.settingsModel)
         }
         .navigationTitle("Voice Control")
+    }
+
+    private func readinessText(_ condition: GateCondition) -> String {
+        condition.isAllowed ? "Ready" : "Not ready"
     }
 
     @ViewBuilder
@@ -169,4 +161,55 @@ struct VoiceControlSettingsView: View {
         case .wakeWord: return "wakeWord"
         }
     }
+}
+
+
+/// Owns the sharing account model for the lifetime of the Voice Control screen and renders the
+/// sharing rows as plain sections (no List of its own) inside the screen's single List.
+/// Omitted entirely when sharing is compiled off or the local settings lifetime is absent —
+/// ordinary Voice Control settings still open and work signed out.
+@MainActor
+struct VoiceSharingSectionHost: View {
+    @StateObject private var account: VoiceSharingAccountModel
+    private let localModel: VoiceSharingSettingsModel?
+
+    init(localModel: VoiceSharingSettingsModel?) {
+        self.localModel = localModel
+        // No configured origin ⇒ a never-yielding credential: the client exists so the screen
+        // composes, but every server action fails closed (token -> nil) exactly as signed out.
+        // purgeLocal is nil unless a local settings model exists — the closure must return a
+        // NON-optional DeleteResult.
+        let tokenProvider = CloudTokenProviderRouter.voiceSharingProvider() ?? NeverTokenProvider()
+        _account = StateObject(wrappedValue: VoiceSharingAccountModel(
+            client: VoiceSharingAccountClient(tokenProvider: tokenProvider),
+            disclosureVersion: VoiceSharingDisclosure.productionVersion,
+            purgeLocal: localModel.map { model in
+                { await model.deletePendingRecordingsOnThisDevice() }
+            }))
+    }
+
+
+    var body: some View {
+        if VoiceSharingSettingsModel.surfaceEnabled {
+            // @ObservedObject expects the object to already exist; the view struct here holds
+            // @StateObject upstream, so wrap in a minimal observed passthrough is unnecessary:
+            // construct the section view against the state-owned model.
+            VoiceSharingAccountSections(
+                accountModel: account,
+                localModel: localModel,
+                surfaceEnabled: { VoiceSharingSettingsModel.surfaceEnabled },
+                originatingSession: account.accountActionSession)
+        }
+    }
+
+
+}
+
+
+
+/// Credential source that never yields a token: composes the sharing client when no Auris origin
+/// is configured so the screen still renders, while every server action fails closed.
+private struct NeverTokenProvider: CloudTokenProviding {
+    func token() async -> String? { nil }
+    func handleUnauthorized(rejectedToken: String?) async {}
 }

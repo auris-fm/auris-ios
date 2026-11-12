@@ -41,7 +41,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         TraceManager.shared.setup(handler: traceHandler)
         #if DEBUG
         AsrIntentBenchmarkHarness.runIfRequested()
-        // NOT HERE: the acceptance run is started AFTER the normal defaults/migrations phase, because
+        // not here: the acceptance run is started after the normal defaults/migrations phase, because
         // that phase can clear the keychain (measured: `checkDefaults v5Run clearTokensFromKeyChain`
         // runs during launch). Starting the run first let initialization clear the session underneath
         // it. It is deferred to the end of launch instead.
@@ -117,7 +117,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             checkDefaults()
 
             #if DEBUG
-            // STARTED AFTER the defaults/migrations phase (which can clear the keychain), so
+            // STARTED after the defaults/migrations phase (which can clear the keychain), so
             // initialization cannot clear the scratch session out from under the run.
             runScratchAcceptanceIfRequested()
             #endif
@@ -203,7 +203,21 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         FileLog.shared.forceFlush()
     }
 
+    /// Voice Sharing's sign-out wiring happens HERE, at the app's own composition point, using the
+    /// notification center the rest of the app observes (SyncManager posts
+    /// `.serverUserWillBeSignedOut` to `.default`). Exposed as an internal method taking the center as a
+    /// parameter so a test can drive the transition through this production setup path rather than
+    /// calling the coordinator's installer directly — a manual installer call proves nothing about
+    /// whether the application actually subscribed.
+    func setupVoiceSharingIdentityInvalidation(
+        onNotificationCenter center: NotificationCenter = .default,
+        coordinator: VoiceSharingCoordinator = .shared
+    ) {
+        _ = coordinator.installIdentityInvalidation(onNotificationCenter: center)
+    }
+
     private func setupVoiceControlIfNeeded() {
+        setupVoiceSharingIdentityInvalidation()
         if voiceControlService == nil {
             if let service = VoiceControlAssembly().buildVoiceControlService() {
                 voiceControlService = service
@@ -215,15 +229,15 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         voiceControlService?.startIfAllowed()
     }
 
-    /// SCRATCH ACCEPTANCE OPERATOR ENTRY.
+    /// SCRATCH acceptance operator entry.
     ///
-    /// Disabled by default: it runs ONLY when the app is launched with the explicit scratch argument,
+    /// Disabled by default: it runs only when the app is launched with the explicit scratch argument,
     /// and it is restricted to the controlled acceptance protocol. It calls the production-factory
-    /// acceptance path and writes ONLY the allowlisted export (request id, conversation id, response
+    /// acceptance path and writes only the allowlisted export (request id, conversation id, response
     /// text, terminal, verdict) to a dedicated file in the app container, which the external runner
     /// reads. It never logs general traffic and never reads a credential.
     ///
-    ///   xcrun simctl launch <device> fm.auris --scratch-acceptance <nonce>
+    /// xcrun simctl launch <device> fm.auris --scratch-acceptance <nonce>
     static let scratchAcceptanceArgument = "--scratch-acceptance"
     static let scratchAcceptanceExportName = "scratch-acceptance-export.json"
 
@@ -235,11 +249,11 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         let url = URL(fileURLWithPath: NSHomeDirectory())
             .appendingPathComponent("Documents")
             .appendingPathComponent(Self.scratchAcceptanceExportName)
-        // A STALE EXPORT MUST NOT SURVIVE A NEW RUN. The previous run's file is removed BEFORE the
+        // A STALE export must not survive A NEW run. The previous run's file is removed before the
         // turns start, so a run that is interrupted or crashes cannot leave an older result that the
         // runner would read as this run's outcome.
         //
-        // THE REMOVAL IS REQUIRED, not best-effort: `try?` would log success even when the stale file
+        // THE removal is required, not best-effort: `try?` would log success even when the stale file
         // survived, which is the very defect this guards. A not-found error is expected and fine; any
         // OTHER failure means a stale file may still be present, so the run REFUSES to proceed and
         // writes no export at all.
@@ -247,7 +261,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             try FileManager.default.removeItem(at: url)
         } catch let error as NSError
             where error.domain == NSCocoaErrorDomain && error.code == NSFileNoSuchFileError {
-            // Expected: there was no prior export. THE DOMAIN IS CHECKED TOO: matching the code alone
+            // Expected: there was no prior export. THE domain is checked too: matching the code alone
             // would treat any other domain's error with the same numeric code as a not-found, and the
             // run would proceed believing no stale file exists.
         } catch {
@@ -384,7 +398,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
     private func configureFirebase() {
-        // TEMPORARY DEV-GUARD: Only initialize Firebase when a real GoogleService-Info
+        // TEMPORARY dev-GUARD: Only initialize Firebase when a real GoogleService-Info
         // bundle is present. Local/dev builds use an empty stub plist (all keys blank);
         // FirebaseApp.configure() throws on missing options and crashes launch. Skip
         // Firebase (and remote config) entirely when the plist is a stub. Remove once

@@ -9,8 +9,29 @@ enum ClassificationResult {
     case none
 }
 
+/// The one classification entry point `VoiceControlService` needs. Extracted so a test can drive the
+/// real routing branches with a deterministic result — the LFM model is not required to exercise
+/// branch composition, only to exercise the model.
+protocol IntentClassifying: AnyObject {
+    var isReady: Bool { get }
+    func classify(input: IntentRoutingInput, pendingDialog: PendingVoiceDialog?) -> ClassificationResult
+    func classify(input: IntentRoutingInput, pendingDialog: PendingVoiceDialog?,
+                  modelUsed: (VoiceSharingContributionEncoder.ModelRef?) -> Void) -> ClassificationResult
+    var onMetrics: ((RouterStageDiagnostic) -> Void)? { get set }
+    func ensureReady() async -> Result<Void, Error>
+}
+
+extension IntentClassifying {
+    var isReady: Bool { false }
+    func classify(input: IntentRoutingInput, pendingDialog: PendingVoiceDialog?,
+                  modelUsed: (VoiceSharingContributionEncoder.ModelRef?) -> Void) -> ClassificationResult {
+        modelUsed(nil)
+        return classify(input: input, pendingDialog: pendingDialog)
+    }
+}
+
 /// Classify-then-generate intent router backed by CPU llama.cpp + LFMC head.
-final class LfmIntentRouter {
+final class LfmIntentRouter: IntentClassifying {
     private let modelManager: ModelManager
     private let inference: LfmInference
     private let mapper = ToolCallMapper()
@@ -89,6 +110,9 @@ final class LfmIntentRouter {
             return .success(())
         }
         inference.release()
+        loadedRelease = nil
+        loadedQuant = nil
+        loadedInputFormat = nil
         let loaded = inference.load(
             modelPath: modelManager.lfmModelFile.path,
             classifierPath: modelManager.lfmClassifierFile.path,
@@ -111,6 +135,11 @@ final class LfmIntentRouter {
     }
 
     func classify(input: IntentRoutingInput, pendingDialog: PendingVoiceDialog? = nil) -> ClassificationResult {
+        classify(input: input, pendingDialog: pendingDialog, modelUsed: { _ in })
+    }
+
+    func classify(input: IntentRoutingInput, pendingDialog: PendingVoiceDialog?,
+                  modelUsed: (VoiceSharingContributionEncoder.ModelRef?) -> Void) -> ClassificationResult {
         let start = now()
         var stages = RouterStageLatencies()
         let trimmed = input.routerTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -119,6 +148,7 @@ final class LfmIntentRouter {
             translationKind: input.translationKind.wireName
         )
         guard !trimmed.isEmpty else {
+            modelUsed(nil)
             report(
                 start: start,
                 base: base,
@@ -141,6 +171,7 @@ final class LfmIntentRouter {
         }
 
         guard let release, let inputFormat else {
+            modelUsed(nil)
             lock.unlock()
             FileLog.shared.addMessage("[VoicePipeline] LFM router not ready for: \"\(trimmed)\"")
             let cachedFormat = modelManager.lfmRouterInputFormat()
@@ -180,6 +211,7 @@ final class LfmIntentRouter {
         // loaded a dual_v1 model, fail gracefully like the unsupported-format
         // paths above instead of trapping.
         guard inputFormat.isReadyForInference else {
+            modelUsed(nil)
             report(
                 start: start,
                 base: base,
@@ -206,12 +238,16 @@ final class LfmIntentRouter {
                     routerTranscript: trimmed,
                     translationKind: input.translationKind,
                     selection: input.selection,
-                    // REQUEST OWNERSHIP: trimming is a view of the SAME utterance, so the id
+                    // REQUEST ownership: trimming is a view of the SAME utterance, so the id
                     // travels — a duplicate callback joins the same request, not a new one.
                     utteranceId: input.utteranceId
                 )
             )
             let prompt = LfmPrompt.render(transcript: routingInput, history: history)
+
+
+            let modelID = "lfm-intent-router" + (loadedQuant.map { "-\($0)" } ?? "")
+            modelUsed(.init(id: modelID, version: release))
 
             let tokenizeStart = now()
             let promptTokenIds: [Int]

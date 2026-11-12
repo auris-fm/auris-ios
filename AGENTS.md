@@ -225,7 +225,7 @@ Applies to all Auris repos; canonical text lives in core's `CLAUDE.md`.
 
 ## PR review discipline
 
-Before any PR merges, **every review comment on it must be addressed** — either fixed in code or rejected with a written reason. Deferral to follow-up tickets is only for comments irrelevant to the PR's changes; anything relevant is handled or rejected-with-reason, never parked. No comment is skipped silently. Addressing comments is **continuous while the PR is open**: keep checking for new comments and handle each as it lands — not a single round. Applies to all Auris repos; canonical text lives in core's CLAUDE.md. The final merge decision is always the owner's (@merlinran).
+Before any PR merges, **every review comment on it must be addressed** — either fixed in code or rejected with a written reason. Deferral to follow-up tickets is only for comments irrelevant to the PR's changes; anything relevant is handled or rejected-with-reason, never parked. No comment is skipped silently. Addressing comments is **continuous while the PR is open**: keep checking for new comments and handle each as it lands — not a single round. Applies to all Auris repos; canonical text lives in core's CLAUDE.md. The final merge decision is always the owner's.
 
 ## Task workspace naming
 

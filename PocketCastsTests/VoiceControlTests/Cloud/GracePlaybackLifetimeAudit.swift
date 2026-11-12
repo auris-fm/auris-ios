@@ -6,14 +6,14 @@ import XCTest
 /// drives a REAL service turn whose answer carries actual audio, and pins the window's state at
 /// each stage of the REAL lifetime:
 ///
-///   1. at `done` (the sink's return — terminal-network, NOT playback end): the window is still
-///      ACTIVE with an UNCHANGED generation — a cloud turn never closes or reopens the window at
-///      dispatch completion;
-///   2. through the REAL drain: restoration of the held playback happens only when the actual
-///      `audioPlayerDidStop(drainEpoch:)` notification lands (observed via the playback sink's
-///      resume), not at `done` and not at queued-buffer completion;
-///   3. after the real drain/stop: the window is STILL active, STILL the same generation, and the
-///      model-call completion has restored the escalation allowance (claimable again).
+/// 1. at `done` (the sink's return — terminal-network, not playback end): the window is still
+/// ACTIVE with an UNCHANGED generation — a cloud turn never closes or reopens the window at
+/// dispatch completion;
+/// 2. through the REAL drain: restoration of the held playback happens only when the actual
+/// `audioPlayerDidStop(drainEpoch:)` notification lands (observed via the playback sink's
+/// resume), not at `done` and not at queued-buffer completion;
+/// 3. after the real drain/stop: the window is STILL active, STILL the same generation, and the
+/// model-call completion has restored the escalation allowance (claimable again).
 ///
 /// Explicit non-goals (kept open, reported): journal/bind discrimination, typed success-envelope
 /// replay, per-action refusal coverage, outcome propagation completeness.
@@ -92,7 +92,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         try await waitForListening(service)
         try await waitForRouter(service)
 
-        // HOLD THE REAL DRAIN: the player's runner parks in its drain path, so at `done` the
+        // HOLD the real drain: the player's runner parks in its drain path, so at `done` the
         // answer's audio is genuinely still pending/playback in flight. Releasing the hold lets
         // the production drain loop finish and send the REAL `audioPlayerDidStop(drainEpoch:)`.
         await MainActor.run {
@@ -115,7 +115,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         )
 
 
-        // STAGE 1 — at `done` (route returned; audio STILL draining): the held playback must NOT
+        // STAGE 1 — at `done` (route returned; audio STILL draining): the held playback must not
         // be restored yet (terminal-network is not playback end), and the window must be active
         // and unchanged. A turn that restores here resumes the episode UNDER the answer's tail.
         XCTAssertEqual(
@@ -190,7 +190,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
 
     /// CONTROLLED-CLOCK EXPIRY control (spec 4acb4aa8): with a SHORT grace clock, actual
     /// playback pending PAST the timeout must keep the window active and the generation unchanged;
-    /// releasing the REAL drain/stop starts the permitted interval EXACTLY ONCE (it then expires
+    /// releasing the REAL drain/stop starts the permitted interval EXACTLY once (it then expires
     /// normally). Identity-bound ownership: a stale end (wrong generation) must not resume
     /// anything, and after the window has expired a late hold-end must not reopen it.
     @MainActor
@@ -254,7 +254,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
             origin: generationAtWake
         )
 
-        // PAST THE TIMEOUT (2.4x), actual playback still pending: the window must be held.
+        // PAST the timeout (2.4x), actual playback still pending: the window must be held.
         try await Task.sleep(nanoseconds: 1_200_000_000)
         XCTAssertTrue(
             service.gracePeriodSignalForTesting.isActive,
@@ -297,7 +297,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         )
         XCTAssertEqual(transitions, 1, "exactly one expiry: no double-start, no re-arm")
 
-        // STALE EVENTS cannot reopen or extend: a late hold-end for the finished generation, and
+        // STALE events cannot reopen or extend: a late hold-end for the finished generation, and
         // an end for a never-held generation, must leave the expired window dead.
         // Token-identity discipline: an end for a token this window never issued — foreign
         // generation or forged against the finished one — is dropped without reopening.
@@ -314,7 +314,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         )
     }
 
-    /// BLOCKER CONTROL 1 — CLOUD-WORK interval: the hold is acquired at the ADMITTED DISPATCH,
+    /// BLOCKER control 1 — CLOUD-WORK interval: the hold is acquired at the ADMITTED dispatch,
     /// before done. A slow cloud turn (gated pre-bind) must not let the window expire.
     @MainActor
     func testSlowCloudWorkBeforeDoneHoldsExpiryFromTheAdmittedDispatch() async throws {
@@ -344,7 +344,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
                     fixture: "event: done\ndata: {\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}\n\n",
                     audioPayloads: audio
                 )
-                // SLOW CLOUD WORK: the transport parks before the bind — no done for a while.
+                // SLOW cloud work: the transport parks before the bind — no done for a while.
                 stub.client.onBeforeBind = { _ in _ = gate.wait(timeout: .now() + 5) }
                 return stub.client
             },
@@ -397,7 +397,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         XCTAssertEqual(transitions, 1, "exactly one expiry — hold started once, released once")
     }
 
-    /// BLOCKER CONTROL 2 — SHARED timer path: with a live same-generation hold, NO caller
+    /// BLOCKER control 2 — SHARED timer path: with a live same-generation hold, NO caller
     /// (command recognition, fallback extension, wake reset) arms the clock under the hold, while
     /// every caller still preserves its allowance/state. Expiry resumes once at the release.
     @MainActor
@@ -525,7 +525,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
             "a hold alone is not a context: with no independent playback context, foreground loss ends the window"
         )
         XCTAssertNotEqual(retiredGeneration, liveGeneration - 1, "sanity: the generation advanced exactly once")
-        gate.signal()  // turn completes + drain releases AFTER the close
+        gate.signal()  // turn completes + drain releases after the close
         try await Task.sleep(nanoseconds: 600_000_000)
         await MainActor.run {
             service.executorForTesting.cloudRouteSinkForTesting
@@ -541,7 +541,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         XCTAssertEqual(playback.resumeCalls, 1, "the drain still restored exactly once")
     }
 
-    /// BLOCKER CONTROL 4 — SUCCESSOR LIVE, stale predecessor completion: a predecessor's late
+    /// BLOCKER control 4 — SUCCESSOR live, stale predecessor completion: a predecessor's late
     /// terminal must not disturb (resume/extend/expire) the SUCCESSOR's live window.
     @MainActor
     func testStalePredecessorCompletionWhileTheSuccessorIsLiveLeavesTheSuccessorAlone() async throws {
@@ -640,7 +640,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
 
     /// REVIEW 7fc40b74 DEFECT 2 — CURRENT-generation release counting: an OLD generation's
     /// outstanding hold must neither delay the successor's resume nor let its later end disturb
-    /// the successor. B's final release resumes B's clock BEFORE old A's end; A's end is a no-op.
+    /// the successor. B's final release resumes B's clock before old A's end; A's end is a no-op.
     @MainActor
     func testSuccessorReleaseResumesItsClockDespiteAnOutstandingOlderHold() async throws {
         let signal = GracePeriodSignal(timeout: 0.5)
@@ -768,14 +768,14 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
             if await MainActor.run(body: { playback.resumeCalls }) == 1 { released = true; break }
             try await Task.sleep(nanoseconds: 50_000_000)
         }
-        // The truncation released the hold exactly once, AFTER the confirmed stop.
+        // The truncation released the hold exactly once, after the confirmed stop.
         XCTAssertTrue(released, "the hold released exactly once at the truncation, after the stop")
         XCTAssertEqual(playback.resumeCalls, 1, "the hold released exactly once at the truncation")
         let pending = await MainActor.run {
             service.executorForTesting.cloudRouteSinkForTesting.audioPlayerForTesting?.hasPendingAudio ?? false
         }
         // DIRECT stop evidence: only cancel()/finish() advance the player's drain epoch. No
-        // `done` arrived, so a bumped epoch proves THIS turn's owned output was stopped BEFORE
+        // `done` arrived, so a bumped epoch proves THIS turn's owned output was stopped before
         // the host playback was released (cancel precedes restoreTransientAudioState).
         let epochAfter = await MainActor.run {
             service.executorForTesting.cloudRouteSinkForTesting.audioPlayerForTesting?.currentDrainEpoch ?? 0

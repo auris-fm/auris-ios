@@ -13,7 +13,23 @@ public extension ApiServerHandler {
     internal func decodePasswordLogin(data: Data?, response: URLResponse?) throws -> AuthenticationResponse {
         guard let data, let response = response as? HTTPURLResponse else { throw APIError.UNKNOWN }
         guard response.statusCode == ServerConstants.HttpConstants.ok else {
-            throw ApiServerHandler.extractErrorResponse(data: data, response: response, error: nil) ?? .UNKNOWN
+            // Diagnostic (scope 2026-11-03): surface the REAL rejection identity for a
+            // failed sign-in. The error envelope carries no credentials; a classified
+            // id is already shown to the user, so only the UNCLASSIFIED body needs the log.
+            if let extracted = ApiServerHandler.extractErrorResponse(data: data, response: response, error: nil) as APIError?,
+               extracted != APIError.UNKNOWN {
+                throw extracted
+            }
+            // Log ONLY the status and the bounded errorMessageId — never the raw
+            // body (it may echo the account email) and never credentials.
+            var errorId = "<none>"
+            if let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                if let id = (object["errorMessageId"] ?? object["error"]) as? String {
+                    errorId = String(id.prefix(100))
+                }
+            }
+            FileLog.shared.addMessage("login rejected: status \(response.statusCode), errorMessageId: \(errorId)")
+            throw APIError.UNKNOWN
         }
         return AuthenticationResponse(from: try JSONDecoder().decode(PocketCastsLoginResponse.self, from: data))
     }
