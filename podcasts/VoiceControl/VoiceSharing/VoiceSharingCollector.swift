@@ -784,18 +784,18 @@ return }
         // WITHDRAWAL disposal. Every retained byte dies here, synchronously:
         // * queued events (each holds a full audio copy) — purged;
         // * the open partial — terminal, ring-remembered for identity only, audio emptied;
-        // * terminal-ring history — audio emptied (no retained speech survives a withdrawal);
+        // * the terminal ring — emptied outright, so every waiting entry dies with it (no
+        //   retained speech survives a withdrawal, and no dead entry blocks later recordings);
         // * the cancellation record itself is CONTENT-FREE: it states that consent ended (identity,
         // counts, truncation metadata) and carries NO audio. GATE-control events still bypass the
         // live dequeue check — their whole point is to report the loss — but they cannot carry old
         // speech, so the bypass cannot deliver withdrawn audio.
         pending.removeAll()
-        disposeRingAudio()
-        // The ring is EMPTIED, not merely marked: entries that survived as noContribution
-        // would stay forever now that no shedder exists, and after re-sign-in every new
-        // recording would be dropped as "ring full of waiting records". A removed entry makes
-        // a late callback miss by capture ID and be dropped — the same refusal a consumed
-        // entry produced (bot finding on core#157).
+        // The ring is EMPTIED outright: with the shedder gone, entries left in place would
+        // stay forever and after re-sign-in every new recording would be dropped as
+        // "ring full of waiting records". A removed entry makes a late callback miss by
+        // capture ID and be dropped (bot finding on core#157) — and disposal of their audio
+        // falls out of the removal.
         for key in terminalRing.keys { cancelOutcomeDeadlineLocked(key) }
         terminalRing.removeAll()
         var cancelEvent: SegmentEvent?
@@ -911,18 +911,6 @@ return }
         }
     }
 
-    /// Disposes all retained audio in the ring (withdrawal path). Identity bookkeeping stays; bytes go.
-    private func disposeRingAudio() {
-        for deadline in outcomeDeadlines.values { deadline.work.cancel() }
-        outcomeDeadlines.removeAll()
-        for key in terminalRing.keys {
-            guard var rec = terminalRing[key] else { continue }
-            var disposed = rec.capture
-            disposed.retained.removeAll()
-            rec.capture = disposed
-            terminalRing[key] = rec
-        }
-    }
 
     /// Whether a capture id is still owned by this collector.
     func owns(_ captureID: UUID) -> Bool {
@@ -1173,8 +1161,6 @@ return }
 
     // MARK: - Test seams (production callers never use these)
 
-    /// Number of events currently queued in the FIFO.
-    private(set) var pendingCount = 0
     /// Captures a FULL ring of waiting records refused (dropped, counted, logged — never
     /// force-emitted without their facts; core#157).
     private(set) var ringDropCount = 0
@@ -1191,6 +1177,7 @@ return }
         return ringDropCount
     }
 
+    /// Number of events currently queued in the FIFO.
     var pendingCountForTesting: Int {
         lock.lock(); defer { lock.unlock() }
         return pending.count
