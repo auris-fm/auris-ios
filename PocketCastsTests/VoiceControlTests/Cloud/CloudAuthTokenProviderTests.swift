@@ -35,6 +35,38 @@ final class CloudAuthTokenProviderTests: XCTestCase {
         XCTAssertNil(requests.first?.body["device"], "the sign-in body must not carry the dead device block")
     }
 
+    /// Sign-in and refresh are Auris requests too: the access log attributes them to a platform via
+    /// the User-Agent header, so the token exchange and the refresh must both carry the app's
+    /// private user agent, exactly like the account and upload requests.
+    func test_tokenAndRefreshRequests_carryTheAppUserAgent() async {
+        stubTokenResponse(accessToken: "access-1", refreshToken: "refresh-1", expiresIn: 900)
+        var requests: [(path: String, ua: String?)] = []
+        CloudRouteTestURLProtocol.onRequest = { request, _ in
+            requests.append((request.url?.path ?? "", request.value(forHTTPHeaderField: "User-Agent")))
+        }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        let provider = CloudAuthTokenProvider(
+            authBaseURLProvider: { "https://auth.test" },
+            credentialProvider: { "cred" },
+            identityProvider: { "acct-A" },
+            session: URLSession(configuration: config),
+            now: { self.now },
+            userAgentProvider: { "Pocket Casts/iOS/9.9-test" }
+        )
+        _ = await provider.token()
+
+        now += 16 * 60
+        stubTokenResponse(accessToken: "access-2", refreshToken: "refresh-2", expiresIn: 900)
+        _ = await provider.token()
+
+        let token = requests.first { $0.path == "/api/v1/auth/token" }
+        let refresh = requests.first { $0.path == "/api/v1/auth/refresh" }
+        XCTAssertEqual(token?.ua, "Pocket Casts/iOS/9.9-test", "sign-in carries the app user agent")
+        XCTAssertEqual(refresh?.ua, "Pocket Casts/iOS/9.9-test", "refresh carries the app user agent")
+    }
+
     func testCachedTokenIsReusedWithoutNetwork() async {
         stubTokenResponse(accessToken: "access-1", refreshToken: "refresh-1", expiresIn: 900)
         let provider = makeProvider(credential: "cred")

@@ -81,6 +81,9 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
     /// credential — see `Tokens.sourceIdentity`.
     private let identityProvider: () -> String?
     private let session: URLSession
+    /// The server's access log attributes each call to a platform via the User-Agent header; the
+    /// production default is the app's standard private user agent, matching every other Auris request.
+    private let userAgentProvider: () -> String
     private let now: () -> Date
 
     private let lock = NSLock()
@@ -95,11 +98,13 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
         credentialProvider: @escaping () -> String?,
         identityProvider: @escaping () -> String? = { ServerSettings.userId },
         session: URLSession? = nil,
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        userAgentProvider: @escaping () -> String = { ServerConfig.shared.syncDelegate?.privateUserAgent() ?? "" }
     ) {
         self.authBaseURLProvider = authBaseURLProvider
         self.credentialProvider = credentialProvider
         self.identityProvider = identityProvider
+        self.userAgentProvider = userAgentProvider
         self.now = now
         if let session {
             self.session = session
@@ -354,6 +359,8 @@ final class CloudAuthTokenProvider: CloudTokenProviding {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let userAgent = userAgentProvider()
+        if !userAgent.isEmpty { request.setValue(userAgent, forHTTPHeaderField: "User-Agent") }
         request.timeoutInterval = Self.requestTimeoutSeconds
         guard let encoded = try? JSONSerialization.data(withJSONObject: body) else {
             // Local failure: no request was sent.
