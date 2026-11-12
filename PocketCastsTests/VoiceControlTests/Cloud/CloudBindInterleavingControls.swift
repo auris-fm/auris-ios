@@ -37,7 +37,7 @@ final class CloudBindInterleavingControls: XCTestCase {
     private func makeClient(task: StubWebSocketTask) -> CloudRouteClient {
         CloudRouteClient(
             baseURL: "https://cloud.test",
-            
+
             requestTimeoutSeconds: 15,
             tokenProvider: StubTokenProvider(token: "test_token"),
             webSocketTaskFactory: { _ in task }
@@ -50,7 +50,7 @@ final class CloudBindInterleavingControls: XCTestCase {
         let box = TaskBox(tasks)
         return CloudRouteClient(
             baseURL: "https://cloud.test",
-            
+
             requestTimeoutSeconds: 15,
             tokenProvider: StubTokenProvider(token: "test_token"),
             webSocketTaskFactory: { _ in box.next() }
@@ -384,7 +384,7 @@ final class CloudBindInterleavingControls: XCTestCase {
     private func makeClient(box: TaskBox) -> CloudRouteClient {
         CloudRouteClient(
             baseURL: "https://cloud.test",
-            
+
             requestTimeoutSeconds: 15,
             tokenProvider: StubTokenProvider(token: "test_token"),
             webSocketTaskFactory: { _ in box.next() }

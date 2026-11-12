@@ -81,7 +81,7 @@ final class CloudPrefetchClientTests: XCTestCase {
         config.protocolClasses = [CloudRouteTestURLProtocol.self]
         let client = CloudPrefetchClient(
             baseURL: "https://cloud.test",
-            
+
             session: URLSession(configuration: config),
             tokenProvider: provider
         )
@@ -173,7 +173,7 @@ final class CloudPrefetchClientTests: XCTestCase {
         config.protocolClasses = [CloudRouteTestURLProtocol.self]
         return CloudPrefetchClient(
             baseURL: "https://cloud.test",
-            
+
             session: URLSession(configuration: config)
         )
     }
@@ -270,7 +270,7 @@ final class CloudTokenProvidingTests: XCTestCase {
         let task = StubWebSocketTask(textFrames: [#"{"type":"done","usage":{"input_tokens":1,"output_tokens":0}}"#])
         let client = CloudRouteClient(
             baseURL: "https://cloud.test",
-            
+
             requestTimeoutSeconds: 15,
             tokenProvider: FixedTokenProvider(value: "token_from_issuer"),
             webSocketTaskFactory: { _ in task }

@@ -482,7 +482,7 @@ final class CloudRouteWebSocketPathTests: XCTestCase {
     private func client(task: StubWebSocketTask, token: String?) -> CloudRouteClient {
         CloudRouteClient(
             baseURL: "https://cloud.test",
-            
+
             requestTimeoutSeconds: 15,
             tokenProvider: StubTokenProvider(token: token),
             webSocketTaskFactory: { _ in task }

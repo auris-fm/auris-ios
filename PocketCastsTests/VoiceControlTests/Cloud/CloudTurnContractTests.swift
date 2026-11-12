@@ -211,7 +211,7 @@ final class CloudTurnContractTests: XCTestCase {
         let task = StubWebSocketTask(textFrames: [#"{"type":"done","usage":{"input_tokens":1,"output_tokens":0}}"#])
         let client = CloudRouteClient(
             baseURL: "https://cloud.test",
-            
+
             requestTimeoutSeconds: 15,
             tokenProvider: StubTokenProvider(token: token),
             webSocketTaskFactory: { _ in task }

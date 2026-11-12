@@ -55,7 +55,6 @@ enum OperationOutcome: String, Equatable, CaseIterable {
             return false
         }
     }
-
 }
 
 /// A recorded result: the outcome and, for every non-success, the machine-readable reason
