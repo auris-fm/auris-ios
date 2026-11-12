@@ -149,8 +149,6 @@ struct VoiceControlSettingsView: View {
         case .noContext: return "noContext"
         case .noMicrophone: return "noMicrophone"
         case .exposedMicrophone: return "exposedMicrophone"
-        case .onCall: return "onCall"
-        case .modelsNotReady: return "modelsNotReady"
         }
     }
 

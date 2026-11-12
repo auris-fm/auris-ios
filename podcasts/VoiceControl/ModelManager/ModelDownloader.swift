@@ -6,7 +6,7 @@ import CryptoKit
 /// pinned**, and an atomic `.tmp` → final rename.
 ///
 /// SHA-256 is only enforced when `sha256` is non-empty. Several assets (notably the
-/// hf-mirror.com SenseVoice/Canary/Whisper models) do not yet carry a pinned hash, so those
+/// hf-mirror.com SenseVoice/Canary models) do not yet carry a pinned hash, so those
 /// downloads still get resumable + atomic semantics but no integrity check. **TODO(ASR-debt):
 /// pin the SHA-256 for every remote model asset so integrity is enforced on all downloads.**
 final class ModelDownloader {

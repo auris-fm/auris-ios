@@ -118,7 +118,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         {
             CloudRouteClient(
                 baseURL: CloudConfig.shared.baseUrl,
-                userId: CloudIdentity.shared.userId,
                 tokenProvider: CloudTokenProviderRouter.provider()
             )
         }
@@ -192,9 +191,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// Typed-only route hint for the current turn. Free-text turns pass nil and
     /// keep today's interpretation path.
     private let routeHintProvider: () -> CloudRouteHint?
-    /// Bounded prior conversation for the turn (≤4 turns / ≤8 KiB enforced by
-    /// `RecentConversation.bounded`).
-    private let recentConversationProvider: () -> [RecentConversationTurn]
+    /// Bounded prior conversation for the turn (≤4 turns / ≤8 KiB enforced by bounded).
     /// Renders negotiated discovery results. Present only when the UI can show
     /// result/empty/unavailable states — the same condition that justifies
     /// advertising `search_results_v1`.
@@ -406,7 +403,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         analytics: VoiceAnalytics? = nil,
         rendersStructuredResults: Bool = false,
         routeHintProvider: @escaping () -> CloudRouteHint? = { nil },
-        recentConversationProvider: @escaping () -> [RecentConversationTurn] = { [] },
         resultsPresenter: DiscoveryResultsPresenting? = nil,
         spokenTemplates: SpokenTemplateResolver = SpokenTemplateResolver(),
         operationResultConsumer: CloudOperationResultConsuming? = nil,
@@ -453,7 +449,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         self.analytics = analytics
         self.rendersStructuredResults = rendersStructuredResults
         self.routeHintProvider = routeHintProvider
-        self.recentConversationProvider = recentConversationProvider
         self.resultsPresenter = resultsPresenter
         self.operationResultConsumer = operationResultConsumer
         self.operationJournal = operationJournal
@@ -1080,7 +1075,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         let turn = CloudTurnEnvelope.make(
             capabilities: CloudClientCapabilities.advertised(rendersStructuredResults: rendersStructuredResults),
             routeHint: routeHintProvider(),
-            recentConversation: recentConversationProvider(),
             conversation: conversation
         )
         // This turn's wire identity, used by the interruption state to bind an acknowledgement or a

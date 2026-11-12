@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds CPU-only llama.cpp static libraries for iOS (simulator and device),
 # then packs llama + ggml + LFM into one archive that exports only the lfm_* C API.
-# That keeps whisper.spm's ggml symbols from colliding at link time.
+# The archive exports only the lfm_* C API, so nothing else in the app can
+# collide with its ggml symbols.
 # Pin must match Android modules/services/voice/src/main/cpp/CMakeLists.txt.
 set -euo pipefail
 
@@ -48,7 +49,7 @@ build_slice() {
   else
     echo "[llama-ios] configuring ${name} (${arch})"
     # -fno-common turns ggml lookup tables into regular locals after ld -r export filtering,
-    # avoiding coalesced commons with whisper.spm's older ggml.
+    # keeping the exported lfm_* surface clean.
     cmake -S "${SRC_DIR}" -B "${build_dir}" \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_SYSTEM_NAME=iOS \
@@ -145,7 +146,7 @@ build_lfm_runtime() {
   done
   if ((${#commons[@]} > 0)); then
     echo "[llama-ios] error: still-global commons after -fno-common merge: ${commons[*]}" >&2
-    echo "[llama-ios] these collide with whisper.spm's ggml; rebuild failed closed." >&2
+    echo "[llama-ios] these collide with app ggml symbols; rebuild failed closed." >&2
     exit 1
   fi
 

@@ -17,8 +17,3 @@ enum DialogControlAction {
     case cancel
     case newCommand(value: String)
 }
-
-struct PendingConfirmation {
-    let tool: String
-    let action: String
-}

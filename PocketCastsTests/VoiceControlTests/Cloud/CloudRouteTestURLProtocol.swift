@@ -187,7 +187,6 @@ func testTurnEnvelope(
     CloudTurnEnvelope.make(
         capabilities: [],
         routeHint: nil,
-        recentConversation: [],
         conversation: CloudPreparedConversation(
             requestId: requestId,
             conversationId: conversationId,
@@ -238,7 +237,6 @@ extension CloudRouteClient {
     /// against; only the transport under it changed.
     static func stubbed(
         baseURL: String = "https://cloud.test",
-        userId: String = "user_test",
         token: String? = "test_token",
         fixture: String,
         /// OPT-IN binary audio. The transport delivers audio as `.data` frames
@@ -262,7 +260,6 @@ extension CloudRouteClient {
         prepareTask(task)
         let client = CloudRouteClient(
             baseURL: baseURL,
-            userId: userId,
             requestTimeoutSeconds: 15,
             tokenProvider: StubTokenProvider(token: token),
             webSocketTaskFactory: { _ in task }

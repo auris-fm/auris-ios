@@ -35,16 +35,6 @@ final class AsrBackendSelectorTests: XCTestCase {
         }
     }
 
-    func test_select_doesNotProductRouteToWhisper() {
-        let selector = AsrBackendSelector()
-        for localeCode in ["en_US", "zh_CN", "de", "ar", "ru"] {
-            let backend = selector.select(locale: Locale(identifier: localeCode))
-            if let backend {
-                XCTAssertFalse(backend is WhisperCppBackend, "Locale \(localeCode) must not select Whisper")
-            }
-        }
-    }
-
     func test_select_noLanguageCode_returnsNil() {
         let selector = AsrBackendSelector()
         // Empty identifier has no language code — must not default to "en"/SenseVoice.

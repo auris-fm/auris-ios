@@ -37,7 +37,7 @@ final class CloudBindInterleavingControls: XCTestCase {
     private func makeClient(task: StubWebSocketTask) -> CloudRouteClient {
         CloudRouteClient(
             baseURL: "https://cloud.test",
-            userId: "user_test",
+            
             requestTimeoutSeconds: 15,
             tokenProvider: StubTokenProvider(token: "test_token"),
             webSocketTaskFactory: { _ in task }
@@ -50,7 +50,7 @@ final class CloudBindInterleavingControls: XCTestCase {
         let box = TaskBox(tasks)
         return CloudRouteClient(
             baseURL: "https://cloud.test",
-            userId: "user_test",
+            
             requestTimeoutSeconds: 15,
             tokenProvider: StubTokenProvider(token: "test_token"),
             webSocketTaskFactory: { _ in box.next() }
@@ -78,7 +78,7 @@ final class CloudBindInterleavingControls: XCTestCase {
         let task = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: fixture()))
         let client = makeClient(task: task)
         let turn = CloudTurnEnvelope.make(
-            capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation())
+            capabilities: [], routeHint: nil, conversation: testPreparedConversation())
         let routed = client.routeWithResultSocket(
             request: "x", context: CloudRouteContext(from: sampleContext()), turn: turn
         )
@@ -131,7 +131,7 @@ final class CloudBindInterleavingControls: XCTestCase {
         let task = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: fixture()))
         let client = makeClient(task: task)
         let turn = CloudTurnEnvelope.make(
-            capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation())
+            capabilities: [], routeHint: nil, conversation: testPreparedConversation())
 
         let closeRequested = Promise<Void>()
         let seamOpened = Promise<Void>()
@@ -190,7 +190,7 @@ final class CloudBindInterleavingControls: XCTestCase {
         let task = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: fixture()))
         let client = makeClient(task: task)
         let turn = CloudTurnEnvelope.make(
-            capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation())
+            capabilities: [], routeHint: nil, conversation: testPreparedConversation())
         let routed = client.routeWithResultSocket(
             request: "x", context: CloudRouteContext(from: sampleContext()), turn: turn
         )
@@ -238,7 +238,7 @@ final class CloudBindInterleavingControls: XCTestCase {
         let taskB = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: fixture()))
         let client = makeClient(tasks: [taskA, taskB])
         let turn = CloudTurnEnvelope.make(
-            capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation())
+            capabilities: [], routeHint: nil, conversation: testPreparedConversation())
         let a = client.routeWithResultSocket(
             request: "x", context: CloudRouteContext(from: sampleContext()), turn: turn
         )
@@ -305,7 +305,7 @@ final class CloudBindInterleavingControls: XCTestCase {
         let box = TaskBox([taskA, taskB])
         let client = makeClient(box: box)
         let turn = CloudTurnEnvelope.make(
-            capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation())
+            capabilities: [], routeHint: nil, conversation: testPreparedConversation())
 
         // Predecessor: route and wait until its bind is published.
         let a = client.routeWithResultSocket(
@@ -384,7 +384,7 @@ final class CloudBindInterleavingControls: XCTestCase {
     private func makeClient(box: TaskBox) -> CloudRouteClient {
         CloudRouteClient(
             baseURL: "https://cloud.test",
-            userId: "user_test",
+            
             requestTimeoutSeconds: 15,
             tokenProvider: StubTokenProvider(token: "test_token"),
             webSocketTaskFactory: { _ in box.next() }

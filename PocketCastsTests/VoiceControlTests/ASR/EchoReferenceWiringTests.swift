@@ -3184,7 +3184,7 @@ private final class CountingAsrBackend: AsrBackend {
         ModelSpec(id: "test", files: [], targetDir: "/tmp/test")
     }
     var capabilities: AsrCapabilities {
-        AsrCapabilities(languages: ["en"], canTranslateToEnglish: false, requiresHardwareAccel: false)
+        AsrCapabilities(canTranslateToEnglish: false)
     }
     func ensureReady() async -> Result<Void, Error> { .success(()) }
     func release() {}

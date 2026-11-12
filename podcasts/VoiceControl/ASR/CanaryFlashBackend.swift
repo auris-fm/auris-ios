@@ -16,9 +16,7 @@ final class CanaryFlashBackend: AsrBackend {
     private let transcribeQueue = DispatchQueue(label: "com.auris.canary", qos: .userInitiated)
 
     let capabilities = AsrCapabilities(
-        languages: ["en", "de", "es", "fr"],
-        canTranslateToEnglish: true,
-        requiresHardwareAccel: false
+        canTranslateToEnglish: true
     )
 
     var requiredModel: ModelSpec {

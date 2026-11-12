@@ -7,6 +7,19 @@ import XCTest
 /// `arch/ios.md` requires an inspectable fault state. A flag private to the segmenter satisfies
 /// neither: nothing outside it can see the interruption, so the user gets silence with no reason.
 final class SegmentationFaultSurfacingControl: XCTestCase {
+    /// Offline backend stand-in: no on-device model is available to a unit test, and the
+    /// Whisper fixture this control used to use is gone with the unselected backend
+    /// (monthly review core#157).
+    private final class StubAsrBackendForControl: AsrBackend {
+        let capabilities = AsrCapabilities(canTranslateToEnglish: false)
+        var requiredModel: ModelSpec { ModelSpec(id: "stub", files: [], targetDir: "stub") }
+        func ensureReady() async -> Result<Void, Error> { .success(()) }
+        func transcribe(samples: [Float], sampleRateHz: Int) async -> AsrResult {
+            AsrResult(text: "", detectedLanguage: nil, tokens: nil)
+        }
+        func release() {}
+    }
+
     private final class SilentDetector: WakeWordDetectorProtocol {
         func detect(samples: [Float], sampleRate: Int) -> WakeWordResult {
             .notDetected(confidence: 0)
@@ -34,7 +47,7 @@ final class SegmentationFaultSurfacingControl: XCTestCase {
         VoiceAsrEngine(
             capture: capture ?? NativeAudioCapture(),
             segmenter: segmenter,
-            backend: WhisperCppBackend(modelPath: "/tmp/test"),
+            backend: StubAsrBackendForControl(),
             signalFilter: SignalFilter(),
             wakeWordDetector: SilentDetector(),
             gracePeriodSignal: GracePeriodSignal()
@@ -505,7 +518,7 @@ final class SegmentationFaultSurfacingControl: XCTestCase {
         let engine = VoiceAsrEngine(
             capture: capture,
             segmenter: segmenter,
-            backend: WhisperCppBackend(modelPath: "/tmp/test"),
+            backend: StubAsrBackendForControl(),
             signalFilter: SignalFilter(),
             wakeWordDetector: SilentDetector(),
             gracePeriodSignal: GracePeriodSignal()

@@ -147,7 +147,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// Stops the engine as well as dropping the buffered frames: a buffer
     /// already handed to `scheduleBuffer` keeps playing otherwise, so the tail
     /// of an abandoned answer would play over the error feedback and
-    /// `isPlaying`/`paused` would stay true into the next turn (whose first
+    /// `isPlaying` would stay true into the next turn (whose first
     /// frames are then treated as an underrun). The runner thread owns the
     /// engine, so the stop is done in drain mode.
     /// Cancels output and returns the identity whose stop notification will follow the ACTUAL
@@ -624,7 +624,6 @@ final class CloudAudioPlayer: @unchecked Sendable {
                 runnerLock.unlock()
                 stopEngine(reason: "shutdown", terminal: true)
                 isPlaying = false
-                paused = false
                 runnerLock.lock()
                 runnerExited = true
                 runnerLock.signal()
@@ -651,7 +650,6 @@ final class CloudAudioPlayer: @unchecked Sendable {
                 physicalStopGateWait()
                 stopEngine(reason: "cancel", terminal: true)
                 isPlaying = false
-                paused = false
                 notifyDidStop(epoch: scheduledEpoch)
                 settleSupersededRequests(displaced)
                 runnerLock.lock()
@@ -705,7 +703,6 @@ final class CloudAudioPlayer: @unchecked Sendable {
                 startEngine()
             }
             isPlaying = true
-            paused = false
             renderStopDeadline = nil
         } else if isPlaying && pendingAudibleOrUnverified {
             // Buffer drained below threshold, but scheduled audio may still be rendering (or the
@@ -714,7 +711,6 @@ final class CloudAudioPlayer: @unchecked Sendable {
             // drain check below owns the bounded catch-up stop.
         } else if isPlaying {
             // Buffer drained below threshold with nothing audible pending — pause.
-            paused = true
             isPlaying = false
             renderStopDeadline = nil
             stopEngine(reason: "underrun", terminal: false)
@@ -753,7 +749,6 @@ final class CloudAudioPlayer: @unchecked Sendable {
         if isBufferEmpty && !drainRemaining {
             // No engine: nothing can be pending.
             if playerNode == nil {
-                paused = true
                 isPlaying = false
                 if let delegate {
                     DispatchQueue.main.async {
@@ -773,7 +768,6 @@ final class CloudAudioPlayer: @unchecked Sendable {
             )
             if let position = renderPosition(of: playerNode!)?.renderedFrames,
                position >= scheduled {
-                paused = true
                 isPlaying = false
                 renderStopDeadline = nil
                 stopEngine(reason: "render_caught_up", terminal: false)
@@ -783,7 +777,6 @@ final class CloudAudioPlayer: @unchecked Sendable {
                     }
                 }
             } else if Date() >= deadline {
-                paused = true
                 isPlaying = false
                 renderStopDeadline = nil
                 stopEngine(reason: "render_timeout", terminal: false)
@@ -856,7 +849,6 @@ final class CloudAudioPlayer: @unchecked Sendable {
     var hasOutstandingOutput: Bool {
         hasPendingAudio || isPlaying || hasQueuedStop
     }
-    private var paused = false
 
     private var hasEnoughFramesToPlay: Bool {
         bufferedFrameCount >= Self.resumeThreshold
@@ -1413,7 +1405,6 @@ final class CloudAudioPlayer: @unchecked Sendable {
         physicalStopGateWait()
         stopEngine(reason: stoppedEpoch == claimedEpoch ? "finish" : "cancel_during_finish", terminal: true)
         isPlaying = false
-        paused = false
         notifyDidStop(epoch: stoppedEpoch)
         settleSupersededRequests(displaced)
     }

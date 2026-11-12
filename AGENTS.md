@@ -13,7 +13,8 @@ rules, so nothing reaches review unlinted.
 ## Building and Running
 
 ```bash
-make build_staging        # trustworthy build (what verification before a PR should use)
+make build                # the Debug build against the staging gateway — what verification
+                          # before a PR should use (build_staging is an alias for it)
 make build_fast           # local iteration: no dSYM, no code signing, no lint, no package re-resolution
 ```
 
@@ -45,26 +46,26 @@ make clean
 ## Running Tests
 
 ```bash
-make test_staging
+make test
 ```
 
 ### Running a Single Test
 
 ```bash
-make test_staging ONLY_TESTING=PocketCastsTests/YourTestClass/testMethodName
+make test ONLY_TESTING=PocketCastsTests/YourTestClass/testMethodName
 ```
 
 ### Running Module Tests
 
 ```bash
 # DataModel module tests
-make test_staging ONLY_TESTING=PocketCastsDataModelTests
+make test ONLY_TESTING=PocketCastsDataModelTests
 
 # Server module tests
-make test_staging ONLY_TESTING=PocketCastsServerTests
+make test ONLY_TESTING=PocketCastsServerTests
 
 # Utils module tests
-make test_staging ONLY_TESTING=PocketCastsUtilsTests
+make test ONLY_TESTING=PocketCastsUtilsTests
 ```
 
 ## Build and test invocation discipline

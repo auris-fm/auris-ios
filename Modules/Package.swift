@@ -54,7 +54,6 @@ let package = Package(
         .package(url: "https://github.com/ksemianov/WrappingHStack", from: "0.2.0"),
         .package(url: "https://github.com/Automattic/pocket-casts-ios-fingerprint", branch: "trunk"),
         .package(url: "https://github.com/scinfu/SwiftSoup.git", from: "2.7.0"),
-        .package(url: "https://github.com/ggml-org/whisper.spm", branch: "master"),
     ],
     targets: XcodeSupport.targets + [
         .target(
@@ -224,7 +223,6 @@ enum XcodeSupport {
                     .product(name: "GoogleCast", package: "google-cast"),
                     .product(name: "WrappingHStack", package: "WrappingHStack"),
                     .product(name: "Fingerprint", package: "pocket-casts-ios-fingerprint"),
-                    .product(name: "whisper", package: "whisper.spm"),
                     "EndOfYear",
                 ]
             ),

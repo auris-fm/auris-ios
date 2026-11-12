@@ -118,18 +118,8 @@ class ModelManager: ObservableObject {
     }
 
     func ensureSelectedModels() async {
-        let whisperSpec = ModelSpec(
-            id: "whisper",
-            files: [
-                ModelFile(
-                    url: URL(string: "https://download.auris.fm/whisper/ggml-small-q5_1.bin")!,
-                    filename: "ggml-small-q5_1.bin",
-                    sha256: nil
-                ),
-            ],
-            targetDir: "whisper-model"
-        )
-        _ = await downloadModel(spec: whisperSpec)
+        // The whisper model download is gone with the unselected WhisperCppBackend (monthly
+        // review core#157); SenseVoice/Canary fetch their assets through ensureLfmModel.
         _ = await ensureLfmModel()
         isReady = isLfmModelReady()
     }

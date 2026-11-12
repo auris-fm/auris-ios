@@ -30,14 +30,6 @@ public struct AuthenticationResponse: Codable {
         isNewAccount = apiResponse.isNew ?? false
     }
 
-    internal init(from apiResponse: Api_UserLoginResponse) {
-        token = apiResponse.token.isEmpty ? nil : apiResponse.token
-        uuid = apiResponse.uuid.isEmpty ? nil : apiResponse.uuid
-        email = apiResponse.email.isEmpty ? nil : apiResponse.email
-        refreshToken = nil
-        isNewAccount = false
-    }
-
     internal init(from apiResponse: Api_TokenLoginResponse) {
         token = apiResponse.accessToken.isEmpty ? nil : apiResponse.accessToken
         uuid = apiResponse.uuid.isEmpty ? nil : apiResponse.uuid

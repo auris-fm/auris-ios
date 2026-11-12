@@ -1,6 +1,5 @@
 class VoiceDialogManager {
     private(set) var pendingDialog: PendingVoiceDialog?
-    private var pendingAction: PendingConfirmation?
 
     struct Result {
         let intent: (any VoiceIntent)?
@@ -69,21 +68,20 @@ class VoiceDialogManager {
         }
     }
 
+    /// The slot-dialog flow emits its intent the moment its last required slot is filled
+    /// (`fillSlot`), so there is no separate confirmation state for these to act on. Both are
+    /// explicit no-ops that emit nothing — the outcomes the contract requires (nil intent, no
+    /// submit).
     private func confirm() -> Result {
-        guard let action = pendingAction else { return Result(intent: nil, question: nil) }
-        pendingAction = nil
-        let intent = buildIntent(tool: action.tool, action: action.action, slots: [:])
-        return Result(intent: intent, question: nil)
+        Result(intent: nil, question: nil)
     }
 
     private func deny() -> Result {
-        pendingAction = nil
-        return Result(intent: nil, question: nil)
+        Result(intent: nil, question: nil)
     }
 
     private func cancel() -> Result {
         pendingDialog = nil
-        pendingAction = nil
         return Result(intent: nil, question: nil)
     }
 
@@ -91,11 +89,10 @@ class VoiceDialogManager {
         // A new_command CANCELS a dialog and re-processes its value. With NO pending dialog there
         // is nothing to cancel — and re-processing anyway would loop forever (each re-processed
         // transcript that classifies as new_command would schedule itself again).
-        guard pendingDialog != nil || pendingAction != nil else {
+        guard pendingDialog != nil else {
             return Result(intent: nil, question: nil)
         }
         pendingDialog = nil
-        pendingAction = nil
         // The caller re-processes this value as a fresh transcript — see `Result.reprocessValue`.
         return Result(intent: nil, question: nil, reprocessValue: value)
     }

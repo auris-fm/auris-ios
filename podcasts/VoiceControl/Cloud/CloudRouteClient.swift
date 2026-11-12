@@ -23,7 +23,6 @@ final class CloudRouteClient {
     static let defaultTimeoutSeconds: TimeInterval = 15
 
     private let baseURL: String
-    private let userId: String
     private let tokenProvider: CloudTokenProviding
     private let session: URLSession
     let requestTimeoutSeconds: TimeInterval
@@ -64,7 +63,6 @@ final class CloudRouteClient {
 
     init(
         baseURL: String,
-        userId: String,
         session: URLSession? = nil,
         requestTimeoutSeconds: TimeInterval = CloudRouteClient.defaultTimeoutSeconds,
         tokenProvider: CloudTokenProviding? = nil,
@@ -72,7 +70,6 @@ final class CloudRouteClient {
         playbackTimingFactory: @escaping (String) -> CloudPlaybackTiming? = CloudPlaybackTiming.make
     ) {
         self.baseURL = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        self.userId = userId
         // Seam (slice 5, design-only): the credential comes from one place so the
         // trusted-issuer swap (task #26) is a provider change. Default preserves
         // today's trust-on-first-use bearer exactly.

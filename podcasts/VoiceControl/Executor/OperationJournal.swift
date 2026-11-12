@@ -58,11 +58,11 @@ enum OperationOutcome: String, Equatable, CaseIterable {
 
     /// Whether recording this outcome must stop the operation from ever being executed again.
     ///
-    /// True for every case, `unknown` included — and `unknown` is the case that matters, since
-    /// it is the one that says the mutation *may have happened* and must therefore not be
-    /// repeated. This deliberately does not mean "the effect is known": `unknown` is recorded
-    /// and final for the journal while telling the server nothing about what occurred.
-    var preventsReExecution: Bool { true }
+    /// Every outcome prevents re-execution, `unknown` included — `unknown` is the case that
+    /// matters, since it is the one that says the mutation *may have happened* and must
+    /// therefore not be repeated. This deliberately does not mean "the effect is known":
+    /// `unknown` is recorded and final for the journal while telling the server nothing about
+    /// what occurred.
 }
 
 /// A recorded result: the outcome and, for every non-success, the machine-readable reason
