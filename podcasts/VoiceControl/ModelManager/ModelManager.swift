@@ -119,7 +119,8 @@ class ModelManager: ObservableObject {
 
     func ensureSelectedModels() async {
         // The whisper model download is gone with the unselected WhisperCppBackend (monthly
-        // review core#157); SenseVoice/Canary fetch their assets through ensureLfmModel.
+        // review core#157). The LFM bundle is fetched here; SenseVoice/Canary download their
+        // own models in their backends' ensureReady().
         _ = await ensureLfmModel()
         isReady = isLfmModelReady()
     }

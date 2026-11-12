@@ -102,3 +102,180 @@ final class AcceptanceConsumerTraversalTests: XCTestCase {
         XCTAssertFalse(a2.responseText.contains(nonce), "outgoing-only evidence was read as recall")
     }
 }
+/// Gates the reviewer asked to keep: an empty nonce, an empty B1 response and empty/absent ids must all
+/// be REJECTED, because each of them would make a check pass for the wrong reason.
+final class AcceptanceGateTests: XCTestCase {
+
+    private func step(_ id: String?, _ conv: String?, _ text: String, _ t: CloudAcceptanceRecord.Terminal? = .done) -> CloudAcceptanceConsumer.StepOutcome {
+        .init(requestId: id, conversationId: conv, responseText: text, terminal: t)
+    }
+
+    private func verdict(nonce: String, a1: CloudAcceptanceConsumer.StepOutcome, a2: CloudAcceptanceConsumer.StepOutcome, b1: CloudAcceptanceConsumer.StepOutcome) -> CloudAcceptanceConsumer.Verdict {
+        CloudAcceptanceConsumer(a1: a1, a2: a2, b1: b1, nonce: nonce).evaluate()
+    }
+
+    func testEmptyNonceIsRejected() {
+        let v = verdict(nonce: "",
+                        a1: step("r1", "A", "ok"), a2: step("r2", "A", "ok"), b1: step("r3", "B", "no"))
+        if case .pass = v { XCTFail("an empty nonce was accepted") }
+    }
+
+    func testEmptyB1ResponseIsNotIsolation() {
+        let v = verdict(nonce: "N",
+                        a1: step("r1", "A", "ok"), a2: step("r2", "A", "you said N"), b1: step("r3", "B", ""))
+        if case .pass = v { XCTFail("an empty B1 response was accepted as isolation") }
+    }
+
+    func testEmptyA2ResponseIsNotRecall() {
+        let v = verdict(nonce: "N",
+                        a1: step("r1", "A", "ok"), a2: step("r2", "A", ""), b1: step("r3", "B", "no"))
+        if case .pass = v { XCTFail("an empty A2 response was accepted as recall") }
+    }
+
+    func testAbsentOrReusedIdsAreRejected() {
+        let absent = verdict(nonce: "N",
+                             a1: step(nil, "A", "ok"), a2: step("r2", "A", "you said N"), b1: step("r3", "B", "no"))
+        if case .pass = absent { XCTFail("an absent request id was accepted") }
+
+        let reused = verdict(nonce: "N",
+                             a1: step("r1", "A", "ok"), a2: step("r1", "A", "you said N"), b1: step("r3", "B", "no"))
+        if case .pass = reused { XCTFail("a reused request id was accepted") }
+    }
+}
+
+/// THE WIRING: the assembly's acceptance entry uses the SAME client factory the sink is built with, so
+/// the harness submits through the app's client path rather than constructing its own.
+final class AcceptanceAssemblyWiringTests: XCTestCase {
+
+    private struct StaticToken: CloudTokenProviding {
+        func token() async -> String? { "t" }
+        func prepare() async {}
+        func handleUnauthorized(rejectedToken: String?) async {}
+    }
+
+    private final class CountingFactory {
+        var built = 0
+        func make() -> CloudRouteClient {
+            built += 1
+            return CloudRouteClient(baseURL: "https://api-staging.auris.fm", tokenProvider: StaticToken())
+        }
+    }
+
+    /// The wiring point is the SAME call that builds the sink's client: the factory is retained there,
+    /// so the acceptance entry cannot diverge from the sink's client.
+    ///
+    /// LIMITATION, stated rather than forced: `buildVoiceControlService` returns nil in this environment
+    /// (no wake-word models), so the full service build cannot be driven here. This exercises the wiring
+    /// point directly instead, and the entry itself is exercised in
+    /// `AcceptanceAssemblyWiringTests.testAcceptanceEntryBuildsThroughTheRetainedFactory`.
+    func testTheBuildPathRetainsTheFactoryForAcceptance() {
+        let counting = CountingFactory()
+        let assembly = VoiceControlAssembly()
+        let factory = assembly.acceptanceClientFactoryForBuild(counting.make)
+        _ = factory()
+        XCTAssertEqual(counting.built, 1, "the retained factory is not the one the build was given")
+    }
+
+    func testAcceptanceEntryBuildsThroughTheRetainedFactory() async {
+        let counting = CountingFactory()
+        let assembly = VoiceControlAssembly()
+        assembly.acceptanceClientFactoryForBuild(counting.make)
+
+        let before = counting.built
+        _ = await assembly.runAcceptance(nonce: "NONCE-1")
+        XCTAssertEqual(counting.built, before + 1, "the acceptance entry did not use the assembly's factory")
+    }
+}
+
+/// The STAGE discriminator: the export must say WHERE a terminal came from, because the code alone does
+/// not. A client construction failure and a served error can carry the SAME code string.
+final class AcceptanceStageDiscriminationTests: XCTestCase {
+
+    func testClientConstructionFailureIsStagedClientRequest() {
+        let r = CloudAcceptanceRecord.Recorder(requestId: "r1", conversationId: "c1")
+        r.observe(.error(source: .requestConstruction, code: "invalid_request", message: "request could not be built"))   // the client's own tag
+        XCTAssertEqual(r.record().terminal, .transportFailure(stage: .clientRequest, code: "invalid_request", message: nil))
+    }
+
+    func testServedErrorIsStagedServerEvent() {
+        let r = CloudAcceptanceRecord.Recorder(requestId: "r1", conversationId: "c1")
+        r.observe(.error(source: .server, code: "invalid_request", message: ""))                      // a served frame
+        XCTAssertEqual(r.record().terminal, .transportFailure(stage: .serverEvent, code: "invalid_request", message: ""))
+    }
+
+    /// THE POINT: the same code, two different stages, distinguishable after the fact.
+    func testSameCodeWithDifferentSourcesIsDistinguishable() {
+        let client = CloudAcceptanceRecord.Recorder(requestId: "r1", conversationId: "c1")
+        client.observe(.error(source: .requestConstruction, code: "invalid_request", message: "request could not be built"))
+        let server = CloudAcceptanceRecord.Recorder(requestId: "r1", conversationId: "c1")
+        server.observe(.error(source: .server, code: "invalid_request", message: ""))
+        XCTAssertNotEqual(client.record().terminal, server.record().terminal, "the stage did not discriminate")
+    }
+}
+
+/// The export must carry NO free-form server text — not in the reason field (bounded token), and not
+/// smuggled inside the serialized terminal, where `String(describing:)` would have embedded it.
+final class AcceptanceExportBoundingTests: XCTestCase {
+
+    func testSerializedTerminalCarriesNoServerText() {
+        let sentinel = "secret-server-prose-that-must-not-be-exported"
+        let terminal = CloudAcceptanceRecord.Terminal.transportFailure(
+            stage: .serverEvent, code: "invalid_request", message: sentinel
+        )
+        let serialized = CloudAcceptanceHarness.boundedTerminal(terminal)
+        XCTAssertFalse(
+            serialized.contains(sentinel),
+            "the serialized terminal embedded raw server text: \(serialized)"
+        )
+        XCTAssertEqual(serialized, "serverEvent:invalid_request", "the terminal must be stage:code only")
+    }
+
+    func testBoundedTerminalHandlesEveryCase() {
+        XCTAssertEqual(CloudAcceptanceHarness.boundedTerminal(nil), "none")
+        XCTAssertEqual(CloudAcceptanceHarness.boundedTerminal(.done), "done")
+        XCTAssertEqual(CloudAcceptanceHarness.boundedTerminal(.cancelled), "cancelled")
+        XCTAssertEqual(
+            CloudAcceptanceHarness.boundedTerminal(.transportFailure(stage: .clientRequest, code: "invalid_request", message: nil)),
+            "clientRequest:invalid_request"
+        )
+    }
+}
+
+/// The VERDICT text must be bounded too: it is exported, and interpolating the terminal would carry the
+/// raw server message out with it.
+final class AcceptanceVerdictBoundingTests: XCTestCase {
+
+    func testVerdictTextCarriesNoServerMessage() {
+        let sentinel = "secret-server-prose-in-verdict"
+        let step = CloudAcceptanceConsumer.StepOutcome(
+            requestId: "r1", conversationId: "c1", responseText: "",
+            terminal: .transportFailure(stage: .serverEvent, code: "invalid_request", message: sentinel)
+        )
+        let v = CloudAcceptanceConsumer(a1: step, a2: step, b1: step, nonce: "N")
+        guard case .fail(let why) = v.evaluate() else { return XCTFail("expected a failure verdict") }
+        XCTAssertFalse(why.contains(sentinel), "the verdict embedded raw server text: \(why)")
+        XCTAssertTrue(why.contains("serverEvent:invalid_request"), "the verdict must name stage and code")
+    }
+}
+
+/// TRANSPORT is distinct from REQUEST CONSTRUCTION. A connection that drops may have been admitted; a
+/// frame that was never built has provably not left. Conflating them would misreport which happened.
+final class AcceptanceOriginDistinctionTests: XCTestCase {
+
+    func testTransportAndConstructionStageDifferently() {
+        let transport = CloudAcceptanceRecord.Recorder(requestId: "r1", conversationId: "c1")
+        transport.observe(.error(source: .transport, code: "connection_lost", message: ""))
+        XCTAssertEqual(transport.record().terminal, .transportFailure(stage: .transport, code: "connection_lost", message: nil))
+
+        let construction = CloudAcceptanceRecord.Recorder(requestId: "r1", conversationId: "c1")
+        construction.observe(.error(source: .requestConstruction, code: "invalid_request", message: "request could not be built"))
+        XCTAssertEqual(construction.record().terminal, .transportFailure(stage: .clientRequest, code: "invalid_request", message: nil))
+
+        let server = CloudAcceptanceRecord.Recorder(requestId: "r1", conversationId: "c1")
+        server.observe(.error(source: .server, code: "invalid_request", message: ""))
+        XCTAssertEqual(server.record().terminal, .transportFailure(stage: .serverEvent, code: "invalid_request", message: ""))
+
+        let stages = [transport.record().terminal, construction.record().terminal, server.record().terminal]
+        XCTAssertEqual(Set(stages.map { String(describing: $0) }).count, 3, "the three origins did not stage distinctly")
+    }
+}
