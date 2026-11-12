@@ -849,25 +849,19 @@ return }
     private func rememberTerminal(_ c: FrozenCapture, noContribution: Bool = false) {
         terminalSequence &+= 1
         // QUEUE-FULL RULE (core#157, spec: "when the queue is full… the new recording is
-        // dropped and the drop is logged with a count"): only records WAITING for their
-        // outcome count toward the ring bound. Eviction sheds bookkeeping-only entries
-        // (already emitted, or never-contributing); it never force-emits a waiting record —
-        // a record emitted before its outcome uploads with every observation `unknown`, which
-        // is the fact-less upload this path used to produce (the `grace_na` R2 clips).
-        // Emitted entries left the ring at their emit site (only waiting records occupy the
-        // ring); what can linger anywhere is bookkeeping (emitted=nothing, noContribution), and
-        // ANY such entry is evictable — never a waiting record, and never decided by dictionary
-        // order.
-        while terminalRing.count >= 32,
-              let evictable = terminalRing.first(where: { $0.value.emitted || $0.value.noContribution }) {
-            cancelOutcomeDeadlineLocked(evictable.key)
-            terminalRing.removeValue(forKey: evictable.key)
-        }
-        if terminalRing.count >= 32, !noContribution {
+        // dropped and the drop is logged with a count"): the ring holds ONLY records waiting
+        // for their outcome. A never-contributing capture (a discarded partial) never enters
+        // it at all — it has nothing to wait for, so it is identity bookkeeping only; an
+        // emitted record left the ring at its emit site. Nothing but waiting records is ever
+        // in the ring, so `count >= 32` alone decides the drop, with no eviction loop at all.
+        // Force-emission is gone for good: a record emitted before its outcome uploads with
+        // every observation `unknown`, which is the fact-less upload the old pressure path
+        // used to produce (the `grace_na` R2 clips).
+        guard !noContribution else { return }
+        if terminalRing.count >= 32 {
             // Every slot is a waiting record and this contributing capture cannot wait: drop
             // the NEW capture, counted and logged. Prefer dropping a recording over machinery
-            // that would save it fact-less. (A never-contributing capture is bookkeeping only,
-            // not audio worth saving: it is admitted regardless and sheds on the next insert.)
+            // that would save it fact-less.
             ringDropCount += 1
             FileLog.shared.addMessage(
                 "[VoiceSharing] capture dropped: ring full of waiting records "
@@ -875,7 +869,7 @@ return }
             return
         }
         terminalRing[c.id] = TerminalRecord(
-            capture: c, emitted: false, noContribution: noContribution,
+            capture: c, emitted: false, noContribution: false,
             deferredOrder: terminalSequence)
     }
 
