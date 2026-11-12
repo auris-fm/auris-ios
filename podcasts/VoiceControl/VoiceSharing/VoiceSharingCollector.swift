@@ -490,7 +490,7 @@ final class VoiceSharingCollector {
         if var capture = current, capture.id == context.id, !capture.terminal {
             record(&capture)
             current = capture
-        } else if var entry = terminalRing[context.id], !entry.noContribution {
+        } else if var entry = terminalRing[context.id] {
             record(&entry.capture)
             terminalRing[context.id] = entry
         }
@@ -564,7 +564,7 @@ final class VoiceSharingCollector {
             current = c
             return
         }
-        if var rec = terminalRing[context.id], !rec.noContribution {
+        if var rec = terminalRing[context.id] {
             rec.capture.reportedStages[stage] = merged(rec.capture.reportedStages[stage], stage: stage)
             terminalRing[context.id] = rec
         }
@@ -575,7 +575,7 @@ final class VoiceSharingCollector {
     func speechCompleted(_ samples: [Float], context: CaptureContext?, deferEmission: Bool = false) {
         if let context, deferEmission {
             lock.lock()
-            if var rec = terminalRing[context.id], !rec.noContribution {
+            if var rec = terminalRing[context.id] {
                 rec.capture.deferEmissionUntilFinalized = true
                 terminalRing[context.id] = rec
             }
@@ -633,13 +633,6 @@ final class VoiceSharingCollector {
         // these checks a late finalize could resurrect a capture that was genuinely cancelled or withdrawn,
         // after a gate/identity move it no longer belongs to, or one that was never a deferred completion.
         guard rec.capture.deferEmissionUntilFinalized else { lock.unlock(); return }
-        if rec.noContribution {
-            // A capture that can never contribute is CONSUMED, never resurrected.
-            cancelOutcomeDeadlineLocked(context.id)
-            terminalRing.removeValue(forKey: context.id)
-            lock.unlock()
-            return
-        }
         // The ACCOUNT and live consent decide; the provenance epoch is not consulted.
         let sameConsent = (rec.capture.session == sessionIdentity())
             && isCollectionPermitted()
@@ -831,11 +824,6 @@ return }
     /// outcome misses by capture ID and emits nothing.
     private struct TerminalRecord {
         var capture: FrozenCapture
-        /// A capture that can never become a contribution — genuinely cancelled partials AND
-        /// consent-revoked (gate-loss) captures — is remembered for identity bookkeeping only. Its
-        /// late outcomes are CONSUMED silently: never resurrected as deliverable records, never
-        /// emitted twice.
-        var noContribution: Bool = false
         /// Monotonic order of entry into the ring, so "the capture the pipeline is working on" is a fact
         /// rather than an artifact of dictionary iteration order.
         var deferredOrder: UInt64 = 0
@@ -882,7 +870,7 @@ return }
     /// Caller holds the observation lock. Work retains identity only, never PCM or the collector.
     private func registerOutcomeDeadlineLocked(for id: UUID) -> OutcomeDeadline? {
         guard outcomeDeadlines[id] == nil, let limit = outcomeWaitLimit,
-              let record = terminalRing[id], !record.noContribution else { return nil }
+              let record = terminalRing[id] else { return nil }
         let deadline = OutcomeDeadline(
             time: monotonicNow() + .nanoseconds(limit.nanoseconds),
             work: DispatchWorkItem { [weak self] in self?.outcomeDeadlineReached(id) })
@@ -904,7 +892,7 @@ return }
             return
         }
         cancelOutcomeDeadlineLocked(id)
-        guard var rec = terminalRing[id], !rec.noContribution else {
+        guard var rec = terminalRing[id] else {
             lock.unlock()
             return
         }
@@ -962,14 +950,6 @@ return }
         guard let context, var rec = terminalRing[context.id] else {
             lock.unlock()
             return false
-        }
-        // A capture that can never contribute (genuine cancel, withdrawal) is consumed, never
-        // resurrected: no late callback may turn it back into a deliverable record.
-        if rec.noContribution {
-            cancelOutcomeDeadlineLocked(context.id)
-            terminalRing.removeValue(forKey: context.id)
-            lock.unlock()
-            return true
         }
         // Late attribution honors the CURRENT gate: if identity moved on (account transition rotated the
         // epoch) the predecessor's completion stays dropped, exactly as before. The reviewer's case — A
@@ -1194,8 +1174,7 @@ return }
     // MARK: - Test seams (production callers never use these)
 
     /// Number of events currently queued in the FIFO.
-    /// Captures a FULL ring of waiting records refused (dropped, counted, logged — never
-    /// force-emitted without their facts; core#157).
+    private(set) var pendingCount = 0
     /// Captures a FULL ring of waiting records refused (dropped, counted, logged — never
     /// force-emitted without their facts; core#157).
     private(set) var ringDropCount = 0
