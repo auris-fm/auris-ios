@@ -61,25 +61,4 @@ protocol VoiceCloudRouteSink {
     /// live all receive a non-owner disposition. The token is passed back to `routeToCloud`, so
     /// the same admission decides both wire and effect ownership (reviewer b2c09394).
     func beginDispatch(utteranceId: String?, origin: Int?) -> CloudDispatchOwnership
-
-    /// Eager barge-in (spec e38a790a): interrupts the live predecessor turn and holds the
-    /// caller's utterance as its retained follow-up. Returns the interrupted turn's request id,
-    /// or nil when this is not a barge-in (no live predecessor, or already claimed).
-    @discardableResult
-    @MainActor
-    func emitBargeIn(
-        request: String,
-        utteranceId: String?,
-        origin: Int?,
-        selection: CloudConversationSelection?,
-        sourceTranscript: String?,
-        sourceLanguage: String?,
-        translationKind: TranslationKind?,
-        validatingEpoch: UInt64?,
-        isEpochStillCurrent: (@Sendable (UInt64) -> Bool)?
-    ) async -> String?
-
-    /// Whether this utterance's interruption was refused, so its turn must not be submitted.
-    @MainActor
-    func isSuppressed(_ utteranceId: String?) -> Bool
 }

@@ -2429,8 +2429,7 @@ final class EngineStubBackend: AsrBackend {
     /// Whether the stub backend claims it translates natively.
     var stubCanTranslate = false
     var capabilities: AsrCapabilities {
-        AsrCapabilities(languages: ["en"], canTranslateToEnglish: stubCanTranslate,
-                        requiresHardwareAccel: false)
+        AsrCapabilities(canTranslateToEnglish: stubCanTranslate)
     }
     func ensureReady() async -> Result<Void, Error> { .success(()) }
     /// The transcript this stub returns; a real recogniser returns text.
@@ -2708,7 +2707,7 @@ final class VoiceSharingModelProvenanceTests: XCTestCase {
     }
 
     private final class InvocationBackend: AsrBackend {
-        let capabilities = AsrCapabilities(languages: ["en"], canTranslateToEnglish: true, requiresHardwareAccel: false)
+        let capabilities = AsrCapabilities(canTranslateToEnglish: true)
         let requiredModel = ModelSpec(id: "asr", files: [], targetDir: "unused")
         private let lock = NSLock()
         private var identity: VoiceSharingContributionEncoder.ModelRef? = .init(id: "asr", version: "A")
