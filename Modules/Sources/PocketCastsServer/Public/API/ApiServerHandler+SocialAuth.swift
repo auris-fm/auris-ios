@@ -57,7 +57,7 @@ public extension ApiServerHandler {
             throw APIError.UNKNOWN
         }
 
-        return try await obtainToken(request: request)
+        return try await obtainToken(request: request, usingRefreshToken: true)
     }
 
     func validateLogin(identityToken: String, provider: SocialAuthProvider) async throws -> AuthenticationResponse {
@@ -67,7 +67,7 @@ public extension ApiServerHandler {
             throw APIError.UNKNOWN
         }
 
-        return try await obtainToken(request: request)
+        return try await obtainToken(request: request, usingRefreshToken: true)
     }
 
     func refreshIdentityToken(connection: URLConnection = URLConnection(handler: URLSession.shared)) async throws -> AuthenticationResponse {
@@ -79,7 +79,7 @@ public extension ApiServerHandler {
             throw APIError.TOKEN_DEAUTH
         }
 
-        return try await obtainToken(request: request, connection: connection)
+        return try await obtainToken(request: request, usingRefreshToken: true, connection: connection)
     }
 
     private func tokenRequest(identityToken: String?, cachePolicy: URLRequest.CachePolicy = .useProtocolCachePolicy, timeoutInterval: TimeInterval = 15.seconds, scope: AuthenticationScope = .default) -> URLRequest? {

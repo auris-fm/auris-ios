@@ -137,10 +137,18 @@ public extension ApiServerHandler {
         }
     }
 
-    /// Refresh-token token auth. The legacy password-login branches (the completion wrapper and
-    /// the `Api_UserLoginResponse` decode) are gone: password sign-in moved to the JSON
-    /// `login_pocket_casts` endpoint and nothing called them.
-    func obtainToken(request: URLRequest, connection: URLConnection = URLConnection(handler: URLSession.shared)) async throws -> AuthenticationResponse {
+    func obtainToken(request: URLRequest, completion: @escaping (Result<AuthenticationResponse, APIError>) -> Void) {
+        Task {
+            do {
+                let response = try await obtainToken(request: request, usingRefreshToken: false)
+                completion(.success(response))
+            } catch {
+                completion(.failure((error as? APIError) ?? .UNKNOWN))
+            }
+        }
+    }
+
+    func obtainToken(request: URLRequest, usingRefreshToken: Bool, connection: URLConnection = URLConnection(handler: URLSession.shared)) async throws -> AuthenticationResponse {
         try await withUnsafeThrowingContinuation { continuation in
             connection.send(request: request) { data, response, error in
                 guard let responseData = data, error == nil, response?.extractStatusCode() == ServerConstants.HttpConstants.ok else {
@@ -151,8 +159,13 @@ public extension ApiServerHandler {
                 }
 
                 do {
-                    let response = try Api_TokenLoginResponse(serializedBytes: responseData)
-                    continuation.resume(returning: AuthenticationResponse(from: response))
+                    if usingRefreshToken {
+                        let response = try Api_TokenLoginResponse(serializedBytes: responseData)
+                        continuation.resume(returning: AuthenticationResponse(from: response))
+                    } else {
+                        let userLoginResponse = try Api_UserLoginResponse(serializedBytes: responseData)
+                        continuation.resume(returning: AuthenticationResponse(from: userLoginResponse))
+                    }
                 } catch {
                     FileLog.shared.addMessage("Error occurred while trying to unpack token request \(error.localizedDescription)")
                     continuation.resume(throwing: APIError.UNKNOWN)

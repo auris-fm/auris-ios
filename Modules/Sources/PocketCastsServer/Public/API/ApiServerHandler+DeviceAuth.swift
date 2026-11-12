@@ -66,7 +66,7 @@ public extension ApiServerHandler {
             throw APIError.UNKNOWN
         }
 
-        return try await obtainToken(request: request)
+        return try await obtainToken(request: request, usingRefreshToken: true)
     }
 
     private func deviceTokenRequest(deviceCode: String,

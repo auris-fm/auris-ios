@@ -191,7 +191,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// Typed-only route hint for the current turn. Free-text turns pass nil and
     /// keep today's interpretation path.
     private let routeHintProvider: () -> CloudRouteHint?
-    /// Bounded prior conversation for the turn (≤4 turns / ≤8 KiB enforced by bounded).
+
     /// Renders negotiated discovery results. Present only when the UI can show
     /// result/empty/unavailable states — the same condition that justifies
     /// advertising `search_results_v1`.
