@@ -899,7 +899,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         if interruptedRequestIdForThisTurn != nil, let priorToken = activeTurn {
             // KEEP THE INTERRUPTED TURN'S RECEIVE ALIVE UNTIL ITS TERMINAL (reviewer ff00457c
             // item 1), now that the interrupt has been SENT. The interrupt needs that turn's
-            // terminal to resolve the hold, and the `cancel` below would otherwise end its
+            // terminal to resolve the hold, and the `cancel()` below would otherwise end its
             // receive loop through the owner-cancel path — skipping the very branch that records
             // the acknowledgement, so the acknowledgement would silently never happen.
             //
@@ -908,7 +908,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // not reintroduce the audio overlap the quiescence wait exists to prevent.
             //
             // A turn that cannot answer must not wedge the successor: the wait is BOUNDED, and its
-            // expiry is acted on the hold is dropped, since no terminal is coming to resolve it,
+            // expiry is acted on — the hold is dropped, since no terminal is coming to resolve it,
             // and this turn proceeds as an ordinary new turn rather than pretending it settled.
             // STOP LOCAL OUTPUT IMMEDIATELY, BEFORE THE WAIT (reviewer eaa8c06a item 3).
             //
@@ -919,61 +919,53 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // is the exact overlap the rule exists to prevent. Stopping only the OUTPUT keeps the
             // receiver alive for the terminal this wait is waiting for; those are different
             // concerns and are now ordered accordingly.
-            let bargeInStopEpoch = interruptedRequestIdForThisTurn != nil
-                ? audioPlayer.cancel()
-                : nil
+            let bargeInStopEpoch = audioPlayer.cancel()
 
-            if interruptedRequestIdForThisTurn != nil, let priorToken = activeTurn {
-                let resolution = await priorToken.awaitAcknowledgement(
-                    timeout: Self.interruptionAcknowledgementTimeout
+            let resolution = await priorToken.awaitAcknowledgement(
+                timeout: Self.interruptionAcknowledgementTimeout
+            )
+            switch resolution {
+            case .acknowledged:
+                // The ONLY outcome that may submit. The follow-up was already released by the
+                // terminal branch; this turn proceeds.
+                break
+            case .refused:
+                FileLog.shared.addMessage(
+                    "[VoicePipeline] interruption REFUSED for turn "
+                    + "\(interruptedRequestIdForThisTurn ?? "nil") — retained utterance "
+                    + "DISCARDED and suppressed; it must never be submitted"
                 )
-                switch resolution {
-                case .acknowledged:
-                    // The only outcome that may submit. The follow-up was already released by the
-                    // terminal branch; this turn proceeds.
-                    break
-                case .refused:
-                    FileLog.shared.addMessage(
-                        "[VoicePipeline] interruption REFUSED for turn "
-                        + "\(interruptedRequestIdForThisTurn ?? "nil") — retained utterance "
-                        + "DISCARDED and suppressed; it must never be submitted"
-                    )
-                    // SUPPRESS, not merely release: a refusal is a server answer, and the contract
-                    // says never to treat it as settlement or submit the held utterance. This
-                    // utterance's turn is already queued, so releasing alone let it reach the wire.
-                    interruptionState.suppressHeldFollowUp(
-                        forRequestId: interruptedRequestIdForThisTurn ?? ""
-                    )
-                    interruptedRequestIdForThisTurn = nil
-                    // END LOCALLY (reviewer c38ff4ba item 2). Clearing the id and falling through
-                    // made THIS turn continue into its own dispatch, authenticating the very
-                    // utterance the refusal discarded. A refusal is a server answer about the
-                    // interruption; it is not settlement and it authorizes nothing, so nothing may
-                    // be submitted for it — including this turn's own successor frame.
-                    if let bargeInStopEpoch {
-                        _ = await audioPlayer.awaitActualStop(after: bargeInStopEpoch, timeout: 0.25)
-                    }
-                    return CloudRouteResult(response: .silent, outcome: .refused)
-                case .failed:
-                    // Timeout or an undelivered send: no acknowledgement can ever arrive, so this
-                    // must END locally. It must not be promoted to an ordinary turn — the user's
-                    // utterance was an interruption of a turn whose fate is now unknown, and
-                    // submitting it would assert a settlement that never happened.
-                    FileLog.shared.addMessage(
-                        "[VoicePipeline] interruption NOT acknowledged for turn "
-                        + "\(interruptedRequestIdForThisTurn ?? "nil") after "
-                        + "\(Self.interruptionAcknowledgementTimeout)s — held follow-up dropped, "
-                        + "nothing submitted, local generic failure"
-                    )
-                    interruptionState.suppressHeldFollowUp(
-                        forRequestId: interruptedRequestIdForThisTurn ?? ""
-                    )
-                    interruptedRequestIdForThisTurn = nil
-                    if let bargeInStopEpoch {
-                        _ = await audioPlayer.awaitActualStop(after: bargeInStopEpoch, timeout: 0.25)
-                    }
-                    return CloudRouteResult(response: .silent, outcome: .refused)
-                }
+                // SUPPRESS, not merely release: a refusal is a server answer, and the contract
+                // says never to treat it as settlement or submit the held utterance. This
+                // utterance's turn is already queued, so releasing alone let it reach the wire.
+                interruptionState.suppressHeldFollowUp(
+                    forRequestId: interruptedRequestIdForThisTurn ?? ""
+                )
+                interruptedRequestIdForThisTurn = nil
+                // END LOCALLY (reviewer c38ff4ba item 2). Clearing the id and falling through
+                // made THIS turn continue into its own dispatch, authenticating the very
+                // utterance the refusal discarded. A refusal is a server answer about the
+                // interruption; it is not settlement and it authorizes nothing, so nothing may
+                // be submitted for it — including this turn's own successor frame.
+                _ = await audioPlayer.awaitActualStop(after: bargeInStopEpoch, timeout: 0.25)
+                return CloudRouteResult(response: .silent, outcome: .refused)
+            case .failed:
+                // Timeout or an undelivered send: no acknowledgement can ever arrive, so this
+                // must END LOCALLY. It must NOT be promoted to an ordinary turn — the user's
+                // utterance was an interruption of a turn whose fate is now unknown, and
+                // submitting it would assert a settlement that never happened.
+                FileLog.shared.addMessage(
+                    "[VoicePipeline] interruption NOT acknowledged for turn "
+                    + "\(interruptedRequestIdForThisTurn ?? "nil") after "
+                    + "\(Self.interruptionAcknowledgementTimeout)s — held follow-up dropped, "
+                    + "nothing submitted, local generic failure"
+                )
+                interruptionState.suppressHeldFollowUp(
+                    forRequestId: interruptedRequestIdForThisTurn ?? ""
+                )
+                interruptedRequestIdForThisTurn = nil
+                _ = await audioPlayer.awaitActualStop(after: bargeInStopEpoch, timeout: 0.25)
+                return CloudRouteResult(response: .silent, outcome: .refused)
             }
         }
 
@@ -1830,8 +1822,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     // MARK: - Eager barge-in (spec e38a790a, reviewer bea7a291)
 
     /// Whether this utterance's interruption was refused, so its turn must not be submitted.
+    /// Production: the service checks suppression at admission and again immediately before
+    /// dispatch (a refusal may land while a turn is queued or classifying).
     @MainActor
-    func isSuppressedForTesting(_ utteranceId: String?) -> Bool {
+    func isSuppressed(_ utteranceId: String?) -> Bool {
         guard let utteranceId else { return false }
         return interruptionState.isSuppressed(utteranceId)
     }

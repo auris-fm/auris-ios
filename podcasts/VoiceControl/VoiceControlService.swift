@@ -1110,7 +1110,7 @@ class VoiceControlService: ObservableObject {
         // while this turn is still queued or classifying, which is exactly the ordering measured
         // here (B entered, A's refusal arrived 110ms later).
         if await MainActor.run(body: {
-            cloudRouteSink?.isSuppressedForTesting(utteranceId) ?? false
+            cloudRouteSink?.isSuppressed(utteranceId) ?? false
         }) {
             FileLog.shared.addMessage(
                 "[VoicePipeline] suppressed utterance \(utteranceId) — its interruption was refused"
@@ -1236,7 +1236,7 @@ class VoiceControlService: ObservableObject {
             // RE-CHECK suppression immediately before dispatch: a refusal that landed while this
             // turn was queued or classifying must still stop it from reaching the wire.
             if await MainActor.run(body: {
-                cloudRouteSink?.isSuppressedForTesting(input.utteranceId) ?? false
+                cloudRouteSink?.isSuppressed(input.utteranceId) ?? false
             }) {
                 FileLog.shared.addMessage(
                     "[VoicePipeline] suppressed at dispatch \(input.utteranceId ?? "-") — "
