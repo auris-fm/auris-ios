@@ -783,7 +783,8 @@ return }
         lock.lock()
         // WITHDRAWAL disposal. Every retained byte dies here, synchronously:
         // * queued events (each holds a full audio copy) — purged;
-        // * the open partial — terminal, ring-remembered for identity only, audio emptied;
+        // * the open partial — terminal and identity-only (a discarded partial never enters
+        //   the ring), audio emptied;
         // * the terminal ring — emptied outright, so every waiting entry dies with it (no
         //   retained speech survives a withdrawal, and no dead entry blocks later recordings);
         // * the cancellation record itself is CONTENT-FREE: it states that consent ended (identity,
@@ -794,7 +795,7 @@ return }
         // The ring is EMPTIED outright: with the shedder gone, entries left in place would
         // stay forever and after re-sign-in every new recording would be dropped as
         // "ring full of waiting records". A removed entry makes a late callback miss by
-        // capture ID and be dropped (bot finding on core#157) — and disposal of their audio
+        // capture ID and be dropped — and disposal of their audio
         // falls out of the removal.
         for key in terminalRing.keys { cancelOutcomeDeadlineLocked(key) }
         terminalRing.removeAll()
@@ -832,7 +833,7 @@ return }
     private var terminalRing: [UUID: TerminalRecord] = [:]
 
     /// An emitted record no longer occupies the ring: only records WAITING for their outcome
-    /// count toward the bound (core#157 queue-full rule). The entry is removed outright; late
+    /// count toward the bound. The entry is removed outright; late
     /// reports look up by capture ID, miss, and are dropped — a record is immutable once emitted.
     /// Caller holds the observation lock.
     private func releaseEmittedLocked(_ id: UUID) {
@@ -842,7 +843,7 @@ return }
 
     private func rememberTerminal(_ c: FrozenCapture, noContribution: Bool = false) {
         terminalSequence &+= 1
-        // QUEUE-FULL RULE (core#157, spec: "when the queue is full… the new recording is
+        // QUEUE-FULL RULE (spec: "when the queue is full… the new recording is
         // dropped and the drop is logged with a count"): the ring holds ONLY records waiting
         // for their outcome. A never-contributing capture (a discarded partial) never enters
         // it at all — it has nothing to wait for, so it is identity bookkeeping only; an
@@ -900,7 +901,7 @@ return }
         let event = makeEvent(kind: .completed, from: rec.capture)
         // The immutable event owns any deliverable PCM from here; the timer/ring release theirs.
         rec.capture = consumed(rec.capture)
-        // The record leaves the ring on emission: only WAITING records occupy it (core#157).
+        // The record leaves the ring on emission: only WAITING records occupy it.
         // A not-permitted capture keeps no audio and contributes nothing, so removal is total.
         terminalRing.removeValue(forKey: id)
         lock.unlock()
@@ -1162,11 +1163,11 @@ return }
     // MARK: - Test seams (production callers never use these)
 
     /// Captures a FULL ring of waiting records refused (dropped, counted, logged — never
-    /// force-emitted without their facts; core#157).
+    /// force-emitted without their facts).
     private(set) var ringDropCount = 0
 
     /// How many records currently WAIT for their outcome in the ring. Withdrawal must drive
-    /// this to 0 even when the ring was full (bot finding on core#157).
+    /// this to 0 even when the ring was full.
     var waitingRingCountForTesting: Int {
         lock.lock(); defer { lock.unlock() }
         return terminalRing.count
@@ -1183,7 +1184,6 @@ return }
         return pending.count
     }
 
-    /// Samples the collector is ACTUALLY holding for the open capture — reads the buffer, not a counter.
     /// What is actually retained right now, walked from the live buffers.
     var actualRetainedAudioBreakdownForTesting: (open: Int, fifo: Int, ring: Int) {
         lock.lock(); defer { lock.unlock() }
@@ -1193,6 +1193,7 @@ return }
         return (openCount, fifoCount, ringCount)
     }
 
+    /// Samples the collector is ACTUALLY holding for the open capture — reads the buffer, not a counter.
     var retainedSampleCountForTesting: Int {
         lock.lock(); defer { lock.unlock() }
         return current?.retained.count ?? 0

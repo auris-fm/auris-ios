@@ -424,7 +424,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
                                  "refusal history is pruned to its floor, not grown for the session lifetime")
         // AMENDED by, twice: (1) queued work is no longer dropped at the cap —
         // the FIFO's pressure is counted, and the only admission gate is the durable queue's
-        // record limit. (2) core#157: force-emission at ring pressure is GONE, so with inline
+        // record limit. (2) force-emission at ring pressure is GONE, so with inline
         // delivery there is no forced FIFO traffic at all: captures emit normally (synchronously
         // here) and the ring never holds a waiting record past its eviction. The identity state
         // this control is really about stays bounded, and the ring never manufactures pressure.
@@ -1026,7 +1026,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
     /// The CONSENT closure is load-bearing on its own: with everything else open, only the closure
     /// can veto. Without this control a closed consent is caught redundantly by identity checks and
     /// never exercised.
-    /// (2): REWRITTEN for the queue-full rule (core#157). With the sink worker BLOCKED, captures
+    /// (2): REWRITTEN for the queue-full rule. With the sink worker BLOCKED, captures
     /// wait in the ring for their outcomes: the first 32 are retained (ring-resident, audio
     /// accounted), captures beyond the bound are DROPPED with a count — never force-emitted
     /// fact-less. Withdrawal disposal purges the ring so nothing survives.
@@ -1069,7 +1069,7 @@ final class VoiceSharingCollectorTests: XCTestCase {
             "queued work is disposed, not delivered after withdrawal")
     }
 
-    ///, fix (core#157 hold): under ring pressure the collector used to FORCE-EMIT the
+    ///, fix (ring-pressure hold): under pressure the collector used to FORCE-EMIT the
     /// oldest unemitted record with its outcome deadline cancelled — the record uploaded with
     /// every observation `unknown`, even though the pipeline went on to judge that very audio
     /// (observed live: `wake 0.123 < 0.812 → ASR (grace/continuous)` seconds after the
