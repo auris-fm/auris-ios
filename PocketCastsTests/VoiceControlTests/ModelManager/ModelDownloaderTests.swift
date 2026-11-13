@@ -20,6 +20,5 @@ final class ModelDownloaderTests: XCTestCase {
     func test_modelManager_storageDir_created() {
         let manager = ModelManager()
         // Verifies no crash, storage dir is set up
-        XCTAssertFalse(manager.isReady) // Not ready until download
     }
 }

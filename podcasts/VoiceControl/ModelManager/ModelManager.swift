@@ -86,8 +86,6 @@ class ModelManager: ObservableObject {
     private static let lfmManifestFilename = "manifest.json"
     private static let lfmLatestURL = URL(string: "https://download.auris.fm/function-call/latest.json")!
 
-    @Published var isReady = false
-
     private let downloader: ModelDownloader
     private let storageDir: URL
     private let session: URLSession
@@ -156,7 +154,6 @@ class ModelManager: ObservableObject {
             let url = lfmDir.appendingPathComponent(name)
             try? FileManager.default.removeItem(at: url)
         }
-        isReady = false
     }
 
     func lfmReleaseVersion() -> String? {
