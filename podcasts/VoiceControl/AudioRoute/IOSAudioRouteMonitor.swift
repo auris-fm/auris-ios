@@ -289,6 +289,7 @@ class IOSAudioRouteMonitor: ObservableObject {
     init(forTesting audioSession: AudioSessionControlling) {
         self.gracePeriodSignal = GracePeriodSignal()
         self.audioSession = audioSession
+        refreshRoute()
     }
 
     /// Current route keyed by physical port UID as well as port type, for the
