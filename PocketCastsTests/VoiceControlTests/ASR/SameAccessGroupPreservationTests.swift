@@ -35,7 +35,7 @@ final class SameAccessGroupPreservationTests: XCTestCase {
         // Environment limitation, checked FIRST so the missing phase-1 expectation below can
         // only mean a real phase-1 defect, never this build's lack of entitlements: probe the
         // keychain before reading the expectation file, and skip on exactly the status the
-        // unentitled Debug build produces (errSecMissingEntitlement, as measured in 41d822acd).
+        // unentitled Debug build produces (errSecMissingEntitlement).
         var probe: CFTypeRef?
         let probeStatus = SecItemCopyMatching([
             kSecClass as String: kSecClassGenericPassword,
@@ -124,7 +124,7 @@ final class SameAccessGroupPreservationTests: XCTestCase {
         if writeStatus == errSecMissingEntitlement {
             // Environment limitation, not a code defect: these controls require a build
             // whose entitlements DECLARE the keychain-access-groups entry for the shared group and
-            // a separately installed helper app (commit 41d822acd measured exactly that). The
+            // a separately installed helper app. The
             // plain Debug test build declares no keychain-access-groups, so the write is refused
             // with errSecMissingEntitlement (-34018) before any preservation semantics run.
             // Skip in that environment; run wherever the entitlement exists.
