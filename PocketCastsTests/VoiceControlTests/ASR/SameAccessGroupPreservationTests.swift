@@ -54,6 +54,14 @@ final class SameAccessGroupPreservationTests: XCTestCase {
         let bytes = (dict?[kSecValueData as String] as? Data).flatMap { String(data: $0, encoding: .utf8) }
         let attributed = dict?[kSecAttrAccessGroup as String] as? String
         print("VERIFY postHelperRead status=\(status) group=\(group) attributedGroup=\(attributed as Any) bytesMatch=\(bytes == expected)")
+        if status == errSecMissingEntitlement {
+            // Environment limitation, not a code defect (task #7): same requirement as the writer
+            // control — an entitled build declaring the shared keychain-access-groups entry and the
+            // installed helper app. The plain Debug test build cannot reach the canary, so the read
+            // is refused with errSecMissingEntitlement (-34018) before any preservation semantics.
+            throw XCTSkip("host build does not declare keychain-access-groups for " + group
+                + " (errSecMissingEntitlement); requires the entitled cross-app build")
+        }
         XCTAssertEqual(status, errSecSuccess, "the canary was not present after the helper read")
         XCTAssertEqual(attributed, group, "the canary is no longer attributed to the shared group")
         XCTAssertEqual(bytes, expected, "the canary bytes changed across the helper read")
@@ -97,6 +105,16 @@ final class SameAccessGroupPreservationTests: XCTestCase {
             kSecValueData as String: Data(syntheticValue.utf8)
         ] as CFDictionary, nil)
         print("PRESERVE write group=\(group) status=\(writeStatus)")
+        if writeStatus == errSecMissingEntitlement {
+            // Environment limitation, not a code defect (task #7): these controls require a build
+            // whose entitlements DECLARE the keychain-access-groups entry for the shared group and
+            // a separately installed helper app (commit 41d822acd measured exactly that). The
+            // plain Debug test build declares no keychain-access-groups, so the write is refused
+            // with errSecMissingEntitlement (-34018) before any preservation semantics run.
+            // Skip in that environment; run wherever the entitlement exists.
+            throw XCTSkip("host build does not declare keychain-access-groups for " + group
+                + " (errSecMissingEntitlement); requires the entitled cross-app build")
+        }
         XCTAssertEqual(writeStatus, errSecSuccess, "the synthetic canary was not written into the measured group")
 
         let sentinelContents = "sentinel-\(UUID().uuidString)"

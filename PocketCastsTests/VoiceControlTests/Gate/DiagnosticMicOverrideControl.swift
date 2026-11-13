@@ -397,13 +397,39 @@ final class DiagnosticMicOverrideControl: XCTestCase {
         // arrive" but would be the wake-word requirement working.
         service.gracePeriodSignalForTesting.onWakeWordDetected()
 
+        // WAIT for the mode switch to actually take effect before emitting speech. The wake-word
+        // hop lands on the service's queue asynchronously; speech frames emitted before it are
+        // correctly ignored in `.wakeWord` mode, and under load (fresh simulator boot) the whole
+        // 2 s of speech plus the silence window could elapse before the switch — the segment then
+        // closes on silence alone and the hook never fires. Timing-dependent, not plumbing
+        // (task #7: passed in the morning full sweep, failed twice on a freshly booted simulator).
+        let continuous = await awaitTrue(timeout: 10) {
+            if case .listening(mode: .continuous) = service.gateState { return true }
+            return false
+        }
+        XCTAssertTrue(
+            continuous,
+            "premise: the wake-word detection must switch the gate to continuous mode; "
+                + "state=\(service.gateState)"
+        )
+
         // ONE FRAME PER CALL, and well above the segmenter threshold: `minSpeechFrames` counts
         // CALLS (5), not samples, so a single large buffer is one frame and speech is never
         // confirmed — a single burst silently produces no segment and this would look like
         // "samples never arrive".
         let frameSize = 1_600   // 100 ms at 16 kHz
+        // A REAL TONE, not constant DC: the segmenter's VAD does not classify a flat DC level as
+        // speech (measured when ServiceSelectionProvenanceTests's fixture was corrected — "the
+        // model calling constant DC speech — it does not"), so a DC burst only intermittently
+        // forms a segment and this control failed nondeterministically (task #7: passed in the
+        // morning sweep, failed four times in the afternoon on identical production code). A
+        // 440 Hz sine at the same peak is unambiguous speech-band energy.
+        let tone: [Float] = (0..<frameSize).map { (index: Int) -> Float in
+            let phase: Double = 2.0 * Double.pi * 440.0 * Double(index) / 16_000.0
+            return 0.3 * Float(sin(phase))
+        }
         for _ in 0..<20 {       // 2s of speech
-            capture.emit(samples: [Float](repeating: 0.05, count: frameSize), at: nil)
+            capture.emit(samples: tone, at: nil)
         }
         // The silence window is WALL-CLOCK (Date() vs 500 ms), so quiet frames must be spread
         // across real time; back-to-back they elapse microseconds and no segment closes.
