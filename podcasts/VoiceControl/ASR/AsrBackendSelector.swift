@@ -6,11 +6,8 @@ class AsrBackendSelector {
     /// (matches Android's `AsrBackendSelector` — no enable gate; the matrix is always live):
     /// zh/ja/ko/yue + en -> SenseVoice (native text, translated downstream);
     /// de/es/fr -> Canary Flash (native translate to English);
-    /// otherwise -> nil (unsupported locale; the unselected WhisperCppBackend was deleted).
-    ///
-    /// On-device validation of SenseVoice/Canary happens on this branch before it is merged
-    /// (per @merlinran); there is no separate activation flag because the branch is held
-    /// unmerged until that pass is done.
+    /// otherwise -> nil (unsupported locale). There is no separate activation flag; the
+    /// locale matrix is always live.
     func select(locale: Locale) -> AsrBackend? {
         guard let lang = locale.language.languageCode?.identifier else {
             return nil
