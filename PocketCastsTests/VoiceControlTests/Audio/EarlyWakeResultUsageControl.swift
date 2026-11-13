@@ -322,4 +322,68 @@ final class EarlyWakeResultUsageControl: XCTestCase {
                        detector.sampleCounts.count,
                        "every call must be a prefix, never a finished segment")
     }
+
+    /// A short grace follow-up must open ONCE, and admission must submit the tag of that one
+    /// connection.
+    ///
+    /// It is routable at trailing silence, so it opens there and carries tag A. If the verdict
+    /// opens again it mints tag B and the sink replaces A — but the exits still submit A, because
+    /// that is what travelled with the utterance. The connection this turn paid for is then the
+    /// one left unused, which is invisible to a count of opens.
+    ///
+    /// Driven through silence → endpoint → admission on the real segmenter and engine.
+    func test_shortGraceFollowUpOpensOnceAndAdmitsTheSameTag() {
+        let classifier = SwitchableClassifier()
+        let segmenter = NativeVadSegmenter(threshold: 0.0, silenceTimeoutMs: 500, classifier: classifier)
+        let grace = GracePeriodSignal()
+        let engine = VoiceAsrEngine(
+            capture: NativeAudioCapture(),
+            segmenter: segmenter,
+            backend: WhisperCppBackend(modelPath: "/tmp/test"),
+            signalFilter: SignalFilter(),
+            wakeWordDetector: CountingDetector(),
+            gracePeriodSignal: grace
+        )
+        var openedTags: [String] = []
+        engine.onAddressedTrailingSilenceBegan = {
+            let tag = CloudRouteSink.mintEarlyConnectionTag()
+            openedTags.append(tag)
+            return tag
+        }
+        var admittedTag: String?
+        engine.onTurnAdmitted = { _, _, tag in admittedTag = tag }
+        engine.installCaptureCallbacksForTesting()
+
+        // Grace: a previous command opened the session.
+        grace.onWakeWordDetected()
+
+        // SHORT speech, so no early prefix is ever scored — the verdict is where a naive
+        // implementation opens a second time.
+        let frame = 320
+        classifier.speaking = true
+        for _ in 0..<(6_000 / frame) {
+            segmenter.process([Float](repeating: 0.1, count: frame), capturedAt: nil)
+        }
+        // NO early result: this is a genuinely short utterance, so nothing opens at silence onset
+        // and the verdict is the only remaining opportunity — the case under test. Setting a
+        // result here would make `earlyResult == nil` false and skip that branch entirely, so the
+        // control would pass whatever the code did.
+        XCTAssertNil(segmenter.earlyWakeResultForCurrentUtterance,
+                     "a short utterance must have no early result, or this tests the wrong path")
+
+        // Silence starts: routable during grace, so it opens here.
+        classifier.speaking = false
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline, admittedTag == nil {
+            segmenter.process([Float](repeating: 0, count: frame), capturedAt: nil)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        drainQueue()
+
+        XCTAssertEqual(openedTags.count, 1,
+                       "one utterance opens one connection; a second open here replaces the first "
+                           + "and leaves the turn submitting the tag of a socket it no longer owns")
+        XCTAssertEqual(admittedTag, openedTags.first,
+                       "admission must submit the tag of the connection actually held")
+    }
 }
