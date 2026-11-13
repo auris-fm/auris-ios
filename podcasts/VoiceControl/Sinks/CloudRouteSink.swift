@@ -942,7 +942,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     forRequestId: interruptedRequestIdForThisTurn ?? ""
                 )
                 interruptedRequestIdForThisTurn = nil
-                // END locally (reviewer c38ff4ba item 2). Clearing the id and falling through
+                // END LOCALLY (reviewer c38ff4ba item 2). Clearing the id and falling through
                 // made THIS turn continue into its own dispatch, authenticating the very
                 // utterance the refusal discarded. A refusal is a server answer about the
                 // interruption; it is not settlement and it authorizes nothing, so nothing may
