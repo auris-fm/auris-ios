@@ -267,13 +267,20 @@ class IOSAudioRouteMonitor: ObservableObject {
                     AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue,
                 ]
                 let isPhysicalDeviceChange = validReasons.contains(reason)
-                // Re-read the route for EVERY reason: an `.override`, `.categoryChange` or
-                // `.routeConfigurationChange` can move the input away from the headset, and a stale
-                // `.isolated` would leave capture running on the built-in microphone. Only a
-                // physical connect/disconnect advances the epoch and breaks grace.
-                self.refreshRoute()
+                // A physical connect/disconnect advances the epoch BEFORE the route is
+                // re-read and published: every observer of the new exposure then also
+                // sees the advanced epoch, so a capture end caused by the device change
+                // is recognised as device-caused in the very evaluation that observes it
+                // (never one evaluation late). Only a physical connect/disconnect advances
+                // the epoch and breaks grace.
                 if isPhysicalDeviceChange {
                     self.physicalDeviceChangeEpoch &+= 1
+                }
+                // Re-read the route for EVERY reason: an `.override`, `.categoryChange` or
+                // `.routeConfigurationChange` can move the input away from the headset, and a stale
+                // `.isolated` would leave capture running on the built-in microphone.
+                self.refreshRoute()
+                if isPhysicalDeviceChange {
                     self.gracePeriodSignal.onAudioRouteChanged()
                 }
             }

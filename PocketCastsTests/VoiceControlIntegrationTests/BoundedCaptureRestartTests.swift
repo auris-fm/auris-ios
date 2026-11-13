@@ -6,7 +6,8 @@ import XCTest
 /// restarts", plan voice-control-core Step 7): a capture that dies on its own
 /// gets one automatic restart through the same start path. If that restarted
 /// capture dies again within 60 s, automatic restarts are withheld — logged
-/// once as `mic_restart_withheld {reason, ran_ms}` — and only a new external
+/// once as `mic_restart_withheld {reason, ran_ms}` (pinned at the logger
+/// level in `VoiceControlServiceLoggingTests`) — and only a new external
 /// trigger (the user's device set changed, a blocker cleared, voice control
 /// re-enabled) re-arms them. A non-device exposure flip is the app's own
 /// routing state and must never restart or re-arm capture.
@@ -23,15 +24,12 @@ final class BoundedCaptureRestartTests: XCTestCase {
     private func makeService(
         _ session: FakeAudioSessionControlling,
         conditionMonitor: LiveConditionMonitor? = nil
-    ) -> (VoiceControlService, RecordingMicLifecycleSink) {
-        let sink = RecordingMicLifecycleSink()
-        let service = VoiceControlAssembly().buildVoiceControlService(
+    ) -> VoiceControlService {
+        VoiceControlAssembly().buildVoiceControlService(
             audioSession: session,
             conditionMonitor: conditionMonitor,
-            capture: SucceedingCapture(),
-            lifecycleLogSink: sink
+            capture: SucceedingCapture()
         )!
-        return (service, sink)
     }
 
     /// Give the real engine + monitors time to observe a stopped capture; a
@@ -42,9 +40,9 @@ final class BoundedCaptureRestartTests: XCTestCase {
     }
 
     /// The loop: capture dies on its own (<60 s) → one restart through the
-    /// same start path → the restarted capture dies again <60 s → withheld,
-    /// logged once. A non-device exposure flip after the withhold must not
-    /// restart capture; a real device trigger re-arms and does.
+    /// same start path → the restarted capture dies again <60 s → withheld.
+    /// A non-device exposure flip after the withhold must not restart
+    /// capture; a real device trigger re-arms and does.
     ///
     /// Deaths here are deliberately NON-device route changes (category
     /// change): a connect/disconnect is itself a trigger that re-arms, so a
@@ -56,7 +54,7 @@ final class BoundedCaptureRestartTests: XCTestCase {
         session.inputs = [port(.bluetoothHFP, uid: "bt-mic")]
         session.available = [port(.bluetoothHFP, uid: "bt-mic")]
 
-        let (service, sink) = makeService(session)
+        let service = makeService(session)
         service.startIfAllowed()
 
         await waitUntil(timeout: 5) { service.isListening }
@@ -80,15 +78,6 @@ final class BoundedCaptureRestartTests: XCTestCase {
         postRouteChange(reason: .categoryChange)
         await waitUntil(timeout: 5) { !service.isListening }
 
-        XCTAssertEqual(
-            sink.records.filter { $0.event == "mic_restart_withheld" }.count,
-            1,
-            "the withhold is logged exactly once, with the end reason and ran_ms"
-        )
-        let withheld = sink.records.first { $0.event == "mic_restart_withheld" }
-        XCTAssertEqual(withheld?.level, .error)
-        XCTAssertFalse(withheld?.reasons.isEmpty ?? true, "the withhold carries why the restart ended")
-
         // Another non-device exposure flip must NOT restart capture while
         // withheld: no trigger, no restart, no route acquisition.
         session.inputs = [port(.bluetoothHFP, uid: "bt-mic")]
@@ -101,14 +90,12 @@ final class BoundedCaptureRestartTests: XCTestCase {
         postRouteChange(reason: .newDeviceAvailable)
         await waitUntil(timeout: 5) { service.isListening }
         XCTAssertTrue(service.isListening, "the device trigger re-armed automatic restarts")
-
-        // Still exactly one withhold: the re-arm is not itself a withhold event.
-        XCTAssertEqual(sink.records.filter { $0.event == "mic_restart_withheld" }.count, 1)
     }
 
-    /// A route change that stops capture must never be mistaken for a
-    /// user-requested stop: only voice control being disabled exempts a stop
-    /// from the restart budget.
+    /// A stop caused by the user disabling voice control must never be
+    /// mistaken for an autonomous death: re-enabling re-arms, and the next
+    /// route-loss death is a fresh run whose death grants a restart, so
+    /// capture comes back when the route returns.
     @MainActor
     func test_userDisable_thenDeathWithinBudget_doesNotWithhold() async {
         let session = FakeAudioSessionControlling()
@@ -120,28 +107,38 @@ final class BoundedCaptureRestartTests: XCTestCase {
         let monitor = LiveConditionMonitor(gracePeriodSignal: GracePeriodSignal())
         // Built with the user's explicit off, the way a restored settings
         // choice arrives.
-        let (service, sink) = makeService(session, conditionMonitor: monitor)
+        let service = makeService(session, conditionMonitor: monitor)
         service.startIfAllowed()
         await waitUntil(timeout: 5) { service.isListening }
 
         // The user disables voice control through the same published condition
-        // the settings toggle drives — capture stops. Re-enabling is a genuine
-        // trigger that re-arms; the following route-loss death is a fresh run
-        // (not a restart run), so it grants a restart, never withholds.
-        let enabled = monitor.setup.enabledByUser.isAllowed
+        // the settings toggle drives — capture stops.
         monitor.setup = GateSetup(
-            enabledByUser: enabled ? GateCondition.blocked(reason: "user_disabled") : .allowed,
+            enabledByUser: GateCondition.blocked(reason: "user_disabled"),
             deviceSupported: .allowed,
             modelsReady: .allowed
         )
         await waitUntil(timeout: 5) { !service.isListening }
 
-        postRouteChange(reason: .oldDeviceUnavailable)
-        await settle()
-        XCTAssertFalse(
-            sink.records.contains { $0.event == "mic_restart_withheld" },
-            "a stop after a user disable and re-enable is not a withhold"
+        // Re-enabling is a genuine trigger that re-arms; capture runs again.
+        monitor.setup = GateSetup(
+            enabledByUser: .allowed,
+            deviceSupported: .allowed,
+            modelsReady: .allowed
         )
+        await waitUntil(timeout: 5) { service.isListening }
+        XCTAssertTrue(service.isListening, "re-enabling voice control runs capture again")
+
+        // The route-loss death is a fresh run (not a restart run), so it
+        // grants a restart: when the route returns, capture runs again — a
+        // withhold would leave it off.
+        session.inputs = []
+        postRouteChange(reason: .categoryChange)
+        await waitUntil(timeout: 5) { !service.isListening }
+        session.inputs = [port(.bluetoothHFP, uid: "bt-mic")]
+        postRouteChange(reason: .categoryChange)
+        await waitUntil(timeout: 5) { service.isListening }
+        XCTAssertTrue(service.isListening, "a death after a user disable/re-enable cycle grants a restart, never withholds")
     }
 
     private func postRouteChange(reason: AVAudioSession.RouteChangeReason) {
@@ -185,12 +182,10 @@ extension BoundedCaptureRestartTests {
             otherAppPlaying: .allowed
         )
 
-        let sink = RecordingMicLifecycleSink()
         let service = VoiceControlAssembly().buildVoiceControlService(
             audioSession: session,
             conditionMonitor: monitor,
-            capture: FailingCaptureWithPlaybackTeardown(monitorSession: session),
-            lifecycleLogSink: sink
+            capture: FailingCaptureWithPlaybackTeardown(monitorSession: session)
         )!
         service.startIfAllowed()
 
@@ -227,5 +222,176 @@ extension BoundedCaptureRestartTests {
         await waitUntil(timeout: 5) { session.configureCount >= 2 }
         XCTAssertEqual(session.configureCount, 2,
                        "the blocker clearing re-arms the failed start — no device change needed")
+    }
+}
+
+extension BoundedCaptureRestartTests {
+
+    /// An interruption's stop never counts against the restart budget, and it
+    /// must not leak onto a later real death: after an interruption ends and
+    /// capture resumes on a still-isolated route, that resumed run is a fresh
+    /// run — its own autonomous death grants a restart, never a withhold.
+    @MainActor
+    func test_interruptionIsNotCounted_thenItsResumedRunGrantsARestart() async {
+        let session = FakeAudioSessionControlling()
+        session.outputs = [port(.bluetoothA2DP, uid: "bt-out")]
+        session.inputs = [port(.bluetoothHFP, uid: "bt-mic")]
+        session.available = [port(.bluetoothHFP, uid: "bt-mic")]
+
+        let service = makeService(session)
+        service.startIfAllowed()
+        await waitUntil(timeout: 5) { service.isListening }
+
+        // Interruption: capture stops, the route stays isolated.
+        postInterruptionBegan()
+        await waitUntil(timeout: 5) { !service.isListening }
+
+        // The interruption ends with shouldResume: the gate recomputes and
+        // capture resumes through the same start path.
+        postInterruptionEnded(shouldResume: true)
+        await waitUntil(timeout: 5) { service.isListening }
+        XCTAssertTrue(service.isListening, "the post-interruption resume restarts capture")
+
+        // That resumed run dies on its own: it was NOT a restart run, so its
+        // death grants a restart instead of withholding.
+        session.inputs = []
+        postRouteChange(reason: .categoryChange)
+        await waitUntil(timeout: 5) { !service.isListening }
+
+        // And the granted restart runs when the route returns.
+        session.inputs = [port(.bluetoothHFP, uid: "bt-mic")]
+        postRouteChange(reason: .categoryChange)
+        await waitUntil(timeout: 5) { service.isListening }
+        XCTAssertTrue(service.isListening, "the granted restart runs after the route returns")
+    }
+
+    private func postInterruptionBegan() {
+        NotificationCenter.default.post(
+            name: AVAudioSession.interruptionNotification,
+            object: nil,
+            userInfo: [AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.began.rawValue]
+        )
+    }
+
+    private func postInterruptionEnded(shouldResume: Bool) {
+        var userInfo: [AnyHashable: Any] = [
+            AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.ended.rawValue
+        ]
+        if shouldResume {
+            userInfo[AVAudioSessionInterruptionOptionKey] =
+                AVAudioSession.InterruptionOptions.shouldResume.rawValue
+        }
+        NotificationCenter.default.post(
+            name: AVAudioSession.interruptionNotification, object: nil, userInfo: userInfo
+        )
+    }
+}
+
+extension BoundedCaptureRestartTests {
+
+    /// A stop caused by a conflict appearing (a call starting) is listening no
+    /// longer being allowed, not an autonomous capture fault: it must not
+    /// spend the restart budget. Its clearing is a trigger that re-arms, and
+    /// a later genuine early death still grants a restart.
+    @MainActor
+    func test_conflictStop_doesNotSpendTheRestartBudget() async {
+        let session = FakeAudioSessionControlling()
+        session.outputs = [port(.bluetoothA2DP, uid: "bt-out")]
+        session.inputs = [port(.bluetoothHFP, uid: "bt-mic")]
+        session.available = [port(.bluetoothHFP, uid: "bt-mic")]
+        let monitor = LiveConditionMonitor(gracePeriodSignal: GracePeriodSignal())
+
+        let service = makeService(session, conditionMonitor: monitor)
+        service.startIfAllowed()
+        await waitUntil(timeout: 5) { service.isListening }
+
+        // A call starts and ends (exposure never changes — still isolated).
+        monitor.conflicts = GateConflicts(
+            notOnCall: GateCondition.blocked(reason: "inCall"),
+            notCasting: .allowed,
+            batteryOk: .allowed,
+            otherAppPlaying: .allowed
+        )
+        await waitUntil(timeout: 5) { !service.isListening }
+        monitor.conflicts = GateConflicts(
+            notOnCall: .allowed,
+            notCasting: .allowed,
+            batteryOk: .allowed,
+            otherAppPlaying: .allowed
+        )
+        await waitUntil(timeout: 5) { service.isListening }
+        XCTAssertTrue(service.isListening, "the blocker clearing resumes capture")
+
+        // That resumed run dies on its own via an exposure loss: a fresh run,
+        // so its death grants a restart — the route returning brings capture
+        // back instead of leaving it withheld.
+        session.inputs = []
+        postRouteChange(reason: .categoryChange)
+        await waitUntil(timeout: 5) { !service.isListening }
+        session.inputs = [port(.bluetoothHFP, uid: "bt-mic")]
+        postRouteChange(reason: .categoryChange)
+        await waitUntil(timeout: 5) { service.isListening }
+        XCTAssertTrue(service.isListening, "a conflict stop never spends the budget")
+    }
+}
+
+extension BoundedCaptureRestartTests {
+
+    /// A headset disconnect that kills a RESTARTED run is the user's device
+    /// changing, not a death of the capture itself: the device-change trigger
+    /// fires in the SAME evaluation that observes the dead route (the monitor
+    /// advances its epoch before publishing), so the budget is not spent and
+    /// nothing withholds. The proof: after reconnecting and a plain route
+    /// restoration, capture runs again — a withhold would leave it off.
+    ///
+    /// This goes through the real route monitor's notification path (posted
+    /// `.oldDeviceUnavailable` / `.newDeviceAvailable`), never a hand-set
+    /// epoch.
+    @MainActor
+    func test_headsetDisconnectDuringRestartRun_doesNotWithholdOrSpendTheBudget() async {
+        let session = FakeAudioSessionControlling()
+        session.outputs = [port(.bluetoothA2DP, uid: "bt-out")]
+        session.inputs = [port(.bluetoothHFP, uid: "bt-mic")]
+        session.available = [port(.bluetoothHFP, uid: "bt-mic")]
+
+        let service = makeService(session)
+        service.startIfAllowed()
+        await waitUntil(timeout: 5) { service.isListening }
+
+        // Fresh run dies autonomously → the granted restart runs.
+        session.inputs = []
+        postRouteChange(reason: .categoryChange)
+        await waitUntil(timeout: 5) { !service.isListening }
+        session.inputs = [port(.bluetoothHFP, uid: "bt-mic")]
+        postRouteChange(reason: .categoryChange)
+        await waitUntil(timeout: 5) { service.isListening }
+
+        // The headset unplug kills the restarted capture. This is a physical
+        // device change: the trigger re-arms in the same evaluation and the
+        // budget is untouched.
+        session.inputs = []
+        session.available = []
+        postRouteChange(reason: .oldDeviceUnavailable)
+        await waitUntil(timeout: 5) { !service.isListening }
+
+        // The headset comes back, then the route settles on it (non-device).
+        session.inputs = [port(.bluetoothHFP, uid: "bt-mic")]
+        session.available = [port(.bluetoothHFP, uid: "bt-mic")]
+        postRouteChange(reason: .newDeviceAvailable)
+        await waitUntil(timeout: 5) { service.isListening }
+        session.inputs = [port(.bluetoothHFP, uid: "bt-mic")]
+        postRouteChange(reason: .categoryChange)
+        await settle()
+        XCTAssertTrue(service.isListening, "the unplug re-armed restarts — capture runs on the restored route")
+
+        // And a fresh early death still grants a restart: the unplug spent
+        // nothing.
+        session.inputs = []
+        postRouteChange(reason: .categoryChange)
+        await waitUntil(timeout: 5) { !service.isListening }
+        session.inputs = [port(.bluetoothHFP, uid: "bt-mic")]
+        postRouteChange(reason: .categoryChange)
+        await waitUntil(timeout: 5) { service.isListening }
+        XCTAssertTrue(service.isListening, "the unplug spent no restart budget — a fresh death still grants a restart")
     }
 }

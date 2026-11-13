@@ -162,3 +162,50 @@ final class VoiceControlServiceLoggingTests: XCTestCase {
         }
     }
 }
+
+extension VoiceControlServiceLoggingTests {
+
+    func test_withheldRestart_emitsErrorWithReasonAndRanMs() {
+        let (logger, sink) = makeLogger()
+
+        logger.withheldRestart(
+            reasons: ["NoMic"],
+            ranMs: 1_234,
+            posture: posture(exposure: .noMic),
+            route: route
+        )
+
+        XCTAssertEqual(sink.records.count, 1)
+        XCTAssertEqual(sink.records[0].event, "mic_restart_withheld")
+        XCTAssertEqual(sink.records[0].level, .error)
+        XCTAssertEqual(sink.records[0].reasons, ["NoMic"])
+        XCTAssertEqual(sink.records[0].ranMs, 1_234)
+        XCTAssertTrue(sink.records[0].priorCapture)
+    }
+
+    func test_withheldRestartThatNeverStarted_carriesRanMsZero() {
+        let (logger, sink) = makeLogger()
+
+        logger.withheldRestart(
+            reasons: ["capture_failure"],
+            ranMs: 0,
+            posture: posture(exposure: .exposed),
+            route: route
+        )
+
+        XCTAssertEqual(sink.records.count, 1)
+        XCTAssertEqual(sink.records[0].event, "mic_restart_withheld")
+        XCTAssertEqual(sink.records[0].ranMs, 0)
+    }
+
+    /// Only `mic_restart_withheld` carries `ran_ms`; the other events stay nil.
+    func test_otherEvents_carryNoRanMs() {
+        let (logger, sink) = makeLogger()
+
+        logger.transition(posture: posture(mode: .wakeWord), route: route, wasCapturing: false, isCapturing: true)
+
+        XCTAssertEqual(sink.records.count, 1)
+        XCTAssertEqual(sink.records[0].event, "mic_capture_started")
+        XCTAssertNil(sink.records[0].ranMs)
+    }
+}

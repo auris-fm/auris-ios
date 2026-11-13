@@ -89,6 +89,8 @@ final class CaptureRestartPolicy {
             lastEndWasAutonomous = false
         }
         isArmed = true
-        restartIsRunning = false
+        // `restartIsRunning` is deliberately kept: a trigger while the granted
+        // restart is running must not erase that run's identity — its own
+        // early death still withholds.
     }
 }
