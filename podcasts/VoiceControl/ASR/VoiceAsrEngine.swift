@@ -910,9 +910,7 @@ class VoiceAsrEngine {
             // it is still before the backend wait, so it is the only remaining point that can save
             // the handshake.
             //
-            // The `earlyResult == nil` guard selects exactly that case. It is not load-bearing for
-            // correctness — the sink's open is idempotent, so an early-scored utterance reaching
-            // here would be a no-op — but it keeps the intent legible: this line is for the
+            // The `earlyResult == nil` guard selects exactly that case: the line is for the
             // utterances that had no earlier opportunity.
             // Only an utterance that has no connection yet opens here. A grace follow-up already
             // opened one at trailing silence and carries its tag; opening again would replace that

@@ -109,7 +109,7 @@ final class StreamingWakeScoreEqualityTests: XCTestCase {
     /// Provenance of the fixture: a TTS-synthesized "hey livekit" positive from the upstream
     /// `livekit-wakeword` project (its positive-clip pipeline is Piper VITS / VoxCPM2 synthesis),
     /// added there in that project's Swift-package PR. Not a recording of any project participant.
-    func test_earlyScoreEqualsFinishedSegmentScoreOnRecordedSpeech() async throws {
+    func test_earlyScoreEqualsFinishedSegmentScoreOnTTSSynthesizedSpeech() async throws {
         let detector = try makeDetector()
         defer { detector.release() }
 
