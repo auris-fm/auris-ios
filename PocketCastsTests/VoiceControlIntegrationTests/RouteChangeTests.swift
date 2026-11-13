@@ -36,11 +36,6 @@ final class FakeAudioSessionControlling: AudioSessionControlling {
     /// Invoked when a preferred input is selected — lets a test cancel the
     /// enclosing acquisition task after selection.
     var onSelect: (() -> Void)?
-    /// Invoked after the session becomes input-capable — lets a test mirror the
-    /// real behavior where a configured `.playAndRecord` session reports the
-    /// built-in microphone in its LIVE route (`currentInputs`), not merely in
-    /// `availableInputs`.
-    var onConfigure: (() -> Void)?
 
     var currentOutputs: [AudioPort] { outputs }
     var currentInputs: [AudioPort] { inputs }
@@ -49,7 +44,6 @@ final class FakeAudioSessionControlling: AudioSessionControlling {
     func configureInputCapableSession() throws {
         configureCount += 1
         available = availableAfterConfigure
-        onConfigure?()
     }
 
     func setSessionActive(_ active: Bool) throws {
