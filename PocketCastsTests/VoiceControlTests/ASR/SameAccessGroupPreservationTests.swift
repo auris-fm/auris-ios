@@ -32,6 +32,22 @@ final class SameAccessGroupPreservationTests: XCTestCase {
     /// a real comparison against the preset bytes, not a self-consistent round trip.
     func testPostHelperReadCanaryBytesAndSentinelAreIntact() throws {
         let group = "6LL2R2A55F.fm.auris.scratchshared"
+        // Environment limitation, checked FIRST so the missing phase-1 expectation below can
+        // only mean a real phase-1 defect, never this build's lack of entitlements: probe the
+        // keychain before reading the expectation file, and skip on exactly the status the
+        // unentitled Debug build produces (errSecMissingEntitlement, as measured in 41d822acd).
+        var probe: CFTypeRef?
+        let probeStatus = SecItemCopyMatching([
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: syntheticService,
+            kSecAttrAccount as String: syntheticAccount,
+            kSecAttrAccessGroup as String: group,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ] as CFDictionary, &probe)
+        if probeStatus == errSecMissingEntitlement {
+            throw XCTSkip("host build does not declare keychain-access-groups for " + group
+                + " (errSecMissingEntitlement); requires the entitled cross-app build")
+        }
         let expectedFile = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("scratch-expected-bytes.txt")
         // REQUIRED, not optional: without the phase-1 expectation this test has nothing to compare
         // against, so a missing file must FAIL rather than pass silently.

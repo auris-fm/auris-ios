@@ -308,17 +308,16 @@ final class DiagnosticMicOverrideControl: XCTestCase {
     @MainActor
     func testBuiltInMicOnlySessionReachesListeningAndDeliversSamples() async throws {
         // ENVIRONMENT LIMITATION, not a code defect: this control's route monitor reads the
-        // HOST Mac's live audio devices through the simulator. With a Bluetooth audio route
-        // attached to the host, the route monitor flaps mid-test — capture is stopped inside
-        // the emission window (`MicExposure: isolated -> noMic`, `Gate: listening ->
-        // off(noMicrophone)` in the log) and the emitted samples never deliver. Skipped
-        // wherever a live host route is present; running it requires a host with no Bluetooth
-        // audio device attached.
-        if await IOSAudioRouteMonitor().micExposure != .exposed {
-            throw XCTSkip("host Mac has a live external audio route (e.g. Bluetooth); the " +
-                "built-in-mic delivery control depends on a stable host route and cannot " +
-                "run deterministically beside it")
-        }
+        // HOST Mac's live audio devices through the simulator. A host Bluetooth route flaps
+        // mid-test — capture is stopped inside the emission window and the emitted samples
+        // never deliver — and the route can look clean (built-in-only, exposed) when the test
+        // starts and still change before it ends, so no pre-check can gate the run. The control
+        // needs an injectable route monitor (an application-code seam ruled out by the owner);
+        // until then it is skipped unconditionally with this reason.
+        throw XCTSkip("depends on the host Mac's live audio route: Bluetooth on the host flaps " +
+            "mid-test and stops capture inside the emission window, and the route can change " +
+            "after any start-of-test check, so the control cannot run deterministically beside " +
+            "a live host route")
         let session = FakeAudioSessionControlling()
         // Exactly the simulator's situation: a built-in output that cannot carry an external
         // microphone, and only the built-in input.
