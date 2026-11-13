@@ -317,18 +317,6 @@ final class DiagnosticMicOverrideControl: XCTestCase {
             + "mid-test and stops capture inside the emission window, and the route can change "
             + "after any start-of-test check, so the control cannot run deterministically beside "
             + "a live host route")
-        // ENVIRONMENT LIMITATION, not a code defect: this control's route monitor reads the
-        // HOST Mac's live audio devices through the simulator. With a Bluetooth audio route
-        // attached to the host, the route monitor flaps mid-test — capture is stopped inside
-        // the emission window (`MicExposure: isolated -> noMic`, `Gate: listening ->
-        // off(noMicrophone)` in the log) and the emitted samples never deliver. Skipped
-        // wherever a live host route is present; running it requires a host with no Bluetooth
-        // audio device attached.
-        if await IOSAudioRouteMonitor().micExposure != .exposed {
-            throw XCTSkip("host Mac has a live external audio route (e.g. Bluetooth); the " +
-                "built-in-mic delivery control depends on a stable host route and cannot " +
-                "run deterministically beside it")
-        }
         let session = FakeAudioSessionControlling()
         // Exactly the simulator's situation: a built-in output that cannot carry an external
         // microphone, and only the built-in input.
