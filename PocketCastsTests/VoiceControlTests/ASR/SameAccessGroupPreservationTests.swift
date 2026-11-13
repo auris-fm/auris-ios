@@ -32,6 +32,22 @@ final class SameAccessGroupPreservationTests: XCTestCase {
     /// a real comparison against the preset bytes, not a self-consistent round trip.
     func testPostHelperReadCanaryBytesAndSentinelAreIntact() throws {
         let group = "6LL2R2A55F.fm.auris.scratchshared"
+        // Environment limitation, checked FIRST so the missing phase-1 expectation below can
+        // only mean a real phase-1 defect, never this build's lack of entitlements: probe the
+        // keychain before reading the expectation file, and skip on exactly the status the
+        // unentitled Debug build produces (errSecMissingEntitlement).
+        var probe: CFTypeRef?
+        let probeStatus = SecItemCopyMatching([
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: syntheticService,
+            kSecAttrAccount as String: syntheticAccount,
+            kSecAttrAccessGroup as String: group,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ] as CFDictionary, &probe)
+        if probeStatus == errSecMissingEntitlement {
+            throw XCTSkip("host build does not declare keychain-access-groups for " + group
+                + " (errSecMissingEntitlement); requires the entitled cross-app build")
+        }
         let expectedFile = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("scratch-expected-bytes.txt")
         // REQUIRED, not optional: without the phase-1 expectation this test has nothing to compare
         // against, so a missing file must FAIL rather than pass silently.
@@ -54,6 +70,14 @@ final class SameAccessGroupPreservationTests: XCTestCase {
         let bytes = (dict?[kSecValueData as String] as? Data).flatMap { String(data: $0, encoding: .utf8) }
         let attributed = dict?[kSecAttrAccessGroup as String] as? String
         print("VERIFY postHelperRead status=\(status) group=\(group) attributedGroup=\(attributed as Any) bytesMatch=\(bytes == expected)")
+        if status == errSecMissingEntitlement {
+            // Environment limitation, not a code defect: same requirement as the writer
+            // control — an entitled build declaring the shared keychain-access-groups entry and the
+            // installed helper app. The plain Debug test build cannot reach the canary, so the read
+            // is refused with errSecMissingEntitlement (-34018) before any preservation semantics.
+            throw XCTSkip("host build does not declare keychain-access-groups for " + group
+                + " (errSecMissingEntitlement); requires the entitled cross-app build")
+        }
         XCTAssertEqual(status, errSecSuccess, "the canary was not present after the helper read")
         XCTAssertEqual(attributed, group, "the canary is no longer attributed to the shared group")
         XCTAssertEqual(bytes, expected, "the canary bytes changed across the helper read")
@@ -97,6 +121,16 @@ final class SameAccessGroupPreservationTests: XCTestCase {
             kSecValueData as String: Data(syntheticValue.utf8)
         ] as CFDictionary, nil)
         print("PRESERVE write group=\(group) status=\(writeStatus)")
+        if writeStatus == errSecMissingEntitlement {
+            // Environment limitation, not a code defect: these controls require a build
+            // whose entitlements DECLARE the keychain-access-groups entry for the shared group and
+            // a separately installed helper app. The
+            // plain Debug test build declares no keychain-access-groups, so the write is refused
+            // with errSecMissingEntitlement (-34018) before any preservation semantics run.
+            // Skip in that environment; run wherever the entitlement exists.
+            throw XCTSkip("host build does not declare keychain-access-groups for " + group
+                + " (errSecMissingEntitlement); requires the entitled cross-app build")
+        }
         XCTAssertEqual(writeStatus, errSecSuccess, "the synthetic canary was not written into the measured group")
 
         let sentinelContents = "sentinel-\(UUID().uuidString)"

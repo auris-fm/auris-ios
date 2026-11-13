@@ -357,6 +357,17 @@ final class CloudProducerInterleavingControls: XCTestCase {
         graph.handoff.drain()
     }
 
+    /// The sample VALUE the reference actually holds for a cloud block encoded at `amplitude`.
+    ///
+    /// Cloud blocks travel the negotiated `pcm_s16le@16k` codec: the fixture encodes each sample
+    /// as `Int16(amplitude * 12_000)` and the player decodes Int16 PCM back to Float by dividing
+    /// by `Int16.max`, so the reference holds `amplitude * 12_000 / 32_767`, not `amplitude`.
+    /// Comparing the raw amplitude can never pass — the quantised value differs by a factor of
+    /// ~2.73, so the raw comparison fails even when the anchor mapping is exactly right.
+    private static func quantized(amplitude: Float) -> Float {
+        Float(Int16(max(-1.0, min(1.0, amplitude)) * 12_000)) / Float(Int16.max)
+    }
+
     /// Read the retained window at a stream index, so an anchor can be checked against the SAMPLES
     /// it points at rather than only against arithmetic.
     private func amplitude(at index: Int, graph: Graph) -> Float {
@@ -443,7 +454,7 @@ final class CloudProducerInterleavingControls: XCTestCase {
         // mapping that always returned zero would satisfy the bounds above, so checking the
         // content is what makes this non-vacuous.
         XCTAssertEqual(
-            abs(amplitude(at: landed, graph: graph) - blocks[0].amplitude) < 0.001, true,
+            abs(amplitude(at: landed, graph: graph) - Self.quantized(amplitude: blocks[0].amplitude)) < 0.001, true,
             "the anchored sample is not block 0's audio: the anchor points into another block"
         )
     }
@@ -498,7 +509,7 @@ final class CloudProducerInterleavingControls: XCTestCase {
                 + "\(secondCloudOrigin + cloud.referenceLength)"
         )
         XCTAssertEqual(
-            abs(amplitude(at: cloudLanded, graph: graph) - cloud.amplitude) < 0.001, true,
+            abs(amplitude(at: cloudLanded, graph: graph) - Self.quantized(amplitude: cloud.amplitude)) < 0.001, true,
             "the cloud anchor sits on samples that are not the cloud producer's audio"
         )
 
@@ -627,7 +638,7 @@ final class CloudProducerInterleavingControls: XCTestCase {
         )
         XCTAssertLessThan(landed, latestOrigin + 1_600)
         XCTAssertEqual(
-            abs(amplitude(at: landed, graph: graph) - 0.6) < 0.001, true,
+            abs(amplitude(at: landed, graph: graph) - Self.quantized(amplitude: 0.6)) < 0.001, true,
             "the new incarnation's anchor sits on the retired node's samples rather than its own"
         )
     }
