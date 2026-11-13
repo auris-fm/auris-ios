@@ -429,7 +429,6 @@ final class DiagnosticMicOverrideControl: XCTestCase {
         )
     }
 
-
     private func gate(
         exposure: MicExposure,
         admits: Bool,
