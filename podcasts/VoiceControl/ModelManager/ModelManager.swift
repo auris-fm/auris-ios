@@ -114,14 +114,6 @@ class ModelManager: ObservableObject {
         try? FileManager.default.createDirectory(at: self.storageDir, withIntermediateDirectories: true)
     }
 
-    func ensureSelectedModels() async {
-        // The whisper model download is gone with the unselected WhisperCppBackend (monthly
-        // review core#157). The LFM bundle is fetched here; SenseVoice/Canary download their
-        // own models in their backends' ensureReady().
-        _ = await ensureLfmModel()
-        isReady = isLfmModelReady()
-    }
-
     func isLfmModelReady() -> Bool {
         guard let release = cachedLfmRelease(),
               release.routerInputFormat.isReadyForInference
