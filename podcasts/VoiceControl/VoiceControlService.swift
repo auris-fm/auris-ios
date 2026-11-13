@@ -293,9 +293,7 @@ class VoiceControlService: ObservableObject {
     private var intentRouterReadyTask: Task<Void, Never>?
 
     /// Owns the mic lifecycle logging rules (event choice, severity, dedup).
-    /// Seam (test-only): the lifecycle sink. Production uses OSLog; a control
-    /// injects a recording sink to assert on emitted events.
-    private let lifecycleLogger: MicLifecycleLogger
+    private let lifecycleLogger = MicLifecycleLogger(sink: OSLogMicLifecycleSink())
 
     /// Route-acquisition attempt. Cancelled when the gate stops requiring it;
     /// a late completion is discarded rather than starting capture.
@@ -326,10 +324,6 @@ class VoiceControlService: ObservableObject {
     /// When the current capture run started, so an autonomous end can report
     /// `ran_ms`.
     private var captureStartedAt: Date?
-    /// The device-change epoch this capture run started on. An advance by the
-    /// run's end means the user's devices changed mid-run — the death is
-    /// device-caused, never an autonomous capture fault.
-    private var captureRunDeviceEpoch: UInt = 0
     /// Device/posture trigger signature seen at the last gate evaluation.
     /// A change in any component is a genuine external trigger: it re-arms
     /// automatic restarts and clears the capture-start-failed suppression.
@@ -390,7 +384,6 @@ class VoiceControlService: ObservableObject {
         self.contributionCollector = contributionCollector
         self.isPlaybackActive = isPlaybackActive
         self.onInputRoutingFinished = onInputRoutingFinished
-        self.lifecycleLogger = MicLifecycleLogger(sink: OSLogMicLifecycleSink())
         self.onInputBarrierSettled = onInputBarrierSettled
         self.onInputTerminal = onInputTerminal
         self.parsedIntentObserverFactory = parsedIntentObserverFactory
@@ -965,7 +958,6 @@ class VoiceControlService: ObservableObject {
         isListening = true
         listeningMode = mode
         captureStartedAt = Date()
-        captureRunDeviceEpoch = routeMonitor.physicalDeviceChangeEpoch
         restartPolicy.captureStarted()
         if mode == .wakeWord {
             audioRenderer.playEarcon(.listeningStart)
@@ -1614,10 +1606,15 @@ class VoiceControlService: ObservableObject {
     private func accountCaptureEnd(posture: GatePosture, wasCapturing: Bool) {
         guard wasCapturing else { return }
         let userRequested = !posture.setup.enabledByUser.isAllowed
+        // The route moving away WITHOUT an exposure loss is a conflict,
+        // context or setup blocker appearing — listening no longer allowed;
+        // its clearing is a trigger that re-arms anyway. And because the
+        // monitor advances its device epoch before publishing, a stop the
+        // user's own device change caused arrives with `triggerFired` already
+        // set, and the caller skips this accounting entirely. So every end
+        // that reaches here with a real exposure loss is autonomous.
         let notExposureDriven = posture.micExposure == .isolated
-        let deviceChangedDuringRun =
-            routeMonitor.physicalDeviceChangeEpoch != captureRunDeviceEpoch
-        if userRequested || notExposureDriven || deviceChangedDuringRun {
+        if userRequested || notExposureDriven {
             captureStartedAt = nil
             restartPolicy.stopWasUserOrInterruption()
             return

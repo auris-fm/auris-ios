@@ -249,6 +249,9 @@ extension BoundedCaptureRestartTests {
         // The interruption ends with shouldResume: the gate recomputes and
         // capture resumes through the same start path.
         postInterruptionEnded(shouldResume: true)
+        // A plain (non-device) route notification lets the gate recompute on
+        // the real monitor path rather than relying on incidental side effects.
+        postRouteChange(reason: .categoryChange)
         await waitUntil(timeout: 5) { service.isListening }
         XCTAssertTrue(service.isListening, "the post-interruption resume restarts capture")
 

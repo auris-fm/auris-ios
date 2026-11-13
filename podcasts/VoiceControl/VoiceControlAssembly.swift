@@ -57,9 +57,7 @@ class VoiceControlAssembly {
         // the pipeline (capture registration, routing, provenance) real. Without this a control
         // must supply audio the real model happens to classify as speech, which makes the test
         // depend on an external recording that a clean checkout does not have.
-        injectedSpeechClassifier: SpeechFrameClassifier? = nil,
-        // Test-only injection: a recording lifecycle-log sink so controls can
-        // assert on emitted mic lifecycle events. Nil in production — OSLog.
+        injectedSpeechClassifier: SpeechFrameClassifier? = nil
     ) -> VoiceControlService? {
         // Test-only injection: a controlled (short) clock lets a control hold actual playback
         // PAST the grace timeout without real sleeps of 30s.
