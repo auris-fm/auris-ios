@@ -22,12 +22,22 @@ final class VoiceDialogManagerTests: XCTestCase {
         XCTAssertEqual(bookmarkIntent, .rename(ref: "3", title: "Great quote"))
     }
 
-    func test_deny_confirmation_emitsNoIntent() {
+    /// Deny always emits nothing. It must also NOT close an in-progress slot dialog: the
+    /// slot flow completes at the last filled slot, so a deny mid-dialog leaves the dialog
+    /// answerable (the old pendingAction machinery made deny dead code with an unreachable
+    /// guard; both outcomes here are pinned).
+    func test_deny_emitsNoIntent_andLeavesTheDialogAnswerable() {
         let manager = VoiceDialogManager()
-        // Setting pendingAction via internal state
         _ = manager.handle(.begin(targetTool: "queue", targetAction: "clear"))
-        let result = manager.handle(.deny)
-        XCTAssertNil(result.intent)
+        let denied = manager.handle(.deny)
+        XCTAssertNil(denied.intent)
+        XCTAssertNil(denied.question)
+
+        // The dialog survives the deny: the missing-slot question still comes back.
+        _ = manager.handle(.begin(targetTool: "bookmark", targetAction: "play"))
+        _ = manager.handle(.deny)
+        let answered = manager.handle(.provideSlot(targetTool: "bookmark", targetAction: "play", slot: "ref", value: "7"))
+        XCTAssertNotNil(answered.intent)
     }
 
     func test_cancel_clearsPendingDialog() {

@@ -25,7 +25,7 @@ final class SourceLanguagePreparationControls: XCTestCase {
 
         var requiredModel: ModelSpec { ModelSpec(id: "stub", files: [], targetDir: "stub") }
         var capabilities: AsrCapabilities {
-            AsrCapabilities(languages: ["zh", "en", "yue"], canTranslateToEnglish: canTranslate, requiresHardwareAccel: false)
+            AsrCapabilities(canTranslateToEnglish: canTranslate)
         }
         func ensureReady() async -> Result<Void, Error> { .success(()) }
         func transcribe(samples: [Float], sampleRateHz: Int) async -> AsrResult { result }

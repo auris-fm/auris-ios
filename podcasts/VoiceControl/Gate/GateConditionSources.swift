@@ -1,4 +1,3 @@
-import CallKit
 import UIKit
 import AVFoundation
 import Combine
@@ -7,25 +6,6 @@ import PocketCastsUtils
 protocol GateConditionSource {
     var current: GateCondition { get }
     var publisher: AnyPublisher<GateCondition, Never> { get }
-}
-
-class CallConditionSource: GateConditionSource {
-    private let observer: CXCallObserver
-
-    init(observer: CXCallObserver = CXCallObserver()) {
-        self.observer = observer
-    }
-
-    var current: GateCondition {
-        observer.calls.isEmpty ? .allowed : .blocked(reason: "call_in_progress")
-    }
-
-    var publisher: AnyPublisher<GateCondition, Never> {
-        NotificationCenter.default
-            .publisher(for: NSNotification.Name("CXCallObserverCallChanged"))
-            .map { [weak self] _ in self?.current ?? .unknown(reason: "uninitialized") }
-            .eraseToAnyPublisher()
-    }
 }
 
 class BatteryConditionSource: GateConditionSource {
@@ -151,7 +131,6 @@ class LiveConditionMonitor: ObservableObject {
     )
     @Published var context: GateContext = .appInForeground
 
-    private let callSource = CallConditionSource()
     private let batterySource = BatteryConditionSource()
     private let castingSource = CastingConditionSource()
     private let otherAppPlayingSource = OtherAppPlayingConditionSource()
@@ -184,19 +163,10 @@ class LiveConditionMonitor: ObservableObject {
     }
 
     private func bind() {
-        callSource.publisher
-            .sink { [weak self] in
-                guard let self else { return }
-                FileLog.shared.addMessage("[VoicePipeline] Call: \($0)")
-                self.conflicts = GateConflicts(
-                    notOnCall: $0,
-                    notCasting: self.conflicts.notCasting,
-                    batteryOk: self.conflicts.batteryOk,
-                    otherAppPlaying: self.conflicts.otherAppPlaying
-                )
-            }
-            .store(in: &cancellables)
-
+        // No call-condition source: the CXCallObserver-based one never emitted (nothing posts
+        // its change event), so `notOnCall` is permanently `.allowed` and the `.onCall` off
+        // reason was unreachable. Deleted per monthly review; restoring a call check means
+        // wiring a real observer and re-introducing the case.
         batterySource.publisher
             .sink { [weak self] in
                 guard let self else { return }

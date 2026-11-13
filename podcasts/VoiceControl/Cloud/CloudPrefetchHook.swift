@@ -14,7 +14,7 @@ final class CloudPrefetchHook {
     private let baseURLProvider: () -> String
     private let userIdProvider: () -> String
     private let currentEpisodeProvider: () -> (episodeId: String, podcastId: String?)?
-    private let clientFactory: (String, String) -> CloudPrefetchClient
+    private let clientFactory: (String) -> CloudPrefetchClient
     /// Scheduling seam: production uses the client's fire-and-forget
     /// `schedulePrefetch`; tests record the request instead.
     private let scheduler: (CloudPrefetchClient, String, String?) -> Void
@@ -29,8 +29,8 @@ final class CloudPrefetchHook {
             guard let episode = PlaybackManager.shared.currentEpisode else { return nil }
             return (episode.uuid, episode.parentIdentifier())
         },
-        clientFactory: @escaping (String, String) -> CloudPrefetchClient = {
-            CloudPrefetchClient(baseURL: $0, userId: $1, tokenProvider: CloudTokenProviderRouter.provider())
+        clientFactory: @escaping (String) -> CloudPrefetchClient = {
+            CloudPrefetchClient(baseURL: $0, tokenProvider: CloudTokenProviderRouter.provider())
         },
         scheduler: @escaping (CloudPrefetchClient, String, String?) -> Void = { client, episodeId, podcastId in
             client.schedulePrefetch(episodeId: episodeId, podcastId: podcastId)
@@ -71,7 +71,7 @@ final class CloudPrefetchHook {
         let userId = userIdProvider()
         guard !userId.isEmpty, let episode = currentEpisodeProvider() else { return }
         prefetchCount += 1
-        scheduler(clientFactory(baseURL, userId), episode.episodeId, episode.podcastId)
+        scheduler(clientFactory(baseURL), episode.episodeId, episode.podcastId)
         FileLog.shared.addMessage(
             "[CloudPrefetch] hint scheduled for \(episode.episodeId) (best effort, no retry)"
         )

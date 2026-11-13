@@ -118,18 +118,9 @@ class ModelManager: ObservableObject {
     }
 
     func ensureSelectedModels() async {
-        let whisperSpec = ModelSpec(
-            id: "whisper",
-            files: [
-                ModelFile(
-                    url: URL(string: "https://download.auris.fm/whisper/ggml-small-q5_1.bin")!,
-                    filename: "ggml-small-q5_1.bin",
-                    sha256: nil
-                ),
-            ],
-            targetDir: "whisper-model"
-        )
-        _ = await downloadModel(spec: whisperSpec)
+        // The whisper model download is gone with the unselected WhisperCppBackend (monthly
+        // review core#157). The LFM bundle is fetched here; SenseVoice/Canary download their
+        // own models in their backends' ensureReady().
         _ = await ensureLfmModel()
         isReady = isLfmModelReady()
     }
@@ -245,12 +236,5 @@ class ModelManager: ObservableObject {
         default:
             return true
         }
-    }
-
-    private func downloadModel(spec: ModelSpec) async -> Result<Void, Error> {
-        let targetDir = storageDir.appendingPathComponent(spec.targetDir)
-        // download(files:to:) creates the directory and applies the per-file contract
-        // (resumable + SHA-verify-when-pinned + atomic rename) for each asset in the spec.
-        return await downloader.download(files: spec.files, to: targetDir)
     }
 }

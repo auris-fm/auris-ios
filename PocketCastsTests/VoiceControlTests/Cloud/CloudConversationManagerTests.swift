@@ -197,7 +197,7 @@ final class CloudConversationManagerTests: XCTestCase {
                 clientPositionMs: nil, recentReferencePositions: [], previousReferencePositionMs: nil
             ),
             turn: CloudTurnEnvelope.make(
-                capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation()
+                capabilities: [], routeHint: nil, conversation: testPreparedConversation()
             )
         )
 
@@ -219,7 +219,7 @@ final class CloudConversationManagerTests: XCTestCase {
                 clientPositionMs: 1_100, recentReferencePositions: [], previousReferencePositionMs: nil
             ),
             turn: CloudTurnEnvelope.make(
-                capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation()
+                capabilities: [], routeHint: nil, conversation: testPreparedConversation()
             )
         )
 
@@ -245,7 +245,7 @@ final class CloudConversationManagerTests: XCTestCase {
                 clientPositionMs: nil, recentReferencePositions: [], previousReferencePositionMs: nil
             ),
             turn: CloudTurnEnvelope.make(
-                capabilities: [], routeHint: nil, recentConversation: [], conversation: prepared
+                capabilities: [], routeHint: nil, conversation: prepared
             )
         )
 

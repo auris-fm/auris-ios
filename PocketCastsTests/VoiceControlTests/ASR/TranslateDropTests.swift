@@ -252,7 +252,7 @@ private final class StubAsrBackend: AsrBackend {
     }
 
     var capabilities: AsrCapabilities {
-        AsrCapabilities(languages: ["zh", "en"], canTranslateToEnglish: canTranslate, requiresHardwareAccel: false)
+        AsrCapabilities(canTranslateToEnglish: canTranslate)
     }
 
     func ensureReady() async -> Result<Void, Error> { .success(()) }

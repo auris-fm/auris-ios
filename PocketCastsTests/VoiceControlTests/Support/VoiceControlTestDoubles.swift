@@ -79,7 +79,7 @@ final class FakeAsrBackend: AsrBackend {
     private(set) var released = false
     var requiredModel: ModelSpec { ModelSpec(id: "fake", files: [], targetDir: "fake") }
     var capabilities: AsrCapabilities {
-        AsrCapabilities(languages: ["en"], canTranslateToEnglish: false, requiresHardwareAccel: false)
+        AsrCapabilities(canTranslateToEnglish: false)
     }
     func ensureReady() async -> Result<Void, Error> {
         ensureReadyCount += 1

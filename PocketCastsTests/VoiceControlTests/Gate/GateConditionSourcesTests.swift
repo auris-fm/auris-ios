@@ -3,10 +3,11 @@ import XCTest
 
 final class GateConditionSourcesTests: XCTestCase {
 
-    func test_notOnCall_whenNoCalls_isAllowed() {
-        let source = CallConditionSource()
-        // Real CXCallObserver has no calls on test devices
-        XCTAssertTrue(source.current.isAllowed || source.current == .unknown(reason: "uninitialized"))
+    /// The call-condition source is deleted (monthly review core#157): nothing ever posted its
+    /// change event, so `notOnCall` is permanently allowed and the `.onCall` off reason was
+    /// unreachable. This pin holds the deletion honest: no source can block on a call any more.
+    func test_notOnCall_conflictFieldIsAlwaysAllowed() {
+        XCTAssertTrue(GateConflicts.noneBlocked.notOnCall.isAllowed)
     }
 
     func test_batteryOk_inLowPowerMode_isBlocked() {

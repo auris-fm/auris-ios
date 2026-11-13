@@ -31,9 +31,9 @@ struct AsrResult {
 }
 
 struct AsrCapabilities: Equatable {
-    let languages: Set<String>
+    /// Production reads only translation capability; selection itself is
+    /// locale-driven in `AsrBackendSelector`, which needs no language table.
     let canTranslateToEnglish: Bool
-    let requiresHardwareAccel: Bool
 }
 
 struct ModelSpec {

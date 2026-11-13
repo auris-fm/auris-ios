@@ -27,13 +27,20 @@ final class MockPlaybackManager: PlaybackManagerProtocol {
 final class PlaybackManagerSinkTests: XCTestCase {
 
     func test_pause_setsVoiceCommandsSource() {
-        // Setting the analytics source before pause is the responsibility of the sink
-        AnalyticsPlaybackHelper.shared.currentSource = .voiceCommands
+        // The SINK must set the analytics source: assert on the real sink's effect, not on a
+        // value the test set itself (the old form passed without touching the sink).
+        let mock = MockPlaybackManager()
+        let sink = PlaybackManagerSink(playbackManager: mock)
+        AnalyticsPlaybackHelper.shared.currentSource = .bookmark
+        _ = sink.pause()
         XCTAssertEqual(AnalyticsPlaybackHelper.shared.currentSource, .voiceCommands)
     }
 
     func test_resume_setsVoiceCommandsSource() {
-        AnalyticsPlaybackHelper.shared.currentSource = .voiceCommands
+        let mock = MockPlaybackManager()
+        let sink = PlaybackManagerSink(playbackManager: mock)
+        AnalyticsPlaybackHelper.shared.currentSource = .bookmark
+        _ = sink.resume()
         XCTAssertEqual(AnalyticsPlaybackHelper.shared.currentSource, .voiceCommands)
     }
 

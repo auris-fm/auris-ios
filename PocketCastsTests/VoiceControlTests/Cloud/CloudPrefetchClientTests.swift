@@ -81,7 +81,7 @@ final class CloudPrefetchClientTests: XCTestCase {
         config.protocolClasses = [CloudRouteTestURLProtocol.self]
         let client = CloudPrefetchClient(
             baseURL: "https://cloud.test",
-            userId: "user_test",
+
             session: URLSession(configuration: config),
             tokenProvider: provider
         )
@@ -173,7 +173,7 @@ final class CloudPrefetchClientTests: XCTestCase {
         config.protocolClasses = [CloudRouteTestURLProtocol.self]
         return CloudPrefetchClient(
             baseURL: "https://cloud.test",
-            userId: "user_test",
+
             session: URLSession(configuration: config)
         )
     }
@@ -187,7 +187,7 @@ final class CloudPrefetchHookTests: XCTestCase {
             baseURLProvider: { "https://cloud.test" },
             userIdProvider: { "user_test" },
             currentEpisodeProvider: { ("ep-1", "pod-1") },
-            clientFactory: { baseURL, userId in CloudPrefetchClient(baseURL: baseURL, userId: userId) },
+            clientFactory: { baseURL in CloudPrefetchClient(baseURL: baseURL) },
             scheduler: { _, episodeId, podcastId in requested.append((episodeId, podcastId)) }
         )
 
@@ -205,7 +205,7 @@ final class CloudPrefetchHookTests: XCTestCase {
             baseURLProvider: { "" },
             userIdProvider: { "user_test" },
             currentEpisodeProvider: { ("ep-1", nil) },
-            clientFactory: { baseURL, userId in CloudPrefetchClient(baseURL: baseURL, userId: userId) },
+            clientFactory: { baseURL in CloudPrefetchClient(baseURL: baseURL) },
             scheduler: { _, _, _ in scheduled += 1 }
         )
         hook.handlePlaybackStarted()
@@ -218,7 +218,7 @@ final class CloudPrefetchHookTests: XCTestCase {
             baseURLProvider: { "https://cloud.test" },
             userIdProvider: { "user_test" },
             currentEpisodeProvider: { nil },
-            clientFactory: { baseURL, userId in CloudPrefetchClient(baseURL: baseURL, userId: userId) },
+            clientFactory: { baseURL in CloudPrefetchClient(baseURL: baseURL) },
             scheduler: { _, _, _ in scheduled += 1 }
         )
         hook.handlePlaybackStarted()
@@ -231,7 +231,7 @@ final class CloudPrefetchHookTests: XCTestCase {
             baseURLProvider: { "https://cloud.test" },
             userIdProvider: { "user_test" },
             currentEpisodeProvider: { ("ep-1", nil) },
-            clientFactory: { baseURL, userId in CloudPrefetchClient(baseURL: baseURL, userId: userId) },
+            clientFactory: { baseURL in CloudPrefetchClient(baseURL: baseURL) },
             scheduler: { _, _, _ in scheduled += 1 }
         )
         // One hint per playback-start event; the network layer does not retry.
@@ -270,7 +270,7 @@ final class CloudTokenProvidingTests: XCTestCase {
         let task = StubWebSocketTask(textFrames: [#"{"type":"done","usage":{"input_tokens":1,"output_tokens":0}}"#])
         let client = CloudRouteClient(
             baseURL: "https://cloud.test",
-            userId: "user_fallback",
+
             requestTimeoutSeconds: 15,
             tokenProvider: FixedTokenProvider(value: "token_from_issuer"),
             webSocketTaskFactory: { _ in task }
@@ -307,7 +307,7 @@ final class CloudTokenFailClosedTests: XCTestCase {
         config.protocolClasses = [CloudRouteTestURLProtocol.self]
         let client = CloudRouteClient(
             baseURL: "https://cloud.test",
-            userId: "user_legacy",   // non-empty: the old fallback would have dialled with this
+               // non-empty: the old fallback would have dialled with this
             session: URLSession(configuration: config),
             tokenProvider: NoTokenProvider(),
         )
@@ -333,7 +333,7 @@ final class CloudTokenFailClosedTests: XCTestCase {
         config.protocolClasses = [CloudRouteTestURLProtocol.self]
         let client = CloudPrefetchClient(
             baseURL: "https://cloud.test",
-            userId: "user_legacy",   // non-empty: the old fallback would have dialled with this
+               // non-empty: the old fallback would have dialled with this
             session: URLSession(configuration: config),
             tokenProvider: NoTokenProvider()
         )
@@ -362,7 +362,7 @@ final class CloudPrefetchRetentionTests: XCTestCase {
         let session = URLSession(configuration: config)
 
         // Exactly the hook's shape: a temporary client, no other reference kept.
-        CloudPrefetchClient(baseURL: "https://cloud.test", userId: "user_test", session: session)
+        CloudPrefetchClient(baseURL: "https://cloud.test", session: session)
             .schedulePrefetch(episodeId: "ep-1", podcastId: nil)
 
         // Poll rather than sleep once: the hint runs on a detached task, and the

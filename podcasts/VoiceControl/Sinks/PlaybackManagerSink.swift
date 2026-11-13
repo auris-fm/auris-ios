@@ -123,21 +123,10 @@ class PlaybackManagerSink: VoicePlaybackSink {
         return .silent
     }
 
+    /// Single-argument form: resolves the episode duration itself, then applies the
+    /// same negative-offset resolution and clamping as the two-argument form.
     func seekTo(positionSeconds: Int) -> VoiceResponse {
-        // Resolve negative positions against episode duration.
-        // Negative = offset from the episode end.
-        let duration = playbackManager.duration()
-        let position: TimeInterval
-        if positionSeconds < 0 {
-            let offsetFromEnd = Double(abs(positionSeconds))
-            position = max(0.0, duration - offsetFromEnd)
-        } else {
-            position = Double(positionSeconds)
-        }
-        let clamped = max(0.0, min(duration, position))
-        AnalyticsPlaybackHelper.shared.currentSource = .voiceCommands
-        playbackManager.seekTo(time: clamped)
-        return .silent
+        seekTo(positionSeconds: positionSeconds, episodeDurationSeconds: Int(playbackManager.duration()))
     }
 
     func nextEpisode() -> VoiceResponse {

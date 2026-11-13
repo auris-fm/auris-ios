@@ -27,17 +27,6 @@ class VoiceAnalytics {
         analytics.track("cloud_assistant_turn", properties: properties)
     }
 
-    func recordLatency(metric: PerformanceMetrics) {
-        analytics.track("voice_router_latency", properties: [
-            "total_ms": metric.totalTranscriptToIntentMs,
-            "prefill_ms": metric.prefillMs,
-            "ttft_ms": metric.timeToFirstTokenMs,
-            "decode_ms": metric.decodeMs,
-            "backend": metric.backend,
-            "fallback": metric.isFallback,
-            "model_release": metric.modelRelease,
-        ])
-    }
 
     /// Emits the pipeline-level `voice_recognition_latency` event defined by
     /// recognition-pipeline.md "Production Recognition Latency Metrics".

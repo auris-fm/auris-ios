@@ -9,13 +9,13 @@ import Foundation
 ///   render the structured `result` event (see `CloudClientCapabilities`).
 /// - `route_hint`: `{operation, arguments}` supplied only by typed UI flows or a
 ///   validated upstream parser — never synthesized from free text.
-/// - `context.recent_conversation`: up to four `{role, text}` entries, at most
-///   8 KiB UTF-8 in total, treated as untrusted context.
+/// - There is NO `context.recent_conversation`: the envelope never carried one on the wire
+///   and the never-serialized field (with its provider plumbing) is deleted (monthly review
+///   core#157). Conversation history stays server-side, reachable through the conversation id.
 struct CloudTurnEnvelope: Equatable {
     let requestId: String
     let capabilities: [String]
     let routeHint: CloudRouteHint?
-    let recentConversation: [RecentConversationTurn]
     /// The conversation identity this turn carries. Required by the admission contract on
     /// every turn; nothing is sent when it is absent, so a caller that forgets it produces a
     /// frame the server must refuse rather than a silently stateless turn.
@@ -33,14 +33,12 @@ struct CloudTurnEnvelope: Equatable {
     static func make(
         capabilities: [String],
         routeHint: CloudRouteHint?,
-        recentConversation: [RecentConversationTurn],
         conversation: CloudPreparedConversation
     ) -> CloudTurnEnvelope {
         CloudTurnEnvelope(
             requestId: conversation.requestId,
             capabilities: capabilities,
             routeHint: routeHint,
-            recentConversation: RecentConversation.bounded(recentConversation),
             conversation: conversation
         )
     }
@@ -68,62 +66,9 @@ struct CloudRouteHint: Equatable {
     let arguments: [String: CloudRouteJSONValue]
 }
 
-/// One bounded prior turn in the request context. Untrusted context only —
-/// never treated as system instructions or authenticated tool results.
-struct RecentConversationTurn: Equatable {
-    enum Role: String {
-        case user
-        case assistant
-    }
-
-    let role: Role
-    let text: String
-}
-
-/// Bounds for the recent-conversation context (≤4 turns, ≤8 KiB UTF-8).
-enum RecentConversation {
-    static let maxTurns = 4
-    static let maxBytes = 8 * 1024
-
-    /// Keeps the newest turns within both bounds: drops oldest entries first,
-    /// then trims the remaining newest entry if it alone exceeds the byte cap.
-    static func bounded(_ turns: [RecentConversationTurn]) -> [RecentConversationTurn] {
-        var result = Array(turns.suffix(maxTurns))
-        // Newest-first trimming so the most recent context survives.
-        while !result.isEmpty {
-            let totalBytes = result.reduce(0) { $0 + $1.text.utf8.count }
-            if totalBytes <= maxBytes { break }
-            if result.count == 1 {
-                // Single oversized turn: keep its tail (newest speech) within
-                // budget, measured in **UTF-8 bytes** — `String.suffix` counts
-                // Characters, so a CJK/emoji turn would trim to 8 Ki *characters*
-                // (~32 KiB of bytes) and blow the bound (review finding on #19).
-                let only = result[0]
-                let truncated = Self.utf8Suffix(only.text, maxBytes: maxBytes)
-                result = [RecentConversationTurn(role: only.role, text: truncated)]
-                break
-            }
-            result.removeFirst()
-        }
-        return result
-    }
-
-    /// The longest suffix of `text` within `maxBytes` UTF-8 bytes, without
-    /// splitting a multi-byte scalar (leading continuation bytes are dropped, so
-    /// the result always decodes).
-    static func utf8Suffix(_ text: String, maxBytes: Int) -> String {
-        guard maxBytes > 0, text.utf8.count > maxBytes else { return maxBytes > 0 ? text : "" }
-        var bytes = Array(text.utf8.suffix(maxBytes))
-        while let first = bytes.first, (first & 0b1100_0000) == 0b1000_0000 {
-            bytes.removeFirst()
-        }
-        return String(decoding: bytes, as: UTF8.self)
-    }
-}
-
 /// Builds the turn envelope — the per-turn fields the server contracts on
-/// (`request_id`, `capabilities` gating, typed-only `route_hint`, a bounded
-/// `context.recent_conversation`).
+/// (`request_id`, `capabilities` gating, typed-only `route_hint`; conversation
+/// history is server-side and never client-supplied).
 ///
 /// This is the **single** place that asserts the envelope's shape: the WebSocket
 /// authenticate frame is built from it, and the contract tests pin it through

@@ -23,7 +23,7 @@ final class SuspendedAsrBackend: AsrBackend, @unchecked Sendable {
 
     var requiredModel: ModelSpec { ModelSpec(id: "suspended", files: [], targetDir: "suspended") }
     var capabilities: AsrCapabilities {
-        AsrCapabilities(languages: ["en"], canTranslateToEnglish: false, requiresHardwareAccel: false)
+        AsrCapabilities(canTranslateToEnglish: false)
     }
     func ensureReady() async -> Result<Void, Error> { .success(()) }
 
@@ -813,7 +813,7 @@ final class FailingAsrBackend: AsrBackend {
     struct NotReady: Error {}
     var requiredModel: ModelSpec { ModelSpec(id: "failing", files: [], targetDir: "failing") }
     var capabilities: AsrCapabilities {
-        AsrCapabilities(languages: ["en"], canTranslateToEnglish: false, requiresHardwareAccel: false)
+        AsrCapabilities(canTranslateToEnglish: false)
     }
     func ensureReady() async -> Result<Void, Error> { .failure(NotReady()) }
     func transcribe(samples: [Float], sampleRateHz: Int) async -> AsrResult {

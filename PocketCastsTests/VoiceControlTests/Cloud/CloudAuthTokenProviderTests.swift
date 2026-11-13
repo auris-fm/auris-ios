@@ -660,7 +660,6 @@ final class CloudTokenProviderRouterTests: XCTestCase {
         CloudRouteTestURLProtocol.onRequest = { request, _ in requests.append(request.value(forHTTPHeaderField: "Authorization") ?? "") }
         let client = CloudRouteClient(
             baseURL: "https://api.test",
-            userId: "user_legacy",
             session: URLSession(configuration: config),
             tokenProvider: CloudAuthTokenProvider(
                 authBaseURLProvider: { "https://auth.test" },

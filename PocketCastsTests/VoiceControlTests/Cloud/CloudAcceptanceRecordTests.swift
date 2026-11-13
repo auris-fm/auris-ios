@@ -36,26 +36,6 @@ final class CloudAcceptanceRecordTests: XCTestCase {
         XCTAssertEqual(recorder.record().terminal, .transportFailure(stage: .serverEvent, code: "invalid_response", message: "x"))
     }
 
-    /// The recall assertion is against the INCOMING response text. This proves the two directions are
-    /// distinguishable: the OUTGOING envelope's recent-conversation context is not what the recorder
-    /// reports, so a turn whose request merely MENTIONED a nonce cannot make recall pass.
-    func testOutgoingRecentConversationIsNotPartOfTheRecord() {
-        let outgoing = CloudTurnEnvelope.make(
-            capabilities: [],
-            routeHint: nil,
-            recentConversation: [RecentConversationTurn(role: .user, text: "NONCE-42")],
-            conversation: testPreparedConversation()
-        )
-        XCTAssertFalse(outgoing.recentConversation.isEmpty, "the fixture must carry outgoing context")
-
-        let recorder = CloudAcceptanceRecord.Recorder(requestId: "req-4", conversationId: "conv-C")
-        recorder.observe(.done(usage: CloudTurnUsage(inputTokens: 0, outputTokens: 0, speech: nil)))
-        XCTAssertEqual(
-            recorder.record().responseText, "",
-            "the recorder reported outgoing context as a response; recall would pass falsely"
-        )
-    }
-
     /// REQUEST IDENTITY: the record carries the request id of the turn that was SUBMITTED, so two
     /// steps' records are distinguishable and a recall assertion cannot be judged against another
     /// step's turn. Fresh recorders alone would not establish this.

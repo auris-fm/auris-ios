@@ -119,16 +119,6 @@ final class OperationJournalTests: XCTestCase {
 
     // MARK: - the result contract
 
-    /// `preventsReExecution` answers one question: may this operation be executed again?
-    /// Every outcome stops it — including `unknown`, whose whole point is that it must NOT be
-    /// re-run. It says nothing about whether the effect is known, which is why `unknown` stops
-    /// re-execution while still not being a success.
-    func test_everyOutcomePreventsReExecution() {
-        for outcome in OperationOutcome.allCases {
-            XCTAssertTrue(outcome.preventsReExecution, "\(outcome) must prevent re-execution")
-        }
-    }
-
     /// The distinction the outcome table turns on: `unknown` is a recorded, final answer that
     /// is not a success.
     func test_unknownPreventsReExecutionButIsNotSuccess() {

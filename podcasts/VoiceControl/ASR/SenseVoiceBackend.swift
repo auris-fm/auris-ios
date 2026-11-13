@@ -14,9 +14,7 @@ final class SenseVoiceBackend: AsrBackend {
     private let transcribeQueue = DispatchQueue(label: "com.auris.sensevoice", qos: .userInitiated)
 
     let capabilities = AsrCapabilities(
-        languages: ["zh", "en", "ja", "ko", "yue"],
-        canTranslateToEnglish: false,
-        requiresHardwareAccel: false
+        canTranslateToEnglish: false
     )
 
     var requiredModel: ModelSpec {
