@@ -781,24 +781,3 @@ private struct MockFingerprintMapper: FingerprintMappingProviding {
     }
 }
 
-// core#157: the real `VoiceCloudRouteSink` protocol gained eager barge-in + suppression; these
-// mocks never barge in and never suppress.
-extension MockCloudRouteSink {
-    // New protocol members (core#157): the mocks never barge in or suppress.
-    @discardableResult
-    @MainActor
-    func emitBargeIn(
-        request: String,
-        utteranceId: String?,
-        origin: Int?,
-        selection: CloudConversationSelection?,
-        sourceTranscript: String?,
-        sourceLanguage: String?,
-        translationKind: TranslationKind?,
-        validatingEpoch: UInt64?,
-        isEpochStillCurrent: (@Sendable (UInt64) -> Bool)?
-    ) async -> String? { nil }
-
-    @MainActor
-    func isSuppressed(_ utteranceId: String?) -> Bool { false }
-}

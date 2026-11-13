@@ -238,10 +238,4 @@ class ModelManager: ObservableObject {
         }
     }
 
-    private func downloadModel(spec: ModelSpec) async -> Result<Void, Error> {
-        let targetDir = storageDir.appendingPathComponent(spec.targetDir)
-        // download(files:to:) creates the directory and applies the per-file contract
-        // (resumable + SHA-verify-when-pinned + atomic rename) for each asset in the spec.
-        return await downloader.download(files: spec.files, to: targetDir)
-    }
 }
