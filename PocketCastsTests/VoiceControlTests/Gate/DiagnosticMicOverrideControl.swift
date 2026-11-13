@@ -23,20 +23,6 @@ import XCTest
 ///    "Audio engine started" alone is NOT sample evidence — it is emitted at startup. The
 ///    `First buffer` line is emitted from the native capture callback on a real received buffer,
 ///    with non-zero amplitude, at the pipeline's 16 kHz rate. That is the actual-signal line.
-/// Classifies a frame as speech by RMS energy — the original `EnergySpeechFrameClassifier`
-/// decision, fixed here so the control's fixture (a flat DC level above zero) is unambiguously
-/// speech and silence is unambiguously not, without depending on a real VAD model's judgment of
-/// synthetic audio.
-private final class FixedRmsSpeechClassifier: SpeechFrameClassifier {
-    func isSpeech(_ samples: [Float]) -> Bool {
-        guard !samples.isEmpty else { return false }
-        let meanSq = samples.reduce(Float(0)) { $0 + $1 * $1 } / Float(samples.count)
-        return sqrt(meanSq) >= 0.02
-    }
-
-    func reset() {}
-}
-
 final class DiagnosticMicOverrideControl: XCTestCase {
     /// Bounded poll, so a premise that never becomes true FAILS instead of hanging the suite.
     private func awaitTrue(timeout: TimeInterval = 5, _ condition: @escaping () -> Bool) async -> Bool {
@@ -332,7 +318,7 @@ final class DiagnosticMicOverrideControl: XCTestCase {
         // A REAL configured session reports the built-in microphone in its LIVE route, not only
         // in `availableInputs` — that live-route readback is what flips the monitor's exposure
         // and lets the gate listen. The fake only models it through this hook.
-        session.onConfigure = { session.inputs = session.availableAfterConfigure }
+        session.onConfigure = { [weak session] in session?.inputs = session?.availableAfterConfigure ?? [] }
 
         XCTAssertTrue(
             DiagnosticMicOverride.isActive,
@@ -375,13 +361,14 @@ final class DiagnosticMicOverrideControl: XCTestCase {
             // The audio's speech classification is INJECTED, not left to the real Silero model:
             // the model does not classify synthetic fixtures as speech (the measured finding that
             // corrected ServiceSelectionProvenanceTests's fixture), and no synthetic waveform
-            // reliably clears a real model's threshold. Injecting the decision keeps capture,
-            // segmentation, routing and provenance fully real — the same pattern that suite uses.
+            // reliably clears a real model's threshold. Injecting the production RMS classifier's
+            // decision keeps capture, segmentation, routing and provenance fully real — the same
+            // pattern that suite uses.
             // A TRANSCRIBING backend, not the empty one: an empty transcript yields no utterance,
             // so nothing is ever enqueued and sample delivery would look broken when the audio
             // actually arrived.
             asrBackend: { TranscribingAsrBackend(text: "play the latest episode") },
-            injectedSpeechClassifier: FixedRmsSpeechClassifier(),
+            injectedSpeechClassifier: EnergySpeechFrameClassifier(threshold: 0.02),
         ) else {
             XCTFail("no service built, so this control proves nothing")
             return
