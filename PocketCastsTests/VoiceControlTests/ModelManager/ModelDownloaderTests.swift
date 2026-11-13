@@ -17,8 +17,14 @@ final class ModelDownloaderTests: XCTestCase {
         XCTAssertTrue(ModelVerifier.verifyAll(models: []))
     }
 
-    func test_modelManager_storageDir_created() {
-        let manager = ModelManager()
-        // Verifies no crash, storage dir is set up
+    func test_modelManager_storageDir_created() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ModelDownloaderTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        _ = ModelManager(storageDir: dir)
+        var isDirectory: ObjCBool = false
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDirectory),
+                      "init must create the storage directory")
+        XCTAssertTrue(isDirectory.boolValue)
     }
 }
