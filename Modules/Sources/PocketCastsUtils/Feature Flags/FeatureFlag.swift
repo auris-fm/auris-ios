@@ -244,9 +244,6 @@ public enum FeatureFlag: String, CaseIterable {
     /// Enable the Up Next sort button
     case upNextSort
 
-    /// Enable voice control with wakeword detection and voice intent execution
-    case voiceControl
-
     /// Enable Generated Chapters
     case generatedChapters
 
@@ -463,8 +460,6 @@ public enum FeatureFlag: String, CaseIterable {
             true
         case .generatedChapters:
             BuildEnvironment.current == .debug
-        case .voiceControl:
-            true
         case .hls:
             true
         case .troubleshooting:

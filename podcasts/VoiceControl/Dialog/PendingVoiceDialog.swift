@@ -2,11 +2,7 @@ struct PendingVoiceDialog {
     let targetTool: String
     let targetAction: String
     var filledSlots: [String: String] = [:]
-    let missingSlots: Set<String>
     let requiredSlots: Set<String>
-    let lastQuestion: String
-
-    var isComplete: Bool { missingSlots.isEmpty }
 }
 
 enum DialogControlAction {

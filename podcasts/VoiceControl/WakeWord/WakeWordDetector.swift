@@ -87,7 +87,7 @@ class WakeWordDetector: WakeWordDetectorProtocol {
 
 // MARK: - C Bridge
 
-/// These C functions are implemented in WakeWordDetector.cpp and linked
+/// These C functions are implemented in WakeWordDetector.mm and linked
 /// via the bridging header. They wrap the ONNX Runtime 3-stage pipeline
 /// (mel spectrogram → embedding → classifier).
 
@@ -101,16 +101,6 @@ private func wakeword_init(
     _ classifierModelPath: UnsafePointer<CChar>,
     _ threshold: Float
 ) -> UnsafeMutableRawPointer?
-
-/// Runs detection on a single window of 16kHz mono float PCM.
-/// Returns a confidence score in [0, 1].
-@_silgen_name("wakeword_detect")
-private func wakeword_detect(
-    _ handle: UnsafeMutableRawPointer,
-    _ samples: UnsafePointer<Float>?,
-    _ sampleCount: Int32,
-    _ sampleRate: Int32
-) -> Float
 
 /// Runs detection on a complete VAD segment per the recognition-pipeline
 /// detection-window policy (virtual 2s context, single preprocessing pass,

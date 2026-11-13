@@ -117,10 +117,9 @@ final class EchoReferenceWiringTests: XCTestCase {
     /// An isolated route must be *classified*, and it must not clear the reference as if it
     /// proved echo impossible.
     ///
-    /// The previous version asserted `echoFilterRouteConsidersEchoImpossible` is false — but
-    /// that is constant-false by contract, so the case could not fail and proved nothing.
-    /// The observable distinction is the route value itself: a headset classifies as
-    /// `.isolated`, which differs from the engine's default.
+    /// An earlier version asserted a constant-false "proves echo impossible" accessor — but
+    /// that could not fail and proved nothing. The observable distinction is the route value
+    /// itself: a headset classifies as `.isolated`, which differs from the engine's default.
     ///
     /// Driven through the monitor, so the case covers the classification path rather than
     /// the setter. The lifetime of this subscription across assembly release is covered
@@ -1805,12 +1804,10 @@ final class EchoReferenceWiringTests: XCTestCase {
             "the built-in speaker must apply the correlation window"
         )
 
-        // The scope value is the observable distinction. `provesEchoImpossible` is not
-        // asserted here: it is constant-false by contract (`VoiceAsrEngine.swift:36`), so an
-        // assertion on it cannot fail whichever route it is handed, and reading it as coverage
-        // is worse than leaving it out. The same correction was already applied to the
-        // isolated-route case above and had not been carried to this one.
-        // Expected scopes read from `forOutput` itself (`VoiceAsrEngine.swift:45-53`):
+        // The scope value is the observable distinction. There is no separate constant-false
+        // "proves echo impossible" flag: an assertion on such a flag cannot fail whichever
+        // route it is handed, and reading it as coverage is worse than leaving it out.
+        // Expected scopes read from `forOutput` itself:
         // headphones and BLE are isolated; HFP, A2DP, AirPlay and unknown are external.
         for (output, expected): (AudioRouteOutput, VoiceAsrEngine.EchoFilterRoute) in [
             (.headphones, .isolated),

@@ -86,14 +86,9 @@ class ModelManager: ObservableObject {
     private static let lfmManifestFilename = "manifest.json"
     private static let lfmLatestURL = URL(string: "https://download.auris.fm/function-call/latest.json")!
 
-    @Published var isReady = false
-
     private let downloader: ModelDownloader
     private let storageDir: URL
     private let session: URLSession
-
-    /// Application Support/.../Auris/Models root (injectable via init for tests).
-    var filesDir: URL { storageDir }
 
     var lfmDir: URL { storageDir.appendingPathComponent("function-call") }
     var lfmModelFile: URL { lfmDir.appendingPathComponent(Self.lfmModelFilename) }
@@ -115,14 +110,6 @@ class ModelManager: ObservableObject {
                 .first!.appendingPathComponent("Auris/Models")
         }
         try? FileManager.default.createDirectory(at: self.storageDir, withIntermediateDirectories: true)
-    }
-
-    func ensureSelectedModels() async {
-        // The whisper model download is gone with the unselected WhisperCppBackend (monthly
-        // review core#157). The LFM bundle is fetched here; SenseVoice/Canary download their
-        // own models in their backends' ensureReady().
-        _ = await ensureLfmModel()
-        isReady = isLfmModelReady()
     }
 
     func isLfmModelReady() -> Bool {
@@ -167,7 +154,6 @@ class ModelManager: ObservableObject {
             let url = lfmDir.appendingPathComponent(name)
             try? FileManager.default.removeItem(at: url)
         }
-        isReady = false
     }
 
     func lfmReleaseVersion() -> String? {

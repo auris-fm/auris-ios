@@ -281,53 +281,6 @@ std::string LfmRuntime::generate(const std::string& prefill, int nPredict) {
     return generated;
 }
 
-std::string LfmRuntime::classifyEmbedding(const std::vector<float>& embedding) const {
-    if (classifier == nullptr) {
-        throw LfmError("classifier not loaded");
-    }
-    const int labelIndex = classifier->argmax(embedding);
-    if (labelIndex < 0 || labelIndex >= static_cast<int>(labels.size())) {
-        throw LfmError("label index out of range");
-    }
-    return labels[static_cast<std::size_t>(labelIndex)];
-}
-
-bool LfmRuntimeHolder::loadClassifierOnly(
-    const std::string& classifierPath,
-    const std::string& labelMapPath,
-    int expectedHiddenSize) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    classifierOnly_ = ClassifierHead::loadFromFile(classifierPath, expectedHiddenSize);
-    classifierOnlyLabels_ = loadLabelMap(labelMapPath);
-    if (static_cast<int>(classifierOnlyLabels_.size()) != classifierOnly_->numLabels()) {
-        classifierOnly_.reset();
-        classifierOnlyLabels_.clear();
-        return false;
-    }
-    return true;
-}
-
-std::string LfmRuntimeHolder::classifyEmbedding(const std::vector<float>& embedding) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (runtime_ != nullptr) {
-        return runtime_->classifyEmbedding(embedding);
-    }
-    if (classifierOnly_ == nullptr) {
-        throw LfmError("classifier not loaded");
-    }
-    const int labelIndex = classifierOnly_->argmax(embedding);
-    if (labelIndex < 0 || labelIndex >= static_cast<int>(classifierOnlyLabels_.size())) {
-        throw LfmError("label index out of range");
-    }
-    return classifierOnlyLabels_[static_cast<std::size_t>(labelIndex)];
-}
-
-void LfmRuntimeHolder::releaseClassifierOnly() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    classifierOnly_.reset();
-    classifierOnlyLabels_.clear();
-}
-
 bool LfmRuntimeHolder::load(
     const std::string& modelPath,
     const std::string& classifierPath,
@@ -340,8 +293,6 @@ bool LfmRuntimeHolder::load(
         runtime_->release();
     }
     runtime_ = std::move(next);
-    classifierOnly_.reset();
-    classifierOnlyLabels_.clear();
     return true;
 }
 
@@ -385,6 +336,4 @@ void LfmRuntimeHolder::release() {
         runtime_->release();
         runtime_.reset();
     }
-    classifierOnly_.reset();
-    classifierOnlyLabels_.clear();
 }

@@ -49,20 +49,9 @@ final class AsrIntentBenchmarkRunner {
     static func makeInputOrThrow(variant: String, benchmarkCase: RepresentationBenchmarkCase) throws -> IntentRoutingInput {
         let english = benchmarkCase.englishText
         switch variant {
-        case variantD:
-            // D (translate → english_v1): router sees English only.
-            return IntentRoutingInput(
-                sourceTranscript: benchmarkCase.nativeText,
-                sourceLanguage: benchmarkCase.language,
-                routerTranscript: english,
-                translationKind: benchmarkCase.language == "en" ? .none : .platform,
-                // A benchmark utterance is not a conversation turn, but it still carries an
-                // explicit identity — no silent mint on the input builders.
-                selection: nil,
-                utteranceId: UUID().uuidString
-            )
-        case variantE:
-            // E (dual_v1): router renders from native + English transcript.
+        case variantD, variantE:
+            // D (translate → english_v1) and E (dual_v1) build the same input envelope here:
+            // the router sees `english` in both.
             return IntentRoutingInput(
                 sourceTranscript: benchmarkCase.nativeText,
                 sourceLanguage: benchmarkCase.language,

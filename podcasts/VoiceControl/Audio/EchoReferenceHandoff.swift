@@ -77,11 +77,6 @@ final class EchoReferenceHandoff {
     }
 
     private let reference: PlaybackEchoReference
-    /// The shared reference this handoff appends to. Exposed read-only so a producer that
-    /// appends its own samples directly (the cloud player, which is not on a real-time
-    /// deadline callback) can still publish ranges and positions through THIS handoff's
-    /// mapping rather than keeping a second one.
-    var emittedReference: PlaybackEchoReference { reference }
     private let capacity: Int
     private let queue: DispatchQueue
 
