@@ -17,7 +17,7 @@ final class ModelDownloaderTests: XCTestCase {
         XCTAssertTrue(ModelVerifier.verifyAll(models: []))
     }
 
-    func test_modelManager_storageDir_created() throws {
+    func test_modelManager_storageDir_created() {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("ModelDownloaderTests-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: dir) }
