@@ -9,7 +9,6 @@ import XCTest
 /// because a rule that is written but never reached would pass every unit test of the policy while
 /// a stale connection still carried a turn.
 final class CloudRouteStaleConnectionTests: XCTestCase {
-    private let userId = "user_79424ba0-f09b-013b-249c-566ad7a4dc9d"
     private let sampleContext = CloudRouteContext(
         episodeId: "79424ba0-f09b-013b-249c-566ad7a4dc9d",
         podcastId: "da7aba5e-f11e-f11e-f11e-da7aba5ef11e",
@@ -35,7 +34,6 @@ final class CloudRouteStaleConnectionTests: XCTestCase {
     ) -> CloudRouteClient {
         CloudRouteClient(
             baseURL: "https://cloud.test",
-            userId: userId,
             tokenProvider: StubTokenProvider(token: "test_token"),
             webSocketTaskFactory: { _ in task },
             now: { clock.read() },
@@ -45,7 +43,7 @@ final class CloudRouteStaleConnectionTests: XCTestCase {
 
     private func makeTurn() -> CloudTurnEnvelope {
         CloudTurnEnvelope.make(
-            capabilities: [], routeHint: nil, recentConversation: [],
+            capabilities: [], routeHint: nil,
             conversation: testPreparedConversation()
         )
     }
@@ -103,7 +101,6 @@ final class CloudRouteStaleConnectionTests: XCTestCase {
         let clock = SteppableClock()
         let client = CloudRouteClient(
             baseURL: "https://cloud.test",
-            userId: userId,
             tokenProvider: StubTokenProvider(token: "test_token"),
             webSocketTaskFactory: { _ in factoryCalls += 1; return task },
             now: { clock.read() }
@@ -128,7 +125,6 @@ final class CloudRouteStaleConnectionTests: XCTestCase {
         let clock = SteppableClock()
         let client = CloudRouteClient(
             baseURL: "https://cloud.test",
-            userId: userId,
             tokenProvider: StubTokenProvider(token: "test_token"),
             webSocketTaskFactory: { _ in task },
             now: { clock.read() }
@@ -146,7 +142,6 @@ final class CloudRouteStaleConnectionTests: XCTestCase {
         let clock = SteppableClock()
         let client = CloudRouteClient(
             baseURL: "https://cloud.test",
-            userId: userId,
             tokenProvider: StubTokenProvider(token: "test_token"),
             webSocketTaskFactory: { _ in
                 if issued.isEmpty {
@@ -185,7 +180,6 @@ final class CloudRouteStaleConnectionTests: XCTestCase {
         let clock = SteppableClock()
         let client = CloudRouteClient(
             baseURL: "https://cloud.test",
-            userId: userId,
             tokenProvider: StubTokenProvider(token: "test_token"),
             webSocketTaskFactory: { _ in
                 let task = StubWebSocketTask(textFrames: [])

@@ -42,7 +42,7 @@ final class EarlyWakeResultUsageControl: XCTestCase {
         VoiceAsrEngine(
             capture: NativeAudioCapture(),
             segmenter: segmenterIn ?? NativeVadSegmenter(threshold: 0.0, silenceTimeoutMs: 500, classifier: classifier),
-            backend: WhisperCppBackend(modelPath: "/tmp/test"),
+            backend: FakeAsrBackend(),
             signalFilter: SignalFilter(),
             wakeWordDetector: detector,
             gracePeriodSignal: GracePeriodSignal()
@@ -198,7 +198,7 @@ final class EarlyWakeResultUsageControl: XCTestCase {
         let engine = VoiceAsrEngine(
             capture: NativeAudioCapture(),
             segmenter: segmenter,
-            backend: WhisperCppBackend(modelPath: "/tmp/test"),
+            backend: FakeAsrBackend(),
             signalFilter: SignalFilter(),
             wakeWordDetector: CountingDetector(),
             gracePeriodSignal: grace
@@ -238,7 +238,7 @@ final class EarlyWakeResultUsageControl: XCTestCase {
         let engine = VoiceAsrEngine(
             capture: NativeAudioCapture(),
             segmenter: segmenter,
-            backend: WhisperCppBackend(modelPath: "/tmp/test"),
+            backend: FakeAsrBackend(),
             signalFilter: SignalFilter(),
             wakeWordDetector: detector,
             gracePeriodSignal: GracePeriodSignal()
@@ -343,7 +343,7 @@ final class EarlyWakeResultUsageControl: XCTestCase {
         let engine = VoiceAsrEngine(
             capture: NativeAudioCapture(),
             segmenter: segmenter,
-            backend: WhisperCppBackend(modelPath: "/tmp/test"),
+            backend: FakeAsrBackend(),
             signalFilter: SignalFilter(),
             wakeWordDetector: CountingDetector(),
             gracePeriodSignal: grace

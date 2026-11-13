@@ -42,7 +42,6 @@ final class EarlyConnectionLifecycleControl: XCTestCase {
             clientFactory: {
                 CloudRouteClient(
                     baseURL: "https://cloud.test",
-                    userId: "user_test",
                     tokenProvider: StubTokenProvider(token: "test_token"),
                     webSocketTaskFactory: { _ in StubWebSocketTask(textFrames: []) }
                 )
