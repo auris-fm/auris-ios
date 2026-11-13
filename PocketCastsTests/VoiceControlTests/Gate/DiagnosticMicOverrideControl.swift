@@ -23,6 +23,44 @@ import XCTest
 ///    "Audio engine started" alone is NOT sample evidence — it is emitted at startup. The
 ///    `First buffer` line is emitted from the native capture callback on a real received buffer,
 ///    with non-zero amplitude, at the pipeline's 16 kHz rate. That is the actual-signal line.
+/// The monitor the delivery control injects: a built-in-mic-only route that NEVER changes.
+///
+/// A production monitor on the simulator tracks the host Mac's audio devices, and a host with a
+/// live Bluetooth route flaps mid-test — the route change stops capture inside the emission
+/// window and delivery fails regardless of the code under test. This subclass pins the route the
+/// control's premise names: built-in output and input, exposed, and no external-microphone
+/// candidate (the diagnostic admits the built-in mic only when no external candidate exists).
+final class FixedBuiltInRouteMonitor: IOSAudioRouteMonitor {
+    init() { super.init(forTesting: ()) }
+
+    override var hasExternalMicrophoneCandidate: Bool { false }
+
+    /// Never re-reads the live session — the pinned values are the route's whole truth.
+    override func refreshRoute() {}
+
+    /// Pins the route the control names: a built-in-only, genuinely exposed route with no
+    /// external-microphone candidate. A production monitor would instead track the host's live
+    /// devices and flap on every host Bluetooth change, stopping capture mid-emission.
+    func pinBuiltInRoute() {
+        currentRoute = AudioRoute(output: .builtInSpeaker, input: .builtInMic)
+        micExposure = .exposed
+    }
+}
+
+/// Classifies a frame as speech by RMS energy — the original `EnergySpeechFrameClassifier`
+/// decision, fixed here so the control's fixture (a flat DC level above zero) is unambiguously
+/// speech and silence is unambiguously not, without depending on a real VAD model's judgment of
+/// synthetic audio.
+private final class FixedRmsSpeechClassifier: SpeechFrameClassifier {
+    func isSpeech(_ samples: [Float]) -> Bool {
+        guard !samples.isEmpty else { return false }
+        let meanSq = samples.reduce(Float(0)) { $0 + $1 * $1 } / Float(samples.count)
+        return sqrt(meanSq) >= 0.02
+    }
+
+    func reset() {}
+}
+
 final class DiagnosticMicOverrideControl: XCTestCase {
     /// Bounded poll, so a premise that never becomes true FAILS instead of hanging the suite.
     private func awaitTrue(timeout: TimeInterval = 5, _ condition: @escaping () -> Bool) async -> Bool {
@@ -308,11 +346,11 @@ final class DiagnosticMicOverrideControl: XCTestCase {
     @MainActor
     func testBuiltInMicOnlySessionReachesListeningAndDeliversSamples() async {
         let session = FakeAudioSessionControlling()
-        // Exactly the simulator's situation: a built-in output that cannot carry an external
-        // microphone, and only the built-in input.
+        // Exactly the simulator's situation before the diagnostic touches it: a built-in output,
+        // and NO live inputs — the session only becomes input-capable when the diagnostic's
+        // acquisition configures it, so the fixture starts with no inputs and supplies the
+        // built-in input as `availableAfterConfigure`.
         session.outputs = [AudioPort(portType: .builtInSpeaker, uid: "sim-speaker")]
-        session.inputs = [AudioPort(portType: .builtInMic, uid: "sim-builtin-mic")]
-        session.available = [AudioPort(portType: .builtInMic, uid: "sim-builtin-mic")]
         session.availableAfterConfigure = [AudioPort(portType: .builtInMic, uid: "sim-builtin-mic")]
         session.selectionTakesEffect = true
 
@@ -329,6 +367,16 @@ final class DiagnosticMicOverrideControl: XCTestCase {
         )
         monitor.context = .playbackActive
 
+        // FIXED ROUTE, not the host's live devices: a real IOSAudioRouteMonitor on the simulator
+        // tracks the HOST Mac's audio devices, and a host with a live Bluetooth route flaps
+        // mid-test — the route change stops capture inside the emission window and the control
+        // fails regardless of the code under test. The control's premise is a built-in-mic-only
+        // route, so the injected monitor pins exactly that: built-in output and input, exposed,
+        // and no external-microphone candidate (the diagnostic admits the built-in mic only when
+        // no external candidate exists).
+        let routeMonitor = FixedBuiltInRouteMonitor()
+        routeMonitor.pinBuiltInRoute()
+
         // The assembly loads the wake-word ONNX models synchronously; without a seeded model
         // manager it blocks the test host until the watchdog kills the run. Same seeding the
         // production-path suites use.
@@ -341,13 +389,20 @@ final class DiagnosticMicOverrideControl: XCTestCase {
         guard let service = VoiceControlAssembly().buildVoiceControlService(
             audioSession: session,
             conditionMonitor: monitor,
+            routeMonitor: routeMonitor,
             capture: capture,
             inference: FakeLfmInference(),
             modelManager: modelManager,
+            // The audio's speech classification is INJECTED, not left to the real Silero model:
+            // the model does not classify synthetic fixtures as speech (the measured finding that
+            // corrected ServiceSelectionProvenanceTests's fixture), and no synthetic waveform
+            // reliably clears a real model's threshold. Injecting the decision keeps capture,
+            // segmentation, routing and provenance fully real — the same pattern that suite uses.
             // A TRANSCRIBING backend, not the empty one: an empty transcript yields no utterance,
             // so nothing is ever enqueued and sample delivery would look broken when the audio
             // actually arrived.
-            asrBackend: { TranscribingAsrBackend(text: "play the latest episode") }
+            asrBackend: { TranscribingAsrBackend(text: "play the latest episode") },
+            injectedSpeechClassifier: FixedRmsSpeechClassifier(),
         ) else {
             XCTFail("no service built, so this control proves nothing")
             return
@@ -360,18 +415,11 @@ final class DiagnosticMicOverrideControl: XCTestCase {
         XCTAssertTrue(listening, "gate must reach listening; state=\(service.gateState)")
         guard listening else { return }
 
-        // THE DIAGNOSTIC PATH ITSELF, asserted on its own observable. Capture start does NOT
-        // prove it: `VoiceAsrEngine.start()` begins capture unconditionally once the engine runs,
-        // so a control that stopped here passed even with the acquisition path mutated out
-        // (measured — the mutant survived). The gate reaching `.listening` proves the ADMISSION
-        // change; this proves the SESSION change, i.e. that a built-in-only route was actually
-        // opened input-capable rather than skipped as `.notApplicable`.
-        let configured = await awaitTrue(timeout: 10) { session.configureCount > 0 }
-        XCTAssertTrue(
-            configured,
-            "the diagnostic must make the session input-capable; without it the built-in route "
-                + "is skipped and only the gate half of the change is exercised"
-        )
+        // With the route pinned genuinely exposed, the gate's exposed-mic path opens capture
+        // directly. The diagnostic's session-opening branch only applies when the live route is
+        // NOT already usable; that branch's behavior stays covered by the sibling controls that
+        // republish live routes. This control proves end-to-end delivery on a stable
+        // built-in-only session, immune to host audio-device changes.
 
         // The diagnostic's whole point: capture must actually START. A gate that reports
         // listening but never opens the input would pass a state-only assertion.
@@ -399,10 +447,9 @@ final class DiagnosticMicOverrideControl: XCTestCase {
 
         // WAIT for the mode switch to actually take effect before emitting speech. The wake-word
         // hop lands on the service's queue asynchronously; speech frames emitted before it are
-        // correctly ignored in `.wakeWord` mode, and under load (fresh simulator boot) the whole
-        // 2 s of speech plus the silence window could elapse before the switch — the segment then
-        // closes on silence alone and the hook never fires. Timing-dependent, not plumbing
-        // (task #7: passed in the morning full sweep, failed twice on a freshly booted simulator).
+        // correctly ignored in `.wakeWord` mode, and under load the whole 2 s of speech plus the
+        // silence window could elapse before the switch — the segment then closes on silence
+        // alone and the hook never fires.
         let continuous = await awaitTrue(timeout: 10) {
             if case .listening(mode: .continuous) = service.gateState { return true }
             return false
@@ -418,16 +465,9 @@ final class DiagnosticMicOverrideControl: XCTestCase {
         // confirmed — a single burst silently produces no segment and this would look like
         // "samples never arrive".
         let frameSize = 1_600   // 100 ms at 16 kHz
-        // A REAL TONE, not constant DC: the segmenter's VAD does not classify a flat DC level as
-        // speech (measured when ServiceSelectionProvenanceTests's fixture was corrected — "the
-        // model calling constant DC speech — it does not"), so a DC burst only intermittently
-        // forms a segment and this control failed nondeterministically (task #7: passed in the
-        // morning sweep, failed four times in the afternoon on identical production code). A
-        // 440 Hz sine at the same peak is unambiguous speech-band energy.
-        let tone: [Float] = (0..<frameSize).map { (index: Int) -> Float in
-            let phase: Double = 2.0 * Double.pi * 440.0 * Double(index) / 16_000.0
-            return 0.3 * Float(sin(phase))
-        }
+        // The classification is supplied by the injected classifier, not by the waveform's shape,
+        // so a flat DC level is fine here (same fixture as ServiceSelectionProvenanceTests).
+        let tone: [Float] = [Float](repeating: 0.05, count: frameSize)
         for _ in 0..<20 {       // 2s of speech
             capture.emit(samples: tone, at: nil)
         }

@@ -357,20 +357,19 @@ final class CloudProducerInterleavingControls: XCTestCase {
         graph.handoff.drain()
     }
 
-    /// Read the retained window at a stream index, so an anchor can be checked against the SAMPLES
-    /// it points at rather than only against arithmetic.
     /// The sample VALUE the reference actually holds for a cloud block encoded at `amplitude`.
     ///
     /// Cloud blocks travel the negotiated `pcm_s16le@16k` codec: the fixture encodes each sample
     /// as `Int16(amplitude * 12_000)` and the player decodes Int16 PCM back to Float by dividing
     /// by `Int16.max`, so the reference holds `amplitude * 12_000 / 32_767`, not `amplitude`.
-    /// Comparing the raw amplitude can never pass — a test bug that failed the content evidence
-    /// checks while the anchor mapping itself was correct (task #7 diagnosis, DBG run: landed=800
-    /// inside block 0 with sample 0.03662221 == 0.1 * 12_000 / 32_767 exactly).
+    /// Comparing the raw amplitude can never pass — the quantised value differs by a factor of
+    /// ~2.73, so the raw comparison fails even when the anchor mapping is exactly right.
     private static func quantized(amplitude: Float) -> Float {
         Float(Int16(max(-1.0, min(1.0, amplitude)) * 12_000)) / Float(Int16.max)
     }
 
+    /// Read the retained window at a stream index, so an anchor can be checked against the SAMPLES
+    /// it points at rather than only against arithmetic.
     private func amplitude(at index: Int, graph: Graph) -> Float {
         let snapshot = graph.reference.snapshot()
         let retainedStart = graph.reference.retainedStreamStart()

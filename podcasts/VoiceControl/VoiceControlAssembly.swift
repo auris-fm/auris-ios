@@ -34,6 +34,7 @@ class VoiceControlAssembly {
     func buildVoiceControlService(
         audioSession: AudioSessionControlling = RealAudioSession(),
         conditionMonitor: LiveConditionMonitor? = nil,
+        routeMonitor injectedRouteMonitor: IOSAudioRouteMonitor? = nil,
         capture injectedCapture: (any AudioCaptureSource)? = nil,
         inference injectedInference: (any LfmInference)? = nil,
         modelManager injectedModelManager: ModelManager? = nil,
@@ -70,7 +71,7 @@ class VoiceControlAssembly {
         // subscription stored here would be cancelled the moment this build call returns, leaving
         // the manager unaware of every window that opens.
 
-        let routeMonitor = IOSAudioRouteMonitor(gracePeriodSignal: gracePeriodSignal, audioSession: audioSession)
+        let routeMonitor = injectedRouteMonitor ?? IOSAudioRouteMonitor(gracePeriodSignal: gracePeriodSignal, audioSession: audioSession)
         let playbackManager = PlaybackManager.shared
         // REAL playback context (an eligible episode exists, playing or paused) — the independent
         // source both the gate's context and the grace signal's backgrounding decision consult.

@@ -55,7 +55,7 @@ final class SameAccessGroupPreservationTests: XCTestCase {
         let attributed = dict?[kSecAttrAccessGroup as String] as? String
         print("VERIFY postHelperRead status=\(status) group=\(group) attributedGroup=\(attributed as Any) bytesMatch=\(bytes == expected)")
         if status == errSecMissingEntitlement {
-            // Environment limitation, not a code defect (task #7): same requirement as the writer
+            // Environment limitation, not a code defect: same requirement as the writer
             // control — an entitled build declaring the shared keychain-access-groups entry and the
             // installed helper app. The plain Debug test build cannot reach the canary, so the read
             // is refused with errSecMissingEntitlement (-34018) before any preservation semantics.
@@ -106,7 +106,7 @@ final class SameAccessGroupPreservationTests: XCTestCase {
         ] as CFDictionary, nil)
         print("PRESERVE write group=\(group) status=\(writeStatus)")
         if writeStatus == errSecMissingEntitlement {
-            // Environment limitation, not a code defect (task #7): these controls require a build
+            // Environment limitation, not a code defect: these controls require a build
             // whose entitlements DECLARE the keychain-access-groups entry for the shared group and
             // a separately installed helper app (commit 41d822acd measured exactly that). The
             // plain Debug test build declares no keychain-access-groups, so the write is refused
