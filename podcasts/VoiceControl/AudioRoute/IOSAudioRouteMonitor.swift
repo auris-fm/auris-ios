@@ -267,13 +267,20 @@ class IOSAudioRouteMonitor: ObservableObject {
                     AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue,
                 ]
                 let isPhysicalDeviceChange = validReasons.contains(reason)
-                // Re-read the route for EVERY reason: an `.override`, `.categoryChange` or
-                // `.routeConfigurationChange` can move the input away from the headset, and a stale
-                // `.isolated` would leave capture running on the built-in microphone. Only a
-                // physical connect/disconnect advances the epoch and breaks grace.
-                self.refreshRoute()
+                // A physical connect/disconnect advances the epoch BEFORE the route is
+                // re-read and published: every observer of the new exposure then also
+                // sees the advanced epoch, so a capture end caused by the device change
+                // is recognised as device-caused in the very evaluation that observes it
+                // (never one evaluation late). Only a physical connect/disconnect advances
+                // the epoch and breaks grace.
                 if isPhysicalDeviceChange {
                     self.physicalDeviceChangeEpoch &+= 1
+                }
+                // Re-read the route for EVERY reason: an `.override`, `.categoryChange` or
+                // `.routeConfigurationChange` can move the input away from the headset, and a stale
+                // `.isolated` would leave capture running on the built-in microphone.
+                self.refreshRoute()
+                if isPhysicalDeviceChange {
                     self.gracePeriodSignal.onAudioRouteChanged()
                 }
             }
@@ -304,13 +311,12 @@ class IOSAudioRouteMonitor: ObservableObject {
     /// differs from the failed attempt's key even with an unchanged identity.
     ///
     /// Note the actual publication ordering — the epoch is incremented by the
-    /// monitor's route-change handler, not atomically with `refreshRoute()`. The
-    /// handler calls `refreshRoute()` first (which publishes `micExposure` →
-    /// one gate evaluation carrying the OLD epoch) and only then increments the
-    /// epoch and breaks grace (whose `isActive` publication → a second gate
-    /// evaluation carrying the NEW epoch). So a single physical notification can
-    /// reach `considerAcquisition` twice; the first sees the old key and is
-    /// deduped, and the second sees the new epoch and is the attempt the contract
+    /// monitor's route-change handler BEFORE it calls `refreshRoute()`, so every
+    /// observer of the freshly published exposure (including
+    /// `considerAcquisition`) already sees the NEW epoch. The handler then also
+    /// breaks grace, whose `isActive` publication drives a second gate
+    /// evaluation carrying the same new epoch. Both evaluations therefore carry
+    /// the new key: the first is the attempt the contract
     /// grants. This key is read at each evaluation, so it is correct in both.
     var acquisitionKey: AcquisitionRouteKey {
         AcquisitionRouteKey(route: currentRouteIdentity, deviceChangeEpoch: physicalDeviceChangeEpoch)

@@ -312,15 +312,32 @@ class VoiceControlService: ObservableObject {
     /// contract and the epoch that carries it.
     private var acquisitionAttemptedRoute: AcquisitionRouteKey?
     /// External device whose capture start failed. Acquisition must not re-arm
-    /// for this device until a genuine change (it disappears or a different
-    /// candidate appears): releasing the preferred input reverts the live route
-    /// to the built-in mic, which is not a device change and must not re-arm.
+    /// for this device until a genuine external trigger (see
+    /// `processRestartTriggers`): releasing the preferred input reverts the
+    /// live route to the built-in mic, which is not a device change and must
+    /// not re-arm.
     private var captureStartFailedInputUID: String?
-    /// Physical-device-change epoch recorded with [captureStartFailedInputUID]. The
-    /// suppression is kept until a later physical change advances the epoch — a missing
-    /// `availableInputs` on its own is ambiguous, because the `.playback` restore after a
-    /// failed capture exposes no inputs even while the headset stays connected.
-    private var captureStartFailedEpoch: UInt = 0
+    /// Owns the bounded automatic capture restart rule (core spec "Automatic
+    /// capture restarts"). One restart per autonomous end; a restart that dies
+    /// within 60 s (or fails to start) withholds until a new trigger.
+    private let restartPolicy = CaptureRestartPolicy()
+    /// When the current capture run started, so an autonomous end can report
+    /// `ran_ms`.
+    private var captureStartedAt: Date?
+    /// Device/posture trigger signature seen at the last gate evaluation.
+    /// A change in any component is a genuine external trigger: it re-arms
+    /// automatic restarts and clears the capture-start-failed suppression.
+    /// The app's own acquire/release moves only `micExposure`, which is
+    /// deliberately absent — own routing state is never a trigger.
+    private var lastTriggerSignature: TriggerSignature?
+    /// The external-truth components of a gate evaluation. See
+    /// [lastTriggerSignature].
+    private struct TriggerSignature: Equatable {
+        let deviceChangeEpoch: UInt
+        let enabledByUser: Bool
+        let conflictsClear: Bool
+        let contextPresent: Bool
+    }
 
     init(
         conditionMonitor: LiveConditionMonitor,
@@ -378,6 +395,14 @@ class VoiceControlService: ObservableObject {
             let wasCapturing = self.isListening
             self.stop()  // stops capture, discards current pipeline state
             if wasCapturing {
+                // The interruption's stop is accounted HERE, not at the next
+                // gate-driven capturing→off transition: by the time that
+                // arrives, capture is already stopped (`wasCapturing` false),
+                // so a sticky flag would leak onto a later real death. An
+                // interruption never counts against the restart budget, and
+                // the restart-after-interruption is not a restart run.
+                self.captureStartedAt = nil
+                self.restartPolicy.stopWasUserOrInterruption()
                 // Audio session reclaimed by the system — an active-capture stop
                 // that the user did not request → ERROR per the mic lifecycle spec.
                 self.lifecycleLogger.runtimeCaptureStopped(
@@ -468,12 +493,38 @@ class VoiceControlService: ObservableObject {
             }
 
             guard !self.isStopping else { return }
+            let triggerFired = self.processRestartTriggers(posture: gate.posture)
             let wasCapturing = self.isListening
             switch gate.state {
             case .off:
+                // A stop caused by the user's own device change (headset
+                // unplug, blocker clearing) is the trigger's doing, not an
+                // autonomous capture fault: the trigger re-arms, and the
+                // budget is neither spent nor a withhold logged.
+                if !triggerFired {
+                    self.accountCaptureEnd(posture: gate.posture, wasCapturing: wasCapturing)
+                } else {
+                    self.captureStartedAt = nil
+                }
                 self.stopCapture()
-                self.considerAcquisition(for: gate.posture)
+                // While restarts are withheld, no acquisition either: an
+                // acquired-but-not-capturing external route would strand a
+                // headset's playback on the narrowband HFP path. The trigger
+                // that re-arms restarts re-enters this branch and acquires
+                // then.
+                if self.restartPolicy.mayStart {
+                    self.considerAcquisition(for: gate.posture)
+                }
             case .listening(let mode):
+                // While automatic restarts are withheld, a start here would be
+                // an automatic restart: a genuine trigger re-armed the policy
+                // above first, so a disarmed policy means no trigger has
+                // arrived. Stay off until one does.
+                if !self.isListening, !self.restartPolicy.mayStart {
+                    FileLog.shared.addMessage("[VoicePipeline] automatic restart withheld — waiting for a new trigger")
+                    self.logLifecycleTransition(posture: gate.posture, wasCapturing: wasCapturing)
+                    return
+                }
                 // The acquisition's own exposure flip publishes synchronously
                 // from inside `acquireExternalInput`. Cancelling here would
                 // abort the very task committing the route, and its later
@@ -891,12 +942,23 @@ class VoiceControlService: ObservableObject {
             FileLog.shared.addMessage("[VoicePipeline] capture start failed — releasing acquired route")
             captureStartFailedInputUID = routeMonitor.currentExternalInputUID
                 ?? routeMonitor.lastAcquisitionTargetUID
-            captureStartFailedEpoch = routeMonitor.physicalDeviceChangeEpoch
             routeMonitor.releaseAcquiredExternalInput(sessionInUseByPlayback: isPlaybackActive())
+            // A restart attempt that cannot start withholds further automatic
+            // restarts (`ran_ms` 0: it never ran).
+            if let withhold = restartPolicy.restartStartFailed(), case .withhold(let ranMs) = withhold {
+                lifecycleLogger.withheldRestart(
+                    reasons: ["capture_failure"],
+                    ranMs: ranMs,
+                    posture: gatePosture,
+                    route: routeDescription()
+                )
+            }
             return
         }
         isListening = true
         listeningMode = mode
+        captureStartedAt = Date()
+        restartPolicy.captureStarted()
         if mode == .wakeWord {
             audioRenderer.playEarcon(.listeningStart)
         }
@@ -1498,6 +1560,76 @@ class VoiceControlService: ObservableObject {
     /// Attempt to acquire an external microphone only when every non-exposure
     /// gate question passes. The attempt is once per route signature; a late or
     /// cancelled completion is discarded rather than starting capture.
+    /// Detects genuine external triggers — the user's device set changed, a
+    /// blocker cleared, the user turned voice control on — and re-arms
+    /// automatic restarts (and clears the capture-start-failed suppression).
+    /// The app's own acquire/release moves only the exposure, which the
+    /// signature deliberately excludes, so own routing state never re-arms.
+    /// Returns whether a genuine external trigger fired in this evaluation.
+    private func processRestartTriggers(posture: GatePosture) -> Bool {
+        let signature = TriggerSignature(
+            deviceChangeEpoch: routeMonitor.physicalDeviceChangeEpoch,
+            enabledByUser: posture.setup.enabledByUser.isAllowed,
+            conflictsClear: posture.conflicts.isClear,
+            contextPresent: posture.context != .none
+        )
+        defer { lastTriggerSignature = signature }
+        guard let previous = lastTriggerSignature else { return false }
+        let deviceChanged = signature.deviceChangeEpoch != previous.deviceChangeEpoch
+        let blockerCleared =
+            (!previous.enabledByUser && signature.enabledByUser)
+            || (!previous.conflictsClear && signature.conflictsClear)
+            || (!previous.contextPresent && signature.contextPresent)
+        guard deviceChanged || blockerCleared else { return false }
+        restartPolicy.reArm()
+        captureStartFailedInputUID = nil
+        // Each trigger yields one attempt: a failed attempt waits for a new
+        // trigger, and this is one — clear the attempted-route dedup so the
+        // next evaluation can try again.
+        acquisitionAttemptedRoute = nil
+        return true
+    }
+
+    /// Accounts one capturing→off transition against the restart budget.
+    /// Only a MICROPHONE-EXPOSURE loss is an autonomous capture end in the
+    /// spec's sense (a route change, a capture fault, a stream that stopped):
+    /// a stop caused by a conflict, context loss, or setup blocker appearing
+    /// is listening no longer being allowed — its clearing is a trigger that
+    /// re-arms anyway, so it neither spends the budget nor withholds. Nor
+    /// does a stop the user's own device change caused: if the physical
+    /// device epoch advanced during the dying run (a headset unplug mid-run),
+    /// the trigger re-arms and the budget is not spent. A user-requested stop
+    /// (voice control disabled) is never counted. What remains — the route
+    /// moving away without any device change — grants the one automatic
+    /// restart, or withholds when the dying run was itself a restart that
+    /// ran under 60 s (`mic_restart_withheld`).
+    private func accountCaptureEnd(posture: GatePosture, wasCapturing: Bool) {
+        guard wasCapturing else { return }
+        let userRequested = !posture.setup.enabledByUser.isAllowed
+        // The route moving away WITHOUT an exposure loss is a conflict,
+        // context or setup blocker appearing — listening no longer allowed;
+        // its clearing is a trigger that re-arms anyway. And because the
+        // monitor advances its device epoch before publishing, a stop the
+        // user's own device change caused arrives with `triggerFired` already
+        // set, and the caller skips this accounting entirely. So every end
+        // that reaches here with a real exposure loss is autonomous.
+        let notExposureDriven = posture.micExposure == .isolated
+        if userRequested || notExposureDriven {
+            captureStartedAt = nil
+            restartPolicy.stopWasUserOrInterruption()
+            return
+        }
+        let ranMs = captureStartedAt.map { Int(Date().timeIntervalSince($0) * 1000) } ?? 0
+        captureStartedAt = nil
+        guard case .withhold(let withheldMs) = restartPolicy.captureEndedAutonomously(ranMs: ranMs) else { return }
+        lifecycleLogger.withheldRestart(
+            reasons: MicLifecycleLogger.blockers(for: posture),
+            ranMs: withheldMs,
+            posture: posture,
+            route: routeDescription()
+        )
+    }
+
     private func considerAcquisition(for posture: GatePosture) {
         guard posture.setup.isReady,
               posture.conflicts.isClear,
@@ -1512,13 +1644,11 @@ class VoiceControlService: ObservableObject {
         // acquisition for that same device. Release restores `.playback`, which
         // exposes no `availableInputs` even while the headset stays connected, so
         // a missing candidate UID is not evidence of removal — treating it as one
-        // cleared the suppression and re-armed the acquire→fail→release loop. Keep
-        // the key until a physical device change (a real connect or disconnect).
-        if captureStartFailedInputUID != nil {
-            guard routeMonitor.physicalDeviceChangeEpoch != captureStartFailedEpoch else { return }
-            captureStartFailedInputUID = nil
-            captureStartFailedEpoch = 0
-        }
+        // cleared the suppression and re-armed the acquire→fail→release loop.
+        // `processRestartTriggers` clears the key only on a genuine external
+        // trigger: a physical device change, a blocker clearing, or voice
+        // control being turned on again.
+        guard captureStartFailedInputUID == nil else { return }
         let route = routeMonitor.acquisitionKey
         guard acquisitionAttemptedRoute != route else { return }
         acquisitionAttemptedRoute = route
@@ -1695,6 +1825,35 @@ struct MicLifecycleLogRecord: Equatable {
     let route: String
     let listeningMode: String
     let priorCapture: Bool
+    /// Present only on `mic_restart_withheld`: how long the restarted capture
+    /// ran (0 if the restart never started).
+    let ranMs: Int?
+
+    init(
+        event: String,
+        level: OSLogType,
+        reasons: [String],
+        setupReady: Bool,
+        conflictsClear: Bool,
+        context: String,
+        micExposure: String,
+        route: String,
+        listeningMode: String,
+        priorCapture: Bool,
+        ranMs: Int? = nil
+    ) {
+        self.event = event
+        self.level = level
+        self.reasons = reasons
+        self.setupReady = setupReady
+        self.conflictsClear = conflictsClear
+        self.context = context
+        self.micExposure = micExposure
+        self.route = route
+        self.listeningMode = listeningMode
+        self.priorCapture = priorCapture
+        self.ranMs = ranMs
+    }
 }
 
 protocol MicLifecycleLogSink: AnyObject {
@@ -1708,6 +1867,10 @@ final class OSLogMicLifecycleSink: MicLifecycleLogSink {
 
     func write(_ record: MicLifecycleLogRecord) {
         let reasons = record.reasons.joined(separator: ",")
+        // `ran_ms` is present only on `mic_restart_withheld`; OSLog string
+        // interpolations cannot carry conditional expressions, so the segment
+        // is assembled outside.
+        let ranMsSegment = record.ranMs.map { " ran_ms=\($0)" } ?? ""
         log.log(
             level: record.level,
             """
@@ -1719,7 +1882,7 @@ final class OSLogMicLifecycleSink: MicLifecycleLogSink {
             micExposure=\(record.micExposure, privacy: .public) \
             route=\(record.route, privacy: .private) \
             listeningMode=\(record.listeningMode, privacy: .public) \
-            priorCapture=\(record.priorCapture, privacy: .public)
+            priorCapture=\(record.priorCapture, privacy: .public)\(ranMsSegment, privacy: .public)
             """
         )
     }
@@ -1731,6 +1894,8 @@ final class OSLogMicLifecycleSink: MicLifecycleLogSink {
 /// attributable user request (voice control disabled), ERROR otherwise
 /// - blocked and never acquired → `mic_acquisition_skipped` (INFO) once on
 /// entry, again only when the blocking reason set changes
+/// - automatic restarts stop → `mic_restart_withheld` (ERROR), once per
+/// withhold, carrying the end reason and `ran_ms`
 final class MicLifecycleLogger {
     private let sink: MicLifecycleLogSink
     /// Last blocking reason set logged for a blocked-never-acquired posture.
@@ -1780,6 +1945,25 @@ final class MicLifecycleLogger {
              posture: posture, route: route, priorCapture: true)
     }
 
+    /// Automatic capture restarts stopped (core spec "Automatic capture
+    /// restarts"). Always ERROR. `reasons` is why the restarted capture ended
+    /// or, if the restart never started, why the start failed; `ranMs` is how
+    /// long the restarted capture ran, or 0 if it never started.
+    func withheldRestart(reasons: [String], ranMs: Int, posture: GatePosture, route: String) {
+        // Deliberately does NOT reset `loggedSkippedReasons`: the withheld
+        // posture's blocker set is unchanged, so re-emitting
+        // `mic_acquisition_skipped` for it would break the dedup.
+        emit(
+            event: "mic_restart_withheld",
+            level: .error,
+            reasons: reasons,
+            posture: posture,
+            route: route,
+            priorCapture: true,
+            ranMs: ranMs
+        )
+    }
+
     /// Deterministically ordered blocking reason set from the posture.
     /// Gate-owned reasons use their condition names, in gate evaluation order
     /// (setup → conflicts → context → mic exposure). Unknown conditions fail
@@ -1805,7 +1989,8 @@ final class MicLifecycleLogger {
         reasons: [String],
         posture: GatePosture,
         route: String,
-        priorCapture: Bool
+        priorCapture: Bool,
+        ranMs: Int? = nil
     ) {
         sink.write(
             MicLifecycleLogRecord(
@@ -1818,7 +2003,8 @@ final class MicLifecycleLogger {
                 micExposure: String(describing: posture.micExposure),
                 route: route,
                 listeningMode: posture.listeningMode.map { "\($0)" } ?? "none",
-                priorCapture: priorCapture
+                priorCapture: priorCapture,
+                ranMs: ranMs
             )
         )
     }
