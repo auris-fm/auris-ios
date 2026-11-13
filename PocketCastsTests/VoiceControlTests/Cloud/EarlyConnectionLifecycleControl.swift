@@ -178,4 +178,54 @@ final class EarlyConnectionLifecycleControl: XCTestCase {
         XCTAssertEqual(opens, 1,
                        "a resumed utterance must open once, not once per pause")
     }
+
+    /// A claim recorded before its open must not survive the turn being abandoned.
+    ///
+    /// The claim is noted when it arrives ahead of its connection. If that utterance is then
+    /// dropped, its note has to go with it — otherwise it can still pin a connection opened later,
+    /// assigning one utterance's identity to another's socket.
+    func test_claimRecordedBeforeItsOpenDoesNotSurviveAbandonment() {
+        let sink = makeSink()
+
+        // The claim arrives first: main ran it before the open it belongs to.
+        sink.claimEarlyConnection(tag: "tag-abandoned", utteranceId: "utterance-abandoned")
+
+        // That utterance is abandoned before its connection ever opened.
+        sink.discardEarlyConnection(tag: "tag-abandoned", reason: "turn released")
+
+        // A connection opens later. It must belong to nobody.
+        sink.beginEarlyConnection(tag: "tag-abandoned")
+
+        XCTAssertNil(sink.earlyConnectionOwnerForTesting,
+                     "an abandoned utterance's claim must not pin a connection opened after it")
+    }
+
+    /// Two utterances that each open before either is admitted are still different utterances.
+    ///
+    /// Neither has an owner yet, so comparing owners would call them equal: the second open would
+    /// keep the first socket while returning the second tag — a tag that does not identify the
+    /// connection it came back with.
+    func test_twoDistinctUnclaimedOpensDoNotShareOneConnection() {
+        let sink = makeSink()
+
+        let firstTag = try! XCTUnwrap(sink.beginEarlyConnection(tag: CloudRouteSink.mintEarlyConnectionTag()))
+        let secondTag = try! XCTUnwrap(sink.beginEarlyConnection(tag: CloudRouteSink.mintEarlyConnectionTag()))
+
+        XCTAssertNotEqual(firstTag, secondTag, "each open mints its own tag")
+        XCTAssertNotEqual(sink.earlyConnectionTagForTesting, firstTag,
+                          "the second open must replace the first connection, not keep it")
+        XCTAssertEqual(sink.earlyConnectionTagForTesting, secondTag,
+                       "the returned tag must identify the connection now held")
+    }
+
+    /// The same connection opened twice is idempotent: one utterance pausing twice keeps its socket.
+    func test_reopeningTheSameConnectionKeepsIt() {
+        let sink = makeSink()
+
+        let tag = try! XCTUnwrap(sink.beginEarlyConnection(tag: CloudRouteSink.mintEarlyConnectionTag()))
+        let again = sink.beginEarlyConnection(tag: tag)
+
+        XCTAssertEqual(again, tag)
+        XCTAssertTrue(sink.hasEarlyConnectionForTesting)
+    }
 }

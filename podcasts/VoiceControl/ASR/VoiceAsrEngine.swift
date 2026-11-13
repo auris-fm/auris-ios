@@ -237,6 +237,11 @@ class VoiceAsrEngine {
         return onAddressedTrailingSilenceBegan?()
     }
 
+    /// The tag of a connection opened at the short-utterance verdict, which arrives after the
+    /// silence-onset opportunity has passed. Held for this turn only, and merged with the carried
+    /// tag at the turn's exits.
+    private var shortUtteranceConnectionTag: String?
+
     /// Called on every positive detection so the service can reset grace and
     /// play the `WAKE_WORD` earcon exactly once.
     var onWakeWordDetected: (() -> Void)?
@@ -689,6 +694,8 @@ class VoiceAsrEngine {
         // is not a fault, so the block above does not cover it; leaving it in place would
         // concatenate old-session PCM with the new session's and dispatch them as one command.
         segmenter.resetForNewSession()
+        // A connection tag opened for a turn that never finished must not describe the next turn.
+        shortUtteranceConnectionTag = nil
         contributionCollector?.pipelineStopped()
     }
 
@@ -744,6 +751,9 @@ class VoiceAsrEngine {
         // The early result ARRIVED with this utterance, so it cannot belong to another by
         // construction. Every exit below simply stops using it.
         let earlyResult = earlyWakeResult
+        // This turn's own tag only: a leftover from an abandoned predecessor must not be adopted.
+        shortUtteranceConnectionTag = nil
+
         stageTimer.mark() // VAD segment ready
         // ONE identity from admission: the utterance is admitted HERE, so its
         // identity is minted here — not rebuilt later. Retries/duplicates that re-emit the SAME
@@ -906,7 +916,10 @@ class VoiceAsrEngine {
             // utterances that had no earlier opportunity.
             if earlyResult == nil {
                 FileLog.shared.addMessage("[VoicePipeline] short utterance routable — opening early connection before ASR")
-                onAddressedTrailingSilenceBegan?()
+                // KEEP the tag: this is the only moment it exists. Dropping it would leave this
+                // socket unowned and unreused — opened, paid for, and then neither claimed nor
+                // closed by the turn it was opened for.
+                shortUtteranceConnectionTag = onAddressedTrailingSilenceBegan?()
             }
             if detected {
                 onWakeWordDetected?()
@@ -931,7 +944,8 @@ class VoiceAsrEngine {
         let admittedOrigin = gracePeriodSignal.currentGeneration()
         // The connection this utterance opened, carried THROUGH it to both its exits: admission
         // pins it to this utterance's turn, and a drop closes exactly this one.
-        let turnEarlyConnectionTag = earlyConnectionTag
+        let turnEarlyConnectionTag = earlyConnectionTag ?? shortUtteranceConnectionTag
+        shortUtteranceConnectionTag = nil
         onTurnAdmitted?(utteranceId, admittedOrigin, turnEarlyConnectionTag)
         // The reservation is owned for exactly as long as this turn is in the engine. Every exit
         // below — backend failure, wake-only, empty/non-content transcript, translation failure,

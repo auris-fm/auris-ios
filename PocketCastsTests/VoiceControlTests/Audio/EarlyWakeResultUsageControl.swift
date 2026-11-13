@@ -240,8 +240,20 @@ final class EarlyWakeResultUsageControl: XCTestCase {
             gracePeriodSignal: GracePeriodSignal()
         )
         var opens = 0
-        engine.onAddressedTrailingSilenceBegan = { opens += 1; return nil }
+        // Returns a REAL tag: production mints one, and a nil here would let the engine look
+        // correct while dropping the tag this control is meant to check.
+        engine.onAddressedTrailingSilenceBegan = {
+            opens += 1
+            return CloudRouteSink.mintEarlyConnectionTag()
+        }
         engine.installCaptureCallbacksForTesting()
+
+        // The tag the engine hands to the turn's exits. This is the value that pins the socket to
+        // the utterance; if it is nil, the connection opened here is never owned or reused.
+        var admittedTag: String?
+        var releasedTag: String?
+        engine.onTurnAdmitted = { _, _, tag in admittedTag = tag }
+        engine.onTurnReleased = { _, tag in releasedTag = tag }
 
         let frame = 320
         // SHORT speech: under the eligible span, so no early prefix is ever emitted.
@@ -264,6 +276,9 @@ final class EarlyWakeResultUsageControl: XCTestCase {
         XCTAssertEqual(opens, 1,
                        "the short utterance's positive gate verdict must open the connection; "
                            + "a short command is the most common case and got no benefit before")
+        XCTAssertNotNil(admittedTag ?? releasedTag,
+                        "the tag returned by this open must reach the turn's exits; dropping it "
+                            + "leaves the socket opened here unowned and never reused")
     }
 
     /// A result from a turn that never consumed it must not address the next turn. The failure

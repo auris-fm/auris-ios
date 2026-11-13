@@ -150,17 +150,22 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// therefore has no owner: it is not taken by anyone, and is replaced by the next open rather
     /// than being closed on a guess.
     @discardableResult
-    func beginEarlyConnection(tag: String, ownerUtteranceId: String? = nil) -> String? {
+    func beginEarlyConnection(tag: String) -> String? {
         if let held = earlyRouteClient {
             // REPLACEMENT BELONGS TO A NEW UTTERANCE. Speech that resumes and pauses again is the
             // same utterance still being spoken — its second pause is not a new turn — so a
             // connection held for it stays. Discarding it would throw away a handshake already in
             // flight and pay for it twice.
-            if earlyRouteUtteranceId == ownerUtteranceId {
+            //
+            // Identity is the CONNECTION's tag, not the owner. Two utterances that both open
+            // before either is admitted have no owner yet, so treating equal (nil) owners as "the
+            // same utterance" would keep the first socket while handing back the second tag —
+            // a tag that does not identify the connection it was returned with.
+            if tag == earlyRouteTag {
                 FileLog.shared.addMessage(
-                    "[CloudRoute] early connection kept — same utterance \(earlyRouteUtteranceId ?? "none") paused again"
+                    "[CloudRoute] early connection kept — same connection \(tag.prefix(8)) opened again"
                 )
-                return tag
+                return earlyRouteTag
             }
             FileLog.shared.addMessage(
                 "[CloudRoute] early connection replaced — one was held by \(earlyRouteUtteranceId ?? "no utterance yet")"
@@ -222,6 +227,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// the next one replaces it, and the server closes it on its own idle timeout. Cleanup exists
     /// for the caller that knows the turn is over, not as a tax on every exit.
     func discardEarlyConnection(openedBy utteranceId: String, reason: String) {
+        if pendingEarlyConnectionClaim?.utteranceId == utteranceId {
+            pendingEarlyConnectionClaim = nil
+        }
         guard let client = earlyRouteClient else { return }
         guard earlyRouteUtteranceId == utteranceId else {
             FileLog.shared.addMessage(
@@ -243,6 +251,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// is what lets a delayed drop be honoured for its own connection and ignored for a
     /// successor's.
     func discardEarlyConnection(tag: String, reason: String) {
+        // Retire a claim that was recorded before its open. The turn is gone, so its claim must go
+        // too: leaving it would let a later open install an owner belonging to an abandoned turn.
+        if pendingEarlyConnectionClaim?.tag == tag {
+            pendingEarlyConnectionClaim = nil
+        }
         guard let client = earlyRouteClient else { return }
         guard earlyRouteTag == tag else {
             FileLog.shared.addMessage(
@@ -259,6 +272,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// Whether an early connection is currently held, and which utterance owns it. Used by controls.
     var hasEarlyConnectionForTesting: Bool { earlyRouteClient != nil }
     var earlyConnectionOwnerForTesting: String? { earlyRouteUtteranceId }
+    var earlyConnectionTagForTesting: String? { earlyRouteTag }
 
     private let clientFactory: () -> CloudRouteClient
 
