@@ -985,7 +985,7 @@ class VoiceControlService: ObservableObject {
     typealias ParsedIntentObserver = @MainActor (any VoiceIntent) -> Void
 
     /// Submit the follow-up an interruption acknowledgement released
-    /// (`cloud-assistant.md` → Interruption, spec c5fe3416).
+    /// (`cloud-assistant.md` → Interruption).
     ///
     /// The contract's rule is precise and this follows it literally: after the prior turn's
     /// terminal acknowledgment the retained utterance is submitted ONCE, on its OWN socket, as a
@@ -1280,7 +1280,7 @@ class VoiceControlService: ObservableObject {
             reportExecution(executionVerdict, captureContext: captureContext,
                             predictedIntent: VoiceAnalytics.predictedIntentName(from: intent),
                             predictedTool: VoiceAnalytics.predictedToolName(from: intent))
-            // SUBMIT THE RETAINED FOLLOW-UP (cloud-assistant.md → Interruption, spec c5fe3416).
+            // SUBMIT THE RETAINED FOLLOW-UP (cloud-assistant.md → Interruption).
             // When the turn that just settled was interrupted, the interrupting utterance was held
             // until its acknowledgement — a `done` for the prior turn, even `completed`, is that
             // acknowledgement. It is submitted here ONCE on its own socket, through the ordinary

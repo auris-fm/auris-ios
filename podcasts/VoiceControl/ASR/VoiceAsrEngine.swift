@@ -389,7 +389,7 @@ class VoiceAsrEngine {
     private var sessionGeneration = 0
     private let sessionLock = NSLock()
 
-    /// Serializes segmenter mutation between queued capture processing and stop/start().
+    /// Serializes segmenter mutation between queued capture processing and stop/start.
     private let segmenterLock = NSLock()
 
     private func currentSession() -> Int {
@@ -823,6 +823,10 @@ class VoiceAsrEngine {
         let result: WakeWordResult
         if let earlyResult {
             result = earlyResult
+            // The early decision was made by the same loaded detector; record its identity here
+            // because the early scoring site has no capture context to report against. A capture
+            // must carry its wake-model provenance whether the score came early or not.
+            contributionCollector?.engineUsedModel(slot: "wakeword", reference: wakeWordDetector.activeModelIdentity, context: utteranceContext)
             FileLog.shared.addMessage("[VoicePipeline] wake used early result")
         } else {
             result = wakeWordDetector.detect(samples: utterance, sampleRate: 16000) { [weak contributionCollector] identity in
@@ -897,11 +901,6 @@ class VoiceAsrEngine {
                     decision: detected ? "detected" : "rejected",
                     score: measuredWake?.score, threshold: measuredWake?.threshold),
                 context: utteranceContext)
-            // The utterance is routable. If it had no early result — a short utterance, which never
-            // reaches the eligible span — this is where its positive verdict first becomes known,
-            // and it is still before the backend wait, so opening here is the only point that can
-            // still save the handshake. `earlyResult == nil` distinguishes exactly the case that
-            // was not already opened at silence onset; an early-scored utterance opened there.
             // The utterance is routable, which for a notDetected result means grace is active or
             // the mode is continuous — both real turns, so opening here agrees with "addressed
             // means routable" rather than widening it.

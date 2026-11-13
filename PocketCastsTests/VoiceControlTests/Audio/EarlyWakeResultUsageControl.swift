@@ -10,8 +10,12 @@ import XCTest
 /// outcome test would notice.
 final class EarlyWakeResultUsageControl: XCTestCase {
 
+    /// The identity the detector reports when the engine asks without re-scoring (the early path).
+    private static let wakeIdentity = VoiceSharingContributionEncoder.ModelRef(id: "wake-fixture", version: "1")
+
     /// Counts calls and answers distinguishably, so the control can tell WHICH audio was scored.
     private final class CountingDetector: WakeWordDetectorProtocol {
+        var activeModelIdentity: VoiceSharingContributionEncoder.ModelRef? { EarlyWakeResultUsageControl.wakeIdentity }
         private(set) var calls: [Int] = []
         private(set) var sampleCounts: [Int] = []
 
@@ -385,5 +389,69 @@ final class EarlyWakeResultUsageControl: XCTestCase {
                            + "and leaves the turn submitting the tag of a socket it no longer owns")
         XCTAssertEqual(admittedTag, openedTags.first,
                        "admission must submit the tag of the connection actually held")
+    }
+
+    /// An early-scored capture must still carry the wakeword model reference.
+    ///
+    /// The early path scores the eligible prefix while the user speaks and never re-runs the
+    /// detector on the finished segment. The fallback path reports `engineUsedModel(slot:
+    /// "wakeword", …)` from its detect call; if the early branch reports nothing, every capture
+    /// long enough to reach the eligible span — the NORMAL case — uploads with no wake-model
+    /// provenance.
+    func test_earlyScoredCapture_carriesTheWakewordModelReference() {
+        var events: [VoiceSharingCollector.SegmentEvent] = []
+        let collector = VoiceSharingCollector(
+            isCollectionPermitted: { true },
+            membership: {
+                var state = VoiceSharingEnrollmentStore.State()
+                state.localOptIn = true
+                state.hasAuthoritativeProjection = true
+                state.membership = VoiceSharingMembership(
+                    plan: .pro, voiceSharingEnrolled: true,
+                    enrollmentEpoch: "epoch-wake", acceptedDisclosureVersion: "2026-09",
+                    withdrawalState: .active
+                )
+                return state
+            },
+            epochProvider: { "epoch-wake" },
+            sessionIdentity: { "gen-wake" },
+            sink: { events.append($0) }
+        )
+        collector.deliversSynchronouslyForTesting = true
+        let detector = CountingDetector()
+        let classifier = SwitchableClassifier()
+        let segmenter = NativeVadSegmenter(threshold: 0.0, silenceTimeoutMs: 500, classifier: classifier)
+        let engine = makeEngine(detector: detector, classifier: classifier, segmenter: segmenter)
+        engine.contributionCollector = collector
+        engine.installCaptureCallbacksForTesting()
+
+        let frame = 320
+        let frames = (NativeVadSegmenter.wakeEligibleSpanSamples / frame) + 10
+        for _ in 0..<frames {
+            segmenter.process([Float](repeating: 0.1, count: frame), capturedAt: nil)
+        }
+        // Name the capture while it is open; after the utterance closes it lives in the ring.
+        guard let captureID = collector.currentCaptureContextForTesting?.id else {
+            return XCTFail("premise: a capture was opened while speaking")
+        }
+        classifier.speaking = false
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline {
+            segmenter.process([Float](repeating: 0, count: frame), capturedAt: nil)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        drainQueue()
+
+        XCTAssertEqual(detector.sampleCounts.count, 1, "premise: the prefix was scored early")
+
+        // The capture was emitted by the time the turn ends, so the provenance rides on the
+        // emitted record's model block, not on the collector's internal state.
+        // The terminal record is the one that carries provenance; the .started record does not.
+        let emitted = events.first { $0.captureID == captureID && $0.kind != .started }
+        guard let emitted else {
+            return XCTFail("premise: the capture was emitted; got \(events.map(\.kind))")
+        }
+        XCTAssertEqual(emitted.reportedModels?.wakeword, EarlyWakeResultUsageControl.wakeIdentity,
+                       "an early-scored capture must carry the wakeword model reference")
     }
 }
