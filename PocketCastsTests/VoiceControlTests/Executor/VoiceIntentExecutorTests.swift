@@ -780,4 +780,3 @@ private struct MockFingerprintMapper: FingerprintMappingProviding {
         playbackTimeForReference ?? referenceTime
     }
 }
-

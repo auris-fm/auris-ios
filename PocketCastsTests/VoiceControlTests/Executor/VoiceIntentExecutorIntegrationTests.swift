@@ -384,4 +384,3 @@ private final class NoOpStatsQuerySink: VoiceStatsQuerySink {
     func newEpisodes(timeframe: String?) -> VoiceResponse { .silent }
     func timeSinceLastListen() -> VoiceResponse { .silent }
 }
-

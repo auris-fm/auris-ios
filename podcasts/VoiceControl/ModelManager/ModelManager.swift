@@ -237,5 +237,4 @@ class ModelManager: ObservableObject {
             return true
         }
     }
-
 }
