@@ -92,9 +92,6 @@ class ModelManager: ObservableObject {
     private let storageDir: URL
     private let session: URLSession
 
-    /// Application Support/.../Auris/Models root (injectable via init for tests).
-    var filesDir: URL { storageDir }
-
     var lfmDir: URL { storageDir.appendingPathComponent("function-call") }
     var lfmModelFile: URL { lfmDir.appendingPathComponent(Self.lfmModelFilename) }
     var lfmClassifierFile: URL { lfmDir.appendingPathComponent(Self.lfmClassifierFilename) }

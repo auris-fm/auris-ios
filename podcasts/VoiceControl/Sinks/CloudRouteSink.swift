@@ -130,14 +130,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// Consulted by the dispatch fence: does this exact turn still hold admitted work under
     /// `origin`? Nil means the sink was constructed without one and fences on the live origin
     /// alone (the pre-existing behaviour).
+    private let admittedWorkAuthority: (() -> GracePeriodSignal.AdmittedWorkAuthority?)?
+
     /// TEST-only: an interleaving barrier invoked inside the coherent admission block, before the
     /// decision reads. Nil in production.
     @MainActor var admissionInterleavingBarrierForTesting: (() -> Void)?
 
-    private let admittedWorkAuthority: (() -> GracePeriodSignal.AdmittedWorkAuthority?)?
-
-    /// The manager whose live origin must follow the grace window. Exposed so the SERVICE can own
-    /// the subscription: a binding stored in the assembly's `cancellables` is cancelled as soon as
     /// What selected the current turn. Defaults to a wake word: a turn with no reported
     /// selection is a new user act, and create-then-resume is the safe direction — resuming
     /// a conversation nobody opened would attach an utterance to someone else's history.
@@ -165,7 +163,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// cross-turn state the production service actually uses rather than assuming its contents.
     @MainActor
     var interruptionStateForTesting: CloudInterruptionState { interruptionState }
-    /// The origin the turn runs under, so a resume cannot cross an ended window.
 
     /// ONE pre-effect hold, used only by controls to strike cancellation deterministically between
     /// the durable claim and the effect. Production never sets it (nil = no pause). The hold is
@@ -250,14 +247,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// successor must retire THAT even though `activeTurn` is already gone. Set at each
     /// admission transfer; never cleared on completion — retirement is by the next transfer.
     private var playbackOwner: CloudTurnToken?
-    /// The stop identity each predecessor's retirement requested, captured AT THE TRANSFER and
-    /// associated with the predecessor's token (review 14f66b72): the superseded turn's cleanup
-    /// awaits ITS OWN captured identity — never the shared latest counter, which later stops
-    /// move.
-
-
-
-
 
     /// Cancellation handle for one logical turn.
     final class CloudTurnToken: Hashable {
