@@ -123,7 +123,7 @@ final class StreamingWakeScoreEqualityTests: XCTestCase {
         // The fixture is exactly 2.0s — the same length as the eligible span — so on its own it
         // could not distinguish "audio past the span is ignored" from "there is no audio past the
         // span". Repeating it gives a segment that genuinely continues past the span while still
-        // containing real speech in the scored prefix.
+        // containing synthesized speech in the scored prefix.
         let once = try readWav16k(fixture)
         let samples = once + once
         XCTAssertGreaterThan(samples.count, NativeVadSegmenter.wakeEligibleSpanSamples,
@@ -151,7 +151,7 @@ final class StreamingWakeScoreEqualityTests: XCTestCase {
         }()
 
         XCTAssertEqual(earlyScore, fullScore, accuracy: 0.0001,
-                       "recorded speech must score identically from the prefix")
+                       "TTS-synthesized speech must score identically from the prefix")
         XCTAssertGreaterThan(earlyScore, 0.001,
                              "the fixture must produce a non-trivial score, or the equality proves "
                                  + "only that two zeros match")
