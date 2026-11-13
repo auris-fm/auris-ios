@@ -23,30 +23,6 @@ import XCTest
 ///    "Audio engine started" alone is NOT sample evidence — it is emitted at startup. The
 ///    `First buffer` line is emitted from the native capture callback on a real received buffer,
 ///    with non-zero amplitude, at the pipeline's 16 kHz rate. That is the actual-signal line.
-/// The monitor the delivery control injects: a built-in-mic-only route that NEVER changes.
-///
-/// A production monitor on the simulator tracks the host Mac's audio devices, and a host with a
-/// live Bluetooth route flaps mid-test — the route change stops capture inside the emission
-/// window and delivery fails regardless of the code under test. This subclass pins the route the
-/// control's premise names: built-in output and input, exposed, and no external-microphone
-/// candidate (the diagnostic admits the built-in mic only when no external candidate exists).
-final class FixedBuiltInRouteMonitor: IOSAudioRouteMonitor {
-    init() { super.init(forTesting: ()) }
-
-    override var hasExternalMicrophoneCandidate: Bool { false }
-
-    /// Never re-reads the live session — the pinned values are the route's whole truth.
-    override func refreshRoute() {}
-
-    /// Pins the route the control names: a built-in-only, genuinely exposed route with no
-    /// external-microphone candidate. A production monitor would instead track the host's live
-    /// devices and flap on every host Bluetooth change, stopping capture mid-emission.
-    func pinBuiltInRoute() {
-        currentRoute = AudioRoute(output: .builtInSpeaker, input: .builtInMic)
-        micExposure = .exposed
-    }
-}
-
 /// Classifies a frame as speech by RMS energy — the original `EnergySpeechFrameClassifier`
 /// decision, fixed here so the control's fixture (a flat DC level above zero) is unambiguously
 /// speech and silence is unambiguously not, without depending on a real VAD model's judgment of
@@ -353,6 +329,10 @@ final class DiagnosticMicOverrideControl: XCTestCase {
         session.outputs = [AudioPort(portType: .builtInSpeaker, uid: "sim-speaker")]
         session.availableAfterConfigure = [AudioPort(portType: .builtInMic, uid: "sim-builtin-mic")]
         session.selectionTakesEffect = true
+        // A REAL configured session reports the built-in microphone in its LIVE route, not only
+        // in `availableInputs` — that live-route readback is what flips the monitor's exposure
+        // and lets the gate listen. The fake only models it through this hook.
+        session.onConfigure = { session.inputs = session.availableAfterConfigure }
 
         XCTAssertTrue(
             DiagnosticMicOverride.isActive,
@@ -367,15 +347,14 @@ final class DiagnosticMicOverrideControl: XCTestCase {
         )
         monitor.context = .playbackActive
 
-        // FIXED ROUTE, not the host's live devices: a real IOSAudioRouteMonitor on the simulator
-        // tracks the HOST Mac's audio devices, and a host with a live Bluetooth route flaps
-        // mid-test — the route change stops capture inside the emission window and the control
-        // fails regardless of the code under test. The control's premise is a built-in-mic-only
-        // route, so the injected monitor pins exactly that: built-in output and input, exposed,
-        // and no external-microphone candidate (the diagnostic admits the built-in mic only when
-        // no external candidate exists).
-        let routeMonitor = FixedBuiltInRouteMonitor()
-        routeMonitor.pinBuiltInRoute()
+        // A monitor over the FAKE session, never the host's live devices: a real monitor on the
+        // simulator tracks the HOST Mac's audio devices, and a host with a live Bluetooth route
+        // flaps mid-test — the route change stops capture inside the emission window and the
+        // control fails regardless of the code under test. This monitor reads the fake session on
+        // every refresh (it starts with no live inputs, as a real simulator session does, and
+        // becomes built-in-input only through the diagnostic's own configure), so the route is
+        // deterministic yet still follows the session the diagnostic actually mutates.
+        let routeMonitor = IOSAudioRouteMonitor(forTesting: session)
 
         // The assembly loads the wake-word ONNX models synchronously; without a seeded model
         // manager it blocks the test host until the watchdog kills the run. Same seeding the
@@ -415,11 +394,18 @@ final class DiagnosticMicOverrideControl: XCTestCase {
         XCTAssertTrue(listening, "gate must reach listening; state=\(service.gateState)")
         guard listening else { return }
 
-        // With the route pinned genuinely exposed, the gate's exposed-mic path opens capture
-        // directly. The diagnostic's session-opening branch only applies when the live route is
-        // NOT already usable; that branch's behavior stays covered by the sibling controls that
-        // republish live routes. This control proves end-to-end delivery on a stable
-        // built-in-only session, immune to host audio-device changes.
+        // THE DIAGNOSTIC PATH ITSELF, asserted on its own observable. Capture start does NOT
+        // prove it: `VoiceAsrEngine.start()` begins capture unconditionally once the engine runs,
+        // so a control that stopped here passed even with the acquisition path mutated out
+        // (measured — the mutant survived). The gate reaching `.listening` proves the ADMISSION
+        // change; this proves the SESSION change, i.e. that a built-in-only session was actually
+        // opened input-capable rather than skipped as `.notApplicable`.
+        let configured = await awaitTrue(timeout: 10) { session.configureCount > 0 }
+        XCTAssertTrue(
+            configured,
+            "the diagnostic must make the session input-capable; without it the built-in route "
+                + "is skipped and only the gate half of the change is exercised"
+        )
 
         // The diagnostic's whole point: capture must actually START. A gate that reports
         // listening but never opens the input would pass a state-only assertion.

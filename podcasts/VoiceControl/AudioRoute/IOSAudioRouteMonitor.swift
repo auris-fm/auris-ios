@@ -280,15 +280,15 @@ class IOSAudioRouteMonitor: ObservableObject {
             .store(in: &cancellables)
     }
 
-    /// TEST-ONLY: a monitor that never reads the live session and never subscribes to route
-    /// changes, so a test can fix the route and exposure explicitly. A production monitor would
-    /// track the HOST's audio devices on the simulator, and a host with a live Bluetooth route
-    /// flaps mid-test — capture is stopped while the route changes and delivery controls fail
-    /// regardless of the code under test. Subclasses fix the route after this init and may
-    /// override `hasExternalMicrophoneCandidate`.
-    init(forTesting unused: Void = ()) {
+    /// TEST-ONLY: a monitor that never subscribes to the real AVAudioSession route-change
+    /// notification, so host device changes cannot flap the route mid-test. It still reads the
+    /// injected session on every `refreshRoute()`, so a test drives the route by mutating that
+    /// session and calling `refreshRoute()` — the same path a real monitor takes. Route changes
+    /// in this monitor never fire `onAudioRouteChanged()`, so they never break grace; a test
+    /// that needs that signal drives the service's grace signal directly.
+    init(forTesting audioSession: AudioSessionControlling) {
         self.gracePeriodSignal = GracePeriodSignal()
-        self.audioSession = RealAudioSession()
+        self.audioSession = audioSession
     }
 
     /// Current route keyed by physical port UID as well as port type, for the
