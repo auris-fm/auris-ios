@@ -143,6 +143,15 @@ final class WakeWordThresholdLoaderTests: XCTestCase {
         XCTAssertNil(
             WakeWordThresholdLoader.wakeOnlyMarginMs(fromManifestJSON: ["wake_only_margin_ms": 80.5]),
             "a fractional margin is not what the model publishes")
+        // A JSON boolean bridges to NSNumber, where true is 1.0 — integral and non-negative — so
+        // the numeric checks alone accept it and the rule runs with a 1 ms boundary. Nothing that
+        // is not a NUMBER may reach the rule, however it happens to coerce.
+        XCTAssertNil(
+            WakeWordThresholdLoader.wakeOnlyMarginMs(fromManifestJSON: ["wake_only_margin_ms": true]),
+            "a boolean is not a millisecond count")
+        XCTAssertNil(
+            WakeWordThresholdLoader.wakeOnlyMarginMs(fromManifestJSON: ["wake_only_margin_ms": false]),
+            "a boolean is not a millisecond count, even when it coerces to zero")
     }
 
     /// A manifest with no margin still LOADS: the margin disables the audio rule only and must

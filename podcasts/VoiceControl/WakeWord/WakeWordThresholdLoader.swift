@@ -29,12 +29,18 @@ enum WakeWordThresholdLoader {
     /// leaves the audio rule off and routing unchanged. Reading it strictly matters: a silently
     /// coerced `-1` would invert the rule and drop ordinary commands.
     static func wakeOnlyMarginMs(fromManifestJSON json: [String: Any]) -> Int? {
-        guard let number = json["wake_only_margin_ms"] as? NSNumber else { return nil }
+        guard let value = json["wake_only_margin_ms"] else { return nil }
+        // TYPE FIRST, value second. A JSON boolean also bridges to NSNumber, where `true` reads as
+        // 1.0 and `false` as 0.0 — both integral and non-negative — so any numeric check alone
+        // accepts them and the rule runs on a margin nobody wrote. Asking whether the value IS a
+        // number is the only way to tell the two apart after bridging.
+        guard CFGetTypeID(value as CFTypeRef) == CFNumberGetTypeID() else { return nil }
+        let number = value as! NSNumber
         // A JSON float ("80.5") is a Double bridging to NSNumber; comparing against the double
         // rejects it, so an obviously wrong type cannot masquerade as a valid milliseconds value.
         guard number.doubleValue == number.doubleValue.rounded() else { return nil }
-        let value = number.intValue
-        return value >= 0 ? value : nil
+        let milliseconds = number.intValue
+        return milliseconds >= 0 ? milliseconds : nil
     }
 
     static func load(manifestURL: URL, modelDirectory: URL) -> Result<Float, Error> {
