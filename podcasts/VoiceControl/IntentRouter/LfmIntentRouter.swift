@@ -130,8 +130,13 @@ final class LfmIntentRouter: IntentClassifying {
     }
 
     /// Compatibility adapter: English-only envelope with `translationKind = none`.
+    ///
+    /// A bare transcript carries no audio verdict, which is `nil` — not a claim either way.
     func classify(transcript: String, utteranceId: String, pendingDialog: PendingVoiceDialog? = nil) -> ClassificationResult {
-        classify(input: .english(transcript: transcript, utteranceId: utteranceId), pendingDialog: pendingDialog)
+        classify(
+            input: .english(transcript: transcript, utteranceId: utteranceId, acousticWakeOnly: nil),
+            pendingDialog: pendingDialog
+        )
     }
 
     func classify(input: IntentRoutingInput, pendingDialog: PendingVoiceDialog? = nil) -> ClassificationResult {
@@ -240,7 +245,10 @@ final class LfmIntentRouter: IntentClassifying {
                     selection: input.selection,
                     // REQUEST ownership: trimming is a view of the SAME utterance, so the id
                     // travels — a duplicate callback joins the same request, not a new one.
-                    utteranceId: input.utteranceId
+                    utteranceId: input.utteranceId,
+                    // And so does the verdict: this envelope describes the same capture, so
+                    // dropping it here would make the rendered view disagree with the input.
+                    acousticWakeOnly: input.acousticWakeOnly
                 )
             )
             let prompt = LfmPrompt.render(transcript: routingInput, history: history)

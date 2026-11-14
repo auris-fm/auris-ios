@@ -13,6 +13,12 @@ struct IntentRoutingInput: Equatable {
     /// so the request owner can join/reuse one prepared wire request; an independent utterance
     /// has its own id and dispatches its own request, even inside one grace window.
     let utteranceId: String
+    /// The acoustic wake-only verdict for this capture, when the engine could make one.
+    ///
+    /// `nil` means the audio could not decide (no margin published, capture ended on speech), so
+    /// only the text rule applies. `.wakeOnly` is authoritative even when ASR rendered the wake
+    /// phrase unrecognisably — that is the entire point of measuring the audio instead.
+    let acousticWakeOnly: Bool?
 
     init(
         sourceTranscript: String?,
@@ -20,7 +26,8 @@ struct IntentRoutingInput: Equatable {
         routerTranscript: String,
         translationKind: TranslationKind,
         selection: CloudConversationSelection?,
-        utteranceId: String
+        utteranceId: String,
+        acousticWakeOnly: Bool?
     ) {
         self.sourceTranscript = sourceTranscript
         self.sourceLanguage = sourceLanguage
@@ -28,6 +35,7 @@ struct IntentRoutingInput: Equatable {
         self.translationKind = translationKind
         self.selection = selection
         self.utteranceId = utteranceId
+        self.acousticWakeOnly = acousticWakeOnly
     }
 
     /// What SELECTED this utterance, carried from the gate decision that produced it.
@@ -43,7 +51,8 @@ struct IntentRoutingInput: Equatable {
         transcript: String,
         language: String? = nil,
         selection: CloudConversationSelection? = nil,
-        utteranceId: String
+        utteranceId: String,
+        acousticWakeOnly: Bool?
     ) -> IntentRoutingInput {
         IntentRoutingInput(
             sourceTranscript: transcript,
@@ -51,7 +60,8 @@ struct IntentRoutingInput: Equatable {
             routerTranscript: transcript,
             translationKind: .none,
             selection: selection,
-            utteranceId: utteranceId
+            utteranceId: utteranceId,
+            acousticWakeOnly: acousticWakeOnly
         )
     }
 }

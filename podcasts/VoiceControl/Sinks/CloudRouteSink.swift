@@ -648,13 +648,15 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         preparedObserver: PreparedObserver? = nil,
         sourceTranscript: String? = nil,
         sourceLanguage: String? = nil,
+        acousticWakeOnly: Bool? = nil,
         ownership: CloudDispatchOwnership? = nil
     ) async -> CloudRouteResult {
         guard let utteranceId else {
             return await routeToCloudOwned(
                 request: request, tier: tier, context: context, origin: origin,
                 selection: selection, utteranceId: nil, preparedObserver: preparedObserver,
-                sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage
+                sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage,
+                acousticWakeOnly: acousticWakeOnly
             )
         }
         let disposition: CloudDispatchOwnership = ownership ?? beginDispatch(utteranceId: utteranceId, origin: origin)
@@ -667,7 +669,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             return await routeToCloudOwned(
                 request: request, tier: tier, context: context, origin: origin,
                 selection: selection, utteranceId: nil, preparedObserver: preparedObserver,
-                sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage
+                sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage,
+                acousticWakeOnly: acousticWakeOnly
             )
         case let .owner(token):
             guard token.utteranceId == utteranceId else {
@@ -676,7 +679,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             return await ownDispatch(
                 token: token, request: request, tier: tier, context: context, origin: origin,
                 selection: selection, utteranceId: utteranceId, preparedObserver: preparedObserver,
-                sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage
+                sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage,
+                acousticWakeOnly: acousticWakeOnly
             )
         }
     }
@@ -714,7 +718,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         utteranceId: String,
         preparedObserver: PreparedObserver?,
         sourceTranscript: String?,
-        sourceLanguage: String?
+        sourceLanguage: String?,
+        acousticWakeOnly: Bool?
     ) async -> CloudRouteResult {
         guard let record = token.record else {
             return CloudRouteResult(response: .earcon(.error), outcome: .refused)
@@ -738,7 +743,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         let result = await routeToCloudOwned(
             request: request, tier: tier, context: context, origin: origin,
             selection: selection, utteranceId: utteranceId, preparedObserver: preparedObserver,
-            sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage
+            sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage,
+            acousticWakeOnly: acousticWakeOnly
         )
         settle(record, with: result)
         return result
@@ -772,7 +778,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         utteranceId: String?,
         preparedObserver: PreparedObserver?,
         sourceTranscript: String?,
-        sourceLanguage: String?
+        sourceLanguage: String?,
+        acousticWakeOnly: Bool?
     ) async -> CloudRouteResult {
         // Recorded before any guard: what selected this turn is a property of the TURN, not of
         // whether the sink happens to be configured. Recording after the configured check made
@@ -878,6 +885,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 request: request,
                 utteranceId: utteranceId,
                 origin: origin,
+                acousticWakeOnly: acousticWakeOnly,
                 forRequestId: priorRequestId
             )
             if await sendInterruptOnPriorSocket(forRequestId: priorRequestId) == .undelivered {
@@ -1888,6 +1896,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         sourceTranscript: String? = nil,
         sourceLanguage: String? = nil,
         translationKind: TranslationKind? = nil,
+        acousticWakeOnly: Bool?,
         validatingEpoch: UInt64? = nil,
         isEpochStillCurrent: (@Sendable (UInt64) -> Bool)? = nil
     ) async -> String? {
@@ -1922,6 +1931,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             sourceTranscript: sourceTranscript,
             sourceLanguage: sourceLanguage,
             translationKind: translationKind,
+            acousticWakeOnly: acousticWakeOnly,
             forRequestId: priorRequestId
         ) else {
             // A different turn is already holding a follow-up: the contract allows exactly one

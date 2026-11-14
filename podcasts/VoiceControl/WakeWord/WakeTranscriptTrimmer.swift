@@ -20,6 +20,69 @@ import Foundation
 /// SenseVoice-Small omits tokens and its config exposes no way to request them,
 /// so the transcript reaches the router intact and the router is the backstop.
 enum WakeTranscriptTrimmer {
+    /// Whether a `Detected` capture said anything after the wake word.
+    ///
+    /// Decided from ACOUSTICS, never from the transcript. That is the whole point: ASR renders the
+    /// wake phrase however it likes (`Oace.`, `oris`, `hey aris`), so a spelling match can never
+    /// decide this, and no tolerance list is needed or guessed at.
+    enum WakeOnlyDecision: Equatable {
+        /// Nothing was said after the wake word: drop silently, no routing, no earcon.
+        case wakeOnly
+        /// Measured: something follows the wake word. Positive evidence of a continuation, which
+        /// is NOT the same thing as "the rule did not run".
+        case continuation
+        /// No audio decision was possible — no positive wake, no margin, or the capture ended on
+        /// speech. Routing proceeds on the text rule alone.
+        ///
+        /// A separate case rather than `route`, so a consumer can never read "the rule never ran"
+        /// as "the audio proved a continuation".
+        case noEvidence
+
+        /// What the capture tells downstream, in the input's `Bool?` terms: `nil` where there is
+        /// no evidence, so absence is never written as a negative measurement.
+        var acousticVerdict: Bool? {
+            switch self {
+            case .wakeOnly: true
+            case .continuation: false
+            case .noEvidence: nil
+            }
+        }
+    }
+
+    /// Decides a `Detected` capture from the audio alone, when the backend supplies no timed
+    /// tokens (recognition-pipeline.md, "Wake-positive time band trim").
+    ///
+    /// The boundary is `completionMs - marginMs`, NOT the completion band's end. The winning
+    /// classifier window's endpoint sits 280-520 ms past the end of the wake word, so the band
+    /// covers a short command attached without a pause, and using it here would silently swallow
+    /// a fast "Auris stop". The margin is measured on validation data for exactly that separation.
+    ///
+    /// Fails SAFE — towards routing — in every case where the rule has no evidence or is switched
+    /// off. A wrong continuation costs at most one dispatch; a wrong `.wakeOnly` silently discards
+    /// a question the user actually asked.
+    static func wakeOnlyDecision(
+        wakePositive: Bool,
+        completionSample: Int,
+        /// The sample index of the first frame of the silence run that closed the segment, in the
+        /// original VAD segment. `nil` when the capture ended on speech, so nothing is known.
+        speechEndSample: Int?,
+        sampleRateHz: Int,
+        /// From `wake_only_margin_ms`. Absent or negative disables the rule.
+        marginMs: Int?
+    ) -> WakeOnlyDecision {
+        // `NotDetected` (including grace) is not gated by a wake result at all.
+        guard wakePositive else { return .noEvidence }
+        // The margin ships with the wake model. Until a model publishes a usable one there is no
+        // measured boundary to apply, so the rule is off and routing is unchanged.
+        guard let marginMs, marginMs >= 0 else { return .noEvidence }
+        // Ended on speech: the segment never closed on silence, so there is no speech end to weigh.
+        guard let speechEndSample else { return .noEvidence }
+        let completionMs = ms(ofSample: completionSample, sampleRateHz: sampleRateHz)
+        let speechEndMs = ms(ofSample: speechEndSample, sampleRateHz: sampleRateHz)
+        // `<=`, not `<`: speech that stops exactly at the boundary left nothing after the wake word.
+        return speechEndMs <= completionMs - marginMs ? .wakeOnly : .continuation
+    }
+
     /// The spec's 120 ms pad, which covers detector hop jitter and a short trailing
     /// burst of the wake phrase; it is not a second word-boundary search.
     static let padMs = 120

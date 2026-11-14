@@ -493,7 +493,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         for index in 0..<20 {
             _ = await sink.routeToCloud(
                 request: "turn \(index)", tier: .free, context: sampleContext(),
-                origin: cloudTestOrigin, selection: nil, utteranceId: "utterance-\(index)"
+                origin: cloudTestOrigin, selection: nil, utteranceId: "utterance-\(index)",
             )
         }
         let clientAfterSettled = clientCreationCount
@@ -502,7 +502,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         // Re-deliver the FIRST (oldest) retained id: it must be a settled replay, not a new owner.
         let replayed = await sink.routeToCloud(
             request: "turn 0", tier: .free, context: sampleContext(),
-            origin: cloudTestOrigin, selection: nil, utteranceId: "utterance-0"
+            origin: cloudTestOrigin, selection: nil, utteranceId: "utterance-0",
         )
         XCTAssertEqual(
             clientCreationCount, clientAfterSettled,
@@ -714,7 +714,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let completed = await Task.detached { () -> Bool in
             let result = await sink.routeToCloud(
                 request: "witness", tier: .free, context: context,
-                origin: cloudTestOrigin, selection: nil, utteranceId: "utterance-witness"
+                origin: cloudTestOrigin, selection: nil, utteranceId: "utterance-witness",
             )
             return result.outcome == .completed
         }.value
@@ -2105,7 +2105,7 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
         let turn = Task {
             await sink.routeToCloud(
                 request: "x", tier: .free, context: sampleContext(),
-                origin: cloudTestOrigin, selection: nil, utteranceId: "u-settled"
+                origin: cloudTestOrigin, selection: nil, utteranceId: "u-settled",
             )
         }
         _ = await turn.value
@@ -2144,7 +2144,7 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
             """
         _ = await sink.routeToCloud(
             request: "follow up", tier: .free, context: sampleContext(),
-            origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-next"
+            origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-next",
         )
         let frames = capturedTask?.sentTextFrames.compactMap { text -> [String: Any]? in
             guard let data = text.data(using: .utf8) else { return nil }
@@ -4508,7 +4508,7 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
         let sink = makeSink()
         let owner = await sink.routeToCloud(
             request: "play the news", tier: .free, context: context,
-            origin: cloudTestOrigin, selection: nil, utteranceId: "7f9c24e5-8b1a-4c02-9e6d-31b5a0f47c88"
+            origin: cloudTestOrigin, selection: nil, utteranceId: "7f9c24e5-8b1a-4c02-9e6d-31b5a0f47c88",
         )
         let ownerFrame = try XCTUnwrap(capturedTask?.sentAuthFrame)
         XCTAssertEqual(
@@ -4520,7 +4520,7 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
         capturedTask = nil
         let duplicate = await sink.routeToCloud(
             request: "play the news", tier: .free, context: context,
-            origin: cloudTestOrigin, selection: nil, utteranceId: "7f9c24e5-8b1a-4c02-9e6d-31b5a0f47c88"
+            origin: cloudTestOrigin, selection: nil, utteranceId: "7f9c24e5-8b1a-4c02-9e6d-31b5a0f47c88",
         )
         XCTAssertEqual(duplicate, owner, "the duplicate observes the owner's settled outcome")
         XCTAssertNil(

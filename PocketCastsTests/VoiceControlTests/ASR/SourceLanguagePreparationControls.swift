@@ -88,7 +88,7 @@ final class SourceLanguagePreparationControls: XCTestCase {
         await MainActor.run { engine.onRoutingInput = { box.inputs.append($0); return true } }
         await engine.processUtterance(Array(repeating: Float(0.01), count: 1600))
         return await MainActor.run { box.inputs.first }
-            ?? { XCTFail("the production preparation produced no routing input"); return .english(transcript: "unreachable", utteranceId: "u-200") }()
+            ?? { XCTFail("the production preparation produced no routing input"); return .english(transcript: "unreachable", utteranceId: "u-200", acousticWakeOnly: nil) }()
     }
 
     // MARK: - Platform translate: source preserved, actual LID carried

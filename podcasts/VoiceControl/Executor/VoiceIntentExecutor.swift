@@ -313,6 +313,8 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
                 preparedObserver: preparedObserver,
                 sourceTranscript: cr.sourceTranscript,
                 sourceLanguage: cr.sourceLanguage,
+                // The turn's own evidence, so the sink holds the retained follow-up with it.
+                acousticWakeOnly: cr.acousticWakeOnly,
                 ownership: ownership
             )
             // A duplicate (a joined or settled copy of the owner's dispatch) observes

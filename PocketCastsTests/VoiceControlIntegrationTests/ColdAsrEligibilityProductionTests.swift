@@ -351,7 +351,7 @@ final class ColdAsrEligibilityProductionTests: XCTestCase {
         // ...and a fallback to live state would be the bug: the sentinel is unclaimable.
         XCTAssertNil(
             signal.claimDispatchOwnership(
-                capturedOrigin: signal.policyRefusedOrigin, utteranceId: "turn-a"
+                capturedOrigin: signal.policyRefusedOrigin, utteranceId: "turn-a",
             ),
             "a retired turn's late completion must not dispatch, and must not adopt the new window"
         )

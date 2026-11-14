@@ -147,6 +147,14 @@ struct CloudRouteIntent: VoiceIntent, Equatable {
     /// not of whatever the window looks like after routing.
     let selection: CloudConversationSelection?
 
+    /// The acoustic wake-only verdict this turn was admitted under, when one existed.
+    ///
+    /// Carried on the TURN, like `selection` and `generation`, so the sink can hold a retained
+    /// follow-up with the same evidence the interruption decision used. Rebuilt from live state
+    /// instead, a bare wake that had already stopped playback could be submitted as a command.
+    /// `nil` means "no audio decision was possible", which is not a claim either way.
+    let acousticWakeOnly: Bool?
+
     init(
         request: String,
         tier: CloudTier,
@@ -155,7 +163,8 @@ struct CloudRouteIntent: VoiceIntent, Equatable {
         utteranceId: String? = nil,
         origin: CloudRouteOrigin = .modelCall,
         generation: Int? = nil,
-        selection: CloudConversationSelection? = nil
+        selection: CloudConversationSelection? = nil,
+        acousticWakeOnly: Bool? = nil
     ) {
         self.request = request
         self.tier = tier
@@ -165,6 +174,7 @@ struct CloudRouteIntent: VoiceIntent, Equatable {
         self.origin = origin
         self.generation = generation
         self.selection = selection
+        self.acousticWakeOnly = acousticWakeOnly
     }
 }
 

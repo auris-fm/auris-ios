@@ -143,7 +143,10 @@ final class SourceLanguageHandoffControls: XCTestCase {
             routerTranscript: c.routerTranscript,
             translationKind: c.sourceTranscript == nil ? .backend : .platform,
             selection: selection,
-            utteranceId: "u-702"
+            utteranceId: "u-702",
+            // The renderer only formats the prompt, but the field is stated rather than defaulted
+            // so a rebuild cannot silently drop what the turn was admitted with.
+            acousticWakeOnly: nil
         )
     }
 
@@ -269,6 +272,7 @@ final class SourceLanguageHandoffControls: XCTestCase {
                 language: "en",
                 selection: .wakeWord,
                 utteranceId: "u-601",
+                acousticWakeOnly: nil
             ),
             origin: service.gracePeriodSignalForTesting.currentGeneration(),
             parsedIntentObserver: { intent in intentBox.intents.append(intent) }

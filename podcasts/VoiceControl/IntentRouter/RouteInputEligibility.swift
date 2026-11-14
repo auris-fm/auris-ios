@@ -21,7 +21,28 @@ enum RouteInputEligibility: Equatable {
 /// null counter and eventually play the error earcon, which the silent rule
 /// forbids. Extracting it makes that reachable in tests without a service seam.
 enum RouteInputEligibilityPolicy {
-    static func decide(transcript: String) -> RouteInputEligibility {
+    /// - Parameter acousticWakeOnly: the engine's audio verdict, when it could make one.
+    ///   `true` is authoritative: the capture measurably ended with the wake word, so nothing was
+    ///   said after it however ASR spelled the phrase. `false` adds nothing (the text rule still
+    ///   applies). `nil` means no audio decision was possible.
+    /// THE decision, taken from the whole input.
+    ///
+    /// The single entry point on purpose. Eligibility is a property of the capture — transcript
+    /// AND the audio verdict — so a gate that asks the question from one field alone can reach the
+    /// opposite answer from the gate before it. That is not hypothetical: the eager barge-in gate
+    /// decided from `routerTranscript` alone, so a misspelled bare wake over a playing answer
+    /// stopped playback and was then submitted as a command. Passing the input makes the fields
+    /// travel together and leaves nothing for a new call site to forget.
+    static func decide(_ input: IntentRoutingInput) -> RouteInputEligibility {
+        decide(transcript: input.routerTranscript, acousticWakeOnly: input.acousticWakeOnly)
+    }
+
+    /// Private on purpose: the whole-input form is the only way in from production code, so no
+    /// gate can decide from the transcript alone. Tests reach it through `decide(_:)` too.
+    private static func decide(transcript: String, acousticWakeOnly: Bool?) -> RouteInputEligibility {
+        // Checked before `.blank`: a capture that ended with the wake word is a session start even
+        // if the recogniser returned an empty string, and `.blank` would otherwise claim it.
+        if acousticWakeOnly == true { return .silentSessionStart }
         if transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return .blank }
         if WakeWordPhraseSet.isWakeOnly(transcript) { return .silentSessionStart }
         return .route

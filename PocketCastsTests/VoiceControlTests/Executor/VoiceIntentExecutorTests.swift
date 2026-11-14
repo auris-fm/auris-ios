@@ -355,6 +355,32 @@ final class VoiceIntentExecutorTests: XCTestCase {
         )
     }
 
+    /// The verdict must reach the sink ON THE TURN, not be re-derived from live state there.
+    ///
+    /// Removing the defaults makes the compiler demand a value at every construction site, but it
+    /// cannot tell whether the value is the RIGHT one: a rebuild that passes `nil` compiles and
+    /// silently tells the sink "no audio evidence", which is how a bare wake over a playing answer
+    /// gets retained and then submitted as a command.
+    func test_execute_carriesTheAcousticVerdictToTheSink() async {
+        mockPlaybackContextProvider.context = Self.context
+        gracePeriodSignal.onWakeWordDetected()
+        let generation = gracePeriodSignal.currentGeneration()
+        XCTAssertNotNil(gracePeriodSignal.claimDispatchOwnership())
+
+        _ = await executor.execute(CloudRouteIntent(
+            request: "oris",
+            tier: .unknown,
+            generation: generation,
+            selection: .wakeWord,
+            acousticWakeOnly: true
+        ))
+
+        XCTAssertEqual(
+            mockCloudRouteSink.lastAcousticWakeOnly, true,
+            "the sink did not receive the verdict the turn was admitted with"
+        )
+    }
+
     func test_execute_pause_callsSinkPause() async {
         let response = await executor.execute(PlaybackIntent.pause)
         XCTAssertTrue(mockPlaybackSink.pauseCalled)
@@ -702,6 +728,9 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
     /// The selection the executor captured, so a case can assert the turn carries what selected
     /// it rather than whatever the window looks like later.
     var lastSelection: CloudConversationSelection?
+    /// The acoustic verdict, for the same reason as `lastSelection`: it belongs to the capture,
+    /// so what the sink receives must be what the turn was admitted with.
+    var lastAcousticWakeOnly: Bool?
     /// The request ids a retry named, in order.
     var retriedRequestIds: [String] = []
 
@@ -711,6 +740,7 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
         utteranceId: String?,
         preparedObserver: CloudRouteSink.PreparedObserver?,
         sourceTranscript: String?, sourceLanguage: String?,
+        acousticWakeOnly: Bool?,
         ownership: CloudDispatchOwnership?
     ) async -> CloudRouteResult {
         routeToCloudCalled = true
@@ -719,6 +749,7 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
         lastContext = context
         lastOrigin = origin
         lastSelection = selection
+        lastAcousticWakeOnly = acousticWakeOnly
         return CloudRouteResult(response: response, outcome: outcome)
     }
 

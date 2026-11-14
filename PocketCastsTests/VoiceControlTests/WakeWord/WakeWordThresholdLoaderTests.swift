@@ -117,4 +117,72 @@ final class WakeWordThresholdLoaderTests: XCTestCase {
             XCTFail("Expected failure when a pinned asset is missing")
         }
     }
+
+    // MARK: - wake_only_margin_ms
+
+    /// The margin is read only when it is a non-negative integer; everything else means "no
+    /// margin", which leaves the audio wake-only rule off rather than applying a guessed one.
+    func test_wakeOnlyMargin_acceptsOnlyANonNegativeInteger() {
+        XCTAssertEqual(
+            WakeWordThresholdLoader.wakeOnlyMarginMs(fromManifestJSON: ["wake_only_margin_ms": 80]),
+            80)
+        XCTAssertEqual(
+            WakeWordThresholdLoader.wakeOnlyMarginMs(fromManifestJSON: ["wake_only_margin_ms": 0]),
+            0,
+            "zero is a VALID margin: the boundary is the completion offset itself")
+
+        XCTAssertNil(
+            WakeWordThresholdLoader.wakeOnlyMarginMs(fromManifestJSON: [:]),
+            "absent: the rule is off, matching a manifest written before the margin existed")
+        XCTAssertNil(
+            WakeWordThresholdLoader.wakeOnlyMarginMs(fromManifestJSON: ["wake_only_margin_ms": -1]),
+            "negative would invert the rule and drop ordinary commands")
+        XCTAssertNil(
+            WakeWordThresholdLoader.wakeOnlyMarginMs(fromManifestJSON: ["wake_only_margin_ms": "eighty"]),
+            "a string is not a millisecond count")
+        XCTAssertNil(
+            WakeWordThresholdLoader.wakeOnlyMarginMs(fromManifestJSON: ["wake_only_margin_ms": 80.5]),
+            "a fractional margin is not a millisecond count")
+        // A whole-valued float is ACCEPTED, and that is deliberate rather than an oversight: JSON
+        // does not distinguish `80` from `80.0` once parsed, both mean eighty milliseconds, and
+        // rejecting the second would fail a manifest for how it was written rather than for what
+        // it says. Only a value with a real fractional part is wrong.
+        XCTAssertEqual(
+            WakeWordThresholdLoader.wakeOnlyMarginMs(fromManifestJSON: ["wake_only_margin_ms": 80.0]),
+            80,
+            "a whole-valued float is still eighty milliseconds")
+        // A JSON boolean bridges to NSNumber, where true is 1.0 — integral and non-negative — so
+        // the numeric checks alone accept it and the rule runs with a 1 ms boundary. Nothing that
+        // is not a NUMBER may reach the rule, however it happens to coerce.
+        XCTAssertNil(
+            WakeWordThresholdLoader.wakeOnlyMarginMs(fromManifestJSON: ["wake_only_margin_ms": true]),
+            "a boolean is not a millisecond count")
+        XCTAssertNil(
+            WakeWordThresholdLoader.wakeOnlyMarginMs(fromManifestJSON: ["wake_only_margin_ms": false]),
+            "a boolean is not a millisecond count, even when it coerces to zero")
+    }
+
+    /// A manifest with no margin still LOADS: the margin disables the audio rule only and must
+    /// not make the detector not-ready, unlike the threshold.
+    func test_aManifestWithoutAMarginStillLoadsTheDeployment() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wake-margin-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // One pinned asset, hashed, so the manifest is otherwise valid.
+        let asset = dir.appendingPathComponent("auris.onnx")
+        let bytes = Data([0x01, 0x02, 0x03])
+        try bytes.write(to: asset)
+        let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        let manifest = dir.appendingPathComponent("auris_eval.json")
+        try JSONSerialization.data(withJSONObject: [
+            "deployment_threshold": 0.5,
+            "asset_hashes": ["auris.onnx": digest],
+        ]).write(to: manifest)
+
+        let deployment = try WakeWordThresholdLoader
+            .loadDeployment(manifestURL: manifest, modelDirectory: dir).get()
+        XCTAssertEqual(deployment.threshold, 0.5, accuracy: 1e-6)
+        XCTAssertNil(deployment.wakeOnlyMarginMs, "no margin: the audio rule is off, not an error")
+    }
 }

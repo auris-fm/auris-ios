@@ -139,7 +139,7 @@ final class SileroSegmenterIntegrationControl: XCTestCase {
     /// Records every emission so coverage can be measured, not counted.
     private func collectEmissions(_ segmenter: NativeVadSegmenter) -> () -> [[Float]] {
         var emissions: [[Float]] = []
-        segmenter.onUtterance = { utterance, _ in emissions.append(utterance) }
+        segmenter.onUtterance = { utterance in emissions.append(utterance.samples) }
         return { emissions }
     }
 
@@ -316,7 +316,7 @@ final class SileroSegmenterIntegrationControl: XCTestCase {
             classifier: ScriptedSpeechClassifier(silentFrames: silentFrames, speechFrames: 4)
         )
         var captured: [([Float], MonotonicTime?)] = []
-        segmenter.onUtterance = { utterance, instant in captured.append((utterance, instant)) }
+        segmenter.onUtterance = { captured.append(($0.samples, $0.capturedAt)) }
 
         // Second-resolution instants make the sample offset unambiguous.
         for i in 0..<silentFrames { segmenter.process(frame(i), capturedAt: MonotonicTime(i)) }
@@ -361,7 +361,7 @@ final class SileroSegmenterIntegrationControl: XCTestCase {
             classifier: script
         )
         var dispatched: [[Float]] = []
-        segmenter.onUtterance = { utterance, _ in dispatched.append(utterance) }
+        segmenter.onUtterance = { utterance in dispatched.append(utterance.samples) }
         segmenter.onStuckActiveFault = { _ in }
 
         for _ in 0..<((240_000 / 20) + 10) { segmenter.process(frame) }
@@ -409,7 +409,7 @@ final class SileroSegmenterIntegrationControl: XCTestCase {
         )
         var dispatched: [[Float]] = []
         var faults: [NativeVadSegmenter.StuckActiveFault] = []
-        segmenter.onUtterance = { utterance, _ in dispatched.append(utterance) }
+        segmenter.onUtterance = { utterance in dispatched.append(utterance.samples) }
         segmenter.onStuckActiveFault = { faults.append($0) }
 
         // 25 unconfirmed frames (0.5 s, the pre-roll bound) are held, then positives run to the
@@ -453,7 +453,7 @@ final class SileroSegmenterIntegrationControl: XCTestCase {
         )
         var dispatched: [[Float]] = []
         var faults: [NativeVadSegmenter.StuckActiveFault] = []
-        segmenter.onUtterance = { (utterance: [Float], _: MonotonicTime?) in dispatched.append(utterance) }
+        segmenter.onUtterance = { utterance in dispatched.append(utterance.samples) }
         segmenter.onStuckActiveFault = { faults.append($0) }
 
         for _ in 0..<(framesToCeiling - 10) { segmenter.process(frame) }
@@ -495,7 +495,7 @@ final class SileroSegmenterIntegrationControl: XCTestCase {
         var faults: [NativeVadSegmenter.ClassifierUnavailableFault] = []
         var dispatched: [[Float]] = []
         segmenter.onClassifierUnavailable = { faults.append($0) }
-        segmenter.onUtterance = { utterance, _ in dispatched.append(utterance) }
+        segmenter.onUtterance = { utterance in dispatched.append(utterance.samples) }
 
         segmenter.reportClassifierUnavailable("silero_vad.onnx could not be loaded")
 
@@ -536,7 +536,7 @@ final class SileroSegmenterIntegrationControl: XCTestCase {
             classifier: ScriptedSpeechClassifier(silentFrames: 5, speechFrames: 7)
         )
         var captured: [[Float]] = []
-        segmenter.onUtterance = { utterance, _ in captured.append(utterance) }
+        segmenter.onUtterance = { utterance in captured.append(utterance.samples) }
         // Twelve indexed frames, then real silence long enough to trigger the endpoint.
         // `silenceTimeoutMs: 0` alone is not enough: the comparison is wall-clock based, so the
         // silence must actually span time rather than assume the clock advanced between calls.
@@ -583,7 +583,7 @@ final class SileroSegmenterIntegrationControl: XCTestCase {
             classifier: ScriptedSpeechClassifier(silentFrames: silentFrames, speechFrames: 4)
         )
         var captured: [([Float], MonotonicTime?)] = []
-        segmenter.onUtterance = { utterance, instant in captured.append((utterance, instant)) }
+        segmenter.onUtterance = { captured.append(($0.samples, $0.capturedAt)) }
 
         // Each frame is stamped with its own instant so eviction is provable by value.
         for i in 0..<silentFrames { segmenter.process(frame(i), capturedAt: MonotonicTime(i)) }
@@ -629,7 +629,7 @@ final class SileroSegmenterIntegrationControl: XCTestCase {
         )
         var dispatched: [[Float]] = []
         var faults: [NativeVadSegmenter.StuckActiveFault] = []
-        segmenter.onUtterance = { utterance, _ in dispatched.append(utterance) }
+        segmenter.onUtterance = { utterance in dispatched.append(utterance.samples) }
         segmenter.onStuckActiveFault = { faults.append($0) }
 
         for _ in 0..<(framesToCeiling + 10) { segmenter.process(frame) }
@@ -663,7 +663,7 @@ final class SileroSegmenterIntegrationControl: XCTestCase {
             classifier: script
         )
         var dispatched: [[Float]] = []
-        segmenter.onUtterance = { utterance, _ in dispatched.append(utterance) }
+        segmenter.onUtterance = { utterance in dispatched.append(utterance.samples) }
         segmenter.onStuckActiveFault = { _ in }
 
         // Past the ceiling, then keep speaking: the tail must not become a command.
@@ -699,6 +699,41 @@ final class SileroSegmenterIntegrationControl: XCTestCase {
             "the classifier reported speech for digital silence, so an endpoint could never arrive"
         )
     }
+    /// The reported speech end must be where SPEECH stopped, not where the hangover did.
+    ///
+    /// The segmenter keeps appending silent frames until the endpoint fires, so the buffer length
+    /// at emit time is the end of the hangover. Reporting that as the speech end would push the
+    /// wake-only boundary later by the whole timeout, and every "auris, stop" would read as a
+    /// bare wake and be silently dropped — the failure this measurement exists to prevent.
+    func test_speechEndExcludesTheHangoverThatClosedTheSegment() {
+        // `silenceTimeoutMs: -1` closes on the FIRST silent frame, so the hangover is known
+        // exactly: the one frame after the speech run. Any reported end that includes it is wrong.
+        let frameSize = 160
+        let frame: (Int) -> [Float] = { i in (0..<frameSize).map { _ in Float(i) / 1000 } }
+        let speechFrames = 4
+        let segmenter = NativeVadSegmenter(
+            threshold: 0.020,
+            silenceTimeoutMs: -1,
+            minSpeechFrames: 1,
+            classifier: ScriptedSpeechClassifier(silentFrames: 0, speechFrames: speechFrames)
+        )
+        var ends: [Int?] = []
+        segmenter.onUtterance = { ends.append($0.speechEndSample) }
+
+        for i in 0..<speechFrames { segmenter.process(frame(i), capturedAt: MonotonicTime(i)) }
+        XCTAssertTrue(ends.isEmpty, "the segment closed before any silence arrived")
+        // This frame opens the silence run and closes the segment; it must NOT count as speech.
+        segmenter.process(frame(speechFrames), capturedAt: MonotonicTime(speechFrames))
+
+        // PRECONDITIONS the test's name asserts: it closed, and it reported an end at all.
+        XCTAssertEqual(ends.count, 1, "the silent frame must close the segment exactly once")
+        let speechEnd: Int? = ends.first ?? nil
+        XCTAssertNotNil(speechEnd, "an emitted utterance must report where speech stopped")
+        XCTAssertEqual(
+            speechEnd, speechFrames * frameSize,
+            "the closing silent frame is hangover, not speech")
+    }
+
 }
 
 /// Reports "no speech" for a fixed number of frames, then "speech" forever.

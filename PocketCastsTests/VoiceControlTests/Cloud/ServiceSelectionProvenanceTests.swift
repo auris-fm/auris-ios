@@ -143,6 +143,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
                 transcript: "what did the host mean by that remark",
                 selection: .wakeWord,
                 utteranceId: "05213c56-cfd9-4e38-be5f-ba4a01ea30ea",
+                acousticWakeOnly: nil
             )
         )
 
@@ -355,6 +356,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             transcript: "what did the host mean by that remark",
             selection: .followUp,
             utteranceId: "ba1f70e0-1010-47f1-b203-9b417709601c",
+            acousticWakeOnly: nil
         ))
 
         var delivered: CloudConversationSelection?
@@ -518,7 +520,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             "<|tool_call_start|>[cloud_route(request='what is this episode about', tier='free')]<|tool_call_end|>"
         let warmId = "7d1c22ab-51e0-4c6a-9f30-8b44c1d2e001"
         await service.handleRoutingInput(
-            IntentRoutingInput.english(transcript: "what is this episode about", selection: .wakeWord, utteranceId: warmId),
+            IntentRoutingInput.english(transcript: "what is this episode about", selection: .wakeWord, utteranceId: warmId, acousticWakeOnly: nil),
             origin: generation
         )
         let warmDeadline = Date().addingTimeInterval(5)
@@ -541,7 +543,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         // A: begins the dialog (local control, admission id A-plan).
         let aId = "3e91c40b-27af-4d5e-8c16-0b2f7a4d9e83"
         await service.handleRoutingInput(
-            IntentRoutingInput.english(transcript: "rename my bookmark", selection: .wakeWord, utteranceId: aId),
+            IntentRoutingInput.english(transcript: "rename my bookmark", selection: .wakeWord, utteranceId: aId, acousticWakeOnly: nil),
             origin: generation
         )
         let dialogDeadline = Date().addingTimeInterval(5)
@@ -563,7 +565,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         let bId = "8a2bf59d-6c31-4e08-b7d4-5c91f0e37a26"
 
         await service.handleRoutingInput(
-            IntentRoutingInput.english(transcript: "actually, what did the host say about the merger", selection: .followUp, utteranceId: bId),
+            IntentRoutingInput.english(transcript: "actually, what did the host say about the merger", selection: .followUp, utteranceId: bId, acousticWakeOnly: nil),
             origin: generation
         )
 
@@ -708,7 +710,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         // it with new_command.
         let aId = "3e91c40b-27af-4d5e-8c16-0b2f7a4d9e83"
         await service.handleRoutingInput(
-            IntentRoutingInput.english(transcript: "rename my bookmark", selection: .wakeWord, utteranceId: aId),
+            IntentRoutingInput.english(transcript: "rename my bookmark", selection: .wakeWord, utteranceId: aId, acousticWakeOnly: nil),
             origin: generation
         )
         let dialogDeadline = Date().addingTimeInterval(5)
@@ -725,7 +727,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         let bId = "8a2bf59d-6c31-4e08-b7d4-5c91f0e37a26"
 
         await service.handleRoutingInput(
-            IntentRoutingInput.english(transcript: "actually, what did the host say about the merger", selection: .wakeWord, utteranceId: bId),
+            IntentRoutingInput.english(transcript: "actually, what did the host say about the merger", selection: .wakeWord, utteranceId: bId, acousticWakeOnly: nil),
             origin: generation
         )
 
@@ -805,6 +807,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
                 transcript: "what did the host mean by that remark",
                 selection: .wakeWord,
                 utteranceId: admittedId,
+                acousticWakeOnly: nil
             ),
             origin: liveGeneration
         )
@@ -885,6 +888,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
                 transcript: "what did the host mean by that remark",
                 selection: .wakeWord,
                 utteranceId: bId,
+                acousticWakeOnly: nil
             ),
             origin: liveGeneration
         )
@@ -976,6 +980,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
                 transcript: "what did the host mean by that remark",
                 selection: .wakeWord,
                 utteranceId: "ddbd8a62-57db-49c9-9b42-4f1e8c29e8c9",
+                acousticWakeOnly: nil
             ),
             origin: liveGeneration,
             preparedObserver: { prepared in preparedForThisTurn = prepared }
@@ -1108,6 +1113,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
                 transcript: "what did the host mean by that remark",
                 selection: .wakeWord,
                 utteranceId: "886a1837-856e-46fb-804b-137ece5200d1",
+                acousticWakeOnly: nil
             ),
             origin: service.gracePeriodSignalForTesting.currentGeneration(),
             preparedObserver: { value in prepared = value }
@@ -1197,6 +1203,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             transcript: "what did the host mean by that remark",
             selection: .wakeWord,
             utteranceId: "51f843e7-549e-42e9-b5df-5ae0a0a275c9",
+            acousticWakeOnly: nil
         ))
 
         var delivered: CloudConversationSelection?
@@ -1307,7 +1314,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
 
         // A preceding turn is dispatched and HELD, so it occupies the serial slot.
         signal.onWakeWordDetected()
-        installed?(IntentRoutingInput.english(transcript: "held turn", selection: .wakeWord, utteranceId: "u-200"))
+        installed?(IntentRoutingInput.english(transcript: "held turn", selection: .wakeWord, utteranceId: "u-200", acousticWakeOnly: nil))
         let builtDeadline = Date().addingTimeInterval(8)
         while Date() < builtDeadline && turnsBuilt == 0 {
             try? await Task.sleep(nanoseconds: 50_000_000)
@@ -1317,7 +1324,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         // A is submitted next: it QUEUES behind the held turn and cannot run while it waits.
         signal.onWakeWordDetected()
         let windowA = signal.currentGeneration()
-        installed?(IntentRoutingInput.english(transcript: "A question", selection: .wakeWord, utteranceId: "u-200"))
+        installed?(IntentRoutingInput.english(transcript: "A question", selection: .wakeWord, utteranceId: "u-200", acousticWakeOnly: nil))
         try? await Task.sleep(nanoseconds: 200_000_000)
         XCTAssertEqual(
             turnsBuilt, 1,
@@ -1453,7 +1460,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         XCTAssertNotNil(installed, "the service must install an onRoutingInput callback")
 
         service.gracePeriodSignalForTesting.onWakeWordDetected()
-        installed?(IntentRoutingInput.english(transcript: "held turn", selection: .wakeWord, utteranceId: "u-200"))
+        installed?(IntentRoutingInput.english(transcript: "held turn", selection: .wakeWord, utteranceId: "u-200", acousticWakeOnly: nil))
         let builtDeadline = Date().addingTimeInterval(8)
         while Date() < builtDeadline && turnsBuilt == 0 {
             try? await Task.sleep(nanoseconds: 50_000_000)
@@ -1462,7 +1469,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
 
         // A queues behind the held turn. NOTHING is retired here.
         service.gracePeriodSignalForTesting.onWakeWordDetected()
-        installed?(IntentRoutingInput.english(transcript: "A question", selection: .wakeWord, utteranceId: "u-200"))
+        installed?(IntentRoutingInput.english(transcript: "A question", selection: .wakeWord, utteranceId: "u-200", acousticWakeOnly: nil))
         try? await Task.sleep(nanoseconds: 200_000_000)
         XCTAssertEqual(turnsBuilt, 1, "precondition: A is queued")
 
@@ -1563,6 +1570,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             transcript: "what did the host mean by that remark",
             selection: .wakeWord,
             utteranceId: "b8024eb5-6cee-44ba-93ad-0b817f55a1d1",
+            acousticWakeOnly: nil
         ))
         let builtDeadline = Date().addingTimeInterval(8)
         while Date() < builtDeadline && turnsBuilt == 0 {
@@ -1701,7 +1709,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         // A is submitted and parks at the barrier, stamped with its own window.
         signal.onWakeWordDetected()
         let windowA = signal.currentGeneration()
-        installed?(IntentRoutingInput.english(transcript: "A question", selection: .wakeWord, utteranceId: "u-200"))
+        installed?(IntentRoutingInput.english(transcript: "A question", selection: .wakeWord, utteranceId: "u-200", acousticWakeOnly: nil))
         // AWAIT THE EVENT, do not sleep and hope: the arrival acknowledgement is what makes "held"
         // observable, and a fixed sleep asserts a timing rather than a fact.
         let arrived = await withTaskGroup(of: Bool.self) { group -> Bool in
@@ -1904,7 +1912,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
         // The window THIS turn is stamped with, captured at submission so the raw-origin assertion
         // below compares against the turn's own window rather than a live read.
         let admittedWindow = service.gracePeriodSignalForTesting.currentGeneration()
-        installed?(IntentRoutingInput.english(transcript: "A question", selection: .wakeWord, utteranceId: "u-200"))
+        installed?(IntentRoutingInput.english(transcript: "A question", selection: .wakeWord, utteranceId: "u-200", acousticWakeOnly: nil))
         // AWAIT THE EVENT rather than sleeping: arrival is what makes "held" a fact.
         let arrived = await withTaskGroup(of: Bool.self) { group -> Bool in
             group.addTask {
@@ -2070,7 +2078,7 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
 
         // Submit A; it arrives at the barrier and waits.
         service.gracePeriodSignalForTesting.onWakeWordDetected()
-        installed?(IntentRoutingInput.english(transcript: "A question", selection: .wakeWord, utteranceId: "u-200"))
+        installed?(IntentRoutingInput.english(transcript: "A question", selection: .wakeWord, utteranceId: "u-200", acousticWakeOnly: nil))
         // AWAIT THE EVENT: a fixed sleep would assert a timing rather than the fact that A is held.
         let arrived = await withTaskGroup(of: Bool.self) { group -> Bool in
             group.addTask {

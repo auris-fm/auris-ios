@@ -152,6 +152,7 @@ class VoiceControlAssembly {
             gracePeriodSignal: gracePeriodSignal,
             clock: SystemMonotonicClock(),
             wakeThreshold: deployment.threshold,
+            wakeOnlyMarginMs: deployment.wakeOnlyMarginMs,
             translationStage: AppleTranslationTranslator()
         )
         // Voice-sharing composition (production). The collector observes the engine with production

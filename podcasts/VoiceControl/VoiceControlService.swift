@@ -774,7 +774,7 @@ class VoiceControlService: ObservableObject {
         guard input.utteranceId != nil else { return false }
         // Only an input that will actually be routed can barge in; a blank or wake-only capture is
         // a session start, not speech over an answer.
-        guard case .route = RouteInputEligibilityPolicy.decide(transcript: input.routerTranscript)
+        guard case .route = RouteInputEligibilityPolicy.decide(input)
         else { return false }
         // The retained record carries the COMPLETE admitted input — including the selection this
         // capture was admitted under — because the follow-up submitter reconstructs its submission
@@ -787,6 +787,9 @@ class VoiceControlService: ObservableObject {
             sourceTranscript: input.sourceTranscript,
             sourceLanguage: input.sourceLanguage,
             translationKind: input.translationKind,
+            // Carried into the hold so the retained follow-up is dispatched on the same evidence
+            // this interruption decision used.
+            acousticWakeOnly: input.acousticWakeOnly,
             // The window this capture was ADMITTED under, carried to the effect boundary
             // (reviewer c38ff4ba item 3). A service stop/restart between the caller's check and
             // the main-actor hop is otherwise invisible: the sink would interrupt on behalf of a
@@ -929,8 +932,13 @@ class VoiceControlService: ObservableObject {
     }
 
     /// Compatibility wrapper for tests that still pass a bare English transcript.
+    ///
+    /// A bare transcript means no audio verdict exists, which is `nil` rather than a claim: the
+    /// text rule decides exactly as it did before the acoustic rule existed.
     func handleTranscript(_ transcript: String, utteranceId: String) async {
-        await handleRoutingInput(.english(transcript: transcript, utteranceId: utteranceId))
+        await handleRoutingInput(
+            .english(transcript: transcript, utteranceId: utteranceId, acousticWakeOnly: nil)
+        )
     }
 
     /// - Parameters:
@@ -986,7 +994,10 @@ class VoiceControlService: ObservableObject {
                 routerTranscript: released.request,
                 translationKind: released.translationKind ?? .none,
                 selection: released.selection,
-                utteranceId: released.utteranceId
+                utteranceId: released.utteranceId,
+                // The verdict the capture was admitted under. Rebuilding without it let a bare
+                // wake that had already stopped playback be submitted as a command.
+                acousticWakeOnly: released.acousticWakeOnly
             ),
             origin: released.origin,
             selection: released.selection
@@ -1132,7 +1143,10 @@ class VoiceControlService: ObservableObject {
         // keeps the wake phrase in the transcript, so this is where that case is
         // caught rather than by the trimmer, which cannot recover the tokens it
         // never had.
-        switch RouteInputEligibilityPolicy.decide(transcript: transcript) {
+        // ONE decision, reused for the branch and for the skip reason: asking twice is how the
+        // two answers drift apart.
+        let eligibility = RouteInputEligibilityPolicy.decide(input)
+        switch eligibility {
         case .blank, .silentSessionStart:
             // Silent by contract and *before* classification: a wake-only or blank
             // capture is the start of a session (or nothing at all), not a failed
@@ -1145,7 +1159,7 @@ class VoiceControlService: ObservableObject {
             // The record still closes honestly: routing and execution did not run, and the
             // app owns that decision. A wake-only capture states the enumerated `wake_only`
             // reason; a blank capture never dispatched anything at all.
-            let skipReason = RouteInputEligibilityPolicy.decide(transcript: transcript) == .silentSessionStart
+            let skipReason = eligibility == .silentSessionStart
                 ? VoiceSharingCollector.wakeOnlySkipReason
                 : VoiceSharingCollector.notDispatchedReason
             for stage in ["routing", "execution"] {
@@ -1194,7 +1208,9 @@ class VoiceControlService: ObservableObject {
                     // routing work, so a live read would attribute the turn to whichever window
                     // happens to be current now.
                     generation: capturedOrigin,
-                    selection: capturedSelection
+                    selection: capturedSelection,
+                    // The verdict is part of the admitted turn, so rebuilding the intent keeps it.
+                    acousticWakeOnly: input.acousticWakeOnly
                 )
             }
 
@@ -1316,7 +1332,14 @@ class VoiceControlService: ObservableObject {
                 // continuation that never ran. The marker is set after the enqueue returns, and the
                 // enqueue releases it again if it refused — so the two can never disagree.
                 let enqueued = enqueueRoutingInput(
-                    .english(transcript: reprocessValue, selection: capturedSelection, utteranceId: input.utteranceId),
+                    // The verdict belongs to the CAPTURE, so a re-processed value keeps it: this
+                    // is the same admitted input continuing, not a new question about its text.
+                    .english(
+                        transcript: reprocessValue,
+                        selection: capturedSelection,
+                        utteranceId: input.utteranceId,
+                        acousticWakeOnly: input.acousticWakeOnly
+                    ),
                     origin: capturedOrigin,
                     selection: capturedSelection
                 )
@@ -1424,7 +1447,10 @@ class VoiceControlService: ObservableObject {
                         // Omitting it dropped the turn to the sink's provider fallback, so an
                         // escalated turn was classified by live window state rather than by what
                         // selected it — the exact defect the caller-level control exists to catch.
-                        selection: capturedSelection
+                        selection: capturedSelection,
+                        // And the verdict travels on the fallback too, or an escalated wake-only
+                        // capture would reach the sink as if the audio had proved a command.
+                        acousticWakeOnly: input.acousticWakeOnly
                     ),
                     preparedObserver: preparedObserver
                 )
