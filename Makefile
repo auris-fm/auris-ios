@@ -19,12 +19,23 @@ SWIFTLINT_FROM_BUILDTOOLS=swiftlint lint --working-directory .. --config .swiftl
 #
 # Override on the command line for a one-off (`make test SIMULATOR_NAME="iPhone 17"`); do not
 # change the default to a personal device.
-SIMULATOR_NAME ?= auris-tests
+#
+# `=` and not `?=`: an exported SIMULATOR_NAME in someone's shell would otherwise silently
+# redirect every test run, which is how a stray value could point a suite back at the device this
+# whole change exists to protect. A command-line override still wins, which is the deliberate case.
+SIMULATOR_NAME = auris-tests
 
 # The device a PERSON looks at, used only by `launch_mac`. Deliberately a different variable from
 # `SIMULATOR_NAME`: pointing the manual-check launcher at the test sim would install a build onto
 # a device a suite is using, and pointing tests at this device is what wiped its account.
-MANUAL_SIMULATOR_NAME ?= auris-manual
+MANUAL_SIMULATOR_NAME = auris-manual
+
+# The simulator a TEST run may never touch, whatever it is called. Checked by name, not by UUID,
+# because the whole failure mode is a name resolving to the wrong device.
+PROTECTED_SIMULATOR_NAME = auris-manual
+
+# The device UDID for a simulator name, resolved once so boot and install cannot disagree.
+simulator_udid = xcrun simctl list devices available | sed -n 's/.* $(1) (\([0-9A-F-]*\)).*/\1/p' | head -1
 
 # Never build the x86_64 simulator slice on Apple Silicon. A `generic/platform=iOS Simulator`
 # destination has no active arch, so ONLY_ACTIVE_ARCH cannot narrow ARCHS: every source is
@@ -100,7 +111,38 @@ clean: ## Cleans the build artifacts
 
 ONLY_TESTING ?= PocketCastsTests
 
-test: ensure_llama_ios ## Build and run the PocketCastsTests target with Unit Tests using Xcode
+# The destination every TEST run uses: guard the protected device, create the test device if it is
+# missing, and resolve its UDID once.
+#
+# Creating it is the point. Naming a dedicated simulator without creating it makes `make test` fail
+# outright on a fresh machine or after an Xcode upgrade removes old runtimes - the change would
+# then have traded a wiped device for a broken build, which is worse.
+.PHONY: ensure_simulator
+ensure_simulator:
+	@if [ "$(SIMULATOR_NAME)" = "$(PROTECTED_SIMULATOR_NAME)" ]; then \
+		echo "error: refusing to run tests on $(PROTECTED_SIMULATOR_NAME) - that is the signed-in device"; \
+		echo "       used for manual checks. Set SIMULATOR_NAME to a test device (default: auris-tests)."; \
+		exit 1; \
+	fi; \
+	if [ -z "$$($(call simulator_udid,$(SIMULATOR_NAME)))" ]; then \
+		TYPE=$$(xcrun simctl list devices -j | python3 -c 'import json,sys; \
+d = json.load(sys.stdin)["devices"]; \
+print(next((x["deviceTypeIdentifier"] for rt in d for x in d[rt] if x["name"] == "$(MANUAL_SIMULATOR_NAME)"), ""))'); \
+		if [ -z "$$TYPE" ]; then \
+			TYPE=$$(xcrun simctl list devicetypes | sed -n 's/.*\(com\.apple\.CoreSimulator\.SimDeviceType\.iPhone[^ ]*\)$$/\1/p' | tail -1); \
+		fi; \
+		if [ -z "$$TYPE" ]; then echo "error: no iPhone device type to create $(SIMULATOR_NAME) from"; exit 1; fi; \
+		echo "creating simulator $(SIMULATOR_NAME) as $$TYPE"; \
+		xcrun simctl create "$(SIMULATOR_NAME)" "$$TYPE" >/dev/null || exit 1; \
+	fi; \
+	if [ -z "$$($(call simulator_udid,$(SIMULATOR_NAME)))" ]; then \
+		echo "error: no simulator named $(SIMULATOR_NAME) and it could not be created"; \
+		exit 1; \
+	fi
+
+# `test` and `test_fast` both need it, and it must run BEFORE xcodebuild rather than inside the
+# command, so a refusal stops the target instead of being piped into the log.
+test: ensure_simulator ensure_llama_ios ## Build and run the PocketCastsTests target with Unit Tests using Xcode
 	set -o pipefail; mkdir -p $(LOG_DIR) && xcodebuild test -project podcasts.xcodeproj \
 	    -scheme pocketcasts \
         -only-testing:$(ONLY_TESTING) \
@@ -124,7 +166,7 @@ build_fast: ensure_llama_ios ## Fast local Debug build (no dSYM/signing/lint); n
        $(FAST_FLAGS) \
        build 2>&1 | tee $(LOG_DIR)/build_fast.log
 
-test_fast: ensure_llama_ios ## Fast local test run (no dSYM/signing/lint); not for CI
+test_fast: ensure_simulator ensure_llama_ios ## Fast local test run (no dSYM/signing/lint); not for CI
 	set -o pipefail; mkdir -p $(LOG_DIR) && $(FAST_ENV) xcodebuild test -project podcasts.xcodeproj \
 	    -scheme pocketcasts \
         -only-testing:$(ONLY_TESTING) \
@@ -163,9 +205,9 @@ launch_mac: build_mac ## Builds and launches in iOS Simulator for log stream
 	if [ -d podcasts/VoiceControl/Resources/earcons ]; then \
 		mkdir -p "$$APP/earcons" && cp podcasts/VoiceControl/Resources/earcons/*.wav "$$APP/earcons/"; \
 	fi; \
-	xcrun simctl boot "$(MANUAL_SIMULATOR_NAME)" 2>/dev/null; \
-	SIM_ID="$$(xcrun simctl list devices available | sed -n 's/.*$(MANUAL_SIMULATOR_NAME) (\([0-9A-F-]*\)).*/\1/p' | head -1)"; \
+	SIM_ID="$$($(call simulator_udid,$(MANUAL_SIMULATOR_NAME)))"; \
 	if [ -z "$$SIM_ID" ]; then echo "error: no simulator named $(MANUAL_SIMULATOR_NAME)"; exit 1; fi; \
+	xcrun simctl boot "$$SIM_ID" 2>/dev/null; \
 	xcrun simctl install "$$SIM_ID" "$$APP" && \
 	xcrun simctl launch "$$SIM_ID" fm.auris
 
