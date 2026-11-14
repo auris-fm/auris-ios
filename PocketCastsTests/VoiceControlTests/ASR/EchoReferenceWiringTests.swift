@@ -544,7 +544,7 @@ final class EchoReferenceWiringTests: XCTestCase {
     func test_segmenterCarriesTheFirstSamplesCaptureInstant() {
         let segmenter = NativeVadSegmenter(threshold: 0.002, silenceTimeoutMs: -1, minSpeechFrames: 2)
         var received: (samples: [Float], capturedAt: MonotonicTime?)?
-        segmenter.onUtterance = { samples, capturedAt in
+        segmenter.onUtterance = { samples, capturedAt, _, _, _ in
             received = (samples, capturedAt)
         }
 

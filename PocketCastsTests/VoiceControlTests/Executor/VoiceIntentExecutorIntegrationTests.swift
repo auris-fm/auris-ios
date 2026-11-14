@@ -61,7 +61,7 @@ final class VoiceIntentExecutorIntegrationTests: XCTestCase {
             cloudRouteSink: cloudSink,
             playbackContextProvider: IntegrationPlaybackContextProvider()
         )
-        let response = await executor.execute(CloudRouteIntent(request: "test", tier: .premium))
+        let response = await executor.execute(CloudRouteIntent(request: "test", tier: .premium, latency: LatencyHandle()))
         XCTAssertEqual(response, .spoken("Cloud response"))
     }
 
@@ -80,8 +80,7 @@ final class VoiceIntentExecutorIntegrationTests: XCTestCase {
         let executor = makeExecutor(cloudRouteSink: sink, gracePeriodSignal: grace)
 
         let rendered = await executor.execute(CloudRouteIntent(
-            request: "play something", tier: .free, origin: .modelCall, generation: generation
-        ))
+            request: "play something", tier: .free, origin: .modelCall, generation: generation, latency: LatencyHandle()))
 
         XCTAssertEqual(
             rendered,
@@ -256,6 +255,7 @@ private final class LimitRefusalCloudRouteSink: VoiceCloudRouteSink {
         utteranceId: String?,
         preparedObserver: CloudRouteSink.PreparedObserver?,
         sourceTranscript: String?, sourceLanguage: String?,
+        latency: LatencyHandle,
         ownership: CloudDispatchOwnership?
     ) async -> CloudRouteResult {
         routeCallCount += 1
@@ -279,6 +279,7 @@ private final class IntegrationCloudRouteSink: VoiceCloudRouteSink {
         utteranceId: String?,
         preparedObserver: CloudRouteSink.PreparedObserver?,
         sourceTranscript: String?, sourceLanguage: String?,
+        latency: LatencyHandle,
         ownership: CloudDispatchOwnership?
     ) async -> CloudRouteResult {
         CloudRouteResult(response: .spoken("Cloud response"), outcome: .completed)

@@ -136,6 +136,12 @@ protocol VoiceIntentExecuting: AnyObject {
     /// Production paths read this instead of force-downcasting `self`, so an unfamiliar conformer
     /// degrades to "no sink" rather than trapping the process.
     var cloudRouteSinkAccess: CloudRouteSink? { get }
+    /// Early-connection lifecycle (task81). The concrete executor forwards to its cloud sink;
+    /// conformers without a cloud sink do nothing, matching `cloudRouteSinkAccess`'s degrade rule.
+    @MainActor func beginEarlyCloudConnection(tag: String)
+    @MainActor func claimEarlyCloudConnection(tag: String?, utteranceId: String)
+    @MainActor func discardEarlyCloudConnection(tag: String, reason: String)
+    @MainActor func discardEarlyCloudConnection(openedBy utteranceId: String, reason: String)
 }
 
 extension VoiceIntentExecuting {
@@ -145,6 +151,10 @@ extension VoiceIntentExecuting {
     @MainActor func releaseRetainedAdmittedDispatch(utteranceId: String, origin: Int) {}
     @MainActor func retireRetainedDispatchesIfWindowChanged(to origin: Int?) {}
     var cloudRouteSinkAccess: CloudRouteSink? { nil }
+    @MainActor func beginEarlyCloudConnection(tag: String) {}
+    @MainActor func claimEarlyCloudConnection(tag: String?, utteranceId: String) {}
+    @MainActor func discardEarlyCloudConnection(tag: String, reason: String) {}
+    @MainActor func discardEarlyCloudConnection(openedBy utteranceId: String, reason: String) {}
     /// Default bridge for conformers that have not adopted structured verdicts. CORRECTION (spec
     /// 6a033773): only the executor's OWN decisions are stated here — the error earcon is the
     /// failure the executor itself logs and acts on, and confirm-required is the executor's own
@@ -185,6 +195,37 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
     /// See `VoiceIntentExecuting.cloudRouteSinkAccess`. This executor always has one, but the
     /// cast stays conditional so the protocol contract holds for every conformer.
     var cloudRouteSinkAccess: CloudRouteSink? { cloudRouteSink as? CloudRouteSink }
+
+    /// Opens the cloud connection for an utterance the user has just finished speaking, before its
+    /// turn exists (production wiring). The wake result is already positive and the endpoint has
+    /// not fired, so the handshake overlaps the tail of the utterance instead of following it.
+    ///
+    /// Only the concrete sink can do this: the protocol has no early-open operation, because a
+    /// sink that never talks to the cloud has nothing to open. A non-concrete sink therefore
+    /// skips it rather than being forced to implement a no-op.
+    /// Opens a connection carrying `tag`, which the caller minted so it could travel with the
+    /// utterance while this call hops to main.
+    @MainActor func beginEarlyCloudConnection(tag: String) {
+        (cloudRouteSink as? CloudRouteSink)?.beginEarlyConnection(tag: tag)
+    }
+
+    /// Pins the held connection to the utterance whose turn will use it, at admission.
+    @MainActor func claimEarlyCloudConnection(tag: String?, utteranceId: String) {
+        (cloudRouteSink as? CloudRouteSink)?.claimEarlyConnection(tag: tag, utteranceId: utteranceId)
+    }
+
+    /// Closes the connection owned by `utteranceId`. Fenced: a drop for any other utterance is
+    /// ignored, so a predecessor's late drop cannot close a successor's socket.
+    /// Closes the connection identified by `tag`, when the owning utterance's identity may not
+    /// exist yet — a turn that died before admission.
+    @MainActor func discardEarlyCloudConnection(tag: String, reason: String) {
+        (cloudRouteSink as? CloudRouteSink)?.discardEarlyConnection(tag: tag, reason: reason)
+    }
+
+    @MainActor func discardEarlyCloudConnection(openedBy utteranceId: String, reason: String) {
+        (cloudRouteSink as? CloudRouteSink)?
+            .discardEarlyConnection(openedBy: utteranceId, reason: reason)
+    }
 
     /// Retires the sink's retained dispatches on the window boundary (production wiring). The
     /// sink transition is lock-guarded and nonisolated, so this stays synchronous — the window
@@ -313,6 +354,7 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
                 preparedObserver: preparedObserver,
                 sourceTranscript: cr.sourceTranscript,
                 sourceLanguage: cr.sourceLanguage,
+                latency: cr.latency,
                 ownership: ownership
             )
             // A duplicate (a joined or settled copy of the owner's dispatch) observes
@@ -378,6 +420,27 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
             gracePeriodSignal.onCommandRecognized()
         }
 
+        // The end of the local path's latency timeline. Deliberately after the grace bookkeeping: a
+        // reader timing this against the routing decision wants the point the action finished, not
+        // the point it was decided.
+        //
+        // FAILED AND EXECUTED ARE SEPARATE EVENTS. The only failure signal this model carries is
+        // the error earcon, and a refused or failed attempt never executed anything — reporting it
+        // as `localActionExecuted` would tell a reader the app performed an action it declined to
+        // perform, which reads as a zero-latency success.
+        //
+        // STATED LIMIT: the error earcon is not how the LOCAL sinks report most failures. They
+        // return `.silent` or `.earcon(.success)` even when the action could not be performed — a
+        // pause with nothing playing still returns `.earcon(.success)`. So `localActionExecuted`
+        // means "the executor returned a non-error response", not "the app performed the action".
+        // The only local path reaching the error earcon today is the unrecognised-intent `default`.
+        // This line therefore separates the two events where the model can distinguish them; it
+        // does not make the executed case a measurement of effect.
+        if !(intent is CloudRouteIntent) {
+            let stage = Self.localActionStage(for: voiceResponse)
+            FileLog.shared.addMessage("[VoicePipeline] \(stage) intent=\(type(of: intent))")
+        }
+
         return (voiceResponse, response.fact)
     }
 
@@ -426,6 +489,14 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
         default:
             return ExecutionVerdict(state: "unknown", reason: "observation_unavailable")
         }
+    }
+
+    /// Names what the local path did, from the only signal the response model carries. Split out
+    /// so the classification can be controlled without capturing log output, and so the limit is
+    /// in one place: "executed" states that the executor returned a non-error response, not that
+    /// the app performed the action.
+    static func localActionStage(for response: VoiceResponse) -> String {
+        response == .earcon(.error) ? "localActionFailed" : "localActionExecuted"
     }
 
     private func executePlayback(_ intent: PlaybackIntent) -> (response: VoiceResponse, fact: SinkActionFact?) {

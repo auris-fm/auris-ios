@@ -11,6 +11,7 @@ private func testConversationManager() -> CloudConversationManager {
 
 import XCTest
 import AVFoundation
+import PocketCastsUtils
 @testable import podcasts
 
 final class CloudRouteSinkTests: SocketCapturingTestCase {
@@ -74,6 +75,403 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let snap = contextState.snapshot()
         XCTAssertEqual(snap.recentReferencePositions.last, 1_130_000)
         XCTAssertEqual(snap.previousReferencePositionMs, 500_000)
+    }
+
+    /// Every cloud request emits exactly ONE client-side latency line, and a turn that produced no
+    /// audio says so rather than reporting zero.
+    ///
+    /// Asserted on the line the sink writes to the app log — the surface a person reads back on a
+    /// device — rather than through an accessor added for the test. A record emitted per frame
+    /// would multiply the turn; one emitted only on success would hide exactly the failing turns
+    /// the latency work is chasing.
+    @MainActor
+    func testEveryCloudRequestEmitsOneLatencyRecord() async throws {
+        // Unique per RUN: the app's log persists across runs, so a fixed id would count the
+        // previous run's lines and measure the harness rather than this turn.
+        let run = UUID().uuidString.prefix(8)
+        let doneId = "u-\(run)-done"
+        let errorId = "u-\(run)-error"
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":10,"output_tokens":4}}
+
+            """
+        let sink = makeSink()
+        _ = await sink.routeToCloud(
+            request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: doneId)
+
+        self.pendingFixture =
+            """
+            event: error
+            data: {"code":"provider_error","message":"upstream failed"}
+
+            """
+        _ = await sink.routeToCloud(
+            request: "again", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: errorId)
+
+        let log = await FileLog.shared.logFileAsString()
+        // The log is shared by every test in the run, so the count is scoped to THIS control's own
+        // request ids: counting globally would measure the suite, not the turn.
+        let mine = log.split(separator: "\n")
+            .filter { $0.contains("cloudTurnLatency") && ($0.contains(doneId) || $0.contains(errorId)) }
+            .map(String.init)
+        XCTAssertEqual(mine.count, 2,
+                       "one latency line per request; a line per frame would multiply the turn, "
+                           + "and a missing one would hide a turn that never played: \(mine)")
+        let done = try XCTUnwrap(mine.first { $0.contains(doneId) }, log)
+        XCTAssertTrue(done.contains("outcome=done"), done)
+        // NOT `contains("end_of_speech_to_first_audible=")`: that substring is satisfied by
+        // `=none`, so it passed for a turn that measured nothing, which is every turn here.
+        // This fixture carries no audio, so the honest expectation is stated as such.
+        XCTAssertTrue(
+            done.contains("first_audible=absent"),
+            "a turn with no audio says so rather than reporting a duration: \(done)")
+        XCTAssertTrue(done.contains("end_of_speech_to_first_audible=none"), done)
+        let failed = try XCTUnwrap(mine.first { $0.contains(errorId) }, log)
+        XCTAssertTrue(failed.contains("outcome=error"), failed)
+        XCTAssertTrue(failed.contains("first_audible=absent"), failed)
+    }
+
+    /// A turn with an AUDIO FIXTURE still reports absence, because the stub never renders.
+    ///
+    /// What this pins is the pass-through once more: the line is produced by the sink reading
+    /// `audioPlayer.firstAudibleHostSeconds` at the terminal, and it must attribute itself to ITS
+    /// request. The sibling test above cannot do the second half - its `=absent` assertion is
+    /// satisfied whether or not the line belongs to the turn under test.
+    ///
+    /// WHAT THIS DELIBERATELY DOES NOT CLAIM: it does not prove the positive case. The stub feeds
+    /// raw byte payloads, so `AVAudioPlayerNode` has no `lastRenderTime`, `noteFirstAudibleIfRendering`
+    /// never takes the mark, and every line here reads `first_audible=absent`. A rendered turn
+    /// cannot be produced through this harness without adding a test-only setter on the player,
+    /// which would pass against logic production never runs. The positive leg is pinned where it
+    /// CAN be reached - `CloudTurnLatencyRecordTests` asserts `2100ms` from the record - and the
+    /// real end-to-end figure needs a signed-in device, which is Merlin's manual check.
+    @MainActor
+    func testAnAudioFixtureTurnReportsItsOwnLineWithoutClaimingAudio() async throws {
+        // Unique per RUN: the app log persists, so a fixed id would read the previous run's line.
+        let utteranceId = "u-\(UUID().uuidString.prefix(12))-audible"
+        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        defer { CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil }
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let sink = makeSinkWithConsumer(
+            RecordingResultConsumer(),
+            audioPayloads: (0..<40).map { Data([UInt8($0)]) }
+        )
+        let context = TurnLatencyContext()
+        context.endOfSpeech = 0
+        _ = await sink.routeToCloud(
+            request: "x", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: nil, utteranceId: utteranceId,
+            latency: LatencyHandle(context))
+
+        let line = try await latencyLine(for: utteranceId)
+        XCTAssertEqual(
+            Self.requestId(of: line), utteranceId,
+            "the line must be THIS turn's, not a stale one from an earlier run: \(line)")
+        XCTAssertTrue(line.contains("outcome=done"), line)
+        // The honest expectation for a stub turn: absence, stated as absence rather than as a
+        // label that happens to match. A duration here would mean the player reported audio it
+        // never played.
+        XCTAssertTrue(
+            line.contains("first_audible=absent"),
+            "a stub turn plays no audio, so it must not claim any: \(line)")
+        XCTAssertTrue(
+            line.contains("end_of_speech_to_first_audible=none"),
+            "no audible instant means the leg is unmeasured, not zero: \(line)")
+    }
+
+    /// A turn with NO early-connection tag still reports its end of speech.
+    ///
+    /// The tag exists only when a pause pre-opened a connection, which most turns never do. While
+    /// the end of speech was recorded behind the tag check, every one of those turns measured
+    /// `end_of_speech_to_* = none` — the measurement silently absent for the majority case.
+    @MainActor
+    func test_aTurnWithoutAnEarlyConnectionStillReportsItsEndOfSpeech() async throws {
+        let utteranceId = "u-\(UUID().uuidString.prefix(8))-notag"
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let sink = makeSink()
+        // The turn's own object, filled the way admission fills it, with no tag in play at all.
+        let latency = TurnLatencyContext()
+        latency.endOfSpeech = 5_000.0
+        latency.endpointDecisionAt = 5_000.2
+        _ = await sink.routeToCloud(
+            request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: utteranceId, latency: LatencyHandle(latency))
+
+        let line = try await latencyLine(for: utteranceId)
+        XCTAssertFalse(line.contains("end_of_speech_to_request=none"),
+                       "a turn with no pre-opened connection still knows when speech ended: \(line)")
+        XCTAssertTrue(line.contains("endpoint_ms=200ms"), line)
+    }
+
+    /// A turn handled on the phone leaves nothing behind, because nothing was ever shared.
+    ///
+    /// This used to be observed through a discard call. With the instants on the turn's own object
+    /// there is no store to clean up: a local turn's context is simply released, so a LATER turn
+    /// reusing the same identity cannot see it. The assertion is the same one that would catch a
+    /// resurrected side table — the newer turn reports its own instant, not the dropped one's.
+    @MainActor
+    func test_aLocallyHandledTurnDoesNotShadowTheNextTurnWithTheSameIdentity() async throws {
+        let utteranceId = "u-\(UUID().uuidString.prefix(8))-local"
+        let sink = makeSink()
+        // The locally handled turn: its context exists, is read by nobody, and is released here.
+        autoreleasepool {
+            let dropped = TurnLatencyContext()
+            dropped.endOfSpeech = 9_000.0
+            dropped.endpointDecisionAt = 9_000.1
+        }
+
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let latency = TurnLatencyContext()
+        latency.endOfSpeech = 9_500.0
+        latency.endpointDecisionAt = 9_500.1
+        _ = await sink.routeToCloud(
+            request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: utteranceId, latency: LatencyHandle(latency))
+
+        let line = try await latencyLine(for: utteranceId)
+        XCTAssertTrue(line.contains("endpoint_ms=100ms"),
+                      "the newer turn's own instant is what is read: \(line)")
+    }
+
+    /// A ROUTED turn that is then handled on the phone leaves no entry behind.
+    ///
+    /// The earlier control only covered a turn that never reached routing. A routed local command —
+    /// the majority — ends at the router instead, where its instants have no consumer at all. With
+    /// the context on the turn, that terminal needs no cleanup call to be correct.
+    @MainActor
+    func test_aRoutedLocalTurnDropsItsEndOfSpeech() async throws {
+        let utteranceId = "u-\(UUID().uuidString.prefix(8))-routedlocal"
+        let sink = makeSink()
+        // Routed, then classified as a local command: its context is released unread.
+        autoreleasepool {
+            let routed = TurnLatencyContext()
+            routed.endOfSpeech = 11_000.0
+            routed.endpointDecisionAt = 11_000.3
+        }
+
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let latency = TurnLatencyContext()
+        latency.endOfSpeech = 12_000.0
+        latency.endpointDecisionAt = 12_000.4
+        _ = await sink.routeToCloud(
+            request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: utteranceId, latency: LatencyHandle(latency))
+
+        let line = try await latencyLine(for: utteranceId)
+        XCTAssertTrue(line.contains("endpoint_ms=400ms"),
+                      "the newer turn's instant must be the one recorded; a survivor would "
+                          + "shadow it with the dropped turn's 300ms: \(line)")
+    }
+
+    /// A CLOUD turn keeps its instants through the router's terminal.
+    ///
+    /// The record is built when the cloud round ends, which can be AFTER the router's terminal
+    /// fires. While those instants lived in a store the router had to be told which turns were
+    /// cloud-bound; with them on the turn's own object, a cloud turn simply still holds them when
+    /// the record is built — no mark, no guard, nothing to get wrong.
+    @MainActor
+    func test_aCloudBoundTurnKeepsItsEndOfSpeechThroughTheRouterTerminal() async throws {
+        let utteranceId = "u-\(UUID().uuidString.prefix(8))-cloudkept"
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let sink = makeSink()
+        _ = sink.beginDispatch(utteranceId: utteranceId, origin: nil)
+        let latency = TurnLatencyContext()
+        latency.endOfSpeech = 13_000.0
+        latency.endpointDecisionAt = 13_000.5
+
+        _ = await sink.routeToCloud(
+            request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: utteranceId, latency: LatencyHandle(latency))
+
+        let line = try await latencyLine(for: utteranceId)
+        XCTAssertTrue(line.contains("endpoint_ms=500ms"),
+                      "a cloud-bound turn must reach its record with its instants intact; losing "
+                          + "them reports no end of speech for the turn: \(line)")
+    }
+
+    /// A REFUSED cloud dispatch builds no record at all, and the instants it carried are not
+    /// reachable from any later turn.
+    ///
+    /// This is the case that kept leaking while the instants lived in a sink-owned store: the
+    /// dispatch was marked cloud-bound before the refusal, the record was never built, and every
+    /// cleanup path declined because of the mark. With the instants on the turn's own object there
+    /// is nothing to clear — a refused dispatch simply never reads them, and the object is released
+    /// with the turn.
+    ///
+    /// A refusal requires a NON-LIVE origin with no admitted work holding it, so the test asserts
+    /// the refusal actually happened rather than assuming it: an earlier version of this test
+    /// dispatched successfully and proved nothing.
+    @MainActor
+    func test_aRefusedCloudDispatchLeavesItsInstantsBehind() async throws {
+        let utteranceId = "u-\(UUID().uuidString.prefix(8))-refused"
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let sink = makeSink()
+        let staleOrigin = cloudTestOrigin + 41
+        let refused = TurnLatencyContext()
+        refused.endOfSpeech = 20_000.0
+        refused.endpointDecisionAt = 20_000.7
+
+        let outcome = await sink.routeToCloud(
+            request: "refused", tier: .free, context: sampleContext(), origin: staleOrigin,
+            selection: nil, utteranceId: utteranceId, latency: LatencyHandle(refused))
+        XCTAssertEqual(outcome.outcome, .refused,
+                       "the case must actually refuse the dispatch, or it proves nothing")
+
+        // No record for the refused turn, either now or later.
+        let afterRefusal = await FileLog.shared.logFileAsString()
+            .split(separator: "\n")
+            .filter { $0.contains("cloudTurnLatency") && $0.contains(utteranceId) }
+        XCTAssertTrue(afterRefusal.isEmpty,
+                      "a refused dispatch produces no latency record: \(afterRefusal)")
+
+        // A later admitted turn on the same identity reports its OWN instant. Under the old
+        // design this is where the refused turn's value resurfaced.
+        let accepted = TurnLatencyContext()
+        accepted.endOfSpeech = 30_000.0
+        accepted.endpointDecisionAt = 30_000.9
+        _ = await sink.routeToCloud(
+            request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: utteranceId, latency: LatencyHandle(accepted))
+
+        let line = try await latencyLine(for: utteranceId)
+        XCTAssertTrue(line.contains("endpoint_ms=900ms"),
+                      "the refused turn's instants must not survive into the next turn: \(line)")
+    }
+
+    /// A turn WITH a timing context and one WITHOUT are the SAME dispatch, as far as identity goes.
+    ///
+    /// The wrapper only does its job if the field is NON-optional. With an optional field, Swift
+    /// compares the optionals by case before `==` is ever consulted, so `.some(handle)` and `.none`
+    /// compare unequal and identical dispatches stop being equal — the leak the wrapper was meant
+    /// to close. Reviewer caught that on `ccc7a212b`.
+    func test_aTurnWithATimingContextEqualsTheSameTurnWithout() {
+        let withContext = CloudRouteIntent(
+            request: "hi", tier: .free, latency: LatencyHandle(TurnLatencyContext()))
+        let withoutContext = CloudRouteIntent(request: "hi", tier: .free, latency: LatencyHandle())
+        XCTAssertEqual(
+            withContext, withoutContext,
+            "the timing context takes no part in identity, so carrying one must not make two "
+                + "otherwise identical dispatches unequal")
+        XCTAssertEqual(withoutContext, withContext, "equality is symmetric here too")
+
+        // Two DIFFERENT contexts are equally irrelevant.
+        let otherContext = CloudRouteIntent(
+            request: "hi", tier: .free, latency: LatencyHandle(TurnLatencyContext()))
+        XCTAssertEqual(withContext, otherContext)
+
+        // And a real difference is still a difference, so the exemption did not swallow equality.
+        let differentRequest = CloudRouteIntent(
+            request: "bye", tier: .free, latency: LatencyHandle(TurnLatencyContext()))
+        XCTAssertNotEqual(withContext, differentRequest)
+    }
+
+    /// The same exemption on the routing envelope, which the executor compares.
+    func test_anInputWithATimingContextEqualsTheSameInputWithout() {
+        let withContext = IntentRoutingInput.english(
+            transcript: "hi", utteranceId: "u-eq",
+            latency: LatencyHandle(TurnLatencyContext()))
+        let withoutContext = IntentRoutingInput.english(transcript: "hi", utteranceId: "u-eq")
+        XCTAssertEqual(withContext, withoutContext)
+        XCTAssertNotEqual(
+            withContext,
+            IntentRoutingInput.english(transcript: "different", utteranceId: "u-eq"))
+    }
+
+    /// The `request_id=` field of a log line, or nil when the line is not a latency record.
+    ///
+    /// Parsed rather than substring-matched: `contains("u-ABC")` also matches `u-ABCD`, so a
+    /// prefix would let one request stand in for another.
+    private static func requestId(of line: String) -> String? {
+        guard line.contains("cloudTurnLatency"),
+              let range = line.range(of: "request_id=") else { return nil }
+        return line[range.upperBound...].split(separator: " ").first.map(String.init)
+    }
+
+    /// The `cloudTurnLatency` line for one request id, waited for because the record is emitted by
+    /// a closure that may run after `routeToCloud` returns.
+    ///
+    /// `requestId` must be unique per RUN. The app log persists across runs, so a fixed id finds
+    /// the PREVIOUS run's line and the test passes without ever seeing its own turn - which is
+    /// exactly how a positive-case control once "passed" against a log where every line read
+    /// `first_audible=absent`.
+    @MainActor
+    private func latencyLine(for utteranceId: String) async throws -> String {
+        XCTAssertTrue(utteranceId.hasPrefix("u-"), "callers must pass a per-run unique id")
+        XCTAssertTrue(
+            utteranceId.count > 12,
+            "a fixed or short id can collide with another run's line in the persistent log")
+        for _ in 0..<40 {
+            let log = await FileLog.shared.logFileAsString()
+            // Matched as a WHOLE field, so `u-ABC` cannot be satisfied by `u-ABCD`.
+            if let line = log.split(separator: "\n")
+                .first(where: { Self.requestId(of: String($0)) == utteranceId }) {
+                return String(line)
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let log = await FileLog.shared.logFileAsString()
+        throw XCTSkip("no cloudTurnLatency line for \(utteranceId)")
+    }
+
+    /// A dispatched spoken turn reports a real end of speech, not `none`: the instant travels from
+    /// admission ON the turn itself, so the record built at the terminal must read it from there.
+    /// Losing it reports `none` — the measurement absent for exactly the turns it exists for.
+    @MainActor
+    func testADispatchedUtteranceReportsItsEndOfSpeech() async throws {
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let eosId = "u-\(UUID().uuidString.prefix(8))-eos"
+        let sink = makeSink()
+        let latency = TurnLatencyContext()
+        latency.endOfSpeech = 1_000.0
+        latency.endpointDecisionAt = 1_000.5
+        _ = await sink.routeToCloud(
+            request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: eosId, latency: LatencyHandle(latency))
+
+        let line = try await latencyLine(for: eosId)
+        XCTAssertTrue(line.contains("endpoint_ms=500ms"),
+                      "the hangover between the acoustic end and the endpoint decision is its own stage: \(line)")
+        XCTAssertFalse(line.contains("end_of_speech_to_request=none"),
+                       "a spoken turn knows when speech ended; `none` here means the instant was lost: \(line)")
     }
 
     func testDoneResumesTurnOwnedAutoPause() async {
@@ -4565,8 +4963,7 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
         // OWNER turn: renders the daily-limit line.
         let owner = await executor.execute(CloudRouteIntent(
             request: "play something", tier: .free,
-            utteranceId: utterance, origin: .modelCall, generation: generation
-        ))
+            utteranceId: utterance, origin: .modelCall, generation: generation, latency: LatencyHandle()))
         renderer.render(owner)
         XCTAssertEqual(
             owner,
@@ -4575,14 +4972,14 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
         // DUPLICATE of the SAME utterance: the sink settles it and the executor renders nothing.
         let duplicate = await executor.execute(CloudRouteIntent(
             request: "play something", tier: .free,
-            utteranceId: utterance, origin: .modelCall, generation: generation
-        ))
+            utteranceId: utterance, origin: .modelCall, generation: generation, latency: LatencyHandle()))
         renderer.render(duplicate)
         // TERMINAL CLOSE on a FRESH utterance (stream ends without a terminal frame).
         self.pendingFixture = ""
         let closeResponse = await executor.execute(CloudRouteIntent(
             request: "play something", tier: .free,
-            utteranceId: "limit-close-\(UUID().uuidString)", origin: .modelCall, generation: generation
+            utteranceId: "limit-close-\(UUID().uuidString)", origin: .modelCall, generation: generation,
+            latency: LatencyHandle()
         ))
         renderer.render(closeResponse)
 

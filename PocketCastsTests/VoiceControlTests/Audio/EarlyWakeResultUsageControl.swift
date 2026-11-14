@@ -1,0 +1,457 @@
+import XCTest
+
+@testable import podcasts
+
+/// The engine must actually use the early wake result, not merely compute it.
+///
+/// The defect this guards against is the one that makes a policy look implemented: a prefix scored
+/// while the user speaks, and then the finished segment scored again anyway. Both produce the same
+/// decision, so nothing observable goes wrong — the latency saving simply never happens, and no
+/// outcome test would notice.
+final class EarlyWakeResultUsageControl: XCTestCase {
+
+    /// The identity the detector reports when the engine asks without re-scoring (the early path).
+    private static let wakeIdentity = VoiceSharingContributionEncoder.ModelRef(id: "wake-fixture", version: "1")
+
+    /// Counts calls and answers distinguishably, so the control can tell WHICH audio was scored.
+    private final class CountingDetector: WakeWordDetectorProtocol {
+        var activeModelIdentity: VoiceSharingContributionEncoder.ModelRef? { EarlyWakeResultUsageControl.wakeIdentity }
+        private(set) var calls: [Int] = []
+        private(set) var sampleCounts: [Int] = []
+
+        func detect(samples: [Float], sampleRate: Int) -> WakeWordResult {
+            calls.append(samples.count)
+            sampleCounts.append(samples.count)
+            // The prefix is shorter than the finished utterance, so the call order alone shows
+            // whether the second (finished-segment) call happened.
+            return .detected(confidence: 0.9, completionSample: samples.count - 1)
+        }
+
+        func release() {}
+    }
+
+    private final class SwitchableClassifier: SpeechFrameClassifier {
+        var speaking = true
+        func isSpeech(_ samples: [Float]) -> Bool { speaking }
+        func reset() {}
+    }
+
+    private func makeEngine(detector: CountingDetector,
+                            classifier: SwitchableClassifier,
+                            segmenter segmenterIn: NativeVadSegmenter? = nil) -> VoiceAsrEngine {
+        VoiceAsrEngine(
+            capture: NativeAudioCapture(),
+            segmenter: segmenterIn ?? NativeVadSegmenter(threshold: 0.0, silenceTimeoutMs: 500, classifier: classifier),
+            backend: FakeAsrBackend(),
+            signalFilter: SignalFilter(),
+            wakeWordDetector: detector,
+            gracePeriodSignal: GracePeriodSignal()
+        )
+    }
+
+    private func drainQueue() {
+        let drained = expectation(description: "queue drained")
+        DispatchQueue.main.async { drained.fulfill() }
+        wait(for: [drained], timeout: 3)
+    }
+
+    /// One detector call per utterance when the prefix was scored early. A second call would mean
+    /// the finished segment was rescored, which is the latency regression in silence.
+    func testEngineDoesNotRescoreTheFinishedSegmentWhenThePrefixWasScored() {
+        let detector = CountingDetector()
+        let classifier = SwitchableClassifier()
+        let segmenter = NativeVadSegmenter(threshold: 0.0, silenceTimeoutMs: 500, classifier: classifier)
+        let engine = makeEngine(detector: detector, classifier: classifier, segmenter: segmenter)
+        engine.installCaptureCallbacksForTesting()
+
+        // Drive the segmenter directly through its own capture path: enough speech to cross the
+        // eligible span, so the early prefix fires.
+        let frame = 320
+        let frames = (NativeVadSegmenter.wakeEligibleSpanSamples / frame) + 10
+        for _ in 0..<frames {
+            segmenter.process([Float](repeating: 0.1, count: frame), capturedAt: nil)
+        }
+        XCTAssertEqual(detector.sampleCounts.count, 1, "the prefix must be scored while speaking")
+        XCTAssertEqual(detector.sampleCounts.first, NativeVadSegmenter.wakeEligibleSpanSamples)
+
+        // Close the utterance; a rescore would add a second, longer call.
+        classifier.speaking = false
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline {
+            segmenter.process([Float](repeating: 0, count: frame), capturedAt: nil)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        drainQueue()
+
+        XCTAssertEqual(detector.sampleCounts.count, 1,
+                       "the finished segment must not be rescored when the prefix was already scored; "
+                           + "calls seen: \(detector.sampleCounts)")
+    }
+
+    /// An early result that is computed but never delivered must not reach the next utterance.
+    ///
+    /// This is the leak @reviewer named: a long positive utterance scores its prefix early, is then
+    /// abandoned (duration ceiling), and never reaches `processUtterance`. If the score survived,
+    /// the next short utterance would be addressed using the previous command's audio — a wrong
+    /// command rather than a missing one.
+    func test_abandonedPrefixDoesNotAddressTheNextUtterance() {
+        let classifier = SwitchableClassifier()
+        let segmenter = NativeVadSegmenter(
+            threshold: 0.0,
+            // A short ceiling so a single long utterance trips abandonment without speaking for
+            // four real minutes.
+            stuckActiveMs: 2_000,
+            classifier: classifier
+        )
+        var delivered: [WakeWordResult?] = []
+        segmenter.onUtterance = { _, _, result, _, _ in delivered.append(result) }
+
+        // Speak past the ceiling without ever going silent: the utterance is abandoned.
+        let frame = 320
+        for _ in 0..<(40_000 / frame) {
+            segmenter.process([Float](repeating: 0.1, count: frame), capturedAt: nil)
+        }
+        XCTAssertTrue(segmenter.isStuckActive, "the ceiling must have been reached")
+        XCTAssertTrue(delivered.isEmpty, "an abandoned utterance is never dispatched")
+
+        // The score that utterance WOULD have produced. Placed here, after abandonment and before
+        // any recovery: recovering from the fault calls `reset()`, which clears this slot on its
+        // own, so a sequence that recovered first would pass whether or not abandonment clears it.
+        // This is exactly the sequence @reviewer described — a prefix scored, then discarded
+        // without ever reaching `processUtterance`.
+        segmenter.earlyWakeResultForCurrentUtterance = .detected(confidence: 0.99, completionSample: 0)
+
+        // A new session begins before anything is dispatched: this is the restart path that
+        // carries the abandoned slot into the next utterance if nothing clears it.
+        segmenter.resetForNewSession()
+        XCTAssertNil(
+            segmenter.earlyWakeResultForCurrentUtterance,
+            "a session boundary must not carry a score from an abandoned utterance; otherwise the "
+                + "next short utterance is addressed using audio that was thrown away"
+        )
+    }
+
+    /// The result must travel with its own utterance, exercised through the real callback
+    /// handoff.
+    ///
+    /// @reviewer was right that the earlier version of this test called `processUtterance` with
+    /// explicit results and never touched the callback, so it could not have caught a slot being
+    /// overwritten — the defect it is named for. This drives the segmenter: two utterances are
+    /// emitted with DIFFERENT early scores, and the values the callback delivered must match them.
+    func test_twoUtterancesDeliverTheirOwnEarlyResults() {
+        let classifier = SwitchableClassifier()
+        let segmenter = NativeVadSegmenter(threshold: 0.0, silenceTimeoutMs: 500, classifier: classifier)
+        var delivered: [WakeWordResult?] = []
+        segmenter.onUtterance = { _, _, result, _, _ in delivered.append(result) }
+
+        let frame = 320
+        func speak(briefly: Bool, result: WakeWordResult?) {
+            classifier.speaking = true
+            let frames = briefly ? (6_000 / frame) : (10_000 / frame)
+            for _ in 0..<frames {
+                segmenter.process([Float](repeating: 0.1, count: frame), capturedAt: nil)
+            }
+            // The score for THIS utterance, exactly as the engine's prefix callback sets it. When
+            // nil the assignment is SKIPPED rather than writing nil: writing nil would erase a
+            // stale value and hide the very defect this control exists to catch.
+            if let result {
+                segmenter.earlyWakeResultForCurrentUtterance = result
+            }
+
+            classifier.speaking = false
+            let deadline = Date().addingTimeInterval(1.2)
+            while Date() < deadline {
+                segmenter.process([Float](repeating: 0, count: frame), capturedAt: nil)
+                Thread.sleep(forTimeInterval: 0.02)
+            }
+        }
+
+        speak(briefly: false, result: .detected(confidence: 0.93, completionSample: 0))
+        // The second utterance's OWN value is deliberately left unset before it closes. Under the
+        // old shared-slot defect the first utterance's score was still sitting there and would be
+        // delivered as the second's; carrying the result with the utterance delivers nil instead.
+        // This is what makes the control able to tell the two designs apart.
+        speak(briefly: true, result: nil)
+
+        XCTAssertEqual(delivered.count, 2, "both utterances must be delivered")
+        guard delivered.count == 2 else { return }
+        switch delivered[0] {
+        case .detected(let confidence, _):
+            XCTAssertEqual(confidence, 0.93, accuracy: 0.0001,
+                           "the first utterance must carry its own positive score")
+        default:
+            XCTFail("the first utterance must carry the positive score, got \(String(describing: delivered[0]))")
+        }
+        XCTAssertNil(delivered[1] ?? nil,
+                     "the second utterance scored nothing, so it must carry nothing — a shared slot "
+                         + "would hand it the first utterance's positive score")
+    }
+
+    /// A wake-negative follow-up spoken during grace is a real turn and must open early.
+    ///
+    /// Requiring a positive wake score would open for first commands and never for follow-ups,
+    /// which is the half a user in a conversation is most likely to be waiting on.
+    func test_graceFollowUpOpensDespiteNegativeWake() {
+        let classifier = SwitchableClassifier()
+        let segmenter = NativeVadSegmenter(threshold: 0.0, silenceTimeoutMs: 500, classifier: classifier)
+        let grace = GracePeriodSignal()
+        let engine = VoiceAsrEngine(
+            capture: NativeAudioCapture(),
+            segmenter: segmenter,
+            backend: FakeAsrBackend(),
+            signalFilter: SignalFilter(),
+            wakeWordDetector: CountingDetector(),
+            gracePeriodSignal: grace
+        )
+        var opens = 0
+        engine.onAddressedTrailingSilenceBegan = { opens += 1; return nil }
+        engine.installCaptureCallbacksForTesting()
+
+        // Grace is active: the session was opened by a previous command.
+        grace.onWakeWordDetected()
+
+        let frame = 320
+        classifier.speaking = true
+        for _ in 0..<(10_000 / frame) {
+            segmenter.process([Float](repeating: 0.1, count: frame), capturedAt: nil)
+        }
+        segmenter.earlyWakeResultForCurrentUtterance = .notDetected(confidence: 0.01)
+
+        classifier.speaking = false
+        segmenter.process([Float](repeating: 0, count: frame), capturedAt: nil)
+        XCTAssertEqual(opens, 1,
+                       "a follow-up during grace is routable, so it must open the connection")
+    }
+
+    /// A short utterance must open too — and through the real path, not a test seam.
+    ///
+    /// A short utterance never reaches the eligible span, so its silence onset has no early result
+    /// and nothing opens there. Its positive verdict only appears when the gate decides, still
+    /// before the backend wait. This drives a genuinely short segment through the endpoint and the
+    /// engine's own capture wiring, and asserts the open without calling any decision entry point
+    /// directly — an earlier version of this control did, creating an ordering production cannot
+    /// produce.
+    func test_shortUtteranceOpensThroughTheEndpointAndGate() {
+        let classifier = SwitchableClassifier()
+        let segmenter = NativeVadSegmenter(threshold: 0.0, silenceTimeoutMs: 500, classifier: classifier)
+        let detector = CountingDetector()
+        let engine = VoiceAsrEngine(
+            capture: NativeAudioCapture(),
+            segmenter: segmenter,
+            backend: FakeAsrBackend(),
+            signalFilter: SignalFilter(),
+            wakeWordDetector: detector,
+            gracePeriodSignal: GracePeriodSignal()
+        )
+        var opens = 0
+        // Returns a REAL tag: production mints one, and a nil here would let the engine look
+        // correct while dropping the tag this control is meant to check.
+        engine.onAddressedTrailingSilenceBegan = {
+            opens += 1
+            return CloudRouteSink.mintEarlyConnectionTag()
+        }
+        engine.installCaptureCallbacksForTesting()
+
+        // The tag the engine hands to the turn's exits. This is the value that pins the socket to
+        // the utterance; if it is nil, the connection opened here is never owned or reused.
+        var admittedTag: String?
+        var releasedTag: String?
+        engine.onTurnAdmitted = { _, _, tag, _, _ in admittedTag = tag }
+        engine.onTurnReleased = { _, tag in releasedTag = tag }
+
+        let frame = 320
+        // SHORT speech: under the eligible span, so no early prefix is ever emitted.
+        classifier.speaking = true
+        for _ in 0..<(6_000 / frame) {
+            segmenter.process([Float](repeating: 0.1, count: frame), capturedAt: nil)
+        }
+        XCTAssertNil(segmenter.earlyWakeResultForCurrentUtterance,
+                     "a short utterance must have no early result, or this tests the wrong path")
+
+        // Close the utterance through the real endpoint, then let the engine's async task run.
+        classifier.speaking = false
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline {
+            segmenter.process([Float](repeating: 0, count: frame), capturedAt: nil)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        drainQueue()
+
+        XCTAssertEqual(opens, 1,
+                       "the short utterance's positive gate verdict must open the connection; "
+                           + "a short command is the most common case and got no benefit before")
+        XCTAssertNotNil(admittedTag ?? releasedTag,
+                        "the tag returned by this open must reach the turn's exits; dropping it "
+                            + "leaves the socket opened here unowned and never reused")
+    }
+
+    /// A result from a turn that never consumed it must not address the next turn. The failure
+    /// would be a command answered using the previous command's audio.
+    func testEarlyResultIsConsumedOncePerUtterance() {
+        let detector = CountingDetector()
+        let classifier = SwitchableClassifier()
+        let segmenter = NativeVadSegmenter(threshold: 0.0, silenceTimeoutMs: 500, classifier: classifier)
+        let engine = makeEngine(detector: detector, classifier: classifier, segmenter: segmenter)
+        engine.installCaptureCallbacksForTesting()
+
+        let frame = 320
+        let frames = (NativeVadSegmenter.wakeEligibleSpanSamples / frame) + 10
+        func speak() {
+            classifier.speaking = true
+            for _ in 0..<frames {
+                segmenter.process([Float](repeating: 0.1, count: frame), capturedAt: nil)
+            }
+        }
+        func close() {
+            classifier.speaking = false
+            let deadline = Date().addingTimeInterval(1.2)
+            while Date() < deadline {
+                segmenter.process([Float](repeating: 0, count: frame), capturedAt: nil)
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+            }
+            drainQueue()
+        }
+
+        speak()
+        close()
+        let afterFirst = detector.sampleCounts.count
+        speak()
+        close()
+
+        // Each utterance contributes exactly one call: its own prefix. A leaked result would make
+        // the second utterance skip its own scoring or reuse the first's count.
+        XCTAssertEqual(detector.sampleCounts.count, afterFirst * 2,
+                       "each utterance must score its own prefix exactly once; calls: \(detector.sampleCounts)")
+        XCTAssertEqual(detector.sampleCounts.filter { $0 == NativeVadSegmenter.wakeEligibleSpanSamples }.count,
+                       detector.sampleCounts.count,
+                       "every call must be a prefix, never a finished segment")
+    }
+
+    /// A short grace follow-up must open ONCE, and admission must submit the tag of that one
+    /// connection.
+    ///
+    /// It is routable at trailing silence, so it opens there and carries tag A. If the verdict
+    /// opens again it mints tag B and the sink replaces A — but the exits still submit A, because
+    /// that is what travelled with the utterance. The connection this turn paid for is then the
+    /// one left unused, which is invisible to a count of opens.
+    ///
+    /// Driven through silence → endpoint → admission on the real segmenter and engine.
+    func test_shortGraceFollowUpOpensOnceAndAdmitsTheSameTag() {
+        let classifier = SwitchableClassifier()
+        let segmenter = NativeVadSegmenter(threshold: 0.0, silenceTimeoutMs: 500, classifier: classifier)
+        let grace = GracePeriodSignal()
+        let engine = VoiceAsrEngine(
+            capture: NativeAudioCapture(),
+            segmenter: segmenter,
+            backend: FakeAsrBackend(),
+            signalFilter: SignalFilter(),
+            wakeWordDetector: CountingDetector(),
+            gracePeriodSignal: grace
+        )
+        var openedTags: [String] = []
+        engine.onAddressedTrailingSilenceBegan = {
+            let tag = CloudRouteSink.mintEarlyConnectionTag()
+            openedTags.append(tag)
+            return tag
+        }
+        var admittedTag: String?
+        engine.onTurnAdmitted = { _, _, tag, _, _ in admittedTag = tag }
+        engine.installCaptureCallbacksForTesting()
+
+        // Grace: a previous command opened the session.
+        grace.onWakeWordDetected()
+
+        // SHORT speech, so no early prefix is ever scored — the verdict is where a naive
+        // implementation opens a second time.
+        let frame = 320
+        classifier.speaking = true
+        for _ in 0..<(6_000 / frame) {
+            segmenter.process([Float](repeating: 0.1, count: frame), capturedAt: nil)
+        }
+        // NO early result: this is a genuinely short utterance, so nothing opens at silence onset
+        // and the verdict is the only remaining opportunity — the case under test. Setting a
+        // result here would make `earlyResult == nil` false and skip that branch entirely, so the
+        // control would pass whatever the code did.
+        XCTAssertNil(segmenter.earlyWakeResultForCurrentUtterance,
+                     "a short utterance must have no early result, or this tests the wrong path")
+
+        // Silence starts: routable during grace, so it opens here.
+        classifier.speaking = false
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline, admittedTag == nil {
+            segmenter.process([Float](repeating: 0, count: frame), capturedAt: nil)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        drainQueue()
+
+        XCTAssertEqual(openedTags.count, 1,
+                       "one utterance opens one connection; a second open here replaces the first "
+                           + "and leaves the turn submitting the tag of a socket it no longer owns")
+        XCTAssertEqual(admittedTag, openedTags.first,
+                       "admission must submit the tag of the connection actually held")
+    }
+
+    /// An early-scored capture must still carry the wakeword model reference.
+    ///
+    /// The early path scores the eligible prefix while the user speaks and never re-runs the
+    /// detector on the finished segment. The fallback path reports `engineUsedModel(slot:
+    /// "wakeword", …)` from its detect call; if the early branch reports nothing, every capture
+    /// long enough to reach the eligible span — the NORMAL case — uploads with no wake-model
+    /// provenance.
+    func test_earlyScoredCapture_carriesTheWakewordModelReference() {
+        var events: [VoiceSharingCollector.SegmentEvent] = []
+        let collector = VoiceSharingCollector(
+            isCollectionPermitted: { true },
+            membership: {
+                var state = VoiceSharingEnrollmentStore.State()
+                state.localOptIn = true
+                state.hasAuthoritativeProjection = true
+                state.membership = VoiceSharingMembership(
+                    plan: .pro, voiceSharingEnrolled: true,
+                    enrollmentEpoch: "epoch-wake", acceptedDisclosureVersion: "2026-09",
+                    withdrawalState: .active
+                )
+                return state
+            },
+            epochProvider: { "epoch-wake" },
+            sessionIdentity: { "gen-wake" },
+            sink: { events.append($0) }
+        )
+        collector.deliversSynchronouslyForTesting = true
+        let detector = CountingDetector()
+        let classifier = SwitchableClassifier()
+        let segmenter = NativeVadSegmenter(threshold: 0.0, silenceTimeoutMs: 500, classifier: classifier)
+        let engine = makeEngine(detector: detector, classifier: classifier, segmenter: segmenter)
+        engine.contributionCollector = collector
+        engine.installCaptureCallbacksForTesting()
+
+        let frame = 320
+        let frames = (NativeVadSegmenter.wakeEligibleSpanSamples / frame) + 10
+        for _ in 0..<frames {
+            segmenter.process([Float](repeating: 0.1, count: frame), capturedAt: nil)
+        }
+        // Name the capture while it is open; after the utterance closes it lives in the ring.
+        guard let captureID = collector.currentCaptureContextForTesting?.id else {
+            return XCTFail("premise: a capture was opened while speaking")
+        }
+        classifier.speaking = false
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline {
+            segmenter.process([Float](repeating: 0, count: frame), capturedAt: nil)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        drainQueue()
+
+        XCTAssertEqual(detector.sampleCounts.count, 1, "premise: the prefix was scored early")
+
+        // The capture was emitted by the time the turn ends, so the provenance rides on the
+        // emitted record's model block, not on the collector's internal state.
+        // The terminal record is the one that carries provenance; the .started record does not.
+        let emitted = events.first { $0.captureID == captureID && $0.kind != .started }
+        guard let emitted else {
+            return XCTFail("premise: the capture was emitted; got \(events.map(\.kind))")
+        }
+        XCTAssertEqual(emitted.reportedModels?.wakeword, EarlyWakeResultUsageControl.wakeIdentity,
+                       "an early-scored capture must carry the wakeword model reference")
+    }
+}

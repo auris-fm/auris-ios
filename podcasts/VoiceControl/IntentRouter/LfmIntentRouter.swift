@@ -570,7 +570,7 @@ final class LfmIntentRouter: IntentClassifying {
         // Emit before any reset side-effects; exactly one diagnostic per exit.
         onMetrics?(diagnostic)
         FileLog.shared.addMessage(
-            "[LfmRouter] stage=\(failedStage ?? "ok") outcome=\(finalOutcome) reason=\(reason ?? "-") label=\(classifierLabel ?? "-") format=\(format ?? "-") lang=\(base.sourceLanguage ?? "-") kind=\(base.translationKind) release=\(release ?? "-") quant=\(cachedQuant ?? "-") \(Int(totalMs))ms"
+            "[LfmRouter] routingDone stage=\(failedStage ?? "ok") outcome=\(finalOutcome) reason=\(reason ?? "-") label=\(classifierLabel ?? "-") format=\(format ?? "-") lang=\(base.sourceLanguage ?? "-") kind=\(base.translationKind) release=\(release ?? "-") quant=\(cachedQuant ?? "-") \(Int(totalMs))ms"
         )
     }
 

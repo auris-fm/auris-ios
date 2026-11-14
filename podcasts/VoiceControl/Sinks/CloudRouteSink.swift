@@ -112,6 +112,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// The cloud player this sink drives, so a test can reach the real producer through
     /// the chain the app builds rather than constructing its own.
     var audioPlayerForTesting: CloudAudioPlayer? { audioPlayer }
+
     /// The PRODUCTION client factory, extracted so the assembly reuses it VERBATIM and the test seam
     /// substitutes it. Production is unchanged: the default is this same factory.
     nonisolated static func productionClientFactory() -> () -> CloudRouteClient {
@@ -123,7 +124,174 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         }
     }
 
+    /// Begins the cloud connection for the utterance the user is finishing.
+    ///
+    /// Called when trailing silence begins on addressed speech — the wake result is already
+    /// positive, the endpoint has not fired — so the handshake overlaps the tail of the utterance
+    /// rather than following it. The turn that follows reuses this connection if it is still
+    /// fresh, and replaces it silently if not.
+    ///
+    /// Idempotent: a second call while a connection is held does nothing, because only one can be
+    /// handed to a turn and opening another would orphan the first.
+    /// Opens a connection and returns the tag identifying it, or nil when none opened.
+    ///
+    /// The tag is minted HERE rather than supplied by the caller: the connection opens while the
+    /// utterance is still being spoken, so the utterance's own identity does not exist yet (it is
+    /// minted at admission, and deliberately so — retries of the same capture must carry it). The
+    /// tag therefore identifies the CONNECTION, and the utterance it belongs to is pinned to it at
+    /// admission with `claimEarlyConnection(tag:utteranceId:)`.
+    ///
+    /// Replacing a held connection rather than skipping is what keeps the tag honest: a held
+    /// connection belongs to ONE utterance, so a new utterance must never inherit it.
+    nonisolated static func mintEarlyConnectionTag() -> String { UUID().uuidString }
+
+    /// Opens a connection carrying `tag`, without an owner.
+    ///
+    /// The owning utterance is pinned separately at admission. A connection that no turn admits
+    /// therefore has no owner: it is not taken by anyone, and is replaced by the next open rather
+    /// than being closed on a guess.
+    @discardableResult
+    func beginEarlyConnection(tag: String) -> String? {
+        if let held = earlyRouteClient {
+            // REPLACEMENT BELONGS TO A NEW UTTERANCE. Speech that resumes and pauses again is the
+            // same utterance still being spoken — its second pause is not a new turn — so a
+            // connection held for it stays. Discarding it would throw away a handshake already in
+            // flight and pay for it twice.
+            //
+            // Identity is the CONNECTION's tag, not the owner. Two utterances that both open
+            // before either is admitted have no owner yet, so treating equal (nil) owners as "the
+            // same utterance" would keep the first socket while handing back the second tag —
+            // a tag that does not identify the connection it was returned with.
+            if tag == earlyRouteTag {
+                FileLog.shared.addMessage(
+                    "[CloudRoute] early connection kept — same connection \(tag.prefix(8)) opened again"
+                )
+                return earlyRouteTag
+            }
+            FileLog.shared.addMessage(
+                "[CloudRoute] early connection replaced — one was held by \(earlyRouteUtteranceId ?? "no utterance yet")"
+            )
+            earlyRouteClient = nil
+            earlyRouteTag = nil
+            earlyRouteUtteranceId = nil
+            pendingEarlyConnectionClaim = nil
+            held.discardEarlyConnection(reason: "replaced by a later utterance")
+        }
+        guard isConfigured() else {
+            FileLog.shared.addMessage("[VoicePipeline] early connection skipped — cloud not configured")
+            return nil
+        }
+        let client = clientFactory()
+        guard client.openEarlyConnection() else { return nil }
+        earlyRouteClient = client
+        earlyRouteTag = tag
+        // Honour a claim that was already waiting for this connection.
+        if let pending = pendingEarlyConnectionClaim, pending.tag == tag {
+            earlyRouteUtteranceId = pending.utteranceId
+            pendingEarlyConnectionClaim = nil
+        } else {
+            earlyRouteUtteranceId = nil
+        }
+        return tag
+    }
+
+    /// Pins the held connection to the utterance whose turn will use it.
+    ///
+    /// Called once, at admission, where the utterance's own identity is minted. After this the
+    /// connection belongs to exactly that utterance: only a drop carrying the same tag may close
+    /// it, and only that utterance's turn may take it.
+    func claimEarlyConnection(tag: String?, utteranceId: String) {
+        guard let tag else { return }
+        // The claim can be enqueued before the open it belongs to: both are submitted to main from
+        // the audio thread and independently. Recording the intent lets the open honour it, so the
+        // connection is not left unowned just because of which hop ran first.
+        if earlyRouteClient == nil {
+            pendingEarlyConnectionClaim = (tag: tag, utteranceId: utteranceId)
+            return
+        }
+        guard tag == earlyRouteTag else { return }
+        guard earlyRouteUtteranceId == nil else { return }
+        earlyRouteUtteranceId = utteranceId
+        pendingEarlyConnectionClaim = nil
+    }
+
+    /// A claim that arrived before its connection opened, applied when it does.
+    private var pendingEarlyConnectionClaim: (tag: String, utteranceId: String)?
+
+    /// Abandons a connection that its own utterance did not end up using.
+    ///
+    /// Fenced by identity: only the utterance tagged on the connection may close it. Without the
+    /// fence a predecessor whose drop arrives late would close the successor's socket, leaving that
+    /// turn waiting on a handshake that was cancelled underneath it.
+    ///
+    /// An unused connection is not a leak worth chasing through every way a turn can end: opening
+    /// the next one replaces it, and the server closes it on its own idle timeout. Cleanup exists
+    /// for the caller that knows the turn is over, not as a tax on every exit.
+    func discardEarlyConnection(openedBy utteranceId: String, reason: String) {
+        if pendingEarlyConnectionClaim?.utteranceId == utteranceId {
+            pendingEarlyConnectionClaim = nil
+        }
+        guard let client = earlyRouteClient else { return }
+        guard earlyRouteUtteranceId == utteranceId else {
+            FileLog.shared.addMessage(
+                "[CloudRoute] early connection kept — drop for \(utteranceId) does not own it "
+                    + "(\(earlyRouteUtteranceId ?? "none"))"
+            )
+            return
+        }
+        earlyRouteClient = nil
+        earlyRouteTag = nil
+        earlyRouteUtteranceId = nil
+        client.discardEarlyConnection(reason: reason)
+    }
+
+    /// Closes the connection identified by `tag`, if it is still the one held.
+    ///
+    /// Used where the caller knows the connection but the owning utterance's identity may not
+    /// exist yet (a turn that died before admission). Fencing on the tag rather than the utterance
+    /// is what lets a delayed drop be honoured for its own connection and ignored for a
+    /// successor's.
+    func discardEarlyConnection(tag: String, reason: String) {
+        // Retire a claim that was recorded before its open. The turn is gone, so its claim must go
+        // too: leaving it would let a later open install an owner belonging to an abandoned turn.
+        if pendingEarlyConnectionClaim?.tag == tag {
+            pendingEarlyConnectionClaim = nil
+        }
+        guard let client = earlyRouteClient else { return }
+        guard earlyRouteTag == tag else {
+            FileLog.shared.addMessage(
+                "[CloudRoute] early connection kept — drop for tag \(tag.prefix(8)) is not the held one"
+            )
+            return
+        }
+        earlyRouteClient = nil
+        earlyRouteTag = nil
+        earlyRouteUtteranceId = nil
+        client.discardEarlyConnection(reason: reason)
+    }
+
+    /// Whether an early connection is currently held, and which utterance owns it. Used by controls.
+    var hasEarlyConnectionForTesting: Bool { earlyRouteClient != nil }
+    var earlyConnectionOwnerForTesting: String? { earlyRouteUtteranceId }
+    var earlyConnectionTagForTesting: String? { earlyRouteTag }
+
     private let clientFactory: () -> CloudRouteClient
+
+    /// The client holding a connection opened before this turn existed, waiting to be used or
+    /// replaced. Cleared when a turn takes it, so one connection cannot span two turns.
+    ///
+    /// Tagged with the utterance that opened it. Without the tag, cleanup for a predecessor that
+    /// never reached the cloud could close a successor's socket — the same "one utterance using
+    /// another's state" defect the early result had, in the opposite direction.
+    private var earlyRouteClient: CloudRouteClient?
+
+    /// The utterance whose early open produced `earlyRouteClient`, or nil when none is held.
+    private var earlyRouteUtteranceId: String?
+
+    /// Identifies the connection itself, minted when it opens. Survives until the connection is
+    /// taken or closed; the utterance that owns it is pinned separately at admission.
+    private var earlyRouteTag: String?
+
     private let isConfigured: () -> Bool
     /// Prepares the conversation identity for each turn.
     private let conversationManager: CloudConversationManager
@@ -595,6 +763,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // once running on main, performs no further cross-queue hops. Retirement that lands before
         // the block runs is simply observed by the decision; retirement after publication settles
         // through the normal ownership path.
+        // CLOUD-BOUND, recorded before the admission decision: the dispatch is happening for this
+        // utterance either way, and the router's terminal will consult this to decide whether a
+        // locally-handled turn may drop its instants.
         guard let origin else { return .refused }
         let decideAndPublish: () -> CloudDispatchOwnership = {
             // TEST HOOK (review 5fa6e007): an explicit interleaving barrier INSIDE the coherent
@@ -648,13 +819,14 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         preparedObserver: PreparedObserver? = nil,
         sourceTranscript: String? = nil,
         sourceLanguage: String? = nil,
+        latency: LatencyHandle = LatencyHandle(),
         ownership: CloudDispatchOwnership? = nil
     ) async -> CloudRouteResult {
         guard let utteranceId else {
             return await routeToCloudOwned(
                 request: request, tier: tier, context: context, origin: origin,
                 selection: selection, utteranceId: nil, preparedObserver: preparedObserver,
-                sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage
+                sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage, latency: latency
             )
         }
         let disposition: CloudDispatchOwnership = ownership ?? beginDispatch(utteranceId: utteranceId, origin: origin)
@@ -667,7 +839,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             return await routeToCloudOwned(
                 request: request, tier: tier, context: context, origin: origin,
                 selection: selection, utteranceId: nil, preparedObserver: preparedObserver,
-                sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage
+                sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage, latency: latency
             )
         case let .owner(token):
             guard token.utteranceId == utteranceId else {
@@ -676,7 +848,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             return await ownDispatch(
                 token: token, request: request, tier: tier, context: context, origin: origin,
                 selection: selection, utteranceId: utteranceId, preparedObserver: preparedObserver,
-                sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage
+                sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage, latency: latency
             )
         }
     }
@@ -714,7 +886,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         utteranceId: String,
         preparedObserver: PreparedObserver?,
         sourceTranscript: String?,
-        sourceLanguage: String?
+        sourceLanguage: String?,
+        latency: LatencyHandle = LatencyHandle()
     ) async -> CloudRouteResult {
         guard let record = token.record else {
             return CloudRouteResult(response: .earcon(.error), outcome: .refused)
@@ -738,7 +911,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         let result = await routeToCloudOwned(
             request: request, tier: tier, context: context, origin: origin,
             selection: selection, utteranceId: utteranceId, preparedObserver: preparedObserver,
-            sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage
+            sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage, latency: latency
         )
         settle(record, with: result)
         return result
@@ -772,7 +945,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         utteranceId: String?,
         preparedObserver: PreparedObserver?,
         sourceTranscript: String?,
-        sourceLanguage: String?
+        sourceLanguage: String?,
+        latency: LatencyHandle = LatencyHandle()
     ) async -> CloudRouteResult {
         // Recorded before any guard: what selected this turn is a property of the TURN, not of
         // whether the sink happens to be configured. Recording after the configured check made
@@ -823,8 +997,31 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             preparedObserver?(prepared)
         }
 
-        MainActor.assumeIsolated { clientCreationCountForTesting += 1 }
-        let client = clientFactory()
+        // The client that opened early is the client this turn uses: a connection is only usable
+        // by the transport that holds it, so creating a second client here would discard the
+        // handshake the early open paid for and leave its socket orphaned.
+        let client: CloudRouteClient
+        // ONE CONNECTION, ONE TURN: the connection may only be consumed by the utterance it
+        // belongs to. A turn that arrives while another utterance owns it takes a fresh client
+        // instead of sending on a socket opened for a different command — and leaves that
+        // connection for its own turn, or for the server to close.
+        if let earlyClient = earlyRouteClient, earlyRouteUtteranceId != nil, earlyRouteUtteranceId == utteranceId {
+            client = earlyClient
+            // The connection now belongs to this turn. The tag and owner go with it, so a
+            // predecessor settling later cannot claim or close what this turn is using.
+            earlyRouteClient = nil
+            earlyRouteTag = nil
+            earlyRouteUtteranceId = nil
+        } else {
+            if earlyRouteClient != nil {
+                FileLog.shared.addMessage(
+                    "[CloudRoute] early connection not taken — owned by \(earlyRouteUtteranceId ?? "none"), "
+                        + "not \(utteranceId ?? "-")"
+                )
+            }
+            MainActor.assumeIsolated { clientCreationCountForTesting += 1 }
+            client = clientFactory()
+        }
         let routeContext = CloudRouteContext(from: context)
 
         // GRACE contract, acquisition at the ADMITTED dispatch: the window's expiry is held from
@@ -1046,6 +1243,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             guard activeTurn === turnToken, quiesced else {
                 // Ownership-safe disposition: never admit over a predecessor that is not
                 // confirmed quiescent, and never run as a superseded-while-waiting turn.
+                // Reported like every other terminal: a turn that never reached audio is the case
+                // the record exists for, so it must not be the one that goes unrecorded.
                 return CloudRouteResult(response: .silent, outcome: .earlyClose)
             }
             // Success: the scoped rollback above must not fire on fall-through — B keeps the
@@ -1144,6 +1343,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             sourceTranscript: sourceTranscript,
             sourceLanguage: sourceLanguage,
             pendingInterruptReport: pendingInterruptReport,
+            // The send's own instant, reported by the transport once the authenticated frame is
+            // out — NOT inferred from the first reply frame, which would fold the server's
+            // admission into the client's share of the turn.
+            onRequestSent: { sentAt in latency.context?.requestSentAt = sentAt },
             // Confirm the report only once it actually left: a failed connection or token fetch
             // must not destroy a correction the user still owes the server.
             onReportAttached: { [weak self] requestId in
@@ -1195,6 +1398,35 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         if ownerCancelledFlag.isSet || Task.isCancelled {
             activeResultSocket?.finishTurn()
         }
+        // The turn's client-side latency record: created when the request goes out and emitted
+        // ONCE at the terminal, whether or not audio was ever heard.
+        let latencyRecord = CloudTurnLatencyRecord(
+            requestId: turnRequestId,
+            endOfSpeech: latency.context?.endOfSpeech,
+            endpointDecision: latency.context?.endpointDecisionAt
+        )
+        // Local names the closure and the loop below share. Swift forbids a local function that
+        // captures a local declared before it, so the state lives in an explicit box.
+        let latencyState = TurnLatencyState(record: latencyRecord, emitted: false)
+        // Snapshot the audible instant WHILE audio is still playing. Teardown clears the player's
+        // mark, so a terminal that cancels before emitting would otherwise lose it.
+        let noteAudioStillPlaying: () -> Void = {
+            guard latencyState.firstAudible == nil else { return }
+            latencyState.firstAudible = self.audioPlayer.firstAudibleHostSeconds
+        }
+        let emitLatencyRecord: (String) -> Void = { outcome in
+            guard !latencyState.emitted else { return }
+            latencyState.emitted = true
+            // The send instant is read at the TERMINAL, from the sink's own record, because the
+            // transport reports it asynchronously: binding it earlier would sometimes report the
+            // reply's arrival instead.
+            self.emitTurnLatencyRecord(
+                latencyState.record,
+                requestSent: latency.context?.requestSentAt,
+                outcome: outcome,
+                firstAudible: latencyState.firstAudible ?? self.audioPlayer.firstAudibleHostSeconds
+            )
+        }
         var turnResult: CloudRouteOutcome?
         var turnResponse: VoiceResponse = .silent
         await withTaskCancellationHandler {
@@ -1217,6 +1449,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // after cancel must not reach the player.
                     if ownerCancelledFlag.isSet || Task.isCancelled { break turnLoop }
                     audioPlayer.enqueue(frame)
+                    noteAudioStillPlaying()
                 case let .action(tool, action, params, operationId, capabilityVersion):
                     // BUFFERED admission check: an event drained from the buffer after the owner
                     // was cancelled must not admit any later effect or a completed result. The
@@ -1262,6 +1495,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                         requestId: turnRequestId,
                         conversationId: turnConversationId
                     )
+                    emitLatencyRecord("done")
                     analytics?.recordCloudAssistantTurn(
                         outcome: "done",
                         inputTokens: usage.inputTokens,
@@ -1372,6 +1606,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                             restoreHeldForPlayerDrain = (owner: turnToken, drainEpoch: stopEpoch)
                         }
                     }
+                    emitLatencyRecord("error")
                     analytics?.recordCloudAssistantTurn(outcome: "error", inputTokens: nil, outputTokens: nil)
                     // THE REMOTE MESSAGE IS NEVER SPOKEN (cloud-assistant.md, spec 961fab07): the
                     // wire `message` is bounded OPERATOR DIAGNOSTICS — "never spoken or used to
@@ -1422,7 +1657,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 let stopEpoch = audioPlayer.cancel()
                 if await audioPlayer.awaitActualStop(after: stopEpoch) {
                     guard activeTurn == nil || activeTurn === turnToken else {
-                        return CloudRouteResult(response: .silent, outcome: .earlyClose, fact: Self.aggregateActionFact(turnActionFacts))
+                        emitLatencyRecord("early_close")
+        return CloudRouteResult(response: .silent, outcome: .earlyClose, fact: Self.aggregateActionFact(turnActionFacts))
                     }
                     restoreTransientAudioState()
                 } else {
@@ -1455,7 +1691,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 // No captured entry: nothing was retired for this turn (it owned no pending
                 // playback at supersession) — nothing to await.
             }
-            return CloudRouteResult(response: .silent, outcome: .earlyClose, fact: Self.aggregateActionFact(turnActionFacts))
+            emitLatencyRecord("early_close")
+        return CloudRouteResult(response: .silent, outcome: .earlyClose, fact: Self.aggregateActionFact(turnActionFacts))
         }
         // DEFECT 3 (reviewer 7fc40b74) + review 24f236de: stop THIS turn's OWNED output and
         // AWAIT the identity-bound stop completion BEFORE releasing the host playback and the
@@ -1479,7 +1716,49 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         }
         // The stream ended without `done`: the turn was truncated, which is not a
         // completion and must not restore the allowance as though the model answered.
+        emitLatencyRecord("early_close")
         return CloudRouteResult(response: .silent, outcome: .earlyClose, fact: Self.aggregateActionFact(turnActionFacts))
+    }
+
+    /// One turn's latency bookkeeping. A reference type because the request instant and the
+    /// emission guard are written and read across the turn's stream loop and its terminals.
+    private final class TurnLatencyState {
+        let record: CloudTurnLatencyRecord
+        var emitted: Bool
+        /// The player's first-audible instant, snapshotted the FIRST time this turn is seen to have
+        /// played audio.
+        ///
+        /// Read at the terminal it would sometimes be gone: `cancel()` and `finish()` are
+        /// turn-ending reasons, and the player clears its mark on both, so an error or early-close
+        /// terminal that cancels before emitting reported `first_audible=absent` for a turn the
+        /// user had already heard part of. Snapshotting while the audio is still playing keeps the
+        /// measurement independent of what the teardown does.
+        var firstAudible: MonotonicTime?
+        init(record: CloudTurnLatencyRecord, emitted: Bool) {
+            self.record = record
+            self.emitted = emitted
+        }
+    }
+
+    /// Emits one turn's client-side latency line.
+    ///
+    /// A turn has ONE terminal, so this is called once per request; the caller guards it anyway
+    /// because two paths can classify the same turn and reporting it twice would describe two
+    /// requests. The line is written whether or not audio was ever heard: a turn that produced no
+    /// audio is the case worth measuring, and a missing line would be indistinguishable from a turn
+    /// that never ran.
+    private func emitTurnLatencyRecord(
+        _ record: CloudTurnLatencyRecord,
+        requestSent: Double?,
+        outcome: String,
+        firstAudible: Double?
+    ) {
+        let line = record.logLine(
+            requestSent: requestSent,
+            firstAudible: firstAudible,
+            outcome: outcome
+        )
+        FileLog.shared.addMessage("[VoicePipeline] cloudTurnLatency \(line)")
     }
 
     private func restoreTransientAudioState() {

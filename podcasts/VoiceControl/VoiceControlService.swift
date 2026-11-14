@@ -810,18 +810,52 @@ class VoiceControlService: ObservableObject {
             self?.gracePeriodSignal.onWakeWordDetected()
             self?.audioRenderer.playEarcon(.wakeWord)
         }
+        // Trailing silence on an addressed utterance is when the connection should open: the user
+        // appears to have finished, the endpoint has not fired, so the handshake overlaps the
+        // remaining wait instead of following it. Opening at the wake decision would be too late —
+        // that decision happens after the endpoint. The turn reuses the connection if it is still
+        // fresh and replaces it silently if not, so opening early can never cost correctness.
+        // The tag identifies THIS connection and is returned synchronously so the segmenter can
+        // carry it with the utterance. The tag is minted HERE, off-main, because that is where
+        // this runs (audio thread): minting needs no actor. The open itself touches the sink, so
+        // it hops to main — a real hop, not `assumeIsolated`, which does not switch executors and
+        // would trap when called from the audio thread.
+        asrEngine.onAddressedTrailingSilenceBegan = { [weak self] in
+            guard let self else { return nil }
+            let tag = CloudRouteSink.mintEarlyConnectionTag()
+            DispatchQueue.main.async {
+                self.executor.beginEarlyCloudConnection(tag: tag)
+            }
+            return tag
+        }
         // A turn is ADMITTED the moment the engine has settled its window origin and before the
         // backend wait, so a slow (cold-start) recognition cannot let the deadline retire it
         // (spec voice-control-core.md:270). Recorded against the turn's own id, and released on
         // its terminal outcome below, so eligibility lasts exactly as long as the work is live.
-        asrEngine.onTurnAdmitted = { [weak self] utteranceId, origin in
-            self?.gracePeriodSignal.admitInFlightTurn(utteranceId: utteranceId, origin: origin)
+        asrEngine.onTurnAdmitted = { [weak self] utteranceId, origin, earlyConnectionTag, speechEndedAt, endpointDecisionAt in
+            guard let self else { return }
+            self.gracePeriodSignal.admitInFlightTurn(utteranceId: utteranceId, origin: origin)
+            // Pin the connection to this utterance at the first instant its identity exists, so
+            // this turn's cloud route may take it and any other utterance is refused it. A real
+            // hop: this runs on whatever thread the engine's task is on.
+            guard let tag = earlyConnectionTag else { return }
+            DispatchQueue.main.async {
+                self.executor.claimEarlyCloudConnection(tag: tag, utteranceId: utteranceId)
+            }
         }
         // A turn that leaves the engine without reaching routing (backend failure, wake-only,
         // empty/non-content transcript, translation failure, cancellation) releases its own
         // reservation here, so it cannot leak for the life of the process.
-        asrEngine.onTurnReleased = { [weak self] utteranceId in
-            self?.gracePeriodSignal.releaseInFlightTurn(utteranceId: utteranceId)
+        asrEngine.onTurnReleased = { [weak self] utteranceId, earlyConnectionTag in
+            guard let self else { return }
+            self.gracePeriodSignal.releaseInFlightTurn(utteranceId: utteranceId)
+            guard let tag = earlyConnectionTag else { return }
+            // The turn left the engine without reaching routing, so the connection it opened will
+            // never be used. Close it — fenced by the tag it carries, so a drop that arrives after
+            // a successor opened leaves the successor's socket alone.
+            DispatchQueue.main.async {
+                self.executor.discardEarlyCloudConnection(tag: tag, reason: "turn released without routing")
+            }
         }
         // Silent by contract: a wake-only capture is the user opening a session,
         // not a failed question, so it plays nothing. The "command not understood"
@@ -953,7 +987,7 @@ class VoiceControlService: ObservableObject {
     typealias ParsedIntentObserver = @MainActor (any VoiceIntent) -> Void
 
     /// Submit the follow-up an interruption acknowledgement released
-    /// (`cloud-assistant.md` → Interruption, spec c5fe3416).
+    /// (`cloud-assistant.md` → Interruption).
     ///
     /// The contract's rule is precise and this follows it literally: after the prior turn's
     /// terminal acknowledgment the retained utterance is submitted ONCE, on its OWN socket, as a
@@ -1194,7 +1228,8 @@ class VoiceControlService: ObservableObject {
                     // routing work, so a live read would attribute the turn to whichever window
                     // happens to be current now.
                     generation: capturedOrigin,
-                    selection: capturedSelection
+                    selection: capturedSelection,
+                    latency: input.latency
                 )
             }
 
@@ -1248,7 +1283,7 @@ class VoiceControlService: ObservableObject {
             reportExecution(executionVerdict, captureContext: captureContext,
                             predictedIntent: VoiceAnalytics.predictedIntentName(from: intent),
                             predictedTool: VoiceAnalytics.predictedToolName(from: intent))
-            // SUBMIT the retained follow-UP (cloud-assistant.md → Interruption, ).
+            // SUBMIT THE RETAINED FOLLOW-UP (cloud-assistant.md → Interruption).
             // When the turn that just settled was interrupted, the interrupting utterance was held
             // until its acknowledgement — a `done` for the prior turn, even `completed`, is that
             // acknowledgement. It is submitted here ONCE on its own socket, through the ordinary
@@ -1424,7 +1459,12 @@ class VoiceControlService: ObservableObject {
                         // Omitting it dropped the turn to the sink's provider fallback, so an
                         // escalated turn was classified by live window state rather than by what
                         // selected it — the exact defect the caller-level control exists to catch.
-                        selection: capturedSelection
+                        selection: capturedSelection,
+                        // The SAME turn's latency context. An escalated turn is still the turn the
+                        // user spoke, so its end-of-speech instant must reach the cloud request;
+                        // defaulting it here measured the escalation path as if the user had never
+                        // stopped talking.
+                        latency: input.latency
                     ),
                     preparedObserver: preparedObserver
                 )
