@@ -140,6 +140,12 @@ ONLY_TESTING ?= PocketCastsTests
 # Creating it is the point. Naming a dedicated simulator without creating it makes `make test` fail
 # outright on a fresh machine or after an Xcode upgrade removes old runtimes - the change would
 # then have traded a wiped device for a broken build, which is worse.
+#
+# The device type is taken from the manual simulator when it exists, and otherwise from a type the
+# INSTALLED runtime can actually host. The fallback has to be one of the latter: `simctl list
+# devicetypes` lists types whose runtime was removed, and `simctl create` refuses those with
+# "Could not find an available runtime". Its identifier must also be captured WITHOUT the trailing
+# ")" that the listing wraps it in, or creation fails with "Invalid device type".
 .PHONY: ensure_simulator
 ensure_simulator:
 	@if [ "$(SIMULATOR_NAME)" = "$(PROTECTED_SIMULATOR_NAME)" ]; then \
@@ -152,7 +158,10 @@ ensure_simulator:
 d = json.load(sys.stdin)["devices"]; \
 print(next((x["deviceTypeIdentifier"] for rt in d for x in d[rt] if x["name"] == "$(MANUAL_SIMULATOR_NAME)"), ""))'); \
 		if [ -z "$$TYPE" ]; then \
-			TYPE=$$(xcrun simctl list devicetypes | sed -n 's/.*\(com\.apple\.CoreSimulator\.SimDeviceType\.iPhone[^ ]*\)$$/\1/p' | tail -1); \
+			TYPE=$$(xcrun simctl list devices -j | python3 -c 'import json,sys; \
+d = json.load(sys.stdin)["devices"]; \
+present = {x["deviceTypeIdentifier"] for rt in d for x in d[rt]}; \
+print(next((t for t in reversed(sorted(present)) if "iPhone" in t), ""))'); \
 		fi; \
 		if [ -z "$$TYPE" ]; then echo "error: no iPhone device type to create $(SIMULATOR_NAME) from"; exit 1; fi; \
 		echo "creating simulator $(SIMULATOR_NAME) as $$TYPE"; \
