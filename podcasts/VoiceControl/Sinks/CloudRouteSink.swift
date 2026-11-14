@@ -50,6 +50,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// must be too. A test awaits it through `MainActor.run`.
     var activeTurnIsCancelledForTesting: Bool? { activeTurn?.isCancelled }
 
+    /// Whether the live turn has closed its effects. Lets a control prove that a REAL barge-in
+    /// (service -> `emitEagerBargeInIfNeeded` -> `emitBargeIn`) closes them, not just the
+    /// `routeToCloud` branch that happened to call it first.
+    @MainActor var activeTurnEffectsClosedForTesting: Bool? { activeTurn?.effectsClosed }
+
     /// Whether an interruption report awaits a later EXPLICIT user request. A refusal retains the
     /// report but submits nothing, so the turn ends locally and there is no successor frame to
     /// observe it on (reviewer c38ff4ba item 2).
@@ -912,12 +917,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             if await sendInterruptOnPriorSocket(forRequestId: priorRequestId) == .undelivered {
                 interruptedRequestIdForThisTurn = nil
             }
-            // EFFECTS CLOSE AT THE SEND, not at the cancellation below. The interrupted turn is
-            // kept alive deliberately until its terminal arrives (next block), so it is still
-            // receiving frames in that window; a late action drained here would otherwise run
-            // after the user already took the turn away. Anything it executed BEFORE this point
-            // stands — the interrupt only forbids what comes after it.
-            activeTurn?.closeEffects()
         }
 
         if interruptedRequestIdForThisTurn != nil, let priorToken = activeTurn {
@@ -1251,6 +1250,17 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // Owner cancellation gates buffered audio admission too: a frame drained
                     // after cancel must not reach the player.
                     if ownerCancelledFlag.isSet || Task.isCancelled { break turnLoop }
+                    // SAME RULE FOR OUTPUT AS FOR EFFECTS. The contract has the interrupted turn
+                    // clear buffered answer audio; a frame drained after the interrupt was sent
+                    // would `enqueue` and re-arm playback, so audio the user already took back
+                    // briefly resumes. Closed effects therefore stop DELIVERY too: once the
+                    // interrupt is out, nothing of this turn reaches the user except its
+                    // terminal, which is what releases the successor.
+                    //
+                    // `break turnLoop` — not `continue` — because unlike an action, audio owes
+                    // nothing downstream, and continuing to drain frames only to drop them keeps
+                    // the abandoned turn holding the player.
+                    if turnToken.effectsClosed { break turnLoop }
                     audioPlayer.enqueue(frame)
                 case let .action(tool, action, params, operationId, capabilityVersion):
                     // BUFFERED admission check: an event drained from the buffer after the owner
@@ -1286,6 +1296,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 case let .result(result):
                     // Structured results are rendered as they arrive; the turn still
                     // completes on `done` with the same restore/analytics behavior.
+                    //
+                    // OUTPUT, like audio: a result drained after this turn's interrupt was sent
+                    // must not be presented, or the user sees content from a question they took
+                    // back. `continue` rather than `break`: a result owes nothing downstream and
+                    // the terminal still has to arrive to release the successor.
+                    if turnToken.effectsClosed { continue }
                     presentDiscoveryResults(DiscoveryResultsViewModel(result: result))
                 case let .done(usage):
                     // Buffered-`done` admission check: a cancelled owner must not report a
@@ -1898,6 +1914,19 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             interruptionState.releaseUnsentHold(forRequestId: priorRequestId)
             return .undelivered
         }
+        // EFFECTS CLOSE HERE, AT THE SEND, and here is the ONE place every interrupt goes through.
+        // Closing at any caller would leave every path that caller did not know about uncovered —
+        // which is exactly how this fix first shipped: it closed effects only in `routeToCloud`'s
+        // interrupt branch, so a real barge-in (service -> `emitEagerBargeInIfNeeded` ->
+        // `emitBargeIn` -> this function) sent its interrupt with effects still open and the
+        // interrupted turn could still execute a late action.
+        //
+        // The moment is the SEND, not the successor's cancellation: a successor interrupts and
+        // then WAITS for this turn's terminal, so between the two the interrupted turn is still
+        // live and still receiving. Anything it executed BEFORE this point stands; the interrupt
+        // only forbids what comes after it.
+        activeTurn?.closeEffects()
+
         // AWAITED, because delivery IS the interruption: a fire-and-forget send could be scheduled
         // after this turn retires the registration, which is how an interrupt becomes a silent
         // no-op. Position is omitted until one is actually measured.

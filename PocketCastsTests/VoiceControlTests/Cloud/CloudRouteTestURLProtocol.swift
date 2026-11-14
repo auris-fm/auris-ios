@@ -855,6 +855,14 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
         }
         framesServedForPark += 1
         if let receiveError { throw receiveError }
+        // UNDER THE SAME LOCK `send()` TAKES. `receive()` checked `incoming` and then
+        // `removeFirst()`d it as two unsynchronised steps while a concurrent `send`-side script
+        // mutation could append to the same array, so a control that scripted a frame while the
+        // transport was serving could corrupt the buffer or lose a frame. The lock is taken for
+        // the empty-check and the pop TOGETHER, so "there was a frame" and "here it is" describe
+        // the same state. `NSLock` is not held across an `await` here: both steps are synchronous.
+        scriptLock.lock()
+        defer { scriptLock.unlock() }
         guard !incoming.isEmpty else {
             // A closed socket: the server ended the stream without a terminal
             // event, which the client must surface rather than treat as success.

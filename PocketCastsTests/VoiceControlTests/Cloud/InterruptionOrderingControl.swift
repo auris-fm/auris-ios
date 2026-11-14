@@ -599,6 +599,71 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         _ = await first.value
         _ = await second.value
     }
+    /// A REAL BARGE-IN CLOSES THE INTERRUPTED TURN'S EFFECTS — through `emitBargeIn`.
+    ///
+    /// The behaviour fix ("an interrupted turn admits no new effects") has to hold on the path
+    /// SHIPPING USES. That path is service -> `emitEagerBargeInIfNeeded` -> `emitBargeIn`, not
+    /// `routeToCloud`'s interrupt branch. Closing effects at the branch left the real barge-in
+    /// uncovered: it sent its interrupt and the interrupted turn stayed open for late actions.
+    ///
+    /// This drives `emitBargeIn` directly (the same call the service makes at input admission) and
+    /// asserts the interrupted turn closed its effects. Fails while the close sits at a caller
+    /// instead of in `sendInterruptOnPriorSocket`, which every interrupt goes through.
+    func testARealBargeInClosesTheInterruptedTurnsEffects() async {
+        let state = CloudInterruptionState()
+        let gate = Gate()
+        let sink = makeSink(state: state, gate: gate) { self.doneFixture }
+
+        let prior = Task {
+            await sink.routeToCloud(
+                request: "prior question",
+                tier: .free,
+                context: self.sampleContext(),
+                origin: Self.origin,
+                selection: .followUp,
+                utteranceId: "u-turn-a"
+            )
+        }
+        let appeared = await waitUntil(timeout: 5) {
+            await MainActor.run { sink.activeResultSocketForTesting != nil }
+        }
+        XCTAssertTrue(appeared, "premise: the prior turn must own a socket before it is interrupted")
+        let priorRequestId = await MainActor.run { sink.activeResultSocketForTesting?.requestId }
+        guard let priorRequestId else {
+            XCTFail("premise: the prior turn must own a live socket")
+            return
+        }
+        // Premise: the prior turn's effects are still OPEN before the barge-in.
+        let openBefore = await MainActor.run { sink.activeTurnEffectsClosedForTesting }
+        XCTAssertEqual(openBefore, false, "premise: nothing has interrupted this turn yet")
+
+        let emitted = await sink.emitBargeIn(
+            request: "play the next one",
+            utteranceId: "u-barge",
+            origin: Self.origin,
+            selection: CloudConversationSelection.followUp
+        )
+        XCTAssertEqual(emitted, priorRequestId, "the barge-in must claim the live predecessor")
+
+        // THE ASSERTION: the interrupt was sent through the real path, so the interrupted turn
+        // must have closed its effects. Without the close at the shared send point this is false
+        // and the turn would still execute a late action.
+        let closed = await MainActor.run { sink.activeTurnEffectsClosedForTesting }
+        XCTAssertEqual(
+            closed, true,
+            "a real barge-in must close the interrupted turn's effects at the send, or the "
+            + "shipping path can still execute a late action of a turn the user took back"
+        )
+        // And the interrupt genuinely reached the wire on the prior socket.
+        let frames = capturedTask?.sentTextFrames ?? []
+        XCTAssertTrue(
+            frames.contains { $0.contains("\"interrupt\"") },
+            "premise: the barge-in must have sent an interrupt frame: \(frames)"
+        )
+        gate.release()
+        _ = await prior.value
+    }
+
     /// AN UNDELIVERED INTERRUPT SUPPRESSES ITS UTTERANCE — driven through the sink.
     ///
     /// Supersedes a state-only test whose name claimed a boundary it never executed (reviewer
