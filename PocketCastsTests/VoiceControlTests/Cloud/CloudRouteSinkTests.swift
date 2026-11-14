@@ -1588,6 +1588,87 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         return lines.joined(separator: "\n")
     }
 
+    /// POSITIVE CONTROL: the SAME fixture and the same parking, with NO barge-in, must reach the
+    /// player. Without it, "no seek after a barge-in" cannot be told apart from "the action never
+    /// parsed" — and the first three versions of the control below were vacuous for exactly that.
+    func testLateActionReachesThePlayerWithoutABargeIn() async {
+        mapper.playbackSecondsForReference = [1130.0: 1200.0]
+        playback.setPositionMs(500_000)
+        self.pendingFixture = """
+        event: action
+        data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":1130000}}
+
+        event: done
+        data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+        """
+        playback.clearCalls()
+
+        // Plain `makeSink()`, no park, direct await — the exact shape that is known to reach the
+        // executor. Anything else here made the control vacuous.
+        await makeSink().routeToCloud(
+            request: "prior question", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-turn-a")
+
+        let seeks = playback.calls.filter { if case .seekTo = $0 { return true }; return false }
+        XCTAssertFalse(seeks.isEmpty, "premise: this fixture must execute an action")
+    }
+
+    /// A REAL BARGE-IN MUST NOT EXECUTE THE INTERRUPTED TURN'S LATE ACTION.
+    ///
+    /// Driven through the path SHIPPING USES: `emitBargeIn` (service ->
+    /// `emitEagerBargeInIfNeeded` -> here), not `routeToCloud`'s interrupt branch. On that path
+    /// the prior turn is NOT cancelled — it stays live and draining — so `turnToken.effectsClosed`
+    /// is the only gate open when the late action arrives, and it is what must refuse it.
+    ///
+    /// Asserted on the EXECUTOR STUB, not a log line: a refusal that logged and still executed
+    /// would satisfy a log assertion and fail this one.
+    func testARealBargeInDoesNotExecuteTheInterruptedTurnsLateAction() async {
+        mapper.playbackSecondsForReference = [1130.0: 1200.0]
+        playback.setPositionMs(500_000)
+        self.pendingFixture = """
+        event: action
+        data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":1130000}}
+
+        event: done
+        data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+        """
+        let sink = makeSink()
+        playback.clearCalls()
+
+        // The prior turn runs in a Task because a barge-in has to land WHILE it is still in
+        // flight. The action reaches the executor in this shape (see the positive control).
+        let prior = Task {
+            await sink.routeToCloud(
+                request: "prior question", tier: .free, context: self.sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-turn-a")
+        }
+        var owned = false
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if await MainActor.run(body: { sink.activeResultSocketForTesting != nil }) {
+                owned = true; break
+            }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertTrue(owned, "premise: the prior turn must own a socket before it is interrupted")
+        let priorRequestId = await MainActor.run { sink.activeResultSocketForTesting?.requestId }
+        guard let priorRequestId else { XCTFail("premise: a live socket"); return }
+
+        let emitted = await sink.emitBargeIn(
+            request: "play the next one", utteranceId: "u-barge",
+            origin: cloudTestOrigin, selection: CloudConversationSelection.followUp)
+        XCTAssertEqual(emitted, priorRequestId, "the barge-in must claim the live predecessor")
+
+        _ = await prior.value
+        let seeks = playback.calls.filter { if case .seekTo = $0 { return true }; return false }
+        XCTAssertTrue(seeks.isEmpty,
+                      "an interrupted turn must not execute a late action: the executor saw "
+                      + "\(seeks). Effects must close where every interrupt goes through")
+    }
+
+
     private func makeSink(
         rendersStructuredResults: Bool = false,
         routeHint: CloudRouteHint? = nil
