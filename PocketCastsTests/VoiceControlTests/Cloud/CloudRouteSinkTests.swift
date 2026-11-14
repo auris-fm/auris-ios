@@ -123,10 +123,69 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
                            + "and a missing one would hide a turn that never played: \(mine)")
         let done = try XCTUnwrap(mine.first { $0.contains(doneId) }, log)
         XCTAssertTrue(done.contains("outcome=done"), done)
-        XCTAssertTrue(done.contains("end_of_speech_to_first_audible="), done)
+        // NOT `contains("end_of_speech_to_first_audible=")`: that substring is satisfied by
+        // `=none`, so it passed for a turn that measured nothing, which is every turn here.
+        // This fixture carries no audio, so the honest expectation is stated as such.
+        XCTAssertTrue(
+            done.contains("first_audible=absent"),
+            "a turn with no audio says so rather than reporting a duration: \(done)")
+        XCTAssertTrue(done.contains("end_of_speech_to_first_audible=none"), done)
         let failed = try XCTUnwrap(mine.first { $0.contains(errorId) }, log)
         XCTAssertTrue(failed.contains("outcome=error"), failed)
         XCTAssertTrue(failed.contains("first_audible=absent"), failed)
+    }
+
+    /// A turn with an AUDIO FIXTURE still reports absence, because the stub never renders.
+    ///
+    /// What this pins is the pass-through once more: the line is produced by the sink reading
+    /// `audioPlayer.firstAudibleHostSeconds` at the terminal, and it must attribute itself to ITS
+    /// request. The sibling test above cannot do the second half - its `=absent` assertion is
+    /// satisfied whether or not the line belongs to the turn under test.
+    ///
+    /// WHAT THIS DELIBERATELY DOES NOT CLAIM: it does not prove the positive case. The stub feeds
+    /// raw byte payloads, so `AVAudioPlayerNode` has no `lastRenderTime`, `noteFirstAudibleIfRendering`
+    /// never takes the mark, and every line here reads `first_audible=absent`. A rendered turn
+    /// cannot be produced through this harness without adding a test-only setter on the player,
+    /// which would pass against logic production never runs. The positive leg is pinned where it
+    /// CAN be reached - `CloudTurnLatencyRecordTests` asserts `2100ms` from the record - and the
+    /// real end-to-end figure needs a signed-in device, which is Merlin's manual check.
+    @MainActor
+    func testAnAudioFixtureTurnReportsItsOwnLineWithoutClaimingAudio() async throws {
+        // Unique per RUN: the app log persists, so a fixed id would read the previous run's line.
+        let utteranceId = "u-\(UUID().uuidString.prefix(12))-audible"
+        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        defer { CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil }
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let sink = makeSinkWithConsumer(
+            RecordingResultConsumer(),
+            audioPayloads: (0..<40).map { Data([UInt8($0)]) }
+        )
+        let context = TurnLatencyContext()
+        context.endOfSpeech = 0
+        _ = await sink.routeToCloud(
+            request: "x", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: nil, utteranceId: utteranceId,
+            latency: LatencyHandle(context))
+
+        let line = try await latencyLine(for: utteranceId)
+        XCTAssertEqual(
+            Self.requestId(of: line), utteranceId,
+            "the line must be THIS turn's, not a stale one from an earlier run: \(line)")
+        XCTAssertTrue(line.contains("outcome=done"), line)
+        // The honest expectation for a stub turn: absence, stated as absence rather than as a
+        // label that happens to match. A duration here would mean the player reported audio it
+        // never played.
+        XCTAssertTrue(
+            line.contains("first_audible=absent"),
+            "a stub turn plays no audio, so it must not claim any: \(line)")
+        XCTAssertTrue(
+            line.contains("end_of_speech_to_first_audible=none"),
+            "no audible instant means the leg is unmeasured, not zero: \(line)")
     }
 
     /// A turn with NO early-connection tag still reports its end of speech.
@@ -352,14 +411,34 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             IntentRoutingInput.english(transcript: "different", utteranceId: "u-eq"))
     }
 
+    /// The `request_id=` field of a log line, or nil when the line is not a latency record.
+    ///
+    /// Parsed rather than substring-matched: `contains("u-ABC")` also matches `u-ABCD`, so a
+    /// prefix would let one request stand in for another.
+    private static func requestId(of line: String) -> String? {
+        guard line.contains("cloudTurnLatency"),
+              let range = line.range(of: "request_id=") else { return nil }
+        return line[range.upperBound...].split(separator: " ").first.map(String.init)
+    }
+
     /// The `cloudTurnLatency` line for one request id, waited for because the record is emitted by
     /// a closure that may run after `routeToCloud` returns.
+    ///
+    /// `requestId` must be unique per RUN. The app log persists across runs, so a fixed id finds
+    /// the PREVIOUS run's line and the test passes without ever seeing its own turn - which is
+    /// exactly how a positive-case control once "passed" against a log where every line read
+    /// `first_audible=absent`.
     @MainActor
     private func latencyLine(for utteranceId: String) async throws -> String {
+        XCTAssertTrue(utteranceId.hasPrefix("u-"), "callers must pass a per-run unique id")
+        XCTAssertTrue(
+            utteranceId.count > 12,
+            "a fixed or short id can collide with another run's line in the persistent log")
         for _ in 0..<40 {
             let log = await FileLog.shared.logFileAsString()
+            // Matched as a WHOLE field, so `u-ABC` cannot be satisfied by `u-ABCD`.
             if let line = log.split(separator: "\n")
-                .first(where: { $0.contains("cloudTurnLatency") && $0.contains(utteranceId) }) {
+                .first(where: { Self.requestId(of: String($0)) == utteranceId }) {
                 return String(line)
             }
             try await Task.sleep(nanoseconds: 50_000_000)
