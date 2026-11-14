@@ -9,10 +9,73 @@ FASTLANE=$(LANG_VAR) $(BUNDLE) exec fastlane
 # Explicit --config prevents SwiftLint from picking up nested configs in
 # BuildTools/.build/checkouts/ (e.g., SwiftGenPlugin's .swiftlint.yml).
 SWIFTLINT_FROM_BUILDTOOLS=swiftlint lint --working-directory .. --config .swiftlint.yml --quiet
-# Parse the human-readable output of simctl
-SIMULATOR_NAME = $(shell xcrun simctl list devices available \
-	| grep "iPhone" \
-	| tail -1 | sed 's/^[[:space:]]*//' | sed 's/ *(.*) *$$//')
+# Tests run on a DEDICATED simulator, never a hand-picked device.
+#
+# This used to be "the last iPhone simctl lists", which is arbitrary ordering rather than a
+# choice: a suite started here could boot and install over `auris-manual`, the signed-in device
+# used for manual checks, wiping its account and its data. That is exactly what happened, and
+# re-signing in needs a human. Tests also do not belong on a device a person is using, since a
+# suite leaves its own fixtures behind.
+#
+# Override on the command line for a one-off (`make test SIMULATOR_NAME="iPhone 17"`); do not
+# change the default to a personal device.
+#
+# `=` and not `?=`: an exported SIMULATOR_NAME in someone's shell would otherwise silently
+# redirect every test run, which is how a stray value could point a suite back at the device this
+# whole change exists to protect. A command-line override still wins, which is the deliberate case.
+SIMULATOR_NAME = auris-tests
+
+# The device a PERSON looks at, used only by `launch_mac`. Deliberately a different variable from
+# `SIMULATOR_NAME`: pointing the manual-check launcher at the test sim would install a build onto
+# a device a suite is using, and pointing tests at this device is what wiped its account.
+MANUAL_SIMULATOR_NAME = auris-manual
+
+# The simulator a TEST run may never touch, whatever it is called. Checked by name, not by UUID,
+# because the whole failure mode is a name resolving to the wrong device.
+PROTECTED_SIMULATOR_NAME = auris-manual
+
+# Where a test run builds. Defaults to a directory named after THIS WORKTREE, so two checkouts
+# running suites at the same time cannot evict each other's build products — the collision that
+# made a lane call xcodebuild by hand with its own path. The worktree's own name is the right key:
+# it is stable for the life of the checkout and distinct between them, without anyone having to
+# pick a name and remember it.
+#
+# `=` and not `?=`, for the same reason as SIMULATOR_NAME: an exported value must not silently
+# redirect a run. A command-line override still wins, which is the deliberate case.
+WORKTREE_NAME := $(notdir $(CURDIR))
+DERIVED_DATA = /tmp/dd-$(WORKTREE_NAME)
+
+# The resolved package clones, shared read-only across worktrees so a fresh DERIVED_DATA does not
+# have to re-resolve 23 packages over the network on every checkout. Kept SEPARATE from
+# DERIVED_DATA on purpose: build products are per-worktree (two lanes must not evict each other),
+# while the package clone is immutable and expensive, so copying it per worktree would cost ~5.6 GB
+# each for no isolation benefit.
+#
+# Derived from this checkout's PARENT directory, not hardcoded: the worktrees live side by side
+# under one parent, so `$(CURDIR)/..` is the shared location on any machine and needs no absolute
+# path someone else's checkout would not have.
+SOURCE_PACKAGES = $(abspath $(CURDIR)/../SourcePackages)
+
+# Picks the device type and runtime for creating the test simulator.
+#
+# Answers from an AVAILABLE runtime's own `supportedDeviceTypes`, not from `simctl list devicetypes`
+# (which lists types whose runtime was removed, and wraps the identifier in parentheses) and not from
+# the existing devices (empty on a machine that has never booted one - the fresh-checkout case this
+# whole target exists for).
+#
+# Prints "<deviceTypeId> <runtimeId>" together so `simctl create` receives the pair that was actually
+# chosen rather than re-resolving either half. Prints nothing when no available runtime offers an
+# iPhone, and swallows unreadable input for the same reason: the caller's message names the device
+# it could not create, which is more use than a traceback.
+#
+# One line, because a multi-line `define` cannot be embedded in a quoted shell argument.
+SIMULATOR_TYPE_PICK = import json,sys; \
+  _d = json.load(sys.stdin); \
+  _rs = sorted([r for r in _d.get("runtimes", []) if r.get("isAvailable") and "iOS" in r.get("identifier", "")], key=lambda r: [int(n) for n in r["version"].split(".")], reverse=True); \
+  print(next((t["identifier"] + " " + r["identifier"] for r in _rs for t in r.get("supportedDeviceTypes", []) if t.get("productFamily") == "iPhone"), ""))
+
+# The device UDID for a simulator name, resolved once so boot and install cannot disagree.
+simulator_udid = xcrun simctl list devices available | sed -n 's/.* $(1) (\([0-9A-F-]*\)).*/\1/p' | head -1
 
 # Never build the x86_64 simulator slice on Apple Silicon. A `generic/platform=iOS Simulator`
 # destination has no active arch, so ONLY_ACTIVE_ARCH cannot narrow ARCHS: every source is
@@ -35,6 +98,7 @@ TEST_TIMEOUT_FLAGS = -test-timeouts-enabled YES \
 # invocation, and SKIP_LINT short-circuits the two always-run SwiftLint build phases.
 # Do not use these for archives, device builds, or CI verification.
 FAST_FLAGS = -disableAutomaticPackageResolution $(SIM_ARCH) \
+	-clonedSourcePackagesDirPath $(SOURCE_PACKAGES) \
 	DEBUG_INFORMATION_FORMAT=dwarf CODE_SIGNING_ALLOWED=NO
 FAST_ENV = SKIP_LINT=1
 
@@ -88,13 +152,76 @@ clean: ## Cleans the build artifacts
 
 ONLY_TESTING ?= PocketCastsTests
 
-test: ensure_llama_ios ## Build and run the PocketCastsTests target with Unit Tests using Xcode
+# The destination every TEST run uses: guard the protected device, create the test device if it is
+# missing, and resolve its UDID once.
+#
+# Creating it is the point. Naming a dedicated simulator without creating it makes `make test` fail
+# outright on a fresh machine or after an Xcode upgrade removes old runtimes - the change would
+# then have traded a wiped device for a broken build, which is worse.
+#
+# The device type comes from the manual simulator when it exists; otherwise from an AVAILABLE
+# runtime's own `supportedDeviceTypes`, via scripts/test-simulator-type.py. That fallback deliberately
+# does not look at existing devices: a device list still counts orphans whose runtime has been removed
+# (creation then fails with "Could not find an available runtime") and is EMPTY on a machine that has
+# never booted one - which is the fresh-checkout case this target exists for. The helper returns the
+# type and runtime together, and both are passed to `simctl create`, so neither is re-resolved.
+.PHONY: ensure_simulator
+ensure_simulator:
+	@if [ "$(SIMULATOR_NAME)" = "$(PROTECTED_SIMULATOR_NAME)" ]; then \
+		echo "error: refusing to run tests on $(PROTECTED_SIMULATOR_NAME) - that is the signed-in device"; \
+		echo "       used for manual checks. Set SIMULATOR_NAME to a test device (default: auris-tests)."; \
+		exit 1; \
+	fi; \
+	if [ -z "$$($(call simulator_udid,$(SIMULATOR_NAME)))" ]; then \
+		TYPE=$$(xcrun simctl list devices -j | python3 -c 'import json,sys; \
+d = json.load(sys.stdin)["devices"]; \
+print(next((x["deviceTypeIdentifier"] for rt in d for x in d[rt] if x["name"] == "$(MANUAL_SIMULATOR_NAME)"), ""))'); \
+		RUNTIME=""; \
+		if [ -z "$$TYPE" ]; then \
+			PAIR=$$(xcrun simctl list runtimes -j | python3 -c '$(SIMULATOR_TYPE_PICK)'); \
+			TYPE=$${PAIR%% *}; \
+			RUNTIME=$${PAIR#* }; \
+			if [ "$$TYPE" = "$$RUNTIME" ]; then RUNTIME=""; fi; \
+		fi; \
+		if [ -z "$$TYPE" ]; then echo "error: no iPhone device type to create $(SIMULATOR_NAME) from"; exit 1; fi; \
+		echo "creating simulator $(SIMULATOR_NAME) as $$TYPE (runtime $${RUNTIME:-default})"; \
+		if [ -n "$$RUNTIME" ]; then \
+			xcrun simctl create "$(SIMULATOR_NAME)" "$$TYPE" "$$RUNTIME" >/dev/null || exit 1; \
+		else \
+			xcrun simctl create "$(SIMULATOR_NAME)" "$$TYPE" >/dev/null || exit 1; \
+		fi; \
+	fi; \
+	if [ -z "$$($(call simulator_udid,$(SIMULATOR_NAME)))" ]; then \
+		echo "error: no simulator named $(SIMULATOR_NAME) and it could not be created"; \
+		exit 1; \
+	fi; \
+	mkdir -p $(LOG_DIR); \
+	$(call simulator_udid,$(SIMULATOR_NAME)) > $(SIMULATOR_UDID_FILE); \
+	test -s $(SIMULATOR_UDID_FILE) || { echo "error: could not resolve a UDID for $(SIMULATOR_NAME)"; exit 1; }
+
+# The UDID `ensure_simulator` verified, written to a file so `test`/`test_fast` can pass THAT
+# device to xcodebuild. Passing the name would let xcodebuild resolve it again, and a second
+# resolution is a second chance to land on a different device — the whole failure mode here.
+SIMULATOR_UDID_FILE = $(LOG_DIR)/test-simulator.udid
+
+# Says which simulator and build directory a test run will use, so a lane can confirm the pair
+# without reading the recipe or guessing a path.
+.PHONY: show_test_env
+show_test_env:
+	@echo "simulator:       $(SIMULATOR_NAME)"
+	@echo "derived data:    $(DERIVED_DATA)"
+	@echo "source packages: $(SOURCE_PACKAGES)"
+
+# `test` and `test_fast` both need it, and it must run BEFORE xcodebuild rather than inside the
+# command, so a refusal stops the target instead of being piped into the log.
+test: ensure_simulator ensure_llama_ios ## Build and run the PocketCastsTests target with Unit Tests using Xcode
 	set -o pipefail; mkdir -p $(LOG_DIR) && xcodebuild test -project podcasts.xcodeproj \
 	    -scheme pocketcasts \
         -only-testing:$(ONLY_TESTING) \
         $(TEST_TIMEOUT_FLAGS) \
         $(SIM_ARCH) \
-        -destination 'platform=iOS Simulator,name=$(SIMULATOR_NAME),OS=latest' \
+        -destination "platform=iOS Simulator,id=$$(cat $(SIMULATOR_UDID_FILE))" \
+        -derivedDataPath $(DERIVED_DATA) \
         2>&1 | tee $(LOG_DIR)/test.log
 
 build_staging: build ## Build the Debug app using the staging gateway
@@ -112,13 +239,14 @@ build_fast: ensure_llama_ios ## Fast local Debug build (no dSYM/signing/lint); n
        $(FAST_FLAGS) \
        build 2>&1 | tee $(LOG_DIR)/build_fast.log
 
-test_fast: ensure_llama_ios ## Fast local test run (no dSYM/signing/lint); not for CI
+test_fast: ensure_simulator ensure_llama_ios ## Fast local test run (no dSYM/signing/lint); not for CI
 	set -o pipefail; mkdir -p $(LOG_DIR) && $(FAST_ENV) xcodebuild test -project podcasts.xcodeproj \
 	    -scheme pocketcasts \
         -only-testing:$(ONLY_TESTING) \
         $(TEST_TIMEOUT_FLAGS) \
         $(FAST_FLAGS) \
-        -destination 'platform=iOS Simulator,name=$(SIMULATOR_NAME),OS=latest' \
+        -destination "platform=iOS Simulator,id=$$(cat $(SIMULATOR_UDID_FILE))" \
+        -derivedDataPath $(DERIVED_DATA) \
         2>&1 | tee $(LOG_DIR)/test_fast.log
 
 build_mac: ensure_llama_ios ## Builds for iOS Simulator (use for log stream on Mac)
@@ -151,9 +279,11 @@ launch_mac: build_mac ## Builds and launches in iOS Simulator for log stream
 	if [ -d podcasts/VoiceControl/Resources/earcons ]; then \
 		mkdir -p "$$APP/earcons" && cp podcasts/VoiceControl/Resources/earcons/*.wav "$$APP/earcons/"; \
 	fi; \
-	xcrun simctl boot "$(SIMULATOR_NAME)" 2>/dev/null; \
-	xcrun simctl install booted "$$APP" && \
-	xcrun simctl launch booted fm.auris
+	SIM_ID="$$($(call simulator_udid,$(MANUAL_SIMULATOR_NAME)))"; \
+	if [ -z "$$SIM_ID" ]; then echo "error: no simulator named $(MANUAL_SIMULATOR_NAME)"; exit 1; fi; \
+	xcrun simctl boot "$$SIM_ID" 2>/dev/null; \
+	xcrun simctl install "$$SIM_ID" "$$APP" && \
+	xcrun simctl launch "$$SIM_ID" fm.auris
 
 debug: launch_mac ## Builds, launches, and streams VoicePipeline app logs
 	log stream --predicate 'subsystem == "com.pocketcasts" AND category == "VoicePipeline"' --level debug --style compact
