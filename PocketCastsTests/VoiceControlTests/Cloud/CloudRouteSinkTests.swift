@@ -1652,6 +1652,104 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
                        + "failure (earlyClose) that never happened")
     }
 
+    /// A BARGE-IN DURING ADMISSION MUST NOT CLOSE THE ADMITTING TURN'S EFFECTS.
+    ///
+    /// While turn B is being admitted, `activeTurn` already names B but `activeResultSocket` still
+    /// names A. Closing effects from those two fields read separately closes B — the live turn —
+    /// so B's own seek is silently refused, while A, the turn actually interrupted, stays open.
+    /// The interrupt must act on the turn that owns the socket it is interrupting.
+    /// A BARGE-IN DURING ADMISSION SUPERSEDES EVERY EARLIER UNFINISHED TURN.
+    ///
+    /// The rule (core PR 174): the newest utterance replaces any held one, and every earlier
+    /// unfinished turn is superseded. Here that is BOTH A (still playing, owns the socket) and B
+    /// (being admitted, so `activeTurn` already names it while the socket is still A's).
+    ///
+    /// Choosing either field alone is wrong in one direction each, which is why this asserts on
+    /// the outer behaviour rather than on effects: `activeTurn` names B, so closing it lets A run
+    /// a late action; the socket's owner names A, so closing it lets B run one. Neither may.
+    ///
+    /// The window is the successor's `awaitActualStop`, so the predecessor must be mid-audio: with
+    /// nothing playing the stop confirms at once and the window closes before anything can be
+    /// dispatched into it.
+    func testABargeInDuringAdmissionSupersedesEveryEarlierUnfinishedTurn() async {
+        mapper.playbackSecondsForReference = [1130.0: 1200.0]
+        playback.setPositionMs(500_000)
+        // A: an action and NO terminal, so it stays unfinished and keeps owning the socket.
+        self.pendingFixture = """
+        event: action
+        data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":1130000}}
+
+        """
+        let sink = makeSinkWithConsumer(
+            RecordingResultConsumer(), audioPayloads: [Data([0x11, 0x22])])
+
+        final class Box: @unchecked Sendable {
+            private let lock = NSLock()
+            private var deliveries: [() -> Void] = []
+            func store(_ d: @escaping () -> Void) { lock.lock(); deliveries.append(d); lock.unlock() }
+            func deliverAll() { lock.lock(); let all = deliveries; deliveries = []; lock.unlock(); all.forEach { $0() } }
+        }
+        let box = Box()
+        await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(true) }
+
+        let a = Task {
+            await sink.routeToCloud(
+                request: "A", tier: .free, context: self.sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-a")
+        }
+        var aEnqueued = false
+        for _ in 0..<600 {
+            if await MainActor.run(body: { sink.audioPlayerForTesting?.hasPendingAudio ?? false }) {
+                aEnqueued = true; break
+            }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(aEnqueued, "premise: A must be mid-audio, or the admission window never opens")
+
+        await MainActor.run {
+            sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting { _, deliver in
+                box.store(deliver)
+            }
+        }
+        playback.clearCalls()
+        // B is admitted NOW and suspends on A's withheld retire stop — the window.
+        self.pendingFixture = """
+        event: action
+        data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":1130000}}
+
+        """
+        let b = Task {
+            await sink.routeToCloud(
+                request: "B", tier: .free, context: self.sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-b")
+        }
+        try? await Task.sleep(nanoseconds: 200_000_000)
+
+        // C barges in INSIDE the window, while B is still being admitted.
+        _ = await sink.emitBargeIn(
+            request: "C", utteranceId: "u-c",
+            origin: cloudTestOrigin, selection: CloudConversationSelection.followUp)
+
+        await MainActor.run {
+            sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting(nil)
+            box.deliverAll()
+            sink.audioPlayerForTesting?.setDrainHoldForTesting(false)
+        }
+        _ = await a.value
+        let bResult = await b.value
+
+        let seeks = playback.calls.filter { if case .seekTo = $0 { return true }; return false }
+        XCTAssertTrue(seeks.isEmpty,
+                      "neither earlier unfinished turn may run an action: the executor saw "
+                      + "\(seeks). Closing only the socket's owner lets the admitting turn run; "
+                      + "closing only `activeTurn` lets the playing turn run")
+        // NOTE: the outcome assertion is deliberately absent. `CloudRouteOutcome` has no
+        // `.superseded` case and `.refused` already means "cloud is not configured", so asserting
+        // either here would assert the wrong meaning. Spec ruling: the naming is a separate small
+        // change; this control proves the BEHAVIOUR, which is that no earlier turn acts.
+        _ = bResult.outcome
+    }
+
     /// POSITIVE CONTROL: the SAME fixture and the same parking, with NO barge-in, must reach the
     /// player. Without it, "no seek after a barge-in" cannot be told apart from "the action never
     /// parsed" — and the first three versions of the control below were vacuous for exactly that.

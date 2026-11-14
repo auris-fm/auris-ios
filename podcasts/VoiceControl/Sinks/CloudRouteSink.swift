@@ -900,7 +900,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         var interruptedRequestIdForThisTurn: String? = nil
         if !isRetainedFollowUpSubmission,
            let priorRequestId = activeResultSocket?.requestId,
-           (activeTurn.map { !$0.isCancelled }) ?? false,
+           let priorTurnToken = activeTurn,
+           !priorTurnToken.isCancelled,
            interruptionState.claimInterruptEmission(forRequestId: priorRequestId) {
             interruptedRequestIdForThisTurn = priorRequestId
             interruptionState.hold(
@@ -996,6 +997,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // while we wait must observe itself as the owner (review 14f66b72).
         activeTurn = turnToken
         playbackOwner = turnToken
+        // REGISTERED HERE and removed on EVERY exit path: a finished turn must not stay in the
+        // live set, or a later barge-in would close effects on tokens nobody owns any more.
+        liveTurns.append(turnToken)
+        defer { liveTurns.removeAll { $0 === turnToken } }
         // ATOMIC RETIRE + QUIESCENCE AT ADMISSION (reviews 9fc2603e / 14f66b72): the successor
         // retires the PLAYBACK predecessor's output HERE — before this turn can admit any audio
         // of its own — and WAITS for the confirmed stop before admitting, because `cancel` only
@@ -1922,7 +1927,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // then WAITS for this turn's terminal, so between the two the interrupted turn is still
         // live and still receiving. Anything it executed BEFORE this point stands; the interrupt
         // only forbids what comes after it.
-        activeTurn?.closeEffects()
+        // EVERY EARLIER UNFINISHED TURN, not one chosen by a field (core PR 174: the newest
+        // utterance supersedes all of them). Choosing a field was wrong in both directions:
+        // `activeTurn` names the SUCCESSOR during an admission race, so closing it closed the live
+        // turn and left the interrupted one open; and the socket's owner names only the
+        // predecessor, leaving a turn still being admitted free to run an action afterwards.
+        for turn in liveTurns { turn.closeEffects() }
 
         guard let priorSocket = activeResultSocket, let client = resultSendClient else {
             // No transport to interrupt: no acknowledgement can come, so nothing may stay held.
@@ -2177,6 +2187,14 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     var currentTurnResultSocketForTesting: AppOperationResultSocket? { activeResultSocket }
 
     private var activeResultSocket: AppOperationResultSocket?
+    /// EVERY turn that has started and has not finished. A barge-in supersedes all of them
+    /// (core PR 174: "the newest utterance replaces any held one, and every earlier unfinished
+    /// turn is superseded"), so the interrupt closes effects on this whole set rather than on
+    /// one turn chosen by a field. Choosing a field was wrong in both directions: `activeTurn`
+    /// names the SUCCESSOR during an admission race (it is set before the successor owns a
+    /// socket), and the socket's owner names only the predecessor, leaving a turn still being
+    /// admitted free to run an action. Tokens remove themselves on completion via `defer`.
+    private var liveTurns: [CloudTurnToken] = []
     /// The follow-up released by an interruption acknowledgement, waiting to be submitted on its
     /// own socket. Read-and-clear by the submitter so it is submitted exactly once.
     @MainActor private(set) var pendingFollowUpSubmission: CloudInterruptionState.ReleasedFollowUp?
