@@ -11,6 +11,7 @@ private func testConversationManager() -> CloudConversationManager {
 
 import XCTest
 import AVFoundation
+import PocketCastsUtils
 @testable import podcasts
 
 final class CloudRouteSinkTests: SocketCapturingTestCase {
@@ -76,15 +77,20 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(snap.previousReferencePositionMs, 500_000)
     }
 
-    /// Every cloud request contributes exactly ONE client-side latency record, and a turn that
-    /// produced no audio says so rather than reporting zero.
+    /// Every cloud request emits exactly ONE client-side latency line, and a turn that produced no
+    /// audio says so rather than reporting zero.
     ///
-    /// This is the wiring the requirement rests on: the record is only useful if it is emitted per
-    /// REQUEST at its terminal, and a first-audible number is only honest if it is absent when
-    /// nothing was heard. A record emitted per frame would multiply the turn; one emitted only on
-    /// success would hide exactly the failing turns the latency work is chasing.
+    /// Asserted on the line the sink writes to the app log — the surface a person reads back on a
+    /// device — rather than through an accessor added for the test. A record emitted per frame
+    /// would multiply the turn; one emitted only on success would hide exactly the failing turns
+    /// the latency work is chasing.
     @MainActor
-    func testEveryCloudRequestEmitsOneLatencyRecord() async {
+    func testEveryCloudRequestEmitsOneLatencyRecord() async throws {
+        // Unique per RUN: the app's log persists across runs, so a fixed id would count the
+        // previous run's lines and measure the harness rather than this turn.
+        let run = UUID().uuidString.prefix(8)
+        let doneId = "u-\(run)-done"
+        let errorId = "u-\(run)-error"
         self.pendingFixture =
             """
             event: done
@@ -94,9 +100,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let sink = makeSink()
         _ = await sink.routeToCloud(
             request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
-            selection: nil, utteranceId: "u-latency-1")
-        XCTAssertEqual(sink.turnLatencyRecordsForTesting.count, 1,
-                       "one request must produce exactly one latency record")
+            selection: nil, utteranceId: doneId)
 
         self.pendingFixture =
             """
@@ -106,13 +110,53 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             """
         _ = await sink.routeToCloud(
             request: "again", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
-            selection: nil, utteranceId: "u-latency-2")
-        XCTAssertEqual(sink.turnLatencyRecordsForTesting.count, 2,
-                       "the erroring turn must record too; that is the case worth measuring")
-        let failed = sink.turnLatencyRecordsForTesting.last ?? ""
+            selection: nil, utteranceId: errorId)
+
+        let log = await FileLog.shared.logFileAsString()
+        // The log is shared by every test in the run, so the count is scoped to THIS control's own
+        // request ids: counting globally would measure the suite, not the turn.
+        let mine = log.split(separator: "\n")
+            .filter { $0.contains("cloudTurnLatency") && ($0.contains(doneId) || $0.contains(errorId)) }
+            .map(String.init)
+        XCTAssertEqual(mine.count, 2,
+                       "one latency line per request; a line per frame would multiply the turn, "
+                           + "and a missing one would hide a turn that never played: \(mine)")
+        let done = try XCTUnwrap(mine.first { $0.contains(doneId) }, log)
+        XCTAssertTrue(done.contains("outcome=done"), done)
+        XCTAssertTrue(done.contains("end_of_speech_to_first_audible="), done)
+        let failed = try XCTUnwrap(mine.first { $0.contains(errorId) }, log)
         XCTAssertTrue(failed.contains("outcome=error"), failed)
         XCTAssertTrue(failed.contains("first_audible=absent"), failed)
-        XCTAssertTrue(failed.contains("request_id="), failed)
+    }
+
+    /// A dispatched spoken turn reports a real end of speech, not `none`: the instant travels from
+    /// admission under the utterance's own identity, so the key used to consume it must be the same
+    /// one it was stored under. A key mismatch would leak the entry and silently report `none`.
+    @MainActor
+    func testADispatchedUtteranceReportsItsEndOfSpeech() async throws {
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let eosId = "u-\(UUID().uuidString.prefix(8))-eos"
+        let sink = makeSink()
+        sink.recordEndOfSpeech(1_000.0, endpointDecisionAt: 1_000.5, for: eosId)
+        _ = await sink.routeToCloud(
+            request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: eosId)
+
+        let log = await FileLog.shared.logFileAsString()
+        let line = try XCTUnwrap(
+            log.split(separator: "\n").first { $0.contains("cloudTurnLatency") && $0.contains(eosId) }
+                .map(String.init),
+            log
+        )
+        XCTAssertTrue(line.contains("endpoint_ms=500ms"),
+                      "the hangover between the acoustic end and the endpoint decision is its own stage: \(line)")
+        XCTAssertFalse(line.contains("end_of_speech_to_request=none"),
+                       "a spoken turn knows when speech ended; `none` here means the instant was lost: \(line)")
     }
 
     func testDoneResumesTurnOwnedAutoPause() async {

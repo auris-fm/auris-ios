@@ -239,7 +239,7 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
         }
         var recognizedSegments: [[Float]] = []
         // Observe the ordinary natural-end segment, without scheduling a backend task.
-        segmenter.onUtterance = { samples, _, _, _ in recognizedSegments.append(samples) }
+        segmenter.onUtterance = { samples, _, _, _, _ in recognizedSegments.append(samples) }
         let speech = [Float](repeating: 0.8, count: 320)
         let silence = [Float](repeating: 0, count: 320)
         segmenter.process(speech)
@@ -271,7 +271,7 @@ final class VoiceSharingCollectorEngineTests: XCTestCase {
         defer { engine.stop() }
         let progressed = DispatchSemaphore(value: 0)
         var ordinarySamples = 0
-        segmenter.onUtterance = { samples, _, _, _ in
+        segmenter.onUtterance = { samples, _, _, _, _ in
             ordinarySamples = samples.count
             progressed.signal()
         }

@@ -182,9 +182,9 @@ final class ColdAsrEligibilityProductionTests: XCTestCase {
         // OBSERVE, do not replace: the service's own admission handler must still run, or no
         // reservation is ever made and this control would fail for a reason of its own making.
         let serviceAdmitted = engine.onTurnAdmitted
-        engine.onTurnAdmitted = { id, origin, tag in
+        engine.onTurnAdmitted = { id, origin, tag, speechEndedAt, endpointDecisionAt in
             admittedIds.append(id)
-            serviceAdmitted?(id, origin, tag)
+            serviceAdmitted?(id, origin, tag, speechEndedAt, endpointDecisionAt)
         }
         // OBSERVE, do not replace: the service's own callback still takes and reports acceptance.
         let serviceRouting = engine.onRoutingInput
@@ -311,7 +311,7 @@ final class ColdAsrEligibilityProductionTests: XCTestCase {
             wakeWordDetector: AlwaysDetectingWakeWordDetector(),
             gracePeriodSignal: signal
         )
-        engine.onTurnAdmitted = { id, _, _ in admitted.append(id) }
+        engine.onTurnAdmitted = { id, _, _, _, _ in admitted.append(id) }
         engine.onTurnReleased = { id, _ in released.append(id) }
 
         signal.onWakeWordDetected()

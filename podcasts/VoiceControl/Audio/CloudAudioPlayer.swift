@@ -1241,16 +1241,6 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// the pipeline measures with (`CACurrentMediaTime`).
     var firstAudibleHostSeconds: Double? { firstAudibleInstant }
 
-    /// TEST-VISIBLE alias, so a control reads the same property production does.
-    var firstAudibleHostSecondsForTesting: Double? { firstAudibleInstant }
-
-    /// TEST-ONLY: applies an instant the way the production observation does, so a control can
-    /// drive the same state transition without depending on when a host happens to render.
-    func observeFirstAudibleForTesting(atHostSeconds seconds: Double) {
-        guard firstAudibleInstant == nil else { return }
-        firstAudibleInstant = seconds
-    }
-
     /// The output node's rendered position, or nil when the node is not rendering.
     ///
     /// `lastRenderTime` is the host instant of the most recent render; converting it

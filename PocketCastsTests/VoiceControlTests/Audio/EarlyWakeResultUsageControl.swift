@@ -104,7 +104,7 @@ final class EarlyWakeResultUsageControl: XCTestCase {
             classifier: classifier
         )
         var delivered: [WakeWordResult?] = []
-        segmenter.onUtterance = { _, _, result, _ in delivered.append(result) }
+        segmenter.onUtterance = { _, _, result, _, _ in delivered.append(result) }
 
         // Speak past the ceiling without ever going silent: the utterance is abandoned.
         let frame = 320
@@ -142,7 +142,7 @@ final class EarlyWakeResultUsageControl: XCTestCase {
         let classifier = SwitchableClassifier()
         let segmenter = NativeVadSegmenter(threshold: 0.0, silenceTimeoutMs: 500, classifier: classifier)
         var delivered: [WakeWordResult?] = []
-        segmenter.onUtterance = { _, _, result, _ in delivered.append(result) }
+        segmenter.onUtterance = { _, _, result, _, _ in delivered.append(result) }
 
         let frame = 320
         func speak(briefly: Bool, result: WakeWordResult?) {
@@ -256,7 +256,7 @@ final class EarlyWakeResultUsageControl: XCTestCase {
         // the utterance; if it is nil, the connection opened here is never owned or reused.
         var admittedTag: String?
         var releasedTag: String?
-        engine.onTurnAdmitted = { _, _, tag in admittedTag = tag }
+        engine.onTurnAdmitted = { _, _, tag, _, _ in admittedTag = tag }
         engine.onTurnReleased = { _, tag in releasedTag = tag }
 
         let frame = 320
@@ -355,7 +355,7 @@ final class EarlyWakeResultUsageControl: XCTestCase {
             return tag
         }
         var admittedTag: String?
-        engine.onTurnAdmitted = { _, _, tag in admittedTag = tag }
+        engine.onTurnAdmitted = { _, _, tag, _, _ in admittedTag = tag }
         engine.installCaptureCallbacksForTesting()
 
         // Grace: a previous command opened the session.

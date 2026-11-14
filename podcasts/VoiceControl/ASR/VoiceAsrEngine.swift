@@ -188,7 +188,10 @@ class VoiceAsrEngine {
     /// be after the wake decision, not at the top of the method: a wake-selected turn opens its own
     /// window there, and reserving earlier would sample the preceding window's origin.
     /// Carries the tag of the connection this turn opened, so admission pins it to this utterance.
-    var onTurnAdmitted: ((_ utteranceId: String, _ origin: Int?, _ earlyConnectionTag: String?) -> Void)?
+    /// `speechEndedAt` is the utterance's acoustic end, on the monotonic clock, so the turn's
+    /// latency record can be measured from when the user stopped talking rather than from when the
+    /// client finished routing.
+    var onTurnAdmitted: ((_ utteranceId: String, _ origin: Int?, _ earlyConnectionTag: String?, _ speechEndedAt: MonotonicTime?, _ endpointDecisionAt: MonotonicTime?) -> Void)?
 
     /// Hands the router an input. It returns the ROUTER'S OWN acceptance result: a rejection (e.g.
     /// the service stopped) means nobody took ownership, so the engine keeps the turn and its
@@ -470,7 +473,7 @@ class VoiceAsrEngine {
     /// Single definition of the capture wiring, so the fault forwarding cannot exist on one path
     /// and be missing on another.
     private func wireCaptureCallbacks() {
-        segmenter.onUtterance = { [weak self] utterance, capturedAt, earlyWakeResult, earlyConnectionTag in
+        segmenter.onUtterance = { [weak self] utterance, capturedAt, earlyWakeResult, earlyConnectionTag, speechEndedAt in
             guard let self else { return }
             // Fenced as well as the notifications: an utterance emitted from a stopped session
             // is stale PCM, and suppressing only its UI event would still let that audio reach
@@ -496,6 +499,7 @@ class VoiceAsrEngine {
                     capturedAt: capturedAt,
                     frozenContext: frozen,
                     earlyWakeResult: earlyWakeResult,
+                    speechEndedAt: speechEndedAt,
                     // Travels WITH the utterance, captured before this task was launched: a later
                     // utterance's open cannot overwrite it, because it is not read from a slot.
                     earlyConnectionTag: earlyConnectionTag
@@ -740,7 +744,7 @@ class VoiceAsrEngine {
     /// sites attribute their observations to. Test-visible so a control can report against the same capture.
     private(set) var lastUtteranceContextForTesting: VoiceSharingCollector.CaptureContext?
 
-    func processUtterance(_ utterance: [Float], capturedAt: MonotonicTime? = nil, frozenContext: VoiceSharingCollector.CaptureContext? = nil, earlyWakeResult: WakeWordResult? = nil, earlyConnectionTag: String? = nil) async {
+    func processUtterance(_ utterance: [Float], capturedAt: MonotonicTime? = nil, frozenContext: VoiceSharingCollector.CaptureContext? = nil, earlyWakeResult: WakeWordResult? = nil, speechEndedAt: MonotonicTime? = nil, earlyConnectionTag: String? = nil) async {
         // The early result ARRIVED with this utterance, so it cannot belong to another by
         // construction. Every exit below simply stops using it.
         let earlyResult = earlyWakeResult
@@ -755,6 +759,12 @@ class VoiceAsrEngine {
         }
         lastUtteranceContextForTesting = utteranceContext
 
+        // The acoustic end of speech travels with the utterance: the endpoint fires a hangover
+        // later, and a latency record measured from the endpoint would report a wait shorter than
+        // the user's. The gap between the two is the capture-side hangover the turn pays before
+        // anything else happens, so it is reported as its own stage — taken HERE, the instant the
+        // endpoint admitted the utterance.
+        let endpointDecisionAt: MonotonicTime? = speechEndedAt == nil ? nil : CACurrentMediaTime()
         stageTimer.mark() // VAD segment ready
         // ONE identity from admission: the utterance is admitted HERE, so its
         // identity is minted here — not rebuilt later. Retries/duplicates that re-emit the SAME
@@ -947,7 +957,7 @@ class VoiceAsrEngine {
         // The connection this utterance opened, carried THROUGH it to both its exits: admission
         // pins it to this utterance's turn, and a drop closes exactly this one.
 
-        onTurnAdmitted?(utteranceId, admittedOrigin, turnEarlyConnectionTag)
+        onTurnAdmitted?(utteranceId, admittedOrigin, turnEarlyConnectionTag, speechEndedAt, endpointDecisionAt)
         // The reservation is owned for exactly as long as this turn is in the engine. Every exit
         // below — backend failure, wake-only, empty/non-content transcript, translation failure,
         // cancellation — passes through this defer and releases it. The routing path sets the flag

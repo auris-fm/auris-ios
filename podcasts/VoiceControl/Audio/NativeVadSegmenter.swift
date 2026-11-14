@@ -89,7 +89,11 @@ class NativeVadSegmenter {
     /// Carrying the first buffer's instant is what lets the echo filter place the segment
     /// against the emitted reference; using the completing buffer's time would shift it by
     /// the segment's own length.
-    var onUtterance: (([Float], MonotonicTime?, WakeWordResult?, String?) -> Void)?
+    /// `speechEndedAt` is the instant the utterance's last SPEECH frame was captured, derived from
+    /// the retained audio's own sample instants rather than from the processing clock: the
+    /// endpoint fires a hangover later, and the user stopped talking at the end of speech, not
+    /// when the client noticed. It is what a latency record must subtract from.
+    var onUtterance: (([Float], MonotonicTime?, WakeWordResult?, String?, MonotonicTime) -> Void)?
 
     /// Delivers the audio of an in-progress utterance once enough exists to score the wake word
     /// definitively, so detection can run while the user is still speaking.
@@ -529,7 +533,26 @@ class NativeVadSegmenter {
         // can be inherited by the next one.
         let carriedEarlyConnectionTag = earlyConnectionTagForCurrentUtterance
         earlyConnectionTagForCurrentUtterance = nil
-        onUtterance?(utterance, utteranceCapturedAt, carriedWakeResult, carriedEarlyConnectionTag)
+        onUtterance?(
+            utterance,
+            utteranceCapturedAt,
+            carriedWakeResult,
+            carriedEarlyConnectionTag,
+            speechEndedAt(sampleCount: utterance.count)
+        )
+    }
+
+    /// The instant the last speech sample of an utterance was captured.
+    ///
+    /// Derived from the utterance's own start instant plus its samples at the capture rate: the
+    /// retained audio ENDS with the last speech frame (the silent hangover is included, so the
+    /// final samples are the tail of the last speech), which makes this the acoustic end of speech
+    /// rather than the instant the endpoint decision fired. Falls back to the processing clock only
+    /// when the capture instants are unknown (a caller that supplied none), which is the one case
+    /// where no capture-domain instant exists to report.
+    private func speechEndedAt(sampleCount: Int) -> MonotonicTime {
+        guard let start = utteranceCapturedAt else { return CACurrentMediaTime() }
+        return start + Double(sampleCount) / Double(Self.captureSampleRate)
     }
 
     func reset() {

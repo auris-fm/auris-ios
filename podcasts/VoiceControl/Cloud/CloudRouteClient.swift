@@ -198,6 +198,7 @@ final class CloudRouteClient {
         // (cloud-assistant.md → Interruption): the server applies it to already-settled history
         // BEFORE assembling model input, so it must ride the auth frame rather than the turn body.
         pendingInterruptReport: CloudInterruptionState.PendingReport? = nil,
+        onRequestSent: (@Sendable (MonotonicTime) -> Void)? = nil,
         onReportAttached: (@Sendable (String) async -> Void)? = nil
     ) -> (stream: AsyncStream<CloudRouteEvent>, resultSocket: AppOperationResultSocket) {
         let socket = AppOperationResultSocket(requestId: turn.requestId)
@@ -224,6 +225,7 @@ final class CloudRouteClient {
             sourceTranscript: sourceTranscript,
             sourceLanguage: sourceLanguage,
             pendingInterruptReport: pendingInterruptReport,
+            onRequestSent: onRequestSent,
             onReportAttached: onReportAttached
         )
         return (stream, socket)
@@ -330,11 +332,12 @@ final class CloudRouteClient {
         sourceTranscript: String? = nil,
         sourceLanguage: String? = nil,
         pendingInterruptReport: CloudInterruptionState.PendingReport? = nil,
+        onRequestSent: (@Sendable (MonotonicTime) -> Void)? = nil,
         onReportAttached: (@Sendable (String) async -> Void)? = nil
     ) -> AsyncStream<CloudRouteEvent> {
         AsyncStream { continuation in
             let task = Task {
-                await self.performWebSocket(request: request, context: context, turn: turn, continuation: continuation, resultSocket: resultSocket, lifetime: lifetime, sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage, pendingInterruptReport: pendingInterruptReport, onReportAttached: onReportAttached)
+                await self.performWebSocket(request: request, context: context, turn: turn, continuation: continuation, resultSocket: resultSocket, lifetime: lifetime, sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage, pendingInterruptReport: pendingInterruptReport, onRequestSent: onRequestSent, onReportAttached: onReportAttached)
             }
             continuation.onTermination = { [lifetime] reason in
                 task.cancel()
@@ -579,6 +582,7 @@ final class CloudRouteClient {
         sourceTranscript: String?,
         sourceLanguage: String?,
         pendingInterruptReport: CloudInterruptionState.PendingReport? = nil,
+        onRequestSent: (@Sendable (MonotonicTime) -> Void)? = nil,
         onReportAttached: (@Sendable (String) async -> Void)? = nil
     ) async -> Bool {
         let playbackTiming = playbackTimingFactory(turn.requestId)
@@ -756,7 +760,11 @@ final class CloudRouteClient {
             // the wire. Logged AFTER the send returns, so a failed send is never reported as sent,
             // and before any response is awaited, so it marks our send rather than the reply.
             FileLog.shared.addMessage("[VoicePipeline] cloudRequestSent request_id=\(turn.requestId)")
-
+            // The same instant, recorded for the turn's latency measurement: a latency record must
+            // subtract THIS send, not the arrival of the server's first reply frame, which also
+            // carries admission (and possibly inference). `CACurrentMediaTime` is the clock every
+            // other instant in that record is read from.
+            onRequestSent?(CACurrentMediaTime())
             // THE REPORT IS NOW SPENT — confirmed only HERE, after the frame actually reached the
             // transport (reviewer ff00457c item 4). A URL/auth/encoding failure above throws before
             // this point, so the correction survives for the next attempt instead of being

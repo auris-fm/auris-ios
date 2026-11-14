@@ -139,7 +139,7 @@ protocol VoiceIntentExecuting: AnyObject {
     /// Early-connection lifecycle (task81). The concrete executor forwards to its cloud sink;
     /// conformers without a cloud sink do nothing, matching `cloudRouteSinkAccess`'s degrade rule.
     @MainActor func beginEarlyCloudConnection(tag: String)
-    @MainActor func claimEarlyCloudConnection(tag: String?, utteranceId: String)
+    @MainActor func claimEarlyCloudConnection(tag: String?, utteranceId: String, speechEndedAt: MonotonicTime?, endpointDecisionAt: MonotonicTime?)
     @MainActor func discardEarlyCloudConnection(tag: String, reason: String)
     @MainActor func discardEarlyCloudConnection(openedBy utteranceId: String, reason: String)
 }
@@ -152,7 +152,7 @@ extension VoiceIntentExecuting {
     @MainActor func retireRetainedDispatchesIfWindowChanged(to origin: Int?) {}
     var cloudRouteSinkAccess: CloudRouteSink? { nil }
     @MainActor func beginEarlyCloudConnection(tag: String) {}
-    @MainActor func claimEarlyCloudConnection(tag: String?, utteranceId: String) {}
+    @MainActor func claimEarlyCloudConnection(tag: String?, utteranceId: String, speechEndedAt: MonotonicTime?, endpointDecisionAt: MonotonicTime?) {}
     @MainActor func discardEarlyCloudConnection(tag: String, reason: String) {}
     @MainActor func discardEarlyCloudConnection(openedBy utteranceId: String, reason: String) {}
     /// Default bridge for conformers that have not adopted structured verdicts. CORRECTION (spec
@@ -210,7 +210,13 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
     }
 
     /// Pins the held connection to the utterance whose turn will use it, at admission.
-    @MainActor func claimEarlyCloudConnection(tag: String?, utteranceId: String) {
+    @MainActor func claimEarlyCloudConnection(tag: String?, utteranceId: String, speechEndedAt: MonotonicTime?, endpointDecisionAt: MonotonicTime?) {
+        // The acoustic end of speech travels with the claim: this is where the utterance's own
+        // identity is minted, so it is the only place both are available at once, and it precedes
+        // the dispatch the latency record is measured from.
+        (cloudRouteSink as? CloudRouteSink)?.recordEndOfSpeech(
+            speechEndedAt, endpointDecisionAt: endpointDecisionAt, for: utteranceId
+        )
         (cloudRouteSink as? CloudRouteSink)?.claimEarlyConnection(tag: tag, utteranceId: utteranceId)
     }
 

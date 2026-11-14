@@ -96,7 +96,7 @@ final class EarlyConnectionWiringControl: XCTestCase {
         let firstTag = open()
         XCTAssertNotNil(firstTag, "the first utterance must open a connection")
         await drainMain()
-        admit("utterance-local", 0, firstTag)
+        admit("utterance-local", 0, firstTag, nil, nil)
         await drainMain()
         XCTAssertEqual(sink.earlyConnectionOwnerForTesting, "utterance-local",
                        "admission must pin the connection to the utterance that owns it")
@@ -109,7 +109,7 @@ final class EarlyConnectionWiringControl: XCTestCase {
         XCTAssertNotNil(secondTag, "the next utterance must open a connection of its own")
         XCTAssertNotEqual(secondTag, firstTag, "it must not reuse the predecessor's connection")
         await drainMain()
-        admit("utterance-next", 1, secondTag)
+        admit("utterance-next", 1, secondTag, nil, nil)
         await drainMain()
         XCTAssertEqual(sink.earlyConnectionOwnerForTesting, "utterance-next")
     }
@@ -132,13 +132,13 @@ final class EarlyConnectionWiringControl: XCTestCase {
         // The predecessor opens and is admitted, then its turn dies and schedules its drop.
         let predecessorTag = open()
         await drainMain()
-        admit("utterance-predecessor", 0, predecessorTag)
+        admit("utterance-predecessor", 0, predecessorTag, nil, nil)
         await drainMain()
 
         // Before that drop runs, the successor opens and is admitted.
         let successorTag = open()
         await drainMain()
-        admit("utterance-successor", 1, successorTag)
+        admit("utterance-successor", 1, successorTag, nil, nil)
         await drainMain()
         XCTAssertEqual(sink.earlyConnectionOwnerForTesting, "utterance-successor")
 
@@ -172,7 +172,7 @@ final class EarlyConnectionWiringControl: XCTestCase {
         // The predecessor opens and owns the connection.
         let predecessorTag = try XCTUnwrap(open())
         await drainMain()
-        admit("utterance-predecessor", 0, predecessorTag)
+        admit("utterance-predecessor", 0, predecessorTag, nil, nil)
         await drainMain()
         XCTAssertEqual(sink.earlyConnectionOwnerForTesting, "utterance-predecessor")
 

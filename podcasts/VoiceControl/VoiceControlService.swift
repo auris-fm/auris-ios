@@ -832,14 +832,17 @@ class VoiceControlService: ObservableObject {
         // backend wait, so a slow (cold-start) recognition cannot let the deadline retire it
         // (spec voice-control-core.md:270). Recorded against the turn's own id, and released on
         // its terminal outcome below, so eligibility lasts exactly as long as the work is live.
-        asrEngine.onTurnAdmitted = { [weak self] utteranceId, origin, earlyConnectionTag in
+        asrEngine.onTurnAdmitted = { [weak self] utteranceId, origin, earlyConnectionTag, speechEndedAt, endpointDecisionAt in
             self?.gracePeriodSignal.admitInFlightTurn(utteranceId: utteranceId, origin: origin)
             // Pin the connection to this utterance at the first instant its identity exists, so
             // this turn's cloud route may take it and any other utterance is refused it. A real
             // hop: this runs on whatever thread the engine's task is on.
             guard let self, let tag = earlyConnectionTag else { return }
             DispatchQueue.main.async {
-                self.executor.claimEarlyCloudConnection(tag: tag, utteranceId: utteranceId)
+                self.executor.claimEarlyCloudConnection(
+                    tag: tag, utteranceId: utteranceId,
+                    speechEndedAt: speechEndedAt, endpointDecisionAt: endpointDecisionAt
+                )
             }
         }
         // A turn that leaves the engine without reaching routing (backend failure, wake-only,

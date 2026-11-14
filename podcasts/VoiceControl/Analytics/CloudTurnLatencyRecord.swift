@@ -27,10 +27,22 @@ final class CloudTurnLatencyRecord: Equatable {
     /// spoken utterance (a typed request, an acceptance run): the record then still reports the
     /// request-to-audible part rather than inventing a start.
     let endOfSpeech: Double?
+    /// The instant the endpoint decision fired, which follows the acoustic end of speech by the
+    /// configured hangover. Reported as its own stage: that gap is real wait the user pays before
+    /// recognition even starts.
+    let endpointDecision: Double?
 
-    init(requestId: String, endOfSpeech: Double?) {
+    init(requestId: String, endOfSpeech: Double?, endpointDecision: Double? = nil) {
         self.requestId = requestId
         self.endOfSpeech = endOfSpeech
+        self.endpointDecision = endpointDecision
+    }
+
+    /// Milliseconds of capture-side hangover between the last speech sample and the endpoint
+    /// decision, when both instants are known.
+    var endpointMs: Double? {
+        guard let endOfSpeech, let endpointDecision, endpointDecision >= endOfSpeech else { return nil }
+        return (endpointDecision - endOfSpeech) * 1000
     }
 
     /// Milliseconds from the end of speech to the request going out, when both are known.
@@ -57,6 +69,7 @@ final class CloudTurnLatencyRecord: Equatable {
     /// not audio was ever heard: a turn that produced no audio is the interesting case, and a
     /// missing line would be indistinguishable from a turn that never ran.
     func logLine(requestSent: Double?, firstAudible: Double?, outcome: String) -> String {
+        let endpointMs = self.endpointMs
         let ms: (Double?) -> String = { $0.map { String(format: "%.0fms", $0) } ?? "none" }
         let toRequest = requestSent.flatMap { endOfSpeechToRequestMs(requestSent: $0) }
         let requestToAudible = requestSent.flatMap { sent in
@@ -66,6 +79,11 @@ final class CloudTurnLatencyRecord: Equatable {
         var parts = [
             "request_id=\(requestId)",
             "outcome=\(outcome)",
+            // The client's own share, split so a slow turn can be attributed: `endpoint` is the
+            // capture-side hangover between the last speech sample and the endpoint decision,
+            // `to_request` everything from there to the send (recognition plus routing).
+            "endpoint_ms=\(ms(endpointMs))",
+            "endpoint_to_request=\(ms(toRequest.flatMap { total in endpointMs.map { max(0, total - $0) } }))",
             "end_of_speech_to_request=\(ms(toRequest))",
             "request_to_first_audible=\(ms(requestToAudible))",
             "end_of_speech_to_first_audible=\(ms(toAudible))",
