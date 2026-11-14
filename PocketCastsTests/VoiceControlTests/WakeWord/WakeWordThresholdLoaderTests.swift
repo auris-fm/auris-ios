@@ -142,7 +142,15 @@ final class WakeWordThresholdLoaderTests: XCTestCase {
             "a string is not a millisecond count")
         XCTAssertNil(
             WakeWordThresholdLoader.wakeOnlyMarginMs(fromManifestJSON: ["wake_only_margin_ms": 80.5]),
-            "a fractional margin is not what the model publishes")
+            "a fractional margin is not a millisecond count")
+        // A whole-valued float is ACCEPTED, and that is deliberate rather than an oversight: JSON
+        // does not distinguish `80` from `80.0` once parsed, both mean eighty milliseconds, and
+        // rejecting the second would fail a manifest for how it was written rather than for what
+        // it says. Only a value with a real fractional part is wrong.
+        XCTAssertEqual(
+            WakeWordThresholdLoader.wakeOnlyMarginMs(fromManifestJSON: ["wake_only_margin_ms": 80.0]),
+            80,
+            "a whole-valued float is still eighty milliseconds")
         // A JSON boolean bridges to NSNumber, where true is 1.0 — integral and non-negative — so
         // the numeric checks alone accept it and the rule runs with a 1 ms boundary. Nothing that
         // is not a NUMBER may reach the rule, however it happens to coerce.

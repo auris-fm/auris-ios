@@ -23,11 +23,16 @@ enum WakeWordThresholdLoader {
         var wakeOnlyMarginMs: Int? = nil
     }
 
-    /// Reads `wake_only_margin_ms` if, and only if, it is a non-negative integer.
+    /// Reads `wake_only_margin_ms` if, and only if, it is a non-negative NUMBER with no fractional
+    /// part.
     ///
-    /// Anything else — absent, a string, a float, negative — is treated as "no margin", which
-    /// leaves the audio rule off and routing unchanged. Reading it strictly matters: a silently
-    /// coerced `-1` would invert the rule and drop ordinary commands.
+    /// Anything else — absent, a string, a boolean, a value with a fractional part, negative — is
+    /// treated as "no margin", which leaves the audio rule off and routing unchanged. Reading it
+    /// strictly matters: a silently coerced `-1` would invert the rule and drop ordinary commands.
+    ///
+    /// A WHOLE-VALUED float is accepted: JSON does not preserve the difference between `80` and
+    /// `80.0` through `JSONSerialization`, both mean eighty milliseconds, and rejecting the second
+    /// would fail a manifest over how it was written rather than what it says.
     static func wakeOnlyMarginMs(fromManifestJSON json: [String: Any]) -> Int? {
         guard let value = json["wake_only_margin_ms"] else { return nil }
         // TYPE FIRST, value second. A JSON boolean also bridges to NSNumber, where `true` reads as
@@ -36,8 +41,8 @@ enum WakeWordThresholdLoader {
         // number is the only way to tell the two apart after bridging.
         guard CFGetTypeID(value as CFTypeRef) == CFNumberGetTypeID() else { return nil }
         let number = value as! NSNumber
-        // A JSON float ("80.5") is a Double bridging to NSNumber; comparing against the double
-        // rejects it, so an obviously wrong type cannot masquerade as a valid milliseconds value.
+        // Measured in whole milliseconds, so a fractional value is not a count. A whole-valued
+        // float survives this: it says the same thing `80` does, and JSON loses the distinction.
         guard number.doubleValue == number.doubleValue.rounded() else { return nil }
         let milliseconds = number.intValue
         return milliseconds >= 0 ? milliseconds : nil
