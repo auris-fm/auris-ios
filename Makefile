@@ -9,10 +9,22 @@ FASTLANE=$(LANG_VAR) $(BUNDLE) exec fastlane
 # Explicit --config prevents SwiftLint from picking up nested configs in
 # BuildTools/.build/checkouts/ (e.g., SwiftGenPlugin's .swiftlint.yml).
 SWIFTLINT_FROM_BUILDTOOLS=swiftlint lint --working-directory .. --config .swiftlint.yml --quiet
-# Parse the human-readable output of simctl
-SIMULATOR_NAME = $(shell xcrun simctl list devices available \
-	| grep "iPhone" \
-	| tail -1 | sed 's/^[[:space:]]*//' | sed 's/ *(.*) *$$//')
+# Tests run on a DEDICATED simulator, never a hand-picked device.
+#
+# This used to be "the last iPhone simctl lists", which is arbitrary ordering rather than a
+# choice: a suite started here could boot and install over `auris-manual`, the signed-in device
+# used for manual checks, wiping its account and its data. That is exactly what happened, and
+# re-signing in needs a human. Tests also do not belong on a device a person is using, since a
+# suite leaves its own fixtures behind.
+#
+# Override on the command line for a one-off (`make test SIMULATOR_NAME="iPhone 17"`); do not
+# change the default to a personal device.
+SIMULATOR_NAME ?= auris-tests
+
+# The device a PERSON looks at, used only by `launch_mac`. Deliberately a different variable from
+# `SIMULATOR_NAME`: pointing the manual-check launcher at the test sim would install a build onto
+# a device a suite is using, and pointing tests at this device is what wiped its account.
+MANUAL_SIMULATOR_NAME ?= auris-manual
 
 # Never build the x86_64 simulator slice on Apple Silicon. A `generic/platform=iOS Simulator`
 # destination has no active arch, so ONLY_ACTIVE_ARCH cannot narrow ARCHS: every source is
@@ -151,9 +163,11 @@ launch_mac: build_mac ## Builds and launches in iOS Simulator for log stream
 	if [ -d podcasts/VoiceControl/Resources/earcons ]; then \
 		mkdir -p "$$APP/earcons" && cp podcasts/VoiceControl/Resources/earcons/*.wav "$$APP/earcons/"; \
 	fi; \
-	xcrun simctl boot "$(SIMULATOR_NAME)" 2>/dev/null; \
-	xcrun simctl install booted "$$APP" && \
-	xcrun simctl launch booted fm.auris
+	xcrun simctl boot "$(MANUAL_SIMULATOR_NAME)" 2>/dev/null; \
+	SIM_ID="$$(xcrun simctl list devices available | sed -n 's/.*$(MANUAL_SIMULATOR_NAME) (\([0-9A-F-]*\)).*/\1/p' | head -1)"; \
+	if [ -z "$$SIM_ID" ]; then echo "error: no simulator named $(MANUAL_SIMULATOR_NAME)"; exit 1; fi; \
+	xcrun simctl install "$$SIM_ID" "$$APP" && \
+	xcrun simctl launch "$$SIM_ID" fm.auris
 
 debug: launch_mac ## Builds, launches, and streams VoicePipeline app logs
 	log stream --predicate 'subsystem == "com.pocketcasts" AND category == "VoicePipeline"' --level debug --style compact
