@@ -99,7 +99,7 @@ final class VoiceSharingCollectorSegmenterHookTests: XCTestCase {
         var cancellations = 0
         var emissions = 0
         segmenter.onSpeechCancelled = { cancellations += 1 }
-        segmenter.onUtterance = { _, _ in emissions += 1 }
+        segmenter.onUtterance = { _ in emissions += 1 }
 
         segmenter.reset()
         XCTAssertEqual(cancellations, 0, "reset with nothing open is not a cancellation")
@@ -123,12 +123,12 @@ final class VoiceSharingCollectorSegmenterHookTests: XCTestCase {
     func test_hooks_areObserveOnly_recognitionAudioUnchanged() {
         let plain = NativeVadSegmenter(threshold: 0.5, silenceTimeoutMs: -1, minSpeechFrames: 2)
         var baseline: [[Float]] = []
-        plain.onUtterance = { samples, _ in baseline.append(samples) }
+        plain.onUtterance = { samples in baseline.append(samples.samples) }
         plain.process(speech); plain.process(speech); plain.process(silence)
 
         let instrumented = NativeVadSegmenter(threshold: 0.5, silenceTimeoutMs: -1, minSpeechFrames: 2)
         var observed: [[Float]] = []
-        instrumented.onUtterance = { samples, _ in observed.append(samples) }
+        instrumented.onUtterance = { samples in observed.append(samples.samples) }
         instrumented.onSpeechStarted = { _ in }
         instrumented.onSpeechAccumulated = { _, _ in }
         instrumented.onSpeechCancelled = { }
@@ -193,7 +193,7 @@ final class VoiceSharingCollectorSegmenterHookTests: XCTestCase {
             delivered.replayInto(collector)
 
             var utterance: [Float] = []
-            segmenter.onUtterance = { samples, _ in utterance = samples }
+            segmenter.onUtterance = { utterance = $0.samples }
             segmenter.process([Float](repeating: 0.001, count: 320))
             collector.speechCompleted(utterance, context: ctx)
 

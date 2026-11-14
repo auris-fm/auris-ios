@@ -428,10 +428,11 @@ class VoiceAsrEngine {
     /// Single definition of the capture wiring, so the fault forwarding cannot exist on one path
     /// and be missing on another.
     private func wireCaptureCallbacks() {
-        segmenter.onUtterance = { [weak self] utterance, capturedAt in
-            // Captured synchronously with the utterance it belongs to: a later one must not be
-            // measured against this segment's speech end.
-            let speechEndSample = self?.segmenter.lastUtteranceSpeechEndSample
+        // The capture arrives whole, so every field below describes the SAME utterance.
+        segmenter.onUtterance = { [weak self] captured in
+            let utterance = captured.samples
+            let capturedAt = captured.capturedAt
+            let speechEndSample = captured.speechEndSample
             guard let self else { return }
             // Fenced as well as the notifications: an utterance emitted from a stopped session
             // is stale PCM, and suppressing only its UI event would still let that audio reach

@@ -65,23 +65,29 @@ class NativeVadSegmenter {
     /// make up one utterance.
     private var utteranceCapturedAt: MonotonicTime?
 
-    /// Delivers the completed utterance with the instant its **first retained sample** was
-    /// captured.
+    /// Delivers the completed utterance — samples, start instant and speech end — as ONE value.
     ///
-    /// Preserved through buffering: the segmenter appends several tap buffers before it
-    /// emits, so the utterance's start is not the start of the buffer that completed it.
-    /// Carrying the first buffer's instant is what lets the echo filter place the segment
-    /// against the emitted reference; using the completing buffer's time would shift it by
-    /// the segment's own length.
-    var onUtterance: (([Float], MonotonicTime?) -> Void)?
-    /// The sample index where speech actually stopped in the utterance just emitted, excluding
-    /// the hangover — the buffer length at the FIRST silent frame of the run that closed it.
-    ///
-    /// Read by the observer of the matching `onUtterance` call, which is why it is published
-    /// immediately before it. A separate callback rather than a third `onUtterance` parameter:
-    /// only the wake-only rule needs this, so widening the utterance contract every existing
-    /// observer already implements would be cost without use.
-    private(set) var lastUtteranceSpeechEndSample: Int?
+    /// A single carrier on purpose: read from segmenter state instead, the speech end could be
+    /// overwritten by a later utterance before this one's observer ran, which is exactly how a
+    /// per-utterance side table leaked three times over in the latency work. Here the value
+    /// cannot belong to a different utterance, because it IS the utterance.
+    var onUtterance: ((CapturedUtterance) -> Void)?
+
+    /// Everything one completed utterance carries.
+    struct CapturedUtterance {
+        let samples: [Float]
+        /// Capture instant of the utterance's **first retained sample**, preserved through
+        /// buffering: the segmenter appends several tap buffers before it emits, so the
+        /// utterance's start is not the start of the buffer that completed it. Carrying the first
+        /// buffer's instant is what lets the echo filter place the segment against the emitted
+        /// reference; using the completing buffer's time would shift it by the segment's own length.
+        let capturedAt: MonotonicTime?
+        /// The sample index where speech actually stopped, excluding the hangover: the buffer
+        /// length at the FIRST silent frame of the run that closed the segment.
+        ///
+        /// `nil` when the capture ended on speech, so nothing is known about where speech stopped.
+        let speechEndSample: Int?
+    }
 
     /// Called when continuously-classified speech reaches the supported duration ceiling.
     ///
@@ -421,8 +427,11 @@ class NativeVadSegmenter {
         silenceStart = nil
         silenceStartSampleCount = nil
         speechFrameCount = 0
-        lastUtteranceSpeechEndSample = speechEndSample
-        onUtterance?(utterance, utteranceCapturedAt)
+        onUtterance?(CapturedUtterance(
+            samples: utterance,
+            capturedAt: utteranceCapturedAt,
+            speechEndSample: speechEndSample
+        ))
     }
 
     func reset() {
