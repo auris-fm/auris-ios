@@ -103,7 +103,6 @@ final class CloudPlaybackTiming: Equatable {
         record(stage, at: clock(), receipt: receipt, terminal: terminal, state: state)
     }
 
-
     /// One transport summary even when no player ever receives a frame. This does not end
     /// playback observation: server completion can precede the last audible sample.
     func receiverEnded() {

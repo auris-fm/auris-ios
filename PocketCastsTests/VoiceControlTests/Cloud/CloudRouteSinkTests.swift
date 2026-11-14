@@ -129,6 +129,75 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertTrue(failed.contains("first_audible=absent"), failed)
     }
 
+    /// A turn with NO early-connection tag still reports its end of speech.
+    ///
+    /// The tag exists only when a pause pre-opened a connection, which most turns never do. While
+    /// the end of speech was recorded behind the tag check, every one of those turns measured
+    /// `end_of_speech_to_* = none` — the measurement silently absent for the majority case.
+    @MainActor
+    func test_aTurnWithoutAnEarlyConnectionStillReportsItsEndOfSpeech() async throws {
+        let utteranceId = "u-\(UUID().uuidString.prefix(8))-notag"
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let sink = makeSink()
+        // Recorded the way admission does it, with no tag in play at all.
+        sink.recordEndOfSpeech(5_000.0, endpointDecisionAt: 5_000.2, for: utteranceId)
+        _ = await sink.routeToCloud(
+            request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: utteranceId)
+
+        let log = await FileLog.shared.logFileAsString()
+        let line = try XCTUnwrap(
+            log.split(separator: "\n")
+                .first { $0.contains("cloudTurnLatency") && $0.contains(utteranceId) }
+                .map(String.init),
+            log
+        )
+        XCTAssertFalse(line.contains("end_of_speech_to_request=none"),
+                       "a turn with no pre-opened connection still knows when speech ended: \(line)")
+        XCTAssertTrue(line.contains("endpoint_ms=200ms"), line)
+    }
+
+    /// A turn that ended locally leaves nothing behind: a later turn reusing that identity reports
+    /// ITS own end of speech, not the dropped one.
+    ///
+    /// The discard is what keeps the map from growing for the life of the process, and the only
+    /// honest way to observe it from outside is that the next record is not shadowed by the stale
+    /// one — `recordEndOfSpeech` keeps the FIRST value per id, so a survivor would make this wrong.
+    @MainActor
+    func test_aLocallyHandledTurnDoesNotShadowTheNextTurnWithTheSameIdentity() async throws {
+        let utteranceId = "u-\(UUID().uuidString.prefix(8))-local"
+        let sink = makeSink()
+        // The turn that is handled locally: recorded, then dropped when it ends without the cloud.
+        sink.recordEndOfSpeech(9_000.0, endpointDecisionAt: 9_000.1, for: utteranceId)
+        sink.discardEndOfSpeech(for: utteranceId)
+
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        sink.recordEndOfSpeech(9_500.0, endpointDecisionAt: 9_500.1, for: utteranceId)
+        _ = await sink.routeToCloud(
+            request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: utteranceId)
+
+        let log = await FileLog.shared.logFileAsString()
+        let line = try XCTUnwrap(
+            log.split(separator: "\n")
+                .first { $0.contains("cloudTurnLatency") && $0.contains(utteranceId) }
+                .map(String.init),
+            log
+        )
+        XCTAssertTrue(line.contains("endpoint_ms=100ms"),
+                      "the recorded instant is the surviving one, not the dropped turn's: \(line)")
+    }
+
     /// A dispatched spoken turn reports a real end of speech, not `none`: the instant travels from
     /// admission under the utterance's own identity, so the key used to consume it must be the same
     /// one it was stored under. A key mismatch would leak the entry and silently report `none`.

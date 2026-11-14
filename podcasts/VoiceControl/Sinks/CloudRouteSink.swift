@@ -137,6 +137,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         endpointDecisionByUtterance[utteranceId] = endpointDecisionAt
     }
 
+    /// Drops the instants recorded for `utteranceId`. Called when the turn ended without a cloud
+    /// terminal — the case of every locally handled command — so those entries do not accumulate.
+    func discardEndOfSpeech(for utteranceId: String) {
+        endOfSpeechByUtterance.removeValue(forKey: utteranceId)
+        endpointDecisionByUtterance.removeValue(forKey: utteranceId)
+    }
+
     /// The PRODUCTION client factory, extracted so the assembly reuses it VERBATIM and the test seam
     /// substitutes it. Production is unchanged: the default is this same factory.
     nonisolated static func productionClientFactory() -> () -> CloudRouteClient {

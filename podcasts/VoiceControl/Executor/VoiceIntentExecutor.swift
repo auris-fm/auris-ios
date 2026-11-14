@@ -139,7 +139,14 @@ protocol VoiceIntentExecuting: AnyObject {
     /// Early-connection lifecycle (task81). The concrete executor forwards to its cloud sink;
     /// conformers without a cloud sink do nothing, matching `cloudRouteSinkAccess`'s degrade rule.
     @MainActor func beginEarlyCloudConnection(tag: String)
-    @MainActor func claimEarlyCloudConnection(tag: String?, utteranceId: String, speechEndedAt: MonotonicTime?, endpointDecisionAt: MonotonicTime?)
+    /// Records when the user stopped talking for `utteranceId`, at admission. Separate from the
+    /// connection claim because it applies to EVERY spoken turn, while a connection exists for
+    /// only some of them.
+    @MainActor func recordTurnEndOfSpeech(utteranceId: String, speechEndedAt: MonotonicTime?, endpointDecisionAt: MonotonicTime?)
+    /// Drops the end of speech recorded for a turn that ended without reaching the cloud, so a
+    /// locally handled command cannot leave its instant behind forever.
+    @MainActor func discardTurnEndOfSpeech(utteranceId: String)
+    @MainActor func claimEarlyCloudConnection(tag: String?, utteranceId: String)
     @MainActor func discardEarlyCloudConnection(tag: String, reason: String)
     @MainActor func discardEarlyCloudConnection(openedBy utteranceId: String, reason: String)
 }
@@ -152,7 +159,10 @@ extension VoiceIntentExecuting {
     @MainActor func retireRetainedDispatchesIfWindowChanged(to origin: Int?) {}
     var cloudRouteSinkAccess: CloudRouteSink? { nil }
     @MainActor func beginEarlyCloudConnection(tag: String) {}
-    @MainActor func claimEarlyCloudConnection(tag: String?, utteranceId: String, speechEndedAt: MonotonicTime?, endpointDecisionAt: MonotonicTime?) {}
+    /// Default: a conformer without a cloud sink has nowhere to record it.
+    @MainActor func recordTurnEndOfSpeech(utteranceId: String, speechEndedAt: MonotonicTime?, endpointDecisionAt: MonotonicTime?) {}
+    @MainActor func discardTurnEndOfSpeech(utteranceId: String) {}
+    @MainActor func claimEarlyCloudConnection(tag: String?, utteranceId: String) {}
     @MainActor func discardEarlyCloudConnection(tag: String, reason: String) {}
     @MainActor func discardEarlyCloudConnection(openedBy utteranceId: String, reason: String) {}
     /// Default bridge for conformers that have not adopted structured verdicts. CORRECTION (spec
@@ -209,14 +219,22 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
         (cloudRouteSink as? CloudRouteSink)?.beginEarlyConnection(tag: tag)
     }
 
-    /// Pins the held connection to the utterance whose turn will use it, at admission.
-    @MainActor func claimEarlyCloudConnection(tag: String?, utteranceId: String, speechEndedAt: MonotonicTime?, endpointDecisionAt: MonotonicTime?) {
-        // The acoustic end of speech travels with the claim: this is where the utterance's own
-        // identity is minted, so it is the only place both are available at once, and it precedes
-        // the dispatch the latency record is measured from.
+    /// Records when the user stopped talking for `utteranceId`. Deliberately NOT folded into the
+    /// connection claim below: that claim only happens when a pause pre-opened a connection, while
+    /// the end of speech is a property of every spoken turn.
+    @MainActor func recordTurnEndOfSpeech(utteranceId: String, speechEndedAt: MonotonicTime?, endpointDecisionAt: MonotonicTime?) {
         (cloudRouteSink as? CloudRouteSink)?.recordEndOfSpeech(
             speechEndedAt, endpointDecisionAt: endpointDecisionAt, for: utteranceId
         )
+    }
+
+    /// Drops the instants of a turn that ended without a cloud terminal.
+    @MainActor func discardTurnEndOfSpeech(utteranceId: String) {
+        (cloudRouteSink as? CloudRouteSink)?.discardEndOfSpeech(for: utteranceId)
+    }
+
+    /// Pins the held connection to the utterance whose turn will use it, at admission.
+    @MainActor func claimEarlyCloudConnection(tag: String?, utteranceId: String) {
         (cloudRouteSink as? CloudRouteSink)?.claimEarlyConnection(tag: tag, utteranceId: utteranceId)
     }
 

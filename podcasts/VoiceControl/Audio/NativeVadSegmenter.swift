@@ -18,6 +18,14 @@ class NativeVadSegmenter {
     private var buffer: [Float] = []
     private var speechActive = false
     private var silenceStart: Date?
+    /// The number of retained samples at the instant the current silence run opened — the
+    /// capture-domain twin of `silenceStart`.
+    ///
+    /// The retained buffer INCLUDES the hangover (every silent frame is appended), so its total
+    /// length marks the end of the hangover, not the end of speech. The sample count at the first
+    /// silent frame is the acoustic end of speech; without it a latency figure measured from the
+    /// buffer's end would be short by the whole `silenceTimeoutMs`.
+    private var silenceStartSampleCount: Int?
 
     /// Whether the early wake-scoring prefix has already been emitted for this utterance.
     private var wakeScorablePrefixEmitted = false
@@ -311,6 +319,7 @@ class NativeVadSegmenter {
                 // one elapsed time and clear the fault from inside a still-speaking request —
                 // rearm through the back door, which is what this state exists to prevent.
                 silenceStart = nil
+                silenceStartSampleCount = nil
                 return
             }
             if buffer.isEmpty { utteranceCapturedAt = capturedAt }
@@ -346,6 +355,7 @@ class NativeVadSegmenter {
                 }
             }
             silenceStart = nil
+            silenceStartSampleCount = nil
             if checkRetainedCeiling() { return }
             emitWakeScorablePrefixIfReady()
         } else if speechActive || isStuckActive {
@@ -370,6 +380,10 @@ class NativeVadSegmenter {
             }
             // While stuck-active nothing accumulates: the audio is discarded, not dispatched.
             if !isStuckActive {
+                // Taken BEFORE this frame joins the buffer: the first silent frame marks where the
+                // speech run ended, and that index is what the acoustic end of speech is read from.
+                // The retained buffer keeps growing past it with the rest of the hangover.
+                if silenceStartSampleCount == nil { silenceStartSampleCount = buffer.count }
                 buffer.append(contentsOf: samples)
                 // Hangover frames are retained audio and count toward the ceiling. Checking only
                 // on positive classification would let a long hangover cross the bound and then
@@ -401,6 +415,7 @@ class NativeVadSegmenter {
             // command, so it is held as pre-roll and prepended on confirmation.
             speechFrameCount = 0
             silenceStart = nil
+            silenceStartSampleCount = nil
             appendPreRoll(samples, capturedAt: capturedAt)
         } else {
             // Active utterance: a sub-threshold frame is part of the utterance (silence inside
@@ -444,6 +459,7 @@ class NativeVadSegmenter {
         utteranceCapturedAt = nil
         speechFrameCount = 0
         silenceStart = nil
+        silenceStartSampleCount = nil
         onStuckActiveFault?(StuckActiveFault(discardedSamples: discarded, elapsedMs: elapsedMs))
         return true
     }
@@ -510,6 +526,9 @@ class NativeVadSegmenter {
         FileLog.shared.addMessage(
             "[VoicePipeline] vad ~\(durationMs)ms (\(utterance.count) samples) silenceDwell=\(dwellMs.map { "\($0)" } ?? "?")ms hangoverLimit=\(silenceTimeoutMs)ms endpointDecision"
         )
+        // Read BEFORE the clears below, which drop the silence run this utterance ended on. The
+        // acoustic end of speech is only recoverable from that run's opening sample count.
+        let endedAt = speechEndedAt(sampleCount: utterance.count)
         // A windowed classifier carries state across frames; clearing it here keeps the next
         // utterance from being biased by the one that just closed.
         speechClassifier.reset()
@@ -519,6 +538,7 @@ class NativeVadSegmenter {
         buffer.removeAll()
         speechActive = false
         silenceStart = nil
+        silenceStartSampleCount = nil
         speechFrameCount = 0
         // The next utterance scores early again. Without this only the first command in a session
         // would ever get an early wake result, and every later one would silently fall back to
@@ -538,21 +558,24 @@ class NativeVadSegmenter {
             utteranceCapturedAt,
             carriedWakeResult,
             carriedEarlyConnectionTag,
-            speechEndedAt(sampleCount: utterance.count)
+            endedAt
         )
     }
 
-    /// The instant the last speech sample of an utterance was captured.
+    /// The instant the last SPEECH sample of the utterance was captured.
     ///
-    /// Derived from the utterance's own start instant plus its samples at the capture rate: the
-    /// retained audio ENDS with the last speech frame (the silent hangover is included, so the
-    /// final samples are the tail of the last speech), which makes this the acoustic end of speech
-    /// rather than the instant the endpoint decision fired. Falls back to the processing clock only
-    /// when the capture instants are unknown (a caller that supplied none), which is the one case
-    /// where no capture-domain instant exists to report.
+    /// The retained buffer includes the trailing hangover — every silent frame is appended so the
+    /// endpoint can decide on it — so its TOTAL length would place this instant `silenceTimeoutMs`
+    /// after the user actually stopped. The speech sub-run is what precedes the final silence run,
+    /// whose opening sample count is recorded with `silenceStart`; speech samples end there. That
+    /// difference is the acoustic end of speech, and it is what a latency figure must subtract from.
+    ///
+    /// Falls back to the processing clock only when the capture instants are unknown (a caller that
+    /// supplied none), the one case where no capture-domain instant exists to report.
     private func speechEndedAt(sampleCount: Int) -> MonotonicTime {
         guard let start = utteranceCapturedAt else { return CACurrentMediaTime() }
-        return start + Double(sampleCount) / Double(Self.captureSampleRate)
+        let speechSamples = silenceStartSampleCount.map { min($0, sampleCount) } ?? sampleCount
+        return start + Double(speechSamples) / Double(Self.captureSampleRate)
     }
 
     func reset() {
@@ -570,6 +593,7 @@ class NativeVadSegmenter {
         utteranceCapturedAt = nil
         speechActive = false
         silenceStart = nil
+        silenceStartSampleCount = nil
         speechFrameCount = 0
         if wasActive { onSpeechCancelled?() }
     }

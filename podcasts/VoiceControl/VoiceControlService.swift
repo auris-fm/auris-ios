@@ -833,24 +833,42 @@ class VoiceControlService: ObservableObject {
         // (spec voice-control-core.md:270). Recorded against the turn's own id, and released on
         // its terminal outcome below, so eligibility lasts exactly as long as the work is live.
         asrEngine.onTurnAdmitted = { [weak self] utteranceId, origin, earlyConnectionTag, speechEndedAt, endpointDecisionAt in
-            self?.gracePeriodSignal.admitInFlightTurn(utteranceId: utteranceId, origin: origin)
+            guard let self else { return }
+            self.gracePeriodSignal.admitInFlightTurn(utteranceId: utteranceId, origin: origin)
+            // RECORDED BEFORE the connection check, because when the user stopped talking is a
+            // property of the UTTERANCE, not of whether a connection happened to be pre-opened.
+            // Most turns have no tag (the connection opens only on a pause), and recording it
+            // behind the tag guard left every one of them reporting no end of speech — the exact
+            // number this measurement exists to produce.
+            DispatchQueue.main.async {
+                self.executor.recordTurnEndOfSpeech(
+                    utteranceId: utteranceId,
+                    speechEndedAt: speechEndedAt,
+                    endpointDecisionAt: endpointDecisionAt
+                )
+            }
             // Pin the connection to this utterance at the first instant its identity exists, so
             // this turn's cloud route may take it and any other utterance is refused it. A real
             // hop: this runs on whatever thread the engine's task is on.
-            guard let self, let tag = earlyConnectionTag else { return }
+            guard let tag = earlyConnectionTag else { return }
             DispatchQueue.main.async {
-                self.executor.claimEarlyCloudConnection(
-                    tag: tag, utteranceId: utteranceId,
-                    speechEndedAt: speechEndedAt, endpointDecisionAt: endpointDecisionAt
-                )
+                self.executor.claimEarlyCloudConnection(tag: tag, utteranceId: utteranceId)
             }
         }
         // A turn that leaves the engine without reaching routing (backend failure, wake-only,
         // empty/non-content transcript, translation failure, cancellation) releases its own
         // reservation here, so it cannot leak for the life of the process.
         asrEngine.onTurnReleased = { [weak self] utteranceId, earlyConnectionTag in
-            self?.gracePeriodSignal.releaseInFlightTurn(utteranceId: utteranceId)
-            guard let self, let tag = earlyConnectionTag else { return }
+            guard let self else { return }
+            self.gracePeriodSignal.releaseInFlightTurn(utteranceId: utteranceId)
+            // The turn is over without a cloud terminal, so nothing will consume the end of
+            // speech it recorded. Dropped HERE, at the same release the in-flight registry uses:
+            // most turns are handled locally, and leaving their entries behind would grow the
+            // dictionary for the life of the process.
+            DispatchQueue.main.async {
+                self.executor.discardTurnEndOfSpeech(utteranceId: utteranceId)
+            }
+            guard let tag = earlyConnectionTag else { return }
             // The turn left the engine without reaching routing, so the connection it opened will
             // never be used. Close it — fenced by the tag it carries, so a drop that arrives after
             // a successor opened leaves the successor's socket alone.
