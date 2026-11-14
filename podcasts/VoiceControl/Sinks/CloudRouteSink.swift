@@ -50,11 +50,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// must be too. A test awaits it through `MainActor.run`.
     var activeTurnIsCancelledForTesting: Bool? { activeTurn?.isCancelled }
 
-    /// Whether the live turn has closed its effects. Lets a control prove that a REAL barge-in
-    /// (service -> `emitEagerBargeInIfNeeded` -> `emitBargeIn`) closes them, not just the
-    /// `routeToCloud` branch that happened to call it first.
-    @MainActor var activeTurnEffectsClosedForTesting: Bool? { activeTurn?.effectsClosed }
-
     /// Whether an interruption report awaits a later EXPLICIT user request. A refusal retains the
     /// report but submits nothing, so the turn ends locally and there is no successor frame to
     /// observe it on (reviewer c38ff4ba item 2).
@@ -1257,10 +1252,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // interrupt is out, nothing of this turn reaches the user except its
                     // terminal, which is what releases the successor.
                     //
-                    // `break turnLoop` — not `continue` — because unlike an action, audio owes
-                    // nothing downstream, and continuing to drain frames only to drop them keeps
-                    // the abandoned turn holding the player.
-                    if turnToken.effectsClosed { break turnLoop }
+                    // `continue`, NOT `break`. A late `.audioFrame` is the NORMAL case: right
+                    // after the interrupt the server is still flushing audio it had already
+                    // produced. Breaking here would stop this turn reading the terminal that
+                    // releases the successor's held follow-up, so the successor would never get
+                    // its acknowledgement and the turn would end as earlyClose as if the
+                    // connection had failed. The frame is dropped and the loop keeps draining.
+                    if turnToken.effectsClosed { continue }
                     audioPlayer.enqueue(frame)
                 case let .action(tool, action, params, operationId, capabilityVersion):
                     // BUFFERED admission check: an event drained from the buffer after the owner
@@ -1909,24 +1907,28 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     private func sendInterruptOnPriorSocket(
         forRequestId priorRequestId: String
     ) async -> CloudRouteClient.AppOperationResultSendReport? {
-        guard let priorSocket = activeResultSocket, let client = resultSendClient else {
-            // No transport to interrupt: no acknowledgement can come, so nothing may stay held.
-            interruptionState.releaseUnsentHold(forRequestId: priorRequestId)
-            return .undelivered
-        }
-        // EFFECTS CLOSE HERE, AT THE SEND, and here is the ONE place every interrupt goes through.
-        // Closing at any caller would leave every path that caller did not know about uncovered —
-        // which is exactly how this fix first shipped: it closed effects only in `routeToCloud`'s
-        // interrupt branch, so a real barge-in (service -> `emitEagerBargeInIfNeeded` ->
-        // `emitBargeIn` -> this function) sent its interrupt with effects still open and the
-        // interrupted turn could still execute a late action.
+        // EFFECTS CLOSE ON EVERY INTERRUPT ATTEMPT, delivered or not, and here is the ONE place
+        // every interrupt goes through. Closing at a caller left every path that caller did not
+        // know about uncovered — how this fix first shipped: it closed effects only in
+        // `routeToCloud`'s interrupt branch, so a real barge-in (service ->
+        // `emitEagerBargeInIfNeeded` -> `emitBargeIn` -> this function) sent its interrupt with
+        // effects still open.
         //
-        // The moment is the SEND, not the successor's cancellation: a successor interrupts and
+        // Above the guard, because an interrupt that CANNOT be delivered still means the user took
+        // the turn away: no acknowledgement can arrive, nothing may stay held, and nothing of that
+        // turn may still take effect.
+        //
+        // The moment is the attempt, not the successor's cancellation: a successor interrupts and
         // then WAITS for this turn's terminal, so between the two the interrupted turn is still
         // live and still receiving. Anything it executed BEFORE this point stands; the interrupt
         // only forbids what comes after it.
         activeTurn?.closeEffects()
 
+        guard let priorSocket = activeResultSocket, let client = resultSendClient else {
+            // No transport to interrupt: no acknowledgement can come, so nothing may stay held.
+            interruptionState.releaseUnsentHold(forRequestId: priorRequestId)
+            return .undelivered
+        }
         // AWAITED, because delivery IS the interruption: a fire-and-forget send could be scheduled
         // after this turn retires the registration, which is how an interrupt becomes a silent
         // no-op. Position is omitted until one is actually measured.
