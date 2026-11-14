@@ -149,9 +149,9 @@ struct CloudRouteIntent: VoiceIntent, Equatable {
 
     /// The turn's latency bookkeeping, carried from admission so the cloud request can report when
     /// the user stopped talking. Held by reference: it dies with the turn, so there is no side
-    /// table to clean up on every exit. Excluded from equality below, because two dispatches for
-    /// the same request are the same dispatch whether or not they share a timing object.
-    var latency: TurnLatencyContext? = nil
+    /// table to clean up on every exit. Wrapped so it takes no part in equality without a
+    /// hand-written `==` that would silently omit the next field added beside it.
+    var latency: LatencyHandle? = nil
 
     init(
         request: String,
@@ -162,7 +162,7 @@ struct CloudRouteIntent: VoiceIntent, Equatable {
         origin: CloudRouteOrigin = .modelCall,
         generation: Int? = nil,
         selection: CloudConversationSelection? = nil,
-        latency: TurnLatencyContext? = nil
+        latency: LatencyHandle? = nil
     ) {
         self.request = request
         self.tier = tier
@@ -175,19 +175,6 @@ struct CloudRouteIntent: VoiceIntent, Equatable {
         self.latency = latency
     }
 
-    /// The timing object is deliberately NOT part of identity: it describes the same dispatch
-    /// either way, and a synthesized `Equatable` would make two otherwise identical dispatches
-    /// unequal purely because they hold different objects.
-    static func == (lhs: CloudRouteIntent, rhs: CloudRouteIntent) -> Bool {
-        lhs.request == rhs.request
-            && lhs.tier == rhs.tier
-            && lhs.sourceTranscript == rhs.sourceTranscript
-            && lhs.sourceLanguage == rhs.sourceLanguage
-            && lhs.utteranceId == rhs.utteranceId
-            && lhs.origin == rhs.origin
-            && lhs.generation == rhs.generation
-            && lhs.selection == rhs.selection
-    }
 }
 
 enum CloudRouteOrigin: Equatable {

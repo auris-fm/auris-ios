@@ -17,8 +17,9 @@ struct IntentRoutingInput: Equatable {
     /// The turn's own latency bookkeeping, created when the capture was admitted. Carried here
     /// because this envelope is the one object that spans admission → routing → dispatch, so the
     /// instants recorded at admission reach the cloud request without a side table keyed by
-    /// utterance id — and die with the turn when it ends, whatever path it takes.
-    let latency: TurnLatencyContext?
+    /// utterance id — and die with the turn when it ends, whatever path it takes. Wrapped so it
+    /// takes no part in equality without a hand-written `==`.
+    let latency: LatencyHandle?
 
     init(
         sourceTranscript: String?,
@@ -27,7 +28,7 @@ struct IntentRoutingInput: Equatable {
         translationKind: TranslationKind,
         selection: CloudConversationSelection?,
         utteranceId: String,
-        latency: TurnLatencyContext? = nil
+        latency: LatencyHandle? = nil
     ) {
         self.sourceTranscript = sourceTranscript
         self.sourceLanguage = sourceLanguage
@@ -38,17 +39,6 @@ struct IntentRoutingInput: Equatable {
         self.latency = latency
     }
 
-    /// The timing object is not part of identity: the same input describes the same turn whether
-    /// or not it holds one. A synthesized `Equatable` would compare it by reference and make two
-    /// otherwise identical inputs unequal.
-    static func == (lhs: IntentRoutingInput, rhs: IntentRoutingInput) -> Bool {
-        lhs.sourceTranscript == rhs.sourceTranscript
-            && lhs.sourceLanguage == rhs.sourceLanguage
-            && lhs.routerTranscript == rhs.routerTranscript
-            && lhs.translationKind == rhs.translationKind
-            && lhs.selection == rhs.selection
-            && lhs.utteranceId == rhs.utteranceId
-    }
 
     /// What SELECTED this utterance, carried from the gate decision that produced it.
     ///
@@ -64,7 +54,7 @@ struct IntentRoutingInput: Equatable {
         language: String? = nil,
         selection: CloudConversationSelection? = nil,
         utteranceId: String,
-        latency: TurnLatencyContext? = nil
+        latency: LatencyHandle? = nil
     ) -> IntentRoutingInput {
         IntentRoutingInput(
             sourceTranscript: transcript,

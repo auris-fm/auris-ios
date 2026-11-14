@@ -150,7 +150,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         latency.endpointDecisionAt = 5_000.2
         _ = await sink.routeToCloud(
             request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
-            selection: nil, utteranceId: utteranceId, latency: latency)
+            selection: nil, utteranceId: utteranceId, latency: LatencyHandle(latency))
 
         let line = try await latencyLine(for: utteranceId)
         XCTAssertFalse(line.contains("end_of_speech_to_request=none"),
@@ -186,7 +186,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         latency.endpointDecisionAt = 9_500.1
         _ = await sink.routeToCloud(
             request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
-            selection: nil, utteranceId: utteranceId, latency: latency)
+            selection: nil, utteranceId: utteranceId, latency: LatencyHandle(latency))
 
         let line = try await latencyLine(for: utteranceId)
         XCTAssertTrue(line.contains("endpoint_ms=100ms"),
@@ -220,7 +220,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         latency.endpointDecisionAt = 12_000.4
         _ = await sink.routeToCloud(
             request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
-            selection: nil, utteranceId: utteranceId, latency: latency)
+            selection: nil, utteranceId: utteranceId, latency: LatencyHandle(latency))
 
         let line = try await latencyLine(for: utteranceId)
         XCTAssertTrue(line.contains("endpoint_ms=400ms"),
@@ -251,7 +251,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
         _ = await sink.routeToCloud(
             request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
-            selection: nil, utteranceId: utteranceId, latency: latency)
+            selection: nil, utteranceId: utteranceId, latency: LatencyHandle(latency))
 
         let line = try await latencyLine(for: utteranceId)
         XCTAssertTrue(line.contains("endpoint_ms=500ms"),
@@ -288,7 +288,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
         let outcome = await sink.routeToCloud(
             request: "refused", tier: .free, context: sampleContext(), origin: staleOrigin,
-            selection: nil, utteranceId: utteranceId, latency: refused)
+            selection: nil, utteranceId: utteranceId, latency: LatencyHandle(refused))
         XCTAssertEqual(outcome.outcome, .refused,
                        "the case must actually refuse the dispatch, or it proves nothing")
 
@@ -306,7 +306,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         accepted.endpointDecisionAt = 30_000.9
         _ = await sink.routeToCloud(
             request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
-            selection: nil, utteranceId: utteranceId, latency: accepted)
+            selection: nil, utteranceId: utteranceId, latency: LatencyHandle(accepted))
 
         let line = try await latencyLine(for: utteranceId)
         XCTAssertTrue(line.contains("endpoint_ms=900ms"),
@@ -347,7 +347,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         latency.endpointDecisionAt = 1_000.5
         _ = await sink.routeToCloud(
             request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
-            selection: nil, utteranceId: eosId, latency: latency)
+            selection: nil, utteranceId: eosId, latency: LatencyHandle(latency))
 
         let line = try await latencyLine(for: eosId)
         XCTAssertTrue(line.contains("endpoint_ms=500ms"),
