@@ -34,6 +34,28 @@ MANUAL_SIMULATOR_NAME = auris-manual
 # because the whole failure mode is a name resolving to the wrong device.
 PROTECTED_SIMULATOR_NAME = auris-manual
 
+# Where a test run builds. Defaults to a directory named after THIS WORKTREE, so two checkouts
+# running suites at the same time cannot evict each other's build products — the collision that
+# made a lane call xcodebuild by hand with its own path. The worktree's own name is the right key:
+# it is stable for the life of the checkout and distinct between them, without anyone having to
+# pick a name and remember it.
+#
+# `=` and not `?=`, for the same reason as SIMULATOR_NAME: an exported value must not silently
+# redirect a run. A command-line override still wins, which is the deliberate case.
+WORKTREE_NAME := $(notdir $(CURDIR))
+DERIVED_DATA = /tmp/dd-$(WORKTREE_NAME)
+
+# The resolved package clones, shared read-only across worktrees so a fresh DERIVED_DATA does not
+# have to re-resolve 23 packages over the network on every checkout. Kept SEPARATE from
+# DERIVED_DATA on purpose: build products are per-worktree (two lanes must not evict each other),
+# while the package clone is immutable and expensive, so copying it per worktree would cost ~5.6 GB
+# each for no isolation benefit.
+#
+# Derived from this checkout's PARENT directory, not hardcoded: the worktrees live side by side
+# under one parent, so `$(CURDIR)/..` is the shared location on any machine and needs no absolute
+# path someone else's checkout would not have.
+SOURCE_PACKAGES = $(abspath $(CURDIR)/../SourcePackages)
+
 # The device UDID for a simulator name, resolved once so boot and install cannot disagree.
 simulator_udid = xcrun simctl list devices available | sed -n 's/.* $(1) (\([0-9A-F-]*\)).*/\1/p' | head -1
 
@@ -58,6 +80,7 @@ TEST_TIMEOUT_FLAGS = -test-timeouts-enabled YES \
 # invocation, and SKIP_LINT short-circuits the two always-run SwiftLint build phases.
 # Do not use these for archives, device builds, or CI verification.
 FAST_FLAGS = -disableAutomaticPackageResolution $(SIM_ARCH) \
+	-clonedSourcePackagesDirPath $(SOURCE_PACKAGES) \
 	DEBUG_INFORMATION_FORMAT=dwarf CODE_SIGNING_ALLOWED=NO
 FAST_ENV = SKIP_LINT=1
 
@@ -140,6 +163,14 @@ print(next((x["deviceTypeIdentifier"] for rt in d for x in d[rt] if x["name"] ==
 		exit 1; \
 	fi
 
+# Says which simulator and build directory a test run will use, so a lane can confirm the pair
+# without reading the recipe or guessing a path.
+.PHONY: show_test_env
+show_test_env:
+	@echo "simulator:       $(SIMULATOR_NAME)"
+	@echo "derived data:    $(DERIVED_DATA)"
+	@echo "source packages: $(SOURCE_PACKAGES)"
+
 # `test` and `test_fast` both need it, and it must run BEFORE xcodebuild rather than inside the
 # command, so a refusal stops the target instead of being piped into the log.
 test: ensure_simulator ensure_llama_ios ## Build and run the PocketCastsTests target with Unit Tests using Xcode
@@ -149,6 +180,7 @@ test: ensure_simulator ensure_llama_ios ## Build and run the PocketCastsTests ta
         $(TEST_TIMEOUT_FLAGS) \
         $(SIM_ARCH) \
         -destination 'platform=iOS Simulator,name=$(SIMULATOR_NAME),OS=latest' \
+        -derivedDataPath $(DERIVED_DATA) \
         2>&1 | tee $(LOG_DIR)/test.log
 
 build_staging: build ## Build the Debug app using the staging gateway
@@ -173,6 +205,7 @@ test_fast: ensure_simulator ensure_llama_ios ## Fast local test run (no dSYM/sig
         $(TEST_TIMEOUT_FLAGS) \
         $(FAST_FLAGS) \
         -destination 'platform=iOS Simulator,name=$(SIMULATOR_NAME),OS=latest' \
+        -derivedDataPath $(DERIVED_DATA) \
         2>&1 | tee $(LOG_DIR)/test_fast.log
 
 build_mac: ensure_llama_ios ## Builds for iOS Simulator (use for log stream on Mac)
