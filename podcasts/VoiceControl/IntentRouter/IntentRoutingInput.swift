@@ -17,9 +17,9 @@ struct IntentRoutingInput: Equatable {
     /// The turn's own latency bookkeeping, created when the capture was admitted. Carried here
     /// because this envelope is the one object that spans admission → routing → dispatch, so the
     /// instants recorded at admission reach the cloud request without a side table keyed by
-    /// utterance id — and die with the turn when it ends, whatever path it takes. Wrapped so it
-    /// takes no part in equality without a hand-written `==`.
-    let latency: LatencyHandle?
+    /// utterance id — and die with the turn when it ends, whatever path it takes. NON-optional so
+    /// a turn with a context and one without compare equal; see `LatencyHandle`.
+    let latency: LatencyHandle
 
     init(
         sourceTranscript: String?,
@@ -28,7 +28,7 @@ struct IntentRoutingInput: Equatable {
         translationKind: TranslationKind,
         selection: CloudConversationSelection?,
         utteranceId: String,
-        latency: LatencyHandle? = nil
+        latency: LatencyHandle = LatencyHandle()
     ) {
         self.sourceTranscript = sourceTranscript
         self.sourceLanguage = sourceLanguage
@@ -54,7 +54,7 @@ struct IntentRoutingInput: Equatable {
         language: String? = nil,
         selection: CloudConversationSelection? = nil,
         utteranceId: String,
-        latency: LatencyHandle? = nil
+        latency: LatencyHandle = LatencyHandle()
     ) -> IntentRoutingInput {
         IntentRoutingInput(
             sourceTranscript: transcript,

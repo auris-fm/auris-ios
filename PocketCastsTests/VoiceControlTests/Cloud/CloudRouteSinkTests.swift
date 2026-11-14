@@ -313,6 +313,45 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
                       "the refused turn's instants must not survive into the next turn: \(line)")
     }
 
+    /// A turn WITH a timing context and one WITHOUT are the SAME dispatch, as far as identity goes.
+    ///
+    /// The wrapper only does its job if the field is NON-optional. With an optional field, Swift
+    /// compares the optionals by case before `==` is ever consulted, so `.some(handle)` and `.none`
+    /// compare unequal and identical dispatches stop being equal — the leak the wrapper was meant
+    /// to close. Reviewer caught that on `ccc7a212b`.
+    func test_aTurnWithATimingContextEqualsTheSameTurnWithout() {
+        let withContext = CloudRouteIntent(
+            request: "hi", tier: .free, latency: LatencyHandle(TurnLatencyContext()))
+        let withoutContext = CloudRouteIntent(request: "hi", tier: .free)
+        XCTAssertEqual(
+            withContext, withoutContext,
+            "the timing context takes no part in identity, so carrying one must not make two "
+                + "otherwise identical dispatches unequal")
+        XCTAssertEqual(withoutContext, withContext, "equality is symmetric here too")
+
+        // Two DIFFERENT contexts are equally irrelevant.
+        let otherContext = CloudRouteIntent(
+            request: "hi", tier: .free, latency: LatencyHandle(TurnLatencyContext()))
+        XCTAssertEqual(withContext, otherContext)
+
+        // And a real difference is still a difference, so the exemption did not swallow equality.
+        let differentRequest = CloudRouteIntent(
+            request: "bye", tier: .free, latency: LatencyHandle(TurnLatencyContext()))
+        XCTAssertNotEqual(withContext, differentRequest)
+    }
+
+    /// The same exemption on the routing envelope, which the executor compares.
+    func test_anInputWithATimingContextEqualsTheSameInputWithout() {
+        let withContext = IntentRoutingInput.english(
+            transcript: "hi", utteranceId: "u-eq",
+            latency: LatencyHandle(TurnLatencyContext()))
+        let withoutContext = IntentRoutingInput.english(transcript: "hi", utteranceId: "u-eq")
+        XCTAssertEqual(withContext, withoutContext)
+        XCTAssertNotEqual(
+            withContext,
+            IntentRoutingInput.english(transcript: "different", utteranceId: "u-eq"))
+    }
+
     /// The `cloudTurnLatency` line for one request id, waited for because the record is emitted by
     /// a closure that may run after `routeToCloud` returns.
     @MainActor

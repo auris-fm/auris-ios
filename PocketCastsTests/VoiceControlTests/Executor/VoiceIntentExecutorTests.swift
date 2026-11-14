@@ -714,7 +714,7 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
         utteranceId: String?,
         preparedObserver: CloudRouteSink.PreparedObserver?,
         sourceTranscript: String?, sourceLanguage: String?,
-        latency: LatencyHandle?,
+        latency: LatencyHandle,
         ownership: CloudDispatchOwnership?
     ) async -> CloudRouteResult {
         routeToCloudCalled = true

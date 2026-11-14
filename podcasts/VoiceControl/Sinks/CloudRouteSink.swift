@@ -819,7 +819,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         preparedObserver: PreparedObserver? = nil,
         sourceTranscript: String? = nil,
         sourceLanguage: String? = nil,
-        latency: LatencyHandle? = nil,
+        latency: LatencyHandle = LatencyHandle(),
         ownership: CloudDispatchOwnership? = nil
     ) async -> CloudRouteResult {
         guard let utteranceId else {
@@ -887,7 +887,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         preparedObserver: PreparedObserver?,
         sourceTranscript: String?,
         sourceLanguage: String?,
-        latency: LatencyHandle?
+        latency: LatencyHandle = LatencyHandle()
     ) async -> CloudRouteResult {
         guard let record = token.record else {
             return CloudRouteResult(response: .earcon(.error), outcome: .refused)
@@ -946,7 +946,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         preparedObserver: PreparedObserver?,
         sourceTranscript: String?,
         sourceLanguage: String?,
-        latency: LatencyHandle?
+        latency: LatencyHandle = LatencyHandle()
     ) async -> CloudRouteResult {
         // Recorded before any guard: what selected this turn is a property of the TURN, not of
         // whether the sink happens to be configured. Recording after the configured check made
@@ -1346,7 +1346,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // The send's own instant, reported by the transport once the authenticated frame is
             // out — NOT inferred from the first reply frame, which would fold the server's
             // admission into the client's share of the turn.
-            onRequestSent: { sentAt in latency?.context?.requestSentAt = sentAt },
+            onRequestSent: { sentAt in latency.context?.requestSentAt = sentAt },
             // Confirm the report only once it actually left: a failed connection or token fetch
             // must not destroy a correction the user still owes the server.
             onReportAttached: { [weak self] requestId in
@@ -1402,8 +1402,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // ONCE at the terminal, whether or not audio was ever heard.
         let latencyRecord = CloudTurnLatencyRecord(
             requestId: turnRequestId,
-            endOfSpeech: latency?.context?.endOfSpeech,
-            endpointDecision: latency?.context?.endpointDecisionAt
+            endOfSpeech: latency.context?.endOfSpeech,
+            endpointDecision: latency.context?.endpointDecisionAt
         )
         // Local names the closure and the loop below share. Swift forbids a local function that
         // captures a local declared before it, so the state lives in an explicit box.
@@ -1416,7 +1416,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // reply's arrival instead.
             self.emitTurnLatencyRecord(
                 latencyState.record,
-                requestSent: latency?.context?.requestSentAt,
+                requestSent: latency.context?.requestSentAt,
                 outcome: outcome
             )
         }

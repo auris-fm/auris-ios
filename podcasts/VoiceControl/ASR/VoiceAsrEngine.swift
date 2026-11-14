@@ -1134,7 +1134,7 @@ class VoiceAsrEngine {
         translateNote: String?,
         selection: CloudConversationSelection? = nil,
         utteranceId: String,
-        latency: LatencyHandle? = nil
+        latency: LatencyHandle = LatencyHandle()
     ) -> IntentRoutingInput {
         if let translateNote, translateNote.hasPrefix("translate=skip(backend)") {
             return IntentRoutingInput(
