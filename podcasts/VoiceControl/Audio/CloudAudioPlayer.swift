@@ -759,6 +759,11 @@ final class CloudAudioPlayer: @unchecked Sendable {
             let deadline = renderStopDeadline ?? Date().addingTimeInterval(
                 scheduled / negotiatedSampleRate * 2.0 + 1.0
             )
+            // The drain probe is a genuine periodic render observation: it runs on the runner while
+            // audio is still scheduled, which is the only other moment after scheduling when the
+            // node's rendered state is available. This is where audio scheduled entirely before
+            // the node started rendering finally gets marked audible.
+            noteFirstAudibleIfRendering()
             if let position = renderPosition(of: playerNode!)?.renderedFrames,
                position >= scheduled {
                 isPlaying = false
@@ -1080,6 +1085,12 @@ final class CloudAudioPlayer: @unchecked Sendable {
             // nil — the position is unknown, and the handoff clears the anchor instead of
             // guessing one.
             handoff.submitRenderPosition(renderPosition(of: node), producer: producerIdentityForTesting)
+            // The render observation is where the mark is taken for audio scheduled before the
+            // node started rendering: the scheduling path ran while the node had no render time
+            // yet, so nothing was marked there. Taking it on EVERY observation (not only the
+            // first) is what makes this the trigger rather than a one-shot: the read is pure and
+            // the mark refuses to move once set, so repeating it costs a lock and cannot re-enter.
+            noteFirstAudibleIfRendering()
             return
         }
 
@@ -1230,9 +1241,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
     private let firstAudibleLock = NSLock()
 
     /// Records first audible audio if this turn has not already. Called from the scheduling path
-    /// and again whenever the node's render position is read, so the mark is observed even when the
-    /// node had not started rendering at schedule time. Once set it never moves: later renders,
-    /// later schedules and a mid-turn node rebuild (underrun) all leave it alone.
+    /// and from the per-block render observation, so the mark is taken even when the node had not
+    /// started rendering at schedule time — audio scheduled entirely before the first render is the
+    /// ordinary case, and reading the position is NOT what triggers this: the read is pure. Once set
+    /// it never moves: later renders, later schedules and a mid-turn node rebuild leave it alone.
     private func noteFirstAudibleIfRendering() {
         // Takes the mark in the ONE place, from a PURE read.
         //

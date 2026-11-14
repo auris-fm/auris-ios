@@ -49,6 +49,51 @@ final class RenderLifecycleControlTests: XCTestCase {
         }
     }
 
+    /// AUDIO SCHEDULED BEFORE THE NODE RENDERS MUST STILL BE MARKED.
+    ///
+    /// Making the position read pure removed the ONLY thing that took the mark during rendering:
+    /// `renderPosition(of:)` used to call `noteFirstAudibleIfRendering()` whenever it got an anchor.
+    /// Audio scheduled entirely before the first render — the ordinary case, and what this fixture
+    /// does — was then never marked and reported `first_audible=absent` for a turn the user heard.
+    /// The mark is now taken from the per-block render observation instead, so it survives the read
+    /// becoming pure.
+    @MainActor
+    func testAudioScheduledBeforeRenderingIsStillMarkedAudible() throws {
+        try withPendingOfflineAudio { player, engine, node, output, scheduledSamples in
+            // Premise: everything was scheduled before anything rendered, which is the case that
+            // went unmarked. If this ever stops holding the test proves nothing.
+            XCTAssertEqual(player.firstAudibleHostSeconds, nil,
+                           "premise: nothing is audible before the node renders")
+
+            // Render real PCM through the production node so its counter advances, and let the
+            // player's own runner run: the mark is taken by an observation the PLAYER makes, not
+            // by anything this test does. Asserting straight after rendering measured only that
+            // the test had not given the player a chance to look, and failed for that reason.
+            let deadline = Date().addingTimeInterval(3)
+            while player.firstAudibleHostSeconds == nil && Date() < deadline {
+                if (player.renderPosition(of: node)?.renderedFrames ?? 0) < 4_096 {
+                    XCTAssertEqual(try engine.renderOffline(1_024, to: output), .success)
+                }
+                RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+            }
+
+            let marked = player.firstAudibleHostSeconds
+            XCTAssertNotNil(
+                marked,
+                "audio that rendered after being scheduled was never marked audible, so the turn"
+                + " reports first_audible=absent although the user heard it"
+            )
+            if let marked {
+                XCTAssertGreaterThan(marked, 0, "the mark must be a real monotonic instant")
+                XCTAssertLessThanOrEqual(
+                    marked, CACurrentMediaTime(),
+                    "the mark cannot be in the future"
+                )
+            }
+            _ = scheduledSamples
+        }
+    }
+
     @MainActor
     func testCancelPreemptsFinishWhileScheduledAudioHasNotRendered() throws {
         try withPendingOfflineAudio { player, _, _, _, _ in
