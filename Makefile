@@ -56,10 +56,23 @@ DERIVED_DATA = /tmp/dd-$(WORKTREE_NAME)
 # path someone else's checkout would not have.
 SOURCE_PACKAGES = $(abspath $(CURDIR)/../SourcePackages)
 
-# Picks the device type and runtime for the test simulator when it has to be created. A separate
-# script rather than inline python: it is the part with the interesting rules, and those were
-# wrong twice while buried in a recipe.
-SIMULATOR_TYPE_HELPER = ./scripts/test-simulator-type.py
+# Picks the device type and runtime for creating the test simulator.
+#
+# Answers from an AVAILABLE runtime's own `supportedDeviceTypes`, not from `simctl list devicetypes`
+# (which lists types whose runtime was removed, and wraps the identifier in parentheses) and not from
+# the existing devices (empty on a machine that has never booted one - the fresh-checkout case this
+# whole target exists for).
+#
+# Prints "<deviceTypeId> <runtimeId>" together so `simctl create` receives the pair that was actually
+# chosen rather than re-resolving either half. Prints nothing when no available runtime offers an
+# iPhone, and swallows unreadable input for the same reason: the caller's message names the device
+# it could not create, which is more use than a traceback.
+#
+# One line, because a multi-line `define` cannot be embedded in a quoted shell argument.
+SIMULATOR_TYPE_PICK = import json,sys; \
+  _d = json.load(sys.stdin); \
+  _rs = sorted([r for r in _d.get("runtimes", []) if r.get("isAvailable") and "iOS" in r.get("identifier", "")], key=lambda r: r["version"], reverse=True); \
+  print(next((t["identifier"] + " " + r["identifier"] for r in _rs for t in r.get("supportedDeviceTypes", []) if t.get("productFamily") == "iPhone"), ""))
 
 # The device UDID for a simulator name, resolved once so boot and install cannot disagree.
 simulator_udid = xcrun simctl list devices available | sed -n 's/.* $(1) (\([0-9A-F-]*\)).*/\1/p' | head -1
@@ -165,7 +178,7 @@ d = json.load(sys.stdin)["devices"]; \
 print(next((x["deviceTypeIdentifier"] for rt in d for x in d[rt] if x["name"] == "$(MANUAL_SIMULATOR_NAME)"), ""))'); \
 		RUNTIME=""; \
 		if [ -z "$$TYPE" ]; then \
-			PAIR=$$(xcrun simctl list runtimes -j | $(SIMULATOR_TYPE_HELPER)); \
+			PAIR=$$(xcrun simctl list runtimes -j | python3 -c '$(SIMULATOR_TYPE_PICK)'); \
 			TYPE=$${PAIR%% *}; \
 			RUNTIME=$${PAIR#* }; \
 			if [ "$$TYPE" = "$$RUNTIME" ]; then RUNTIME=""; fi; \
