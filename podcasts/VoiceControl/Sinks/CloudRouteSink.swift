@@ -112,6 +112,15 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// The cloud player this sink drives, so a test can reach the real producer through
     /// the chain the app builds rather than constructing its own.
     var audioPlayerForTesting: CloudAudioPlayer? { audioPlayer }
+
+    /// The per-turn latency records this sink has emitted, oldest first, so a control can assert
+    /// the record's contents without parsing the log.
+    @MainActor private(set) var turnLatencyRecordsForTesting: [String] = []
+    /// The end of speech for each utterance, keyed by utterance id: recorded when the utterance was
+    /// dispatched and consumed by the cloud request it produced. A turn that escalates from a local
+    /// `no_match` to the cloud still carries the utterance's own end of speech, which is the instant
+    /// the user's wait began.
+    private var endOfSpeechByUtterance: [String: Double] = [:]
     /// The PRODUCTION client factory, extracted so the assembly reuses it VERBATIM and the test seam
     /// substitutes it. Production is unchanged: the default is this same factory.
     nonisolated static func productionClientFactory() -> () -> CloudRouteClient {
@@ -947,6 +956,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         MainActor.assumeIsolated {
             lastSelectionForTesting = selection ?? (try? conversationSelectionProvider())
             lastOriginForTesting = origin
+            // The user's wait began when they stopped talking. Recorded here, at the dispatch the
+            // utterance itself produced, so a turn that escalates from a local `no_match` later
+            // still reports its own end of speech rather than the escalation's start.
+            if let utteranceId, endOfSpeechByUtterance[utteranceId] == nil {
+                endOfSpeechByUtterance[utteranceId] = CloudTurnLatencyRecord.now()
+            }
         }
         // MISSING-ID REFUSAL (reviewer 9ab31c6d): a dispatch without an admitted utterance
         // identity has no honest `request_id` to present, so it is refused BEFORE prepare,
@@ -1236,6 +1251,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             guard activeTurn === turnToken, quiesced else {
                 // Ownership-safe disposition: never admit over a predecessor that is not
                 // confirmed quiescent, and never run as a superseded-while-waiting turn.
+                // Reported like every other terminal: a turn that never reached audio is the case
+                // the record exists for, so it must not be the one that goes unrecorded.
                 return CloudRouteResult(response: .silent, outcome: .earlyClose)
             }
             // Success: the scoped rollback above must not fire on fall-through — B keeps the
@@ -1385,10 +1402,36 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         if ownerCancelledFlag.isSet || Task.isCancelled {
             activeResultSocket?.finishTurn()
         }
+        // The turn's client-side latency record: created when the request goes out and emitted
+        // ONCE at the terminal, whether or not audio was ever heard.
+        let latencyRecord = CloudTurnLatencyRecord(
+            requestId: turnRequestId,
+            endOfSpeech: endOfSpeechByUtterance.removeValue(forKey: turnRequestId)
+        )
+        // Local names the closure and the loop below share. Swift forbids a local function that
+        // captures a local declared before it, so the state lives in an explicit box.
+        let latencyState = TurnLatencyState(
+            record: latencyRecord,
+            requestSentAt: nil,
+            emitted: false
+        )
+        let emitLatencyRecord: (String) -> Void = { outcome in
+            guard !latencyState.emitted else { return }
+            latencyState.emitted = true
+            self.emitTurnLatencyRecord(
+                latencyState.record,
+                requestSent: latencyState.requestSentAt,
+                outcome: outcome
+            )
+        }
         var turnResult: CloudRouteOutcome?
         var turnResponse: VoiceResponse = .silent
         await withTaskCancellationHandler {
             turnLoop: for await event in routed.stream {
+                // The request has gone out: `routed.stream` only yields after the authenticated
+                // frame was sent, so the first event (or any event) is after that instant. The
+                // measured instant is taken once, before the first event is examined.
+                if latencyState.requestSentAt == nil { latencyState.requestSentAt = CloudTurnLatencyRecord.now() }
                 // Superseded mid-stream: stop consuming so this turn cannot execute
                 // late actions or overwrite the new turn's state. The stream's own
                 // termination closes the transport. (`break turnLoop` — a bare
@@ -1452,6 +1495,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                         requestId: turnRequestId,
                         conversationId: turnConversationId
                     )
+                    emitLatencyRecord("done")
                     analytics?.recordCloudAssistantTurn(
                         outcome: "done",
                         inputTokens: usage.inputTokens,
@@ -1562,6 +1606,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                             restoreHeldForPlayerDrain = (owner: turnToken, drainEpoch: stopEpoch)
                         }
                     }
+                    emitLatencyRecord("error")
                     analytics?.recordCloudAssistantTurn(outcome: "error", inputTokens: nil, outputTokens: nil)
                     // THE REMOTE MESSAGE IS NEVER SPOKEN (cloud-assistant.md, spec 961fab07): the
                     // wire `message` is bounded OPERATOR DIAGNOSTICS — "never spoken or used to
@@ -1612,7 +1657,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 let stopEpoch = audioPlayer.cancel()
                 if await audioPlayer.awaitActualStop(after: stopEpoch) {
                     guard activeTurn == nil || activeTurn === turnToken else {
-                        return CloudRouteResult(response: .silent, outcome: .earlyClose, fact: Self.aggregateActionFact(turnActionFacts))
+                        emitLatencyRecord("early_close")
+        return CloudRouteResult(response: .silent, outcome: .earlyClose, fact: Self.aggregateActionFact(turnActionFacts))
                     }
                     restoreTransientAudioState()
                 } else {
@@ -1645,7 +1691,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 // No captured entry: nothing was retired for this turn (it owned no pending
                 // playback at supersession) — nothing to await.
             }
-            return CloudRouteResult(response: .silent, outcome: .earlyClose, fact: Self.aggregateActionFact(turnActionFacts))
+            emitLatencyRecord("early_close")
+        return CloudRouteResult(response: .silent, outcome: .earlyClose, fact: Self.aggregateActionFact(turnActionFacts))
         }
         // DEFECT 3 (reviewer 7fc40b74) + review 24f236de: stop THIS turn's OWNED output and
         // AWAIT the identity-bound stop completion BEFORE releasing the host playback and the
@@ -1669,7 +1716,42 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         }
         // The stream ended without `done`: the turn was truncated, which is not a
         // completion and must not restore the allowance as though the model answered.
+        emitLatencyRecord("early_close")
         return CloudRouteResult(response: .silent, outcome: .earlyClose, fact: Self.aggregateActionFact(turnActionFacts))
+    }
+
+    /// One turn's latency bookkeeping. A reference type because the request instant and the
+    /// emission guard are written and read across the turn's stream loop and its terminals.
+    private final class TurnLatencyState {
+        let record: CloudTurnLatencyRecord
+        var requestSentAt: Double?
+        var emitted: Bool
+        init(record: CloudTurnLatencyRecord, requestSentAt: Double?, emitted: Bool) {
+            self.record = record
+            self.requestSentAt = requestSentAt
+            self.emitted = emitted
+        }
+    }
+
+    /// Emits one turn's client-side latency line and keeps it for controls.
+    ///
+    /// A turn has ONE terminal, so this is called once per request; the caller guards it anyway
+    /// because two paths can classify the same turn and reporting it twice would describe two
+    /// requests. The line is written whether or not audio was ever heard: a turn that produced no
+    /// audio is the case worth measuring, and a missing line would be indistinguishable from a turn
+    /// that never ran.
+    private func emitTurnLatencyRecord(
+        _ record: CloudTurnLatencyRecord,
+        requestSent: Double?,
+        outcome: String
+    ) {
+        let line = record.logLine(
+            requestSent: requestSent,
+            firstAudible: audioPlayer.firstAudibleHostSeconds,
+            outcome: outcome
+        )
+        turnLatencyRecordsForTesting.append(line)
+        FileLog.shared.addMessage("[VoicePipeline] cloudTurnLatency \(line)")
     }
 
     private func restoreTransientAudioState() {

@@ -76,6 +76,45 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(snap.previousReferencePositionMs, 500_000)
     }
 
+    /// Every cloud request contributes exactly ONE client-side latency record, and a turn that
+    /// produced no audio says so rather than reporting zero.
+    ///
+    /// This is the wiring the requirement rests on: the record is only useful if it is emitted per
+    /// REQUEST at its terminal, and a first-audible number is only honest if it is absent when
+    /// nothing was heard. A record emitted per frame would multiply the turn; one emitted only on
+    /// success would hide exactly the failing turns the latency work is chasing.
+    @MainActor
+    func testEveryCloudRequestEmitsOneLatencyRecord() async {
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":10,"output_tokens":4}}
+
+            """
+        let sink = makeSink()
+        _ = await sink.routeToCloud(
+            request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: "u-latency-1")
+        XCTAssertEqual(sink.turnLatencyRecordsForTesting.count, 1,
+                       "one request must produce exactly one latency record")
+
+        self.pendingFixture =
+            """
+            event: error
+            data: {"code":"provider_error","message":"upstream failed"}
+
+            """
+        _ = await sink.routeToCloud(
+            request: "again", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: "u-latency-2")
+        XCTAssertEqual(sink.turnLatencyRecordsForTesting.count, 2,
+                       "the erroring turn must record too; that is the case worth measuring")
+        let failed = sink.turnLatencyRecordsForTesting.last ?? ""
+        XCTAssertTrue(failed.contains("outcome=error"), failed)
+        XCTAssertTrue(failed.contains("first_audible=absent"), failed)
+        XCTAssertTrue(failed.contains("request_id="), failed)
+    }
+
     func testDoneResumesTurnOwnedAutoPause() async {
         self.pendingFixture =
             """

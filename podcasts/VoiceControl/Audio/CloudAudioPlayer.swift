@@ -7,9 +7,9 @@ import os.log
 /// shared audio output path with buffering, pause-and-resume on underrun,
 /// and duck/restore of existing playback.
 ///
-/// The player owns one continuous playback session per turn.  Frames are
+/// The player owns one continuous playback session per turn. Frames are
 /// buffered in-order; when the buffer drains below a threshold playback is
-/// paused and resumed once new frames arrive.  The first frame ducks
+/// paused and resumed once new frames arrive. The first frame ducks
 /// existing playback; `done`/`error` restores it.
 final class CloudAudioPlayer: @unchecked Sendable {
 
@@ -53,7 +53,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     /// Start (or resume) playback with new frames.
     ///
-    /// Call for each frame received on the WebSocket.  If the player was
+    /// Call for each frame received on the WebSocket. If the player was
     /// stopped, the first frame restarts it; if it was already playing the
     /// frame is enqueued.
     func enqueue(_ frame: CloudAudioFrame) {
@@ -1004,6 +1004,9 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // the boundary is limited to the reasons that actually end one.
         if Self.reasonEndsTurn(reason) {
             cloudSchedulingLogged = false
+            // A new turn starts with nothing audible: carrying the previous turn's instant would
+            // report a turn that played nothing as having played immediately.
+            firstAudibleInstant = nil
         }
         echoReferenceHandoff?.rotateIncarnation(for: .cloud, to: nodeIncarnation)
     }
@@ -1201,6 +1204,51 @@ final class CloudAudioPlayer: @unchecked Sendable {
         noteSchedulingBoundary()
         if timingEnabled { timingScheduledFrames += Double(pcmBuffer.frameLength) }
         observeTiming("schedule")
+        // The node has audio to render now, so this is the first instant it can be audible. The
+        // read is refused until the node has actually rendered, which is why it is re-attempted
+        // wherever a render position is taken rather than only here.
+        noteFirstAudibleIfRendering()
+    }
+
+    /// The first instant this turn's answer was actually AUDIBLE, on the same monotonic clock as
+    /// everything else the pipeline measures.
+    ///
+    /// Read from the output node's own render state: `lastRenderTime.hostTime` is when the node last
+    /// rendered, and `playerTime.sampleTime` says how long ago that rendered block began, so the
+    /// instant the FIRST rendered block began is `hostTime - sampleTime / sampleRate`. Measured
+    /// against the node's start, that block is the beginning of the audio the user hears.
+    ///
+    /// Deliberately not the instant the first buffer was scheduled: `scheduleBuffer` only enqueues,
+    /// and the node may still be rendering audio queued before it, so scheduling can precede the
+    /// first audible sound by an arbitrary amount. That earlier reading is still logged, named for
+    /// what it is (`cloudAudioScheduled`), and this is the number the latency work reports.
+    private var firstAudibleInstant: Double?
+
+    /// Records first audible audio if this turn has not already. Called from the scheduling path
+    /// and again whenever the node's render position is read, so the mark is observed even when the
+    /// node had not started rendering at schedule time. Once set it never moves: later renders,
+    /// later schedules and a mid-turn node rebuild (underrun) all leave it alone.
+    private func noteFirstAudibleIfRendering() {
+        guard firstAudibleInstant == nil, let node = playerNode else { return }
+        guard let position = renderPosition(of: node), position.hostTime > 0 else { return }
+        let blockStart = position.hostTime
+            - position.renderedFrames / max(position.sourceSampleRate, 1)
+        firstAudibleInstant = blockStart
+    }
+
+    /// The instant this turn's answer first became audible, or nil when nothing has been heard yet.
+    /// Read by the turn's latency record at its terminal; on the same monotonic clock the rest of
+    /// the pipeline measures with (`CACurrentMediaTime`).
+    var firstAudibleHostSeconds: Double? { firstAudibleInstant }
+
+    /// TEST-VISIBLE alias, so a control reads the same property production does.
+    var firstAudibleHostSecondsForTesting: Double? { firstAudibleInstant }
+
+    /// TEST-ONLY: applies an instant the way the production observation does, so a control can
+    /// drive the same state transition without depending on when a host happens to render.
+    func observeFirstAudibleForTesting(atHostSeconds seconds: Double) {
+        guard firstAudibleInstant == nil else { return }
+        firstAudibleInstant = seconds
     }
 
     /// The output node's rendered position, or nil when the node is not rendering.
@@ -1223,6 +1271,15 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// Internal but test-visible: the deterministic queue-lead control drives a real node whose
     /// counter advances without hardware, and asserts THIS function's reading of it.
     func renderPosition(of node: AVAudioPlayerNode) -> PlaybackRenderAnchor? {
+        let anchor = readRenderPosition(of: node)
+        // Every render-position read is also an opportunity to observe audibility: the first
+        // buffer is scheduled before the node has rendered anything, so the schedule-time read can
+        // legitimately come back nil and this is where the mark is actually taken.
+        if anchor != nil, node === playerNode { noteFirstAudibleIfRendering() }
+        return anchor
+    }
+
+    private func readRenderPosition(of node: AVAudioPlayerNode) -> PlaybackRenderAnchor? {
         guard let lastRender = node.lastRenderTime,
               lastRender.isSampleTimeValid || lastRender.isHostTimeValid else { return nil }
         // The precondition above is what keeps the conversion safe: `playerTime(forNodeTime:)`
