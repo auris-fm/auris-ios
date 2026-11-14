@@ -1922,6 +1922,14 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // then WAITS for this turn's terminal, so between the two the interrupted turn is still
         // live and still receiving. Anything it executed BEFORE this point stands; the interrupt
         // only forbids what comes after it.
+        // `activeTurn` is the right turn to close here BECAUSE admission cannot interleave with
+        // this wait. Admitting a successor cancels its predecessor in the same synchronous step
+        // that publishes the successor (`activeTurn?.cancel()` immediately precedes
+        // `activeTurn = turnToken`), so there is no moment where `activeTurn` names an admitted
+        // successor while this turn is still uncancelled. Before admission the field still names
+        // the turn being interrupted, which is the turn that must stop taking effect. Should
+        // admission ever gain an interleaving point, this line would close the wrong turn and the
+        // closing would have to move to the turn that owns the socket being interrupted.
         activeTurn?.closeEffects()
 
         guard let priorSocket = activeResultSocket, let client = resultSendClient else {
