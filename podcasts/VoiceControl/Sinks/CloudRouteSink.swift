@@ -137,9 +137,19 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         endpointDecisionByUtterance[utteranceId] = endpointDecisionAt
     }
 
-    /// Drops the instants recorded for `utteranceId`. Called when the turn ended without a cloud
-    /// terminal — the case of every locally handled command — so those entries do not accumulate.
+    /// Utterances that actually began a cloud dispatch. A turn is not cloud-bound until this is
+    /// set, so its absence is the honest test for "handled on the phone".
+    private var dispatchedToCloudByUtterance: Set<String> = []
+
+    /// Drops the instants recorded for `utteranceId`, unless the turn is cloud-bound.
+    ///
+    /// Called when a turn ends. A cloud turn consumes its own entry when its record is built, and
+    /// must keep it until then; a locally handled turn has no consumer at all, so its entry would
+    /// otherwise live for the process lifetime. Acknowledging that ending is what distinguishes
+    /// "the turn is over, nothing will read this" from "the turn is over at the router, the cloud
+    /// round is still coming".
     func discardEndOfSpeech(for utteranceId: String) {
+        guard !dispatchedToCloudByUtterance.contains(utteranceId) else { return }
         endOfSpeechByUtterance.removeValue(forKey: utteranceId)
         endpointDecisionByUtterance.removeValue(forKey: utteranceId)
     }
@@ -794,6 +804,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // once running on main, performs no further cross-queue hops. Retirement that lands before
         // the block runs is simply observed by the decision; retirement after publication settles
         // through the normal ownership path.
+        // CLOUD-BOUND, recorded before the admission decision: the dispatch is happening for this
+        // utterance either way, and the router's terminal will consult this to decide whether a
+        // locally-handled turn may drop its instants.
+        dispatchedToCloudByUtterance.insert(utteranceId)
         guard let origin else { return .refused }
         let decideAndPublish: () -> CloudDispatchOwnership = {
             // TEST HOOK (review 5fa6e007): an explicit interleaving barrier INSIDE the coherent
@@ -1785,6 +1799,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         )
         requestSentByRequestId.removeValue(forKey: record.requestId)
         endOfSpeechByUtterance.removeValue(forKey: record.requestId)
+        endpointDecisionByUtterance.removeValue(forKey: record.requestId)
+        dispatchedToCloudByUtterance.remove(record.requestId)
         FileLog.shared.addMessage("[VoicePipeline] cloudTurnLatency \(line)")
     }
 

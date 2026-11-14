@@ -198,6 +198,87 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
                       "the recorded instant is the surviving one, not the dropped turn's: \(line)")
     }
 
+    /// A ROUTED turn that is then handled on the phone leaves no entry behind.
+    ///
+    /// The earlier control only covered a turn that never reached routing. A routed local command —
+    /// the majority — ends at the router instead, and its instants have no consumer at all, so the
+    /// discard has to run on that terminal too or they accumulate for the life of the process.
+    ///
+    /// Observed through a later turn reusing the identity: `recordEndOfSpeech` keeps the FIRST
+    /// value per id, so a surviving entry would shadow the newer one and show up as the wrong
+    /// `endpoint_ms`.
+    @MainActor
+    func test_aRoutedLocalTurnDropsItsEndOfSpeech() async throws {
+        let utteranceId = "u-\(UUID().uuidString.prefix(8))-routedlocal"
+        let sink = makeSink()
+        sink.recordEndOfSpeech(11_000.0, endpointDecisionAt: 11_000.3, for: utteranceId)
+        // No cloud dispatch happens for this turn: it was classified and executed locally.
+        sink.discardEndOfSpeech(for: utteranceId)
+
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        sink.recordEndOfSpeech(12_000.0, endpointDecisionAt: 12_000.4, for: utteranceId)
+        _ = await sink.routeToCloud(
+            request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: utteranceId)
+
+        let log = await FileLog.shared.logFileAsString()
+        let line = try XCTUnwrap(
+            log.split(separator: "\n")
+                .first { $0.contains("cloudTurnLatency") && $0.contains(utteranceId) }
+                .map(String.init),
+            log
+        )
+        XCTAssertTrue(line.contains("endpoint_ms=400ms"),
+                      "the newer turn's instant must be the one recorded; a survivor would "
+                          + "shadow it with the dropped turn's 300ms: \(line)")
+    }
+
+    /// A CLOUD turn keeps its instants through the router's terminal.
+    ///
+    /// The record is built when the cloud round ends, which can be AFTER the router's terminal
+    /// fires. So the discard must DECLINE for a cloud-bound turn; otherwise the entries it is about
+    /// to read are already gone and the turn reports `none` — this fix's defect, in reverse.
+    ///
+    /// Made observable by DISPATCHING FIRST: `beginDispatch` is what marks an utterance cloud-bound
+    /// (it is the dispatch, not the response, that decides). The discard then runs, as the router
+    /// terminal would, and the record built afterwards must still carry the instant.
+    @MainActor
+    func test_aCloudBoundTurnKeepsItsEndOfSpeechThroughTheRouterTerminal() async throws {
+        let utteranceId = "u-\(UUID().uuidString.prefix(8))-cloudkept"
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let sink = makeSink()
+        // `origin: nil` dispatches without publishing a retained record, so nothing parks on it —
+        // but it still marks this utterance as cloud-bound, which is the property under test.
+        _ = sink.beginDispatch(utteranceId: utteranceId, origin: nil)
+        sink.recordEndOfSpeech(13_000.0, endpointDecisionAt: 13_000.5, for: utteranceId)
+        sink.discardEndOfSpeech(for: utteranceId)
+
+        _ = await sink.routeToCloud(
+            request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: utteranceId)
+
+        let log = await FileLog.shared.logFileAsString()
+        let line = try XCTUnwrap(
+            log.split(separator: "\n")
+                .first { $0.contains("cloudTurnLatency") && $0.contains(utteranceId) }
+                .map(String.init),
+            log
+        )
+        XCTAssertTrue(line.contains("endpoint_ms=500ms"),
+                      "a cloud-bound turn must survive the router terminal with its instants "
+                          + "intact; losing them reports no end of speech for the turn: \(line)")
+    }
+
     /// A dispatched spoken turn reports a real end of speech, not `none`: the instant travels from
     /// admission under the utterance's own identity, so the key used to consume it must be the same
     /// one it was stored under. A key mismatch would leak the entry and silently report `none`.

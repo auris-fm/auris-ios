@@ -628,6 +628,15 @@ class VoiceControlService: ObservableObject {
                         // reached its own terminal outcome.
                     } else {
                         self?.gracePeriodSignal.releaseInFlightTurn(utteranceId: input.utteranceId)
+                        // SAME release, the discarding half: a turn that ended here is either
+                        // cloud-bound, in which case the sink keeps its instants until its record
+                        // is built, or it was handled on the phone, in which case nothing will
+                        // ever read them. Locally executed commands are the majority, so without
+                        // this they accumulate for the process lifetime. `onTurnReleased` above
+                        // covers only the narrower path that never reached routing at all.
+                        DispatchQueue.main.async {
+                            self?.executor.discardTurnEndOfSpeech(utteranceId: input.utteranceId)
+                        }
                     }
                     if let notifyTerminal { Task { @MainActor in notifyTerminal(input, terminal) } }
                     if terminal == .routed, let notifyFinished {
