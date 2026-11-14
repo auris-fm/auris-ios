@@ -161,7 +161,15 @@ print(next((x["deviceTypeIdentifier"] for rt in d for x in d[rt] if x["name"] ==
 	if [ -z "$$($(call simulator_udid,$(SIMULATOR_NAME)))" ]; then \
 		echo "error: no simulator named $(SIMULATOR_NAME) and it could not be created"; \
 		exit 1; \
-	fi
+	fi; \
+	mkdir -p $(LOG_DIR); \
+	$(call simulator_udid,$(SIMULATOR_NAME)) > $(SIMULATOR_UDID_FILE); \
+	test -s $(SIMULATOR_UDID_FILE) || { echo "error: could not resolve a UDID for $(SIMULATOR_NAME)"; exit 1; }
+
+# The UDID `ensure_simulator` verified, written to a file so `test`/`test_fast` can pass THAT
+# device to xcodebuild. Passing the name would let xcodebuild resolve it again, and a second
+# resolution is a second chance to land on a different device — the whole failure mode here.
+SIMULATOR_UDID_FILE = $(LOG_DIR)/test-simulator.udid
 
 # Says which simulator and build directory a test run will use, so a lane can confirm the pair
 # without reading the recipe or guessing a path.
@@ -179,7 +187,7 @@ test: ensure_simulator ensure_llama_ios ## Build and run the PocketCastsTests ta
         -only-testing:$(ONLY_TESTING) \
         $(TEST_TIMEOUT_FLAGS) \
         $(SIM_ARCH) \
-        -destination 'platform=iOS Simulator,name=$(SIMULATOR_NAME),OS=latest' \
+        -destination "platform=iOS Simulator,id=$$(cat $(SIMULATOR_UDID_FILE))" \
         -derivedDataPath $(DERIVED_DATA) \
         2>&1 | tee $(LOG_DIR)/test.log
 
@@ -204,7 +212,7 @@ test_fast: ensure_simulator ensure_llama_ios ## Fast local test run (no dSYM/sig
         -only-testing:$(ONLY_TESTING) \
         $(TEST_TIMEOUT_FLAGS) \
         $(FAST_FLAGS) \
-        -destination 'platform=iOS Simulator,name=$(SIMULATOR_NAME),OS=latest' \
+        -destination "platform=iOS Simulator,id=$$(cat $(SIMULATOR_UDID_FILE))" \
         -derivedDataPath $(DERIVED_DATA) \
         2>&1 | tee $(LOG_DIR)/test_fast.log
 
