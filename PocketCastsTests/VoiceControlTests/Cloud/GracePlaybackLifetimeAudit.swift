@@ -110,6 +110,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
                 language: "en",
                 selection: .wakeWord,
                 utteranceId: "8891441c-51b0-478b-9367-e128aa77e665",
+                acousticWakeOnly: nil
             ),
             origin: generationAtWake
         )
@@ -250,6 +251,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
                 language: "en",
                 selection: .wakeWord,
                 utteranceId: "e16e1c46-f626-4d35-950f-641a0cc8cc0a",
+                acousticWakeOnly: nil
             ),
             origin: generationAtWake
         )
@@ -364,7 +366,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         service.gracePeriodSignalForTesting.onWakeWordDetected()
         let gen = service.gracePeriodSignalForTesting.currentGeneration()
         await service.handleRoutingInput(
-            IntentRoutingInput.english(transcript: "play something upbeat", language: "en", selection: .wakeWord, utteranceId: "u-200"),
+            IntentRoutingInput.english(transcript: "play something upbeat", language: "en", selection: .wakeWord, utteranceId: "u-200", acousticWakeOnly: nil),
             origin: gen
         )
         // PAST the timeout with the cloud turn still in flight: expiry must be HELD already.
@@ -512,7 +514,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         service.gracePeriodSignalForTesting.onWakeWordDetected()
         let gen = service.gracePeriodSignalForTesting.currentGeneration()
         await service.handleRoutingInput(
-            IntentRoutingInput.english(transcript: "play something upbeat", language: "en", selection: .wakeWord, utteranceId: "u-200"),
+            IntentRoutingInput.english(transcript: "play something upbeat", language: "en", selection: .wakeWord, utteranceId: "u-200", acousticWakeOnly: nil),
             origin: gen
         )
         XCTAssertTrue(service.gracePeriodSignalForTesting.isActive, "turn admitted under its hold")
@@ -594,7 +596,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         service.gracePeriodSignalForTesting.onWakeWordDetected()
         let gen1 = service.gracePeriodSignalForTesting.currentGeneration()
         await service.handleRoutingInput(
-            IntentRoutingInput.english(transcript: "play something upbeat", language: "en", selection: .wakeWord, utteranceId: "u-200"),
+            IntentRoutingInput.english(transcript: "play something upbeat", language: "en", selection: .wakeWord, utteranceId: "u-200", acousticWakeOnly: nil),
             origin: gen1
         )
         XCTAssertTrue(service.gracePeriodSignalForTesting.isActive, "turn 1 admitted, hold in effect")
@@ -604,7 +606,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         let gen2 = service.gracePeriodSignalForTesting.currentGeneration()
         XCTAssertNotEqual(gen1, gen2)
         await service.handleRoutingInput(
-            IntentRoutingInput.english(transcript: "play something upbeat", language: "en", selection: .wakeWord, utteranceId: "u-200"),
+            IntentRoutingInput.english(transcript: "play something upbeat", language: "en", selection: .wakeWord, utteranceId: "u-200", acousticWakeOnly: nil),
             origin: gen2
         )
         XCTAssertTrue(service.gracePeriodSignalForTesting.isActive)
@@ -751,7 +753,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         service.gracePeriodSignalForTesting.onWakeWordDetected()
         let gen = service.gracePeriodSignalForTesting.currentGeneration()
         let truncationResult = await service.handleRoutingInput(
-            IntentRoutingInput.english(transcript: "play something upbeat", language: "en", selection: .wakeWord, utteranceId: "u-200"),
+            IntentRoutingInput.english(transcript: "play something upbeat", language: "en", selection: .wakeWord, utteranceId: "u-200", acousticWakeOnly: nil),
             origin: gen
         )
         // (outcome of the dispatch is not directly returned here; the sink's terminal

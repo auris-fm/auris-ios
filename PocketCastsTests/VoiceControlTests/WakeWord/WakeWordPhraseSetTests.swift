@@ -39,11 +39,11 @@ final class WakeWordPhraseSetTests: XCTestCase {
     }
 
     func test_theDecisionBoundary_beforeClassification() {
-        XCTAssertEqual(RouteInputEligibilityPolicy.decide(transcript: "auris"), .silentSessionStart)
-        XCTAssertEqual(RouteInputEligibilityPolicy.decide(transcript: "Hey Auris!"), .silentSessionStart)
+        XCTAssertEqual(RouteInputEligibilityPolicy.decideForTesting("auris"), .silentSessionStart)
+        XCTAssertEqual(RouteInputEligibilityPolicy.decideForTesting("Hey Auris!"), .silentSessionStart)
         // A wake plus a question keeps the ordinary rule: it routes, and then the
         // reason decides (`no_match` escalates).
-        XCTAssertEqual(RouteInputEligibilityPolicy.decide(transcript: "hey auris, recommend something"), .route)
+        XCTAssertEqual(RouteInputEligibilityPolicy.decideForTesting("hey auris, recommend something"), .route)
         XCTAssertEqual(RouteFailureEscalationPolicy.outcome(for: RouterStageDiagnostic.reasonNoMatch), .escalate)
     }
 
@@ -52,9 +52,9 @@ final class WakeWordPhraseSetTests: XCTestCase {
     /// error earcon — against the silent rule. Repeats must all decide the same
     /// way, which is what keeps them out of the debounce.
     func test_blankCapturesAreSilentEveryTime() {
-        XCTAssertEqual(RouteInputEligibilityPolicy.decide(transcript: ""), .blank)
-        XCTAssertEqual(RouteInputEligibilityPolicy.decide(transcript: "   "), .blank)
-        let decisions = (1...3).map { _ in RouteInputEligibilityPolicy.decide(transcript: "") }
+        XCTAssertEqual(RouteInputEligibilityPolicy.decideForTesting(""), .blank)
+        XCTAssertEqual(RouteInputEligibilityPolicy.decideForTesting("   "), .blank)
+        let decisions = (1...3).map { _ in RouteInputEligibilityPolicy.decideForTesting("") }
         XCTAssertEqual(decisions, [.blank, .blank, .blank], "repeats stay silent and never reach the counter")
     }
 

@@ -868,7 +868,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         router.result = .intent(CloudRouteIntent(request: utterance, tier: .unknown))
         executor.response = .spoken("ok")
         await service.handleRoutingInput(
-            IntentRoutingInput.english(transcript: utterance, utteranceId: UUID().uuidString),
+            IntentRoutingInput.english(transcript: utterance, utteranceId: UUID().uuidString, acousticWakeOnly: nil),
             captureContext: context)
         finishCapture(harness, context)
 
@@ -988,7 +988,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
             router.result = testCase.result
             executor.response = testCase.response
             await service.handleRoutingInput(
-                IntentRoutingInput.english(transcript: "skip back thirty seconds", utteranceId: UUID().uuidString),
+                IntentRoutingInput.english(transcript: "skip back thirty seconds", utteranceId: UUID().uuidString, acousticWakeOnly: nil),
                 captureContext: context)
             finishCapture(harness, context)
 
@@ -1062,7 +1062,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         // The real sink's declined fact, stated at the executor's verdict seam.
         executor.verdictOverride = ExecutionVerdict(state: "not_run", reason: "precondition_failed")
         await service.handleRoutingInput(
-            IntentRoutingInput.english(transcript: "skip to the next episode", utteranceId: UUID().uuidString),
+            IntentRoutingInput.english(transcript: "skip to the next episode", utteranceId: UUID().uuidString, acousticWakeOnly: nil),
             captureContext: context)
         finishCapture(harness, context)
 
@@ -1094,7 +1094,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
 
         service.enterListeningStateForTesting()
         router.result = .none
-        await service.handleRoutingInput(IntentRoutingInput.english(transcript: "skip back", utteranceId: UUID().uuidString),
+        await service.handleRoutingInput(IntentRoutingInput.english(transcript: "skip back", utteranceId: UUID().uuidString, acousticWakeOnly: nil),
                                          captureContext: context)
         finishCapture(harness, context)
 
@@ -1122,7 +1122,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         guard let first = await openRealCapture(harness) else {
             return XCTFail("a real open capture is required")
         }
-        await service.handleRoutingInput(IntentRoutingInput.english(transcript: "pause", utteranceId: UUID().uuidString),
+        await service.handleRoutingInput(IntentRoutingInput.english(transcript: "pause", utteranceId: UUID().uuidString, acousticWakeOnly: nil),
                                          captureContext: first)
         finishCapture(harness, first)
         let firstStages = publishedStages(for: first.id)
@@ -1136,7 +1136,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         guard let second = await openRealCapture(harness) else {
             return XCTFail("a real open capture is required")
         }
-        await service.handleRoutingInput(IntentRoutingInput.english(transcript: "pause", utteranceId: UUID().uuidString),
+        await service.handleRoutingInput(IntentRoutingInput.english(transcript: "pause", utteranceId: UUID().uuidString, acousticWakeOnly: nil),
                                          captureContext: second)
         finishCapture(harness, second)
         XCTAssertEqual(executor.executed.count, 1, "premise: the debounce suppressed the second turn")
@@ -1166,7 +1166,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         let id = context.id
 
         service.enterListeningStateForTesting()
-        await service.handleRoutingInput(IntentRoutingInput.english(transcript: "   ", utteranceId: UUID().uuidString),
+        await service.handleRoutingInput(IntentRoutingInput.english(transcript: "   ", utteranceId: UUID().uuidString, acousticWakeOnly: nil),
                                          captureContext: context)
         finishCapture(harness, context)
 

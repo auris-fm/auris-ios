@@ -109,7 +109,7 @@ final class PreTerminalRefusalClientControl: SocketCapturingTestCase {
             context: sampleContext(),
             origin: Self.origin,
             selection: .followUp,
-            utteranceId: "u-refused-1"
+            utteranceId: "u-refused-1",
         )
 
         // LOAD-BEARING: `VoiceIntentExecutor` switches on this outcome and treats
@@ -145,7 +145,7 @@ final class PreTerminalRefusalClientControl: SocketCapturingTestCase {
             context: sampleContext(),
             origin: Self.origin,
             selection: .followUp,
-            utteranceId: "u-refused-count"
+            utteranceId: "u-refused-count",
         )
 
         // LIMIT OF THIS ASSERTION, stated so it cannot be read as more than it is: a SocketStub
@@ -174,7 +174,7 @@ final class PreTerminalRefusalClientControl: SocketCapturingTestCase {
             context: sampleContext(),
             origin: Self.origin,
             selection: .followUp,
-            utteranceId: "u-refused-2"
+            utteranceId: "u-refused-2",
         )
         switch result.response {
         case let .spoken(text):
@@ -201,7 +201,7 @@ final class PreTerminalRefusalClientControl: SocketCapturingTestCase {
             context: sampleContext(),
             origin: Self.origin,
             selection: .followUp,
-            utteranceId: "u-refused-3"
+            utteranceId: "u-refused-3",
         )
         // This is what makes "no later done on that transport" true by construction rather than by
         // the fixture happening to end: the receive loop stops and retires the socket.
@@ -225,7 +225,7 @@ final class PreTerminalRefusalClientControl: SocketCapturingTestCase {
             context: sampleContext(),
             origin: Self.origin,
             selection: .followUp,
-            utteranceId: "u-normal-1"
+            utteranceId: "u-normal-1",
         )
         XCTAssertEqual(result.outcome, .completed)
     }

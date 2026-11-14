@@ -270,7 +270,8 @@ final class LfmIntentRouterTests: XCTestCase {
             routerTranscript: "Go back to 3 minutes.",
             translationKind: .platform,
             selection: nil,
-            utteranceId: "u-701")
+            utteranceId: "u-701",
+            acousticWakeOnly: nil)
         _ = router.classify(input: input)
 
         XCTAssertEqual(metrics?.finalOutcome, RouterStageDiagnostic.outcomeNoIntent)
@@ -368,7 +369,7 @@ final class LfmIntentRouterTests: XCTestCase {
             }
         }
         let pending = Task.detached {
-            router.classify(input: .english(transcript: "pause", utteranceId: UUID().uuidString), pendingDialog: nil) { identity in
+            router.classify(input: .english(transcript: "pause", utteranceId: UUID().uuidString, acousticWakeOnly: nil), pendingDialog: nil) { identity in
                 stateLock.withLock { used = identity }
             }
         }
@@ -396,7 +397,7 @@ final class LfmIntentRouterTests: XCTestCase {
         var reports: [VoiceSharingContributionEncoder.ModelRef?] = []
         var tokenizeCount = 0
         inference.onTokenize = { tokenizeCount += 1 }
-        _ = router.classify(input: .english(transcript: "pause", utteranceId: UUID().uuidString), pendingDialog: nil) { reports.append($0) }
+        _ = router.classify(input: .english(transcript: "pause", utteranceId: UUID().uuidString, acousticWakeOnly: nil), pendingDialog: nil) { reports.append($0) }
         XCTAssertEqual(reports.count, 1)
         XCTAssertNil(reports.first.flatMap { $0 })
         XCTAssertEqual(tokenizeCount, 0)

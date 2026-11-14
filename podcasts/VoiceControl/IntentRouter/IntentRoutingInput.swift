@@ -27,7 +27,7 @@ struct IntentRoutingInput: Equatable {
         translationKind: TranslationKind,
         selection: CloudConversationSelection?,
         utteranceId: String,
-        acousticWakeOnly: Bool? = nil
+        acousticWakeOnly: Bool?
     ) {
         self.sourceTranscript = sourceTranscript
         self.sourceLanguage = sourceLanguage
@@ -52,7 +52,7 @@ struct IntentRoutingInput: Equatable {
         language: String? = nil,
         selection: CloudConversationSelection? = nil,
         utteranceId: String,
-        acousticWakeOnly: Bool? = nil
+        acousticWakeOnly: Bool?
     ) -> IntentRoutingInput {
         IntentRoutingInput(
             sourceTranscript: transcript,

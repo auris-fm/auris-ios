@@ -37,7 +37,9 @@ enum RouteInputEligibilityPolicy {
         decide(transcript: input.routerTranscript, acousticWakeOnly: input.acousticWakeOnly)
     }
 
-    static func decide(transcript: String, acousticWakeOnly: Bool? = nil) -> RouteInputEligibility {
+    /// Private on purpose: the whole-input form is the only way in from production code, so no
+    /// gate can decide from the transcript alone. Tests reach it through `decide(_:)` too.
+    private static func decide(transcript: String, acousticWakeOnly: Bool?) -> RouteInputEligibility {
         // Checked before `.blank`: a capture that ended with the wake word is a session start even
         // if the recogniser returned an empty string, and `.blank` would otherwise claim it.
         if acousticWakeOnly == true { return .silentSessionStart }

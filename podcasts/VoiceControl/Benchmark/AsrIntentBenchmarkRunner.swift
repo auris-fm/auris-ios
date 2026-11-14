@@ -60,7 +60,10 @@ final class AsrIntentBenchmarkRunner {
                 // A benchmark utterance is not a conversation turn, but it still carries an
                 // explicit identity — no silent mint on the input builders.
                 selection: nil,
-                utteranceId: UUID().uuidString
+                utteranceId: UUID().uuidString,
+                // A benchmark case is recorded audio with no wake gate, so there is no verdict
+                // to carry: `nil` states that, rather than asserting a continuation.
+                acousticWakeOnly: nil
             )
         default:
             throw BenchmarkVariantError.unknown(variant)

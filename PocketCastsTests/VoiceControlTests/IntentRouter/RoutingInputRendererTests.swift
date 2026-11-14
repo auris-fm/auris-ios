@@ -16,7 +16,8 @@ final class RoutingInputRendererTests: XCTestCase {
             routerTranscript: router,
             translationKind: kind,
             selection: nil,
-            utteranceId: "u-700"
+            utteranceId: "u-700",
+            acousticWakeOnly: nil,
         )
     }
 

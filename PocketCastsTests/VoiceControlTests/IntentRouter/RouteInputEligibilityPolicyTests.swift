@@ -7,18 +7,19 @@ import XCTest
 /// wake-only capture whose text is not one of the listed spellings reached classification and
 /// spent the window's dispatch on nothing. These pin the seam that beats that.
 final class RouteInputEligibilityPolicyTests: XCTestCase {
+
     func test_anAcousticWakeOnlyClosesTheTurnWhateverTheTranscriptSays() {
         // The whole point: a rendering no spelling list contains.
         XCTAssertEqual(
-            RouteInputEligibilityPolicy.decide(transcript: "Oace.", acousticWakeOnly: true),
+            RouteInputEligibilityPolicy.decideForTesting("Oace.", acousticWakeOnly: true),
             .silentSessionStart)
         XCTAssertEqual(
-            RouteInputEligibilityPolicy.decide(transcript: "oris", acousticWakeOnly: true),
+            RouteInputEligibilityPolicy.decideForTesting("oris", acousticWakeOnly: true),
             .silentSessionStart)
         // Even an empty transcript: the audio says the capture ended at the wake word, so this is a
         // session start, not "nothing survived capture".
         XCTAssertEqual(
-            RouteInputEligibilityPolicy.decide(transcript: "", acousticWakeOnly: true),
+            RouteInputEligibilityPolicy.decideForTesting("", acousticWakeOnly: true),
             .silentSessionStart,
             "a wake-only capture must not be counted as blank")
     }
@@ -26,15 +27,15 @@ final class RouteInputEligibilityPolicyTests: XCTestCase {
     /// The margin's absence is not evidence of a bare wake: routing stays exactly as it was.
     func test_withoutAnAcousticVerdictOnlyTheTextRuleApplies() {
         XCTAssertEqual(
-            RouteInputEligibilityPolicy.decide(transcript: "Oace.", acousticWakeOnly: nil),
+            RouteInputEligibilityPolicy.decideForTesting("Oace.", acousticWakeOnly: nil),
             .route,
             "no audio decision, and the spelling is not listed: route rather than guess")
         XCTAssertEqual(
-            RouteInputEligibilityPolicy.decide(transcript: "auris", acousticWakeOnly: nil),
+            RouteInputEligibilityPolicy.decideForTesting("auris", acousticWakeOnly: nil),
             .silentSessionStart,
             "the text rule still holds when no audio verdict exists")
         XCTAssertEqual(
-            RouteInputEligibilityPolicy.decide(transcript: "   ", acousticWakeOnly: nil),
+            RouteInputEligibilityPolicy.decideForTesting("   ", acousticWakeOnly: nil),
             .blank)
     }
 
@@ -43,11 +44,11 @@ final class RouteInputEligibilityPolicyTests: XCTestCase {
     /// is silent, and it must not add anything of its own.
     func test_anInconclusiveVerdictNeitherVetoesNorOverrulesTheTextRule() {
         XCTAssertEqual(
-            RouteInputEligibilityPolicy.decide(transcript: "auris", acousticWakeOnly: false),
+            RouteInputEligibilityPolicy.decideForTesting("auris", acousticWakeOnly: false),
             .silentSessionStart,
             "the text rule still closes a listed spelling")
         XCTAssertEqual(
-            RouteInputEligibilityPolicy.decide(transcript: "play the news", acousticWakeOnly: false),
+            RouteInputEligibilityPolicy.decideForTesting("play the news", acousticWakeOnly: false),
             .route)
     }
 
@@ -86,5 +87,26 @@ final class RouteInputEligibilityPolicyTests: XCTestCase {
             RouteInputEligibilityPolicy.decide(command),
             .route,
             "a measured continuation still routes and may interrupt")
+    }
+}
+
+/// Tests ask eligibility the SAME way production does — through the whole input.
+///
+/// The transcript-only overload is private precisely so no caller can reach a decision from one
+/// field; that constraint is worth keeping in tests too, or a test can go on "passing" while the
+/// gate it is supposed to guard decides differently.
+extension RouteInputEligibilityPolicy {
+    static func decideForTesting(_ transcript: String, acousticWakeOnly: Bool? = nil) -> RouteInputEligibility {
+        decide(
+            IntentRoutingInput(
+                sourceTranscript: transcript,
+                sourceLanguage: "en",
+                routerTranscript: transcript,
+                translationKind: .none,
+                selection: nil,
+                utteranceId: "u-eligibility-testing",
+                acousticWakeOnly: acousticWakeOnly
+            )
+        )
     }
 }

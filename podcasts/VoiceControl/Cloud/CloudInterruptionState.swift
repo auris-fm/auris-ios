@@ -152,7 +152,7 @@ final class CloudInterruptionState: @unchecked Sendable {
         sourceTranscript: String? = nil,
         sourceLanguage: String? = nil,
         translationKind: TranslationKind? = nil,
-        acousticWakeOnly: Bool? = nil,
+        acousticWakeOnly: Bool?,
         forRequestId interruptedRequestId: String
     ) -> Bool {
         lock.lock(); defer { lock.unlock() }

@@ -140,7 +140,7 @@ final class LockOrderControls: XCTestCase {
         let input = IntentRoutingInput(
             sourceTranscript: "late turn", sourceLanguage: nil,
             routerTranscript: "late turn", translationKind: .none, selection: nil,
-            utteranceId: "utterance-stop-restart")
+            utteranceId: "utterance-stop-restart", acousticWakeOnly: nil)
         // The enqueue's completion is observed through a semaphore + lock-protected box with a
         // BOUNDED wait: awaiting the detached task directly would hang this control if the
         // enqueue wedged, and an unbounded hang is not a failure signal.

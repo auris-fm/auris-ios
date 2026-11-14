@@ -145,7 +145,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
     func testATerminalForAnUnrelatedTurnReleasesNothing() {
         let state = CloudInterruptionState()
         XCTAssertTrue(state.claimInterruptEmission(forRequestId: "turn-A"))
-        XCTAssertTrue(state.hold(request: "next one", utteranceId: "u-2", origin: 1, forRequestId: "turn-A"))
+        XCTAssertTrue(state.hold(request: "next one", utteranceId: "u-2", origin: 1, acousticWakeOnly: nil, forRequestId: "turn-A"))
 
         XCTAssertNil(
             state.recordTerminalAcknowledgement(forRequestId: "turn-B"),
@@ -169,7 +169,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
     func testACompletedInterruptionDoesNotBlockTheNextOne() {
         let state = CloudInterruptionState()
         XCTAssertTrue(state.claimInterruptEmission(forRequestId: "turn-A"))
-        XCTAssertTrue(state.hold(request: "a-follow", utteranceId: "u-a", origin: 1, forRequestId: "turn-A"))
+        XCTAssertTrue(state.hold(request: "a-follow", utteranceId: "u-a", origin: 1, acousticWakeOnly: nil, forRequestId: "turn-A"))
         XCTAssertNotNil(state.recordTerminalAcknowledgement(forRequestId: "turn-A"))
 
         // A NEW interruption, after the first resolved: this is the case a single "released" slot
@@ -178,12 +178,12 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
             state.claimInterruptEmission(forRequestId: "turn-B"),
             "a later turn must still be interruptible after an earlier interruption resolved"
         )
-        XCTAssertTrue(state.hold(request: "b-follow", utteranceId: "u-b", origin: 1, forRequestId: "turn-B"))
+        XCTAssertTrue(state.hold(request: "b-follow", utteranceId: "u-b", origin: 1, acousticWakeOnly: nil, forRequestId: "turn-B"))
         XCTAssertNotNil(state.recordTerminalAcknowledgement(forRequestId: "turn-B"))
 
         // And a THIRD, after a refusal in between.
         XCTAssertTrue(state.claimInterruptEmission(forRequestId: "turn-C"))
-        XCTAssertTrue(state.hold(request: "c-follow", utteranceId: "u-c", origin: 1, forRequestId: "turn-C"))
+        XCTAssertTrue(state.hold(request: "c-follow", utteranceId: "u-c", origin: 1, acousticWakeOnly: nil, forRequestId: "turn-C"))
         XCTAssertTrue(
             state.recordRefusal(
                 forRequestId: "turn-C",
@@ -200,7 +200,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
     func testRefusalForAnUnrelatedTurnRetainsNothingAndKeepsTheRealReport() {
         let state = CloudInterruptionState()
         XCTAssertTrue(state.claimInterruptEmission(forRequestId: "turn-A"))
-        XCTAssertTrue(state.hold(request: "a-follow", utteranceId: "u-a", origin: 1, forRequestId: "turn-A"))
+        XCTAssertTrue(state.hold(request: "a-follow", utteranceId: "u-a", origin: 1, acousticWakeOnly: nil, forRequestId: "turn-A"))
 
         XCTAssertFalse(
             state.recordRefusal(
@@ -251,7 +251,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         // terminal resolves only a follow-up held FOR B — which is what the production emit point
         // records (it holds the interrupting utterance against the turn it interrupted).
         XCTAssertTrue(state.claimInterruptEmission(forRequestId: "u-turn-b"))
-        XCTAssertTrue(state.hold(request: "play the next one", utteranceId: "u-followup", origin: Self.origin, forRequestId: "u-turn-b"))
+        XCTAssertTrue(state.hold(request: "play the next one", utteranceId: "u-followup", origin: Self.origin, acousticWakeOnly: nil, forRequestId: "u-turn-b"))
 
         // Turn B runs on its own socket and reaches `done` — the acknowledgement for the turn it
         // interrupted, handled by the sink's `done` branch.
@@ -262,7 +262,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
             context: sampleContext(),
             origin: Self.origin,
             selection: .followUp,
-            utteranceId: "u-turn-b"
+            utteranceId: "u-turn-b",
         )
         XCTAssertEqual(result.outcome, .completed, "premise: turn B completed normally")
 
@@ -302,7 +302,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
                 context: self.sampleContext(),
                 origin: Self.origin,
                 selection: .followUp,
-                utteranceId: "u-turn-a"
+                utteranceId: "u-turn-a",
             )
         }
         // Wait until the prior turn owns the socket.
@@ -321,7 +321,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
             context: sampleContext(),
             origin: Self.origin,
             selection: .followUp,
-            utteranceId: "u-turn-b"
+            utteranceId: "u-turn-b",
         )
 
         // The refusal is a failed turn, never settlement.
@@ -396,7 +396,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         let prior = Task {
             await sink.routeToCloud(
                 request: "prior question", tier: .free, context: self.sampleContext(),
-                origin: Self.origin, selection: .followUp, utteranceId: "u-turn-a"
+                origin: Self.origin, selection: .followUp, utteranceId: "u-turn-a",
             )
         }
         let appeared = await waitUntil(timeout: 5) {
@@ -412,7 +412,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         let successor = Task {
             await sink.routeToCloud(
                 request: "play the next one", tier: .free, context: self.sampleContext(),
-                origin: Self.origin, selection: .followUp, utteranceId: "u-turn-b"
+                origin: Self.origin, selection: .followUp, utteranceId: "u-turn-b",
             )
         }
 
@@ -460,7 +460,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
             context: sampleContext(),
             origin: Self.origin,
             selection: .followUp,
-            utteranceId: "u-turn-c"
+            utteranceId: "u-turn-c",
         )
 
         let frames = capturedTask?.sentTextFrames ?? []
@@ -505,7 +505,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         let sink = makeSink(state: state) { self.doneFixture }
         _ = await sink.routeToCloud(
             request: "different conversation", tier: .free, context: sampleContext(),
-            origin: Self.origin, selection: .wakeWord, utteranceId: "u-other"
+            origin: Self.origin, selection: .wakeWord, utteranceId: "u-other",
         )
 
         let frames = capturedTask?.sentTextFrames ?? []
@@ -527,7 +527,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         let first = makeSink(state: state) { self.doneFixture }
         _ = await first.routeToCloud(
             request: "first", tier: .free, context: sampleContext(),
-            origin: Self.origin, selection: .followUp, utteranceId: "u-first"
+            origin: Self.origin, selection: .followUp, utteranceId: "u-first",
         )
         let firstFrames = capturedTask?.sentTextFrames ?? []
         XCTAssertTrue(firstFrames.contains { $0.contains("\"interrupts\"") }, "premise: the report rode the first turn")
@@ -535,7 +535,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         let second = makeSink(state: state) { self.doneFixture }
         _ = await second.routeToCloud(
             request: "second", tier: .free, context: sampleContext(),
-            origin: Self.origin, selection: .followUp, utteranceId: "u-second"
+            origin: Self.origin, selection: .followUp, utteranceId: "u-second",
         )
         let secondFrames = capturedTask?.sentTextFrames ?? []
         XCTAssertFalse(
@@ -561,7 +561,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         let first = Task {
             await sink.routeToCloud(
                 request: "first wake", tier: .free, context: self.sampleContext(),
-                origin: Self.origin, selection: .followUp, utteranceId: "u-first"
+                origin: Self.origin, selection: .followUp, utteranceId: "u-first",
             )
         }
         let appeared = await waitUntil(timeout: 5) {
@@ -574,7 +574,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         let second = Task {
             await sink.routeToCloud(
                 request: "second wake", tier: .free, context: self.sampleContext(),
-                origin: Self.origin, selection: .followUp, utteranceId: "u-second"
+                origin: Self.origin, selection: .followUp, utteranceId: "u-second",
             )
         }
         let reached = await waitUntil(timeout: 5) {
@@ -619,7 +619,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
                 context: self.sampleContext(),
                 origin: Self.origin,
                 selection: .followUp,
-                utteranceId: "u-turn-a"
+                utteranceId: "u-turn-a",
             )
         }
         let appeared = await waitUntil(timeout: 5) {
@@ -645,7 +645,8 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
             request: "play the next one",
             utteranceId: "u-barge",
             origin: Self.origin,
-            selection: CloudConversationSelection.followUp
+            selection: CloudConversationSelection.followUp,
+            acousticWakeOnly: nil
         )
         XCTAssertEqual(emitted, priorRequestId, "the claimed interruption owns disposal even when its send fails")
 

@@ -251,7 +251,8 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
         let input = IntentRoutingInput.english(
             transcript: transcript,
             selection: .wakeWord,
-            utteranceId: utteranceId
+            utteranceId: utteranceId,
+            acousticWakeOnly: nil
         )
         guard let routing = asr?.onRoutingInput else {
             XCTFail("the service must install onRoutingInput; without it no turn can be admitted")
@@ -504,7 +505,7 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
         XCTAssertTrue(state.claimInterruptEmission(forRequestId: "u-prior"))
         XCTAssertTrue(
             state.hold(request: "play the next one", utteranceId: "u-barge", origin: nil,
-                       forRequestId: "u-prior"),
+                       acousticWakeOnly: nil, forRequestId: "u-prior"),
             "premise: the interrupting utterance is retained while the interruption is unresolved"
         )
         XCTAssertFalse(state.isSuppressed("u-barge"), "premise: nothing is suppressed yet")
@@ -617,6 +618,7 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
                 sourceTranscript: "spiel die naechste folge",
                 sourceLanguage: "de",
                 translationKind: .platform,
+                acousticWakeOnly: nil,
                 forRequestId: "u-prior"
             )
         )
@@ -644,7 +646,7 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
         XCTAssertTrue(
             state.hold(
                 request: "play the next one", utteranceId: "u-barge",
-                origin: 2, forRequestId: "u-prior"
+                origin: 2, acousticWakeOnly: nil, forRequestId: "u-prior"
             )
         )
         XCTAssertFalse(state.isSuppressed("u-barge"), "precondition: not suppressed before the send")

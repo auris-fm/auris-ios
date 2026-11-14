@@ -251,7 +251,8 @@ final class SinglePredecessorInterruptionControl: XCTestCase {
             IntentRoutingInput.english(
                 transcript: transcript,
                 selection: selection,
-                utteranceId: utteranceId
+                utteranceId: utteranceId,
+                acousticWakeOnly: nil
             )
         )
     }
@@ -297,7 +298,7 @@ final class SinglePredecessorInterruptionControl: XCTestCase {
     func testStoppedCaptureIsDroppedRatherThanLabelledSuppressed() async throws {
         let service = try await readyService(fixture: { self.doneFixture }, parkFirstReceive: false)
         service.stop()
-        let outcome = await service.handleRoutingInput(.english(transcript: "next", utteranceId: "stopped"))
+        let outcome = await service.handleRoutingInput(.english(transcript: "next", utteranceId: "stopped", acousticWakeOnly: nil))
         XCTAssertEqual(outcome, .dropped)
         XCTAssertEqual(authFrames(for: "stopped").count, 0)
     }
