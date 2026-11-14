@@ -151,11 +151,11 @@ final class WakeTranscriptTrimmerTests: XCTestCase {
     func test_audioRule_aShortCommandWithoutAPauseStillRoutes() {
         XCTAssertEqual(
             audioRule(completionSample: 4_000, marginMs: 80, speechEndMs: 420, transcript: "auris stop"),
-            .route,
-            "speech continuing past the boundary means something followed the wake word")
+            .continuation,
+            "speech continuing past the boundary is MEASURED evidence of a continuation")
         XCTAssertEqual(
             audioRule(completionSample: 4_000, marginMs: 80, speechEndMs: 171, transcript: "auris stop"),
-            .route,
+            .continuation,
             "one millisecond past the boundary is still past it")
     }
 
@@ -167,7 +167,7 @@ final class WakeTranscriptTrimmerTests: XCTestCase {
         for margin in [nil, -5] {
             XCTAssertEqual(
                 audioRule(completionSample: 4_000, marginMs: margin, speechEndMs: 100),
-                .route,
+                .noEvidence,
                 "a missing or negative margin (\(String(describing: margin))) disables the rule")
         }
     }
@@ -180,14 +180,14 @@ final class WakeTranscriptTrimmerTests: XCTestCase {
             "with no margin the boundary is the completion offset, and speech ends exactly there")
         XCTAssertEqual(
             audioRule(completionSample: 4_000, marginMs: 0, speechEndMs: 251),
-            .route)
+            .continuation)
     }
 
     /// `NotDetected` never applies the audio rule, even when the acoustics look wake-only.
     func test_audioRule_neverAppliesWithoutAPositiveWake() {
         XCTAssertEqual(
             audioRule(completionSample: 4_000, marginMs: 80, speechEndMs: 100, wakePositive: false),
-            .route,
+            .noEvidence,
             "a grace-period capture is not gated by a wake result at all")
     }
 
@@ -198,7 +198,32 @@ final class WakeTranscriptTrimmerTests: XCTestCase {
     func test_audioRule_anUnknownSpeechEndRoutes() {
         XCTAssertEqual(
             audioRule(completionSample: 4_000, marginMs: 80, speechEndMs: nil),
-            .route,
+            .noEvidence,
             "without a speech-end offset the rule has no evidence and must not drop the capture")
+    }
+
+    /// "The rule did not run" must never reach a consumer as "the audio proved a continuation".
+    ///
+    /// Both route, so the routing outcome cannot tell them apart — but a downstream gate that
+    /// treats `false` as evidence would interpret a loud room as a measured command. Only
+    /// `.continuation` is a measurement; every no-evidence case maps to `nil`.
+    func test_audioRule_noEvidenceIsNeverReportedAsAMeasuredContinuation() {
+        XCTAssertNil(WakeTranscriptTrimmer.WakeOnlyDecision.noEvidence.acousticVerdict)
+        XCTAssertEqual(WakeTranscriptTrimmer.WakeOnlyDecision.wakeOnly.acousticVerdict, true)
+        XCTAssertEqual(WakeTranscriptTrimmer.WakeOnlyDecision.continuation.acousticVerdict, false)
+
+        XCTAssertNil(
+            audioRule(completionSample: 4_000, marginMs: nil, speechEndMs: 100).acousticVerdict,
+            "no margin is no evidence, not a measured continuation")
+        XCTAssertNil(
+            audioRule(completionSample: 4_000, marginMs: 80, speechEndMs: nil).acousticVerdict,
+            "an unknown speech end is no evidence")
+        XCTAssertNil(
+            audioRule(completionSample: 4_000, marginMs: 80, speechEndMs: 100, wakePositive: false).acousticVerdict,
+            "a capture with no wake gate is no evidence")
+        XCTAssertEqual(
+            audioRule(completionSample: 4_000, marginMs: 80, speechEndMs: 420).acousticVerdict,
+            false,
+            "a measured continuation IS false, and only this case may report it")
     }
 }

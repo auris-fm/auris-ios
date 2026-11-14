@@ -260,6 +260,56 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
         return routing(input)
     }
 
+
+    // MARK: - A BARE WAKE OVER A PLAYING ANSWER IS NOT A BARGE-IN
+
+    /// A wake-only capture must NOT interrupt a playing answer, whatever ASR called the phrase.
+    ///
+    /// This is the case the acoustic rule exists for: with an answer playing, a user says only the
+    /// wake word, ASR renders it outside every listed spelling, and the transcript alone says
+    /// "this might be a command". Deciding eligibility from the transcript at the barge-in gate
+    /// stopped playback and then submitted the capture as a command — the exact failure, on the
+    /// path where it costs the most.
+    func testAWakeOnlyCaptureDoesNotInterruptAPlayingAnswer() async throws {
+        let service = try await readyService(fixture: { self.doneFixture })
+        speak(service, "first question", "u-prior")
+        let parked = await waitUntil(timeout: 20) { self.recorder.all.first?.terminalWithheld == true }
+        XCTAssertTrue(parked, "premise: turn 1 must be in flight or there is nothing to interrupt")
+        guard let priorSocket = recorder.all.first else {
+            return XCTFail("no predecessor socket was built")
+        }
+        XCTAssertTrue(priorSocket.receiveEntered, "premise: the predecessor receiver is consuming")
+
+        // The same seam `speak` uses, but carrying the audio verdict — as the engine now does.
+        service.gracePeriodSignalForTesting.onWakeWordDetected()
+        let wakeOnly = IntentRoutingInput(
+            sourceTranscript: "oris",
+            sourceLanguage: "en",
+            routerTranscript: "oris",
+            translationKind: .none,
+            selection: .wakeWord,
+            utteranceId: "u-wakeonly",
+            acousticWakeOnly: true
+        )
+        XCTAssertTrue(asr?.onRoutingInput?(wakeOnly) ?? false, "premise: the capture was admitted")
+
+        // Give the eager step real time to run before concluding it did nothing.
+        _ = await waitUntil(timeout: 3) { priorSocket.sentInterrupt }
+        XCTAssertFalse(
+            priorSocket.sentInterrupt,
+            "a bare wake must not interrupt the playing answer; frames=\(priorSocket.sentTextFrames)"
+        )
+        XCTAssertFalse(
+            priorSocket.terminalReleased,
+            "premise: the answer is still playing, so nothing was interrupted")
+        XCTAssertTrue(
+            authFrames(for: "u-wakeonly").isEmpty,
+            "a wake-only capture must not be submitted as a command; frames=\(allFrames())"
+        )
+
+        firstTurnLatch.release()
+    }
+
     // MARK: - Baseline
 
     /// An ordinary turn reaches the wire exactly once. This makes the zeros below meaningful:

@@ -50,4 +50,41 @@ final class RouteInputEligibilityPolicyTests: XCTestCase {
             RouteInputEligibilityPolicy.decide(transcript: "play the news", acousticWakeOnly: false),
             .route)
     }
+
+    /// The verdict must travel with the input, so every gate that asks the question gets the same
+    /// answer — including the eager barge-in gate, which runs while an answer is still playing.
+    ///
+    /// The bug this pins: eligibility was re-decided from `routerTranscript` alone at that gate, so
+    /// a misspelled bare wake stopped playback and was then submitted as a command, and the
+    /// retained follow-up rebuilt its input without the verdict. Deciding from the input makes a
+    /// gate that forgets a field impossible to write — there is nothing to forget.
+    func test_eligibilityIsDecidedFromTheWholeInput() {
+        let wakeOnly = IntentRoutingInput(
+            sourceTranscript: "oris",
+            sourceLanguage: "en",
+            routerTranscript: "oris",
+            translationKind: .none,
+            selection: nil,
+            utteranceId: "u-barge",
+            acousticWakeOnly: true
+        )
+        XCTAssertEqual(
+            RouteInputEligibilityPolicy.decide(wakeOnly),
+            .silentSessionStart,
+            "a bare wake over an answer must not barge in, whatever ASR called it")
+
+        let command = IntentRoutingInput(
+            sourceTranscript: "oris stop",
+            sourceLanguage: "en",
+            routerTranscript: "oris stop",
+            translationKind: .none,
+            selection: nil,
+            utteranceId: "u-command",
+            acousticWakeOnly: false
+        )
+        XCTAssertEqual(
+            RouteInputEligibilityPolicy.decide(command),
+            .route,
+            "a measured continuation still routes and may interrupt")
+    }
 }

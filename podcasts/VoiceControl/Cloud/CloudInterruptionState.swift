@@ -81,6 +81,10 @@ final class CloudInterruptionState: @unchecked Sendable {
         /// How the recognized text was produced (native / platform / backend translation), so the
         /// follow-up dispatches under the same translation regime it was admitted with.
         let translationKind: TranslationKind?
+        /// The acoustic wake-only verdict the capture was admitted under. Carried so the follow-up
+        /// is dispatched on the same evidence the interruption decision used: rebuilding the input
+        /// without it let a bare wake that had already stopped playback be submitted as a command.
+        let acousticWakeOnly: Bool?
         /// The INTERRUPTED turn this follow-up was addressed to — the subject of the pending
         /// report and, with the release, the whole authority to submit.
         let interruptedRequestId: String
@@ -92,6 +96,9 @@ final class CloudInterruptionState: @unchecked Sendable {
         let sourceTranscript: String?
         let sourceLanguage: String?
         let translationKind: TranslationKind?
+        /// See `ReleasedFollowUp.acousticWakeOnly`: part of the admitted input, not a property of
+        /// one gate.
+        let acousticWakeOnly: Bool?
         let utteranceId: String
         let origin: Int?
         /// The turn this utterance interrupts. Bound at hold time; a terminal for any other turn
@@ -145,6 +152,7 @@ final class CloudInterruptionState: @unchecked Sendable {
         sourceTranscript: String? = nil,
         sourceLanguage: String? = nil,
         translationKind: TranslationKind? = nil,
+        acousticWakeOnly: Bool? = nil,
         forRequestId interruptedRequestId: String
     ) -> Bool {
         lock.lock(); defer { lock.unlock() }
@@ -156,6 +164,7 @@ final class CloudInterruptionState: @unchecked Sendable {
             sourceTranscript: sourceTranscript,
             sourceLanguage: sourceLanguage,
             translationKind: translationKind,
+            acousticWakeOnly: acousticWakeOnly,
             utteranceId: utteranceId,
             origin: origin,
             interruptedRequestId: interruptedRequestId
@@ -186,6 +195,7 @@ final class CloudInterruptionState: @unchecked Sendable {
             sourceTranscript: held.sourceTranscript,
             sourceLanguage: held.sourceLanguage,
             translationKind: held.translationKind,
+            acousticWakeOnly: held.acousticWakeOnly,
             interruptedRequestId: requestId
         )
     }

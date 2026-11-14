@@ -1888,6 +1888,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         sourceTranscript: String? = nil,
         sourceLanguage: String? = nil,
         translationKind: TranslationKind? = nil,
+        acousticWakeOnly: Bool? = nil,
         validatingEpoch: UInt64? = nil,
         isEpochStillCurrent: (@Sendable (UInt64) -> Bool)? = nil
     ) async -> String? {
@@ -1922,6 +1923,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             sourceTranscript: sourceTranscript,
             sourceLanguage: sourceLanguage,
             translationKind: translationKind,
+            acousticWakeOnly: acousticWakeOnly,
             forRequestId: priorRequestId
         ) else {
             // A different turn is already holding a follow-up: the contract allows exactly one

@@ -774,7 +774,7 @@ class VoiceControlService: ObservableObject {
         guard input.utteranceId != nil else { return false }
         // Only an input that will actually be routed can barge in; a blank or wake-only capture is
         // a session start, not speech over an answer.
-        guard case .route = RouteInputEligibilityPolicy.decide(transcript: input.routerTranscript)
+        guard case .route = RouteInputEligibilityPolicy.decide(input)
         else { return false }
         // The retained record carries the COMPLETE admitted input — including the selection this
         // capture was admitted under — because the follow-up submitter reconstructs its submission
@@ -787,6 +787,9 @@ class VoiceControlService: ObservableObject {
             sourceTranscript: input.sourceTranscript,
             sourceLanguage: input.sourceLanguage,
             translationKind: input.translationKind,
+            // Carried into the hold so the retained follow-up is dispatched on the same evidence
+            // this interruption decision used.
+            acousticWakeOnly: input.acousticWakeOnly,
             // The window this capture was ADMITTED under, carried to the effect boundary
             // (reviewer c38ff4ba item 3). A service stop/restart between the caller's check and
             // the main-actor hop is otherwise invisible: the sink would interrupt on behalf of a
@@ -986,7 +989,10 @@ class VoiceControlService: ObservableObject {
                 routerTranscript: released.request,
                 translationKind: released.translationKind ?? .none,
                 selection: released.selection,
-                utteranceId: released.utteranceId
+                utteranceId: released.utteranceId,
+                // The verdict the capture was admitted under. Rebuilding without it let a bare
+                // wake that had already stopped playback be submitted as a command.
+                acousticWakeOnly: released.acousticWakeOnly
             ),
             origin: released.origin,
             selection: released.selection

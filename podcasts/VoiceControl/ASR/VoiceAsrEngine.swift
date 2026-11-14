@@ -987,7 +987,8 @@ class VoiceAsrEngine {
             translateNote: translateNote,
             selection: selection,
             utteranceId: utteranceId,
-            acousticWakeOnly: wakeOnlyDecision == .wakeOnly
+            // `nil` when the rule could not run, so "no evidence" is never written as a negative.
+            acousticWakeOnly: wakeOnlyDecision.acousticVerdict
         )
         if onRoutingInputWithContext?(routingInput, utteranceContext) ?? false {
             admissionHandedToRouting = true

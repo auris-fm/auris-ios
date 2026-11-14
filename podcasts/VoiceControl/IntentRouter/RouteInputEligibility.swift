@@ -25,6 +25,18 @@ enum RouteInputEligibilityPolicy {
     ///   `true` is authoritative: the capture measurably ended with the wake word, so nothing was
     ///   said after it however ASR spelled the phrase. `false` adds nothing (the text rule still
     ///   applies). `nil` means no audio decision was possible.
+    /// THE decision, taken from the whole input.
+    ///
+    /// The single entry point on purpose. Eligibility is a property of the capture — transcript
+    /// AND the audio verdict — so a gate that asks the question from one field alone can reach the
+    /// opposite answer from the gate before it. That is not hypothetical: the eager barge-in gate
+    /// decided from `routerTranscript` alone, so a misspelled bare wake over a playing answer
+    /// stopped playback and was then submitted as a command. Passing the input makes the fields
+    /// travel together and leaves nothing for a new call site to forget.
+    static func decide(_ input: IntentRoutingInput) -> RouteInputEligibility {
+        decide(transcript: input.routerTranscript, acousticWakeOnly: input.acousticWakeOnly)
+    }
+
     static func decide(transcript: String, acousticWakeOnly: Bool? = nil) -> RouteInputEligibility {
         // Checked before `.blank`: a capture that ended with the wake word is a session start even
         // if the recogniser returned an empty string, and `.blank` would otherwise claim it.
