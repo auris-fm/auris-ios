@@ -56,6 +56,11 @@ DERIVED_DATA = /tmp/dd-$(WORKTREE_NAME)
 # path someone else's checkout would not have.
 SOURCE_PACKAGES = $(abspath $(CURDIR)/../SourcePackages)
 
+# Picks the device type and runtime for the test simulator when it has to be created. A separate
+# script rather than inline python: it is the part with the interesting rules, and those were
+# wrong twice while buried in a recipe.
+SIMULATOR_TYPE_HELPER = ./scripts/test-simulator-type.py
+
 # The device UDID for a simulator name, resolved once so boot and install cannot disagree.
 simulator_udid = xcrun simctl list devices available | sed -n 's/.* $(1) (\([0-9A-F-]*\)).*/\1/p' | head -1
 
@@ -141,11 +146,12 @@ ONLY_TESTING ?= PocketCastsTests
 # outright on a fresh machine or after an Xcode upgrade removes old runtimes - the change would
 # then have traded a wiped device for a broken build, which is worse.
 #
-# The device type is taken from the manual simulator when it exists, and otherwise from a type the
-# INSTALLED runtime can actually host. The fallback has to be one of the latter: `simctl list
-# devicetypes` lists types whose runtime was removed, and `simctl create` refuses those with
-# "Could not find an available runtime". Its identifier must also be captured WITHOUT the trailing
-# ")" that the listing wraps it in, or creation fails with "Invalid device type".
+# The device type comes from the manual simulator when it exists; otherwise from an AVAILABLE
+# runtime's own `supportedDeviceTypes`, via scripts/test-simulator-type.py. That fallback deliberately
+# does not look at existing devices: a device list still counts orphans whose runtime has been removed
+# (creation then fails with "Could not find an available runtime") and is EMPTY on a machine that has
+# never booted one - which is the fresh-checkout case this target exists for. The helper returns the
+# type and runtime together, and both are passed to `simctl create`, so neither is re-resolved.
 .PHONY: ensure_simulator
 ensure_simulator:
 	@if [ "$(SIMULATOR_NAME)" = "$(PROTECTED_SIMULATOR_NAME)" ]; then \
@@ -157,15 +163,20 @@ ensure_simulator:
 		TYPE=$$(xcrun simctl list devices -j | python3 -c 'import json,sys; \
 d = json.load(sys.stdin)["devices"]; \
 print(next((x["deviceTypeIdentifier"] for rt in d for x in d[rt] if x["name"] == "$(MANUAL_SIMULATOR_NAME)"), ""))'); \
+		RUNTIME=""; \
 		if [ -z "$$TYPE" ]; then \
-			TYPE=$$(xcrun simctl list devices -j | python3 -c 'import json,sys; \
-d = json.load(sys.stdin)["devices"]; \
-present = {x["deviceTypeIdentifier"] for rt in d for x in d[rt]}; \
-print(next((t for t in reversed(sorted(present)) if "iPhone" in t), ""))'); \
+			PAIR=$$(xcrun simctl list runtimes -j | $(SIMULATOR_TYPE_HELPER)); \
+			TYPE=$${PAIR%% *}; \
+			RUNTIME=$${PAIR#* }; \
+			if [ "$$TYPE" = "$$RUNTIME" ]; then RUNTIME=""; fi; \
 		fi; \
 		if [ -z "$$TYPE" ]; then echo "error: no iPhone device type to create $(SIMULATOR_NAME) from"; exit 1; fi; \
-		echo "creating simulator $(SIMULATOR_NAME) as $$TYPE"; \
-		xcrun simctl create "$(SIMULATOR_NAME)" "$$TYPE" >/dev/null || exit 1; \
+		echo "creating simulator $(SIMULATOR_NAME) as $$TYPE (runtime $${RUNTIME:-default})"; \
+		if [ -n "$$RUNTIME" ]; then \
+			xcrun simctl create "$(SIMULATOR_NAME)" "$$TYPE" "$$RUNTIME" >/dev/null || exit 1; \
+		else \
+			xcrun simctl create "$(SIMULATOR_NAME)" "$$TYPE" >/dev/null || exit 1; \
+		fi; \
 	fi; \
 	if [ -z "$$($(call simulator_udid,$(SIMULATOR_NAME)))" ]; then \
 		echo "error: no simulator named $(SIMULATOR_NAME) and it could not be created"; \
