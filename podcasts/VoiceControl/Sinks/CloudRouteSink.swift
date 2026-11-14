@@ -279,6 +279,35 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             lock.unlock()
         }
 
+        // MARK: - Effect admission after an interruption
+        //
+        // `cloud-assistant.md` → Interruption: once a successor has interrupted this turn, its
+        // late frames are REJECTED — "the client stops local output and clears buffered answer
+        // audio while retaining captured user input". Effects already executed are kept, but
+        // nothing NEW may run after the interrupt is SENT.
+        //
+        // Cancellation is NOT that moment. The successor sends the interrupt and then WAITS for
+        // this turn's terminal before cancelling it, so between the send and the terminal the
+        // interrupted turn is still live and would otherwise admit an action that had already
+        // arrived on its socket. The mark is therefore set at the SEND, and `executeAction`
+        // refuses on it — the same refusal path as an owner cancellation, so the turn is
+        // classified as an incomplete turn rather than a completed one.
+        private var effectsClosedStorage = false
+
+        /// No further effect of this turn may run: a successor has interrupted it.
+        var effectsClosed: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return effectsClosedStorage
+        }
+
+        /// Idempotent: the first interrupt of this turn closes it, later ones change nothing.
+        func closeEffects() {
+            lock.lock()
+            effectsClosedStorage = true
+            lock.unlock()
+        }
+
         // MARK: - Interruption acknowledgement latch
         //
         // When a successor interrupts this turn, it must NOT proceed until this turn's terminal
@@ -871,7 +900,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         var interruptedRequestIdForThisTurn: String? = nil
         if !isRetainedFollowUpSubmission,
            let priorRequestId = activeResultSocket?.requestId,
-           (activeTurn.map { !$0.isCancelled }) ?? false,
+           let priorTurnToken = activeTurn,
+           !priorTurnToken.isCancelled,
            interruptionState.claimInterruptEmission(forRequestId: priorRequestId) {
             interruptedRequestIdForThisTurn = priorRequestId
             interruptionState.hold(
@@ -967,6 +997,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // while we wait must observe itself as the owner (review 14f66b72).
         activeTurn = turnToken
         playbackOwner = turnToken
+        // REGISTERED HERE and removed on EVERY exit path: a finished turn must not stay in the
+        // live set, or a later barge-in would close effects on tokens nobody owns any more.
+        liveTurns.append(turnToken)
+        defer { liveTurns.removeAll { $0 === turnToken } }
         // ATOMIC RETIRE + QUIESCENCE AT ADMISSION (reviews 9fc2603e / 14f66b72): the successor
         // retires the PLAYBACK predecessor's output HERE — before this turn can admit any audio
         // of its own — and WAITS for the confirmed stop before admitting, because `cancel` only
@@ -1216,13 +1250,44 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // Owner cancellation gates buffered audio admission too: a frame drained
                     // after cancel must not reach the player.
                     if ownerCancelledFlag.isSet || Task.isCancelled { break turnLoop }
+                    // SAME RULE FOR OUTPUT AS FOR EFFECTS. The contract has the interrupted turn
+                    // clear buffered answer audio; a frame drained after the interrupt was sent
+                    // would `enqueue` and re-arm playback, so audio the user already took back
+                    // briefly resumes. Closed effects therefore stop DELIVERY too: once the
+                    // interrupt is out, nothing of this turn reaches the user except its
+                    // terminal, which is what releases the successor.
+                    //
+                    // `continue`, NOT `break`. A late `.audioFrame` is the NORMAL case: right
+                    // after the interrupt the server is still flushing audio it had already
+                    // produced. Breaking here would stop this turn reading the terminal that
+                    // releases the successor's held follow-up, so the successor would never get
+                    // its acknowledgement and the turn would end as earlyClose as if the
+                    // connection had failed. The frame is dropped and the loop keeps draining.
+                    if turnToken.effectsClosed { continue }
                     audioPlayer.enqueue(frame)
                 case let .action(tool, action, params, operationId, capabilityVersion):
                     // BUFFERED admission check: an event drained from the buffer after the owner
                     // was cancelled must not admit any later effect or a completed result. The
                     // handler's mark (or Task.isCancelled) stops consumption here; the turn is
                     // classified earlyClose below, never `completed`.
+                    //
+                    // `effectsClosed` covers the window the owner-cancel mark cannot: a successor
+                    // has SENT its interrupt but has not cancelled this turn yet (it is waiting on
+                    // this turn's terminal, which is why the receive is still alive). The
+                    // contract forbids a late frame of an interrupted turn from taking effect, so
+                    // an action drained here is refused rather than executed.
                     if ownerCancelledFlag.isSet || Task.isCancelled { break turnLoop }
+                    if turnToken.effectsClosed {
+                        // REFUSE the effect and KEEP CONSUMING. Breaking here would end this
+                        // turn's receive before its own terminal arrives — and that terminal is
+                        // exactly what the interrupting successor is parked on, so the successor
+                        // would never be released.
+                        FileLog.shared.addMessage(
+                            "[VoicePipeline] late action of interrupted turn \(turnRequestId) "
+                            + "rejected: the interrupt was already sent"
+                        )
+                        continue
+                    }
                     turnActionFacts.append(await executeAction(
                         tool: tool, action: action, params: params,
                         operationId: operationId, capabilityVersion: capabilityVersion
@@ -1234,6 +1299,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 case let .result(result):
                     // Structured results are rendered as they arrive; the turn still
                     // completes on `done` with the same restore/analytics behavior.
+                    //
+                    // OUTPUT, like audio: a result drained after this turn's interrupt was sent
+                    // must not be presented, or the user sees content from a question they took
+                    // back. `continue` rather than `break`: a result owes nothing downstream and
+                    // the terminal still has to arrive to release the successor.
+                    if turnToken.effectsClosed { continue }
                     presentDiscoveryResults(DiscoveryResultsViewModel(result: result))
                 case let .done(usage):
                     // Buffered-`done` admission check: a cancelled owner must not report a
@@ -1841,6 +1912,28 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     private func sendInterruptOnPriorSocket(
         forRequestId priorRequestId: String
     ) async -> CloudRouteClient.AppOperationResultSendReport? {
+        // EFFECTS CLOSE ON EVERY INTERRUPT ATTEMPT, delivered or not, and here is the ONE place
+        // every interrupt goes through. Closing at a caller left every path that caller did not
+        // know about uncovered — how this fix first shipped: it closed effects only in
+        // `routeToCloud`'s interrupt branch, so a real barge-in (service ->
+        // `emitEagerBargeInIfNeeded` -> `emitBargeIn` -> this function) sent its interrupt with
+        // effects still open.
+        //
+        // Above the guard, because an interrupt that CANNOT be delivered still means the user took
+        // the turn away: no acknowledgement can arrive, nothing may stay held, and nothing of that
+        // turn may still take effect.
+        //
+        // The moment is the attempt, not the successor's cancellation: a successor interrupts and
+        // then WAITS for this turn's terminal, so between the two the interrupted turn is still
+        // live and still receiving. Anything it executed BEFORE this point stands; the interrupt
+        // only forbids what comes after it.
+        // EVERY EARLIER UNFINISHED TURN, not one chosen by a field (core PR 174: the newest
+        // utterance supersedes all of them). Choosing a field was wrong in both directions:
+        // `activeTurn` names the SUCCESSOR during an admission race, so closing it closed the live
+        // turn and left the interrupted one open; and the socket's owner names only the
+        // predecessor, leaving a turn still being admitted free to run an action afterwards.
+        for turn in liveTurns { turn.closeEffects() }
+
         guard let priorSocket = activeResultSocket, let client = resultSendClient else {
             // No transport to interrupt: no acknowledgement can come, so nothing may stay held.
             interruptionState.releaseUnsentHold(forRequestId: priorRequestId)
@@ -2094,6 +2187,14 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     var currentTurnResultSocketForTesting: AppOperationResultSocket? { activeResultSocket }
 
     private var activeResultSocket: AppOperationResultSocket?
+    /// EVERY turn that has started and has not finished. A barge-in supersedes all of them
+    /// (core PR 174: "the newest utterance replaces any held one, and every earlier unfinished
+    /// turn is superseded"), so the interrupt closes effects on this whole set rather than on
+    /// one turn chosen by a field. Choosing a field was wrong in both directions: `activeTurn`
+    /// names the SUCCESSOR during an admission race (it is set before the successor owns a
+    /// socket), and the socket's owner names only the predecessor, leaving a turn still being
+    /// admitted free to run an action. Tokens remove themselves on completion via `defer`.
+    private var liveTurns: [CloudTurnToken] = []
     /// The follow-up released by an interruption acknowledgement, waiting to be submitted on its
     /// own socket. Read-and-clear by the submitter so it is submitted exactly once.
     @MainActor private(set) var pendingFollowUpSubmission: CloudInterruptionState.ReleasedFollowUp?

@@ -1,3 +1,4 @@
+import PocketCastsUtils
 import XCTest
 @testable import podcasts
 
@@ -65,6 +66,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
     private func makeSink(
         state: CloudInterruptionState,
         gate: Gate? = nil,
+        firstReceiveOnly: HoldLatch? = nil,
         fixture: @escaping () -> String
     ) -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
@@ -75,6 +77,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
                     fixture: fixture(),
                     prepareTask: { task in
                         if let gate { task.holdUntilReleased(gate) }
+                        if let firstReceiveOnly { task.holdFirstReceiveUntilReleased(firstReceiveOnly) }
                     }
                 )
                 self.capturedTask = built.task
@@ -599,6 +602,86 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         _ = await first.value
         _ = await second.value
     }
+    /// A REAL BARGE-IN CLOSES THE INTERRUPTED TURN'S EFFECTS — through `emitBargeIn`.
+    ///
+    /// The behaviour fix ("an interrupted turn admits no new effects") has to hold on the path
+    /// SHIPPING USES: service -> `emitEagerBargeInIfNeeded` -> `emitBargeIn`. Closing effects in
+    /// `routeToCloud`'s interrupt branch left that path uncovered, so a barge-in sent its interrupt
+    /// and the interrupted turn could still execute a late action.
+    ///
+    /// Asserted on the sink's OWN statement that it refused the late effect, which is observable
+    /// behaviour rather than internal state: the fixture carries a late action after the interrupt,
+    /// and the assertion is that the refusal line appears NAMING THAT TURN. If effects were still
+    /// open the action would simply execute and no refusal would be written.
+    func testARealBargeInStopsTheInterruptedTurnsLateAction() async {
+        let state = CloudInterruptionState()
+        let gate = Gate()
+        // A late action, and NO terminal: the turn stays live and parked after serving it, which is
+        // the window in which a barge-in arrives.
+        let lateActionFixture = """
+        event: action
+        data: {"tool":"playback","action":"seek_to","params":{"position_seconds":1130}}
+
+        """
+        // FIRST-RECEIVE-ONLY parking, not the shared gate: the gate parks EVERY receive, which
+        // would serve the action before the barge-in and leave nothing late to refuse. Holding
+        // only the first receive keeps the turn live with its action still unread.
+        let firstReceive = HoldLatch()
+        let sink = makeSink(state: state, firstReceiveOnly: firstReceive) { lateActionFixture }
+
+        let prior = Task {
+            await sink.routeToCloud(
+                request: "prior question",
+                tier: .free,
+                context: self.sampleContext(),
+                origin: Self.origin,
+                selection: .followUp,
+                utteranceId: "u-turn-a"
+            )
+        }
+        let appeared = await waitUntil(timeout: 5) {
+            await MainActor.run { sink.activeResultSocketForTesting != nil }
+        }
+        XCTAssertTrue(appeared, "premise: the prior turn must own a socket before it is interrupted")
+        let priorRequestId = await MainActor.run { sink.activeResultSocketForTesting?.requestId }
+        guard let priorRequestId else {
+            XCTFail("premise: the prior turn must own a live socket")
+            return
+        }
+
+        // The REAL barge-in path, the same call the service makes at input admission.
+        let emitted = await sink.emitBargeIn(
+            request: "play the next one",
+            utteranceId: "u-barge",
+            origin: Self.origin,
+            selection: CloudConversationSelection.followUp
+        )
+        XCTAssertEqual(emitted, priorRequestId, "the barge-in must claim the live predecessor")
+        let interruptFrames = capturedTask?.sentTextFrames ?? []
+        XCTAssertTrue(
+            interruptFrames.contains { $0.contains("\"interrupt\"") },
+            "premise: the barge-in must send an interrupt frame: \(interruptFrames)"
+        )
+
+        // Now release the FIRST receive, so the action is served AFTER the interrupt has gone
+        // out — the genuinely late frame. Effects are closed, so the sink must REFUSE it and say
+        // so, naming this turn.
+        let before = await FileLog.shared.logFileAsString()
+        firstReceive.release()
+        let refused = await waitUntil(timeout: 5) {
+            let log = await FileLog.shared.logFileAsString()
+            return String(log.dropFirst(before.count))
+                .contains("late action of interrupted turn \(priorRequestId) rejected")
+        }
+        XCTAssertTrue(
+            refused,
+            "a real barge-in must close the interrupted turn's effects, so its late action is "
+            + "refused and named; without the close at the shared interrupt point the action "
+            + "executes silently and no refusal is written"
+        )
+        _ = await prior.value
+    }
+
     /// AN UNDELIVERED INTERRUPT SUPPRESSES ITS UTTERANCE — driven through the sink.
     ///
     /// Supersedes a state-only test whose name claimed a boundary it never executed (reviewer
@@ -679,15 +762,37 @@ private struct EmptyInterruptionMapper: FingerprintMappingProviding {
 }
 
 private final class InterruptPlaybackSink: VoicePlaybackSink, @unchecked Sendable {
+    private let lock = NSLock()
+    private var seeks = 0
+
+    /// How many seek effects reached the player. The observable for "did an interrupted turn's
+    /// late action still take effect": a refusal leaves this at zero, an admission moves it.
+    var seekCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return seeks
+    }
+
     private(set) var positionMs: Int64 = 0
     func setPositionMs(_ ms: Int64) { positionMs = ms }
     var isPlaying: Bool { false }
     func pause() -> VoiceResponse { .silent }
     func resume() -> VoiceResponse { .silent }
-    func seekRelative(deltaSeconds: Int?, direction: SeekDirection) -> VoiceResponse { .silent }
-    func seekTo(positionSeconds: Int) -> VoiceResponse { .silent }
-    func seekTo(positionSeconds: Int, episodeDurationSeconds: Int) -> VoiceResponse { .silent }
-    func nextEpisode() -> VoiceResponse { .silent }
+    func seekRelative(deltaSeconds: Int?, direction: SeekDirection) -> VoiceResponse {
+        lock.lock(); seeks += 1; lock.unlock()
+        return .silent
+    }
+    func seekTo(positionSeconds: Int) -> VoiceResponse {
+        lock.lock(); seeks += 1; lock.unlock()
+        return .silent
+    }
+    func seekTo(positionSeconds: Int, episodeDurationSeconds: Int) -> VoiceResponse {
+        lock.lock(); seeks += 1; lock.unlock()
+        return .silent
+    }
+    func nextEpisode() -> VoiceResponse {
+        lock.lock(); seeks += 1; lock.unlock()
+        return .silent
+    }
 }
 
 private final class InterruptAnalytics: AnalyticsService, @unchecked Sendable {
