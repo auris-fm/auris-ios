@@ -88,6 +88,14 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     func terminalResultForTesting(token: CloudDispatchOwnership.DispatchToken) -> CloudRouteResult? {
         token.record?.terminalResult
     }
+    /// TEST-only: settle the record a token was admitted against, WITHOUT dispatching under it.
+    /// Lets a control establish a predecessor that is genuinely terminal (no live turn, no open
+    /// socket) before a successor starts, so the successor is a local supersede rather than the
+    /// barge-in its live socket would make it. No production caller.
+    func settleForTesting(token: CloudDispatchOwnership.DispatchToken, with result: CloudRouteResult) {
+        guard let record = token.record else { return }
+        settle(record, with: result)
+    }
     /// The record instance a token is bound to, for controls.
     func tokenRecordInstanceForTesting(token: CloudDispatchOwnership.DispatchToken) -> UUID? {
         token.record?.instance
@@ -276,6 +284,35 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         func cancel() {
             lock.lock()
             cancelled = true
+            lock.unlock()
+        }
+
+        // MARK: - Effect admission after an interruption
+        //
+        // `cloud-assistant.md` → Interruption: once a successor has interrupted this turn, its
+        // late frames are REJECTED — "the client stops local output and clears buffered answer
+        // audio while retaining captured user input". Effects already executed are kept, but
+        // nothing NEW may run after the interrupt is SENT.
+        //
+        // Cancellation is NOT that moment. The successor sends the interrupt and then WAITS for
+        // this turn's terminal before cancelling it, so between the send and the terminal the
+        // interrupted turn is still live and would otherwise admit an action that had already
+        // arrived on its socket. The mark is therefore set at the SEND, and `executeAction`
+        // refuses on it — the same refusal path as an owner cancellation, so the turn is
+        // classified as an incomplete turn rather than a completed one.
+        private var effectsClosedStorage = false
+
+        /// No further effect of this turn may run: a successor has interrupted it.
+        var effectsClosed: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return effectsClosedStorage
+        }
+
+        /// Idempotent: the first interrupt of this turn closes it, later ones change nothing.
+        func closeEffects() {
+            lock.lock()
+            effectsClosedStorage = true
             lock.unlock()
         }
 
@@ -883,6 +920,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             if await sendInterruptOnPriorSocket(forRequestId: priorRequestId) == .undelivered {
                 interruptedRequestIdForThisTurn = nil
             }
+            // EFFECTS CLOSE AT THE SEND, not at the cancellation below. The interrupted turn is
+            // kept alive deliberately until its terminal arrives (next block), so it is still
+            // receiving frames in that window; a late action drained here would otherwise run
+            // after the user already took the turn away. Anything it executed BEFORE this point
+            // stands — the interrupt only forbids what comes after it.
+            activeTurn?.closeEffects()
         }
 
         if interruptedRequestIdForThisTurn != nil, let priorToken = activeTurn {
@@ -1222,7 +1265,24 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // was cancelled must not admit any later effect or a completed result. The
                     // handler's mark (or Task.isCancelled) stops consumption here; the turn is
                     // classified earlyClose below, never `completed`.
+                    //
+                    // `effectsClosed` covers the window the owner-cancel mark cannot: a successor
+                    // has SENT its interrupt but has not cancelled this turn yet (it is waiting on
+                    // this turn's terminal, which is why the receive is still alive). The
+                    // contract forbids a late frame of an interrupted turn from taking effect, so
+                    // an action drained here is refused rather than executed.
                     if ownerCancelledFlag.isSet || Task.isCancelled { break turnLoop }
+                    if turnToken.effectsClosed {
+                        // REFUSE the effect and KEEP CONSUMING. Breaking here would end this
+                        // turn's receive before its own terminal arrives — and that terminal is
+                        // exactly what the interrupting successor is parked on, so the successor
+                        // would never be released.
+                        FileLog.shared.addMessage(
+                            "[VoicePipeline] late action of interrupted turn \(turnRequestId) "
+                            + "rejected: the interrupt was already sent"
+                        )
+                        continue
+                    }
                     turnActionFacts.append(await executeAction(
                         tool: tool, action: action, params: params,
                         operationId: operationId, capabilityVersion: capabilityVersion

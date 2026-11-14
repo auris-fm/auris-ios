@@ -615,6 +615,61 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
         self.incoming = incoming
     }
 
+    /// TEST-ONLY: the frame the server would send to END an interrupted turn. Unset (the default,
+    /// and every production path) leaves the stub purely scripted. Cleared after it is served once,
+    /// so a second interrupt of the same socket does not resurrect a finished turn.
+    var interruptTerminalFrame: String?
+    /// Set once the interrupt's terminal is queued, so a control can wait for it to be SERVED
+    /// rather than guess how long the turn needs.
+    private(set) var interruptTerminalScheduled = false
+    /// TEST-ONLY: open a parked producer's receive when an interrupt is sent, WITHOUT ending the
+    /// turn. A control that needs the predecessor to stay LIVE (superseded, not completed) while
+    /// the successor admits still needs it to be able to READ — the park is inside the receive
+    /// callback, so leaving it closed would wedge the loop. Terminating A is a separate choice,
+    /// made with `interruptTerminalFrame`.
+    var releasesParksOnInterrupt = false
+
+    /// TEST-ONLY: replace the events still to be served on this socket, for cases that need the
+    /// turn to reach its TERMINAL after the case has already captured what it asserts on (a
+    /// predecessor that must finish before a successor starts, having been parked on purpose).
+    /// Frames already served are unaffected. No production caller: nothing replaces a live
+    /// server's script.
+    func replaceRemainingScript(textFrames: [String]) {
+        scriptLock.lock()
+        incoming = textFrames.map { .string($0) }
+        scriptLock.unlock()
+    }
+
+    private let scriptLock = NSLock()
+
+    /// Parks currently holding a receive callback open (see `releaseProductionParks`). A control
+    /// parks a producer to keep a turn live; a terminal or interrupt must be able to reach it, so
+    /// those parks are opened here rather than left to the control's own release.
+    private nonisolated(unsafe) static var productionParks: [DispatchSemaphore] = []
+    private static let productionParksLock = NSLock()
+
+    /// Register a park so a terminal or interrupt can release it. Returns false when the park was
+    /// already opened, so a caller can stop waiting instead of blocking on a stale semaphore.
+    @discardableResult
+    static func registerProductionPark(_ semaphore: DispatchSemaphore) -> Bool {
+        productionParksLock.lock(); defer { productionParksLock.unlock() }
+        if releasedParks.contains(ObjectIdentifier(semaphore)) { return false }
+        productionParks.append(semaphore)
+        return true
+    }
+
+    private nonisolated(unsafe) static var releasedParks: Set<ObjectIdentifier> = []
+
+    /// Open every registered park. Idempotent: a park released twice keeps its permit count sane.
+    static func releaseProductionParks() {
+        productionParksLock.lock()
+        let parks = productionParks
+        productionParks = []
+        parks.forEach { releasedParks.insert(ObjectIdentifier($0)) }
+        productionParksLock.unlock()
+        parks.forEach { $0.signal() }
+    }
+
     convenience init(textFrames: [String]) {
         self.init(textFrames.map { .string($0) })
     }
@@ -632,6 +687,35 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
     func send(_ message: URLSessionWebSocketTask.Message) async throws {
         if throwsBeforeRecording { throw URLError(.notConnectedToInternet) }
         sent.append(message)
+        // AN INTERRUPTED TURN TERMINATES ON THE REAL SERVER. A control that keeps a predecessor
+        // alive while a successor barges in needs that terminal to arrive, or the successor parks
+        // on an acknowledgement the stub can never produce (and an emptied script surfaces as a
+        // transport error instead). When configured, answering the interrupt with the turn's
+        // terminal is exactly what the server does; the frame is served on the NEXT receive, in
+        // order, so an action already queued ahead of it still lands first.
+        if let terminal = interruptTerminalFrame,
+           case let .string(text) = message,
+           text.contains("\"type\":\"interrupt\"") {
+            scriptLock.lock()
+            // Anything ALREADY queued was sent by the server before it saw the interrupt, so it is
+            // served first — that is what makes "the interrupted turn's late frame arrives before
+            // its terminal" deterministic instead of a race with how far the control got.
+            incoming.append(.string(terminal))
+            scriptLock.unlock()
+            interruptTerminalScheduled = true
+            // SPEC fc4d3160 (Option 2): a park inside the receive callback must not cost the turn
+            // its ability to READ. A control keeps a predecessor alive by parking its producer on
+            // a semaphore inside `onFrameReceived`, which stops the loop BEFORE the frame is
+            // parsed — so an answer queued here could never be consumed and the successor parked
+            // on it would time out. Releasing every park when a terminal or interrupt arrives lets
+            // A read the answer it is owed while each test's subject stays unchanged.
+            StubWebSocketTask.releaseProductionParks()
+        }
+        if releasesParksOnInterrupt,
+           case let .string(text) = message,
+           text.contains("\"type\":\"interrupt\"") {
+            StubWebSocketTask.releaseProductionParks()
+        }
         if transmitsThenThrows { throw URLError(.networkConnectionLost) }
     }
 
