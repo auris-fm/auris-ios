@@ -640,27 +640,46 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
     /// Parks currently holding a receive callback open (see `releaseProductionParks`). A control
     /// parks a producer to keep a turn live; a terminal or interrupt must be able to reach it, so
     /// those parks are opened here rather than left to the control's own release.
+    ///
+    /// Holds the semaphores THEMSELVES, not their identities: an ObjectIdentifier outlives the
+    /// object it names, and a deallocated semaphore's address is reused by the next allocation.
+    /// Tracking identities across tests therefore made a later test's fresh semaphore look
+    /// "already released" the moment it landed on a recycled address, so that park silently did
+    /// not block — a state leak from one test into the next, and exactly the order-dependence it
+    /// produced. Strong references cannot collide that way, and the list is emptied on release.
     private nonisolated(unsafe) static var productionParks: [DispatchSemaphore] = []
     private static let productionParksLock = NSLock()
 
-    /// Register a park so a terminal or interrupt can release it. Returns false when the park was
-    /// already opened, so a caller can stop waiting instead of blocking on a stale semaphore.
+    /// Register a park so a terminal or interrupt can release it. Returns false when this exact
+    /// semaphore has already been opened, so a caller stops blocking instead of parking on it again.
     @discardableResult
     static func registerProductionPark(_ semaphore: DispatchSemaphore) -> Bool {
         productionParksLock.lock(); defer { productionParksLock.unlock() }
-        if releasedParks.contains(ObjectIdentifier(semaphore)) { return false }
-        productionParks.append(semaphore)
+        if releasedParks.contains(where: { $0 === semaphore }) { return false }
+        if !productionParks.contains(where: { $0 === semaphore }) {
+            productionParks.append(semaphore)
+        }
         return true
     }
 
-    private nonisolated(unsafe) static var releasedParks: Set<ObjectIdentifier> = []
+    /// Parks that have been opened. Identity comparison against LIVE objects only.
+    private nonisolated(unsafe) static var releasedParks: [DispatchSemaphore] = []
 
-    /// Open every registered park. Idempotent: a park released twice keeps its permit count sane.
+    /// Drop ALL park state. Called from the test classes' `tearDown` so a park can never outlive
+    /// the test that made it, whatever order tests run in.
+    static func resetProductionParks() {
+        productionParksLock.lock()
+        productionParks = []
+        releasedParks = []
+        productionParksLock.unlock()
+    }
+
+    /// Open every registered park, then forget both lists, so nothing carries into the next test.
     static func releaseProductionParks() {
         productionParksLock.lock()
         let parks = productionParks
         productionParks = []
-        parks.forEach { releasedParks.insert(ObjectIdentifier($0)) }
+        releasedParks = parks
         productionParksLock.unlock()
         parks.forEach { $0.signal() }
     }

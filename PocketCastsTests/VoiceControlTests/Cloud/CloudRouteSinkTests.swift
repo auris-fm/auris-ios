@@ -2327,11 +2327,48 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
     override func tearDown() {
         CloudRouteTestURLProtocol.reset()
+        StubWebSocketTask.resetProductionParks()
         defaults.removePersistentDomain(forName: suiteName)
         super.tearDown()
     }
 
     @MainActor
+    /// REGRESSION CONTROL for a park that leaked between tests (spec 16fdf2a0, reviewer b48a85f8).
+    ///
+    /// `releaseProductionParks` used to record released parks by `ObjectIdentifier`. An identifier
+    /// outlives the object it names and a deallocated semaphore's address is immediately reused,
+    /// so once ANY test had released a park, a LATER test's brand-new semaphore could land on a
+    /// recycled address and be treated as already-open: `registerProductionPark` returned false
+    /// and that park silently did not block. The turn then ran on instead of parking, which is
+    /// what made `testSupersededTurnDoesNotRestoreOrRecordAnalytics` fail only in suite order.
+    ///
+    /// This pins the property directly and deterministically, so the failure does not depend on
+    /// flake luck: after a release, a FRESH park must still block.
+    func testAFreshProductionParkStillBlocksAfterAnEarlierRelease() async throws {
+        // An earlier test's park, released and then genuinely DROPPED — the release must not keep
+        // it alive, or its address could never be recycled and the bug this pins stays hidden.
+        func registerAndReleaseAPark() {
+            let earlier = DispatchSemaphore(value: 0)
+            XCTAssertTrue(StubWebSocketTask.registerProductionPark(earlier))
+            StubWebSocketTask.releaseProductionParks()
+        }
+        registerAndReleaseAPark()
+        // Address reuse is what made the identity comparison unsound: allocate and drop many
+        // semaphores so a recycled address is near-certain, exactly as across a suite run.
+        for _ in 0..<2000 { _ = DispatchSemaphore(value: 0) }
+
+        let fresh = DispatchSemaphore(value: 0)
+        XCTAssertTrue(
+            StubWebSocketTask.registerProductionPark(fresh),
+            "a fresh park must not be mistaken for an already-released one"
+        )
+        // It must actually BLOCK: a stale identity would have let this through instantly.
+        let blocked = fresh.wait(timeout: .now() + 0.05) == .timedOut
+        XCTAssertTrue(blocked, "a freshly registered park must still hold its producer")
+        StubWebSocketTask.releaseProductionParks()
+        XCTAssertEqual(fresh.wait(timeout: .now() + 0.5), .success, "release opens the fresh park")
+    }
+
     func testDoneKeepsTheHoldWhileOnlyScheduledAudioRemains() async throws {
         try await exerciseScheduledOnlyDone(coalesceBeforeDone: false)
     }
