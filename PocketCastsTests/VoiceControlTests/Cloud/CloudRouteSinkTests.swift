@@ -1588,6 +1588,70 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         return lines.joined(separator: "\n")
     }
 
+    /// A REAL BARGE-IN MUST NOT DELIVER THE INTERRUPTED TURN'S LATE AUDIO.
+    ///
+    /// This is the rule the `.audioFrame` gate enforces, and the reason it uses `continue` rather
+    /// than `break`: a late frame is the NORMAL case, because after an interrupt the server is
+    /// still flushing audio it had already produced. The frame is dropped and the turn keeps
+    /// draining to its terminal — ending the turn there would leave the successor's held
+    /// follow-up without the acknowledgement it is parked on.
+    ///
+    /// Guarded by `testATurnCarryingBinaryAudioActuallyReachesThePlayer` below: the same fixture
+    /// with no barge-in enqueues, so "nothing enqueued" here means the frame was refused rather
+    /// than never sent.
+    func testARealBargeInDoesNotDeliverTheInterruptedTurnsLateAudio() async {
+        self.pendingFixture = """
+        event: done
+        data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+        """
+        // The turn must still be LIVE when the barge-in arrives, so its first receive is parked
+        // and released only after the interrupt is sent — otherwise it completes first and there
+        // is no predecessor to claim (which is how this control first passed vacuously).
+        let latch = HoldLatch()
+        pendingProducerHold = latch
+        let sink = makeSinkWithConsumer(
+            RecordingResultConsumer(),
+            audioPayloads: (0..<4).map { _ in Data(repeating: 0x11, count: 4_800 * 2) })
+
+        let prior = Task {
+            await sink.routeToCloud(
+                request: "prior question", tier: .free, context: self.sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-turn-a")
+        }
+        var owned = false
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if await MainActor.run(body: { sink.activeResultSocketForTesting != nil }) {
+                owned = true; break
+            }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertTrue(owned, "premise: the prior turn must own a socket before it is interrupted")
+        let priorRequestId = await MainActor.run { sink.activeResultSocketForTesting?.requestId }
+        guard let priorRequestId else { XCTFail("premise: a live socket"); return }
+
+        let emitted = await sink.emitBargeIn(
+            request: "play the next one", utteranceId: "u-barge",
+            origin: cloudTestOrigin, selection: CloudConversationSelection.followUp)
+        XCTAssertEqual(emitted, priorRequestId, "the barge-in must claim the live predecessor")
+
+        latch.release()
+        // A LATE AUDIO FRAME MUST NOT END THE TURN. With `break` the loop stopped there and the
+        // turn could never read the terminal that follows, so it classified as `earlyClose` — a
+        // connection failure the user never experienced. `continue` drops the frame and keeps
+        // draining, so the turn reaches its terminal.
+        let result = await prior.value
+        let enqueued = await MainActor.run { sink.audioPlayerForTesting?.framesEnqueuedForTesting ?? 0 }
+        XCTAssertEqual(enqueued, 0,
+                       "an interrupted turn must not deliver audio the user already took back; "
+                       + "the player received \(enqueued) frame(s)")
+        XCTAssertEqual(result.outcome, .completed,
+                       "a late audio frame must be DROPPED, not end the turn: breaking there stops "
+                       + "the interrupted turn reading its own terminal, so it reports a connection "
+                       + "failure (earlyClose) that never happened")
+    }
+
     /// POSITIVE CONTROL: the SAME fixture and the same parking, with NO barge-in, must reach the
     /// player. Without it, "no seek after a barge-in" cannot be told apart from "the action never
     /// parsed" — and the first three versions of the control below were vacuous for exactly that.
