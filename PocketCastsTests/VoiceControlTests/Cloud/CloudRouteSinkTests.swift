@@ -2477,18 +2477,15 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             event: token
             data: {"text":"slow"}
 
-            event: done
-            data: {"usage":{"input_tokens":1,"output_tokens":1}}
-
             """
+        // A IS SUPERSEDED WHILE STILL ACTIVE, so its script has NO `done` (spec 43ab05d3): this
+        // case is about a turn that never finished, and a script that served `done` would describe
+        // the different case where A had already concluded. A's producer is parked and only B
+        // ever ends it.
         // A's frames are held IN THE BUFFER (drain-hold parks dequeue without consuming), so
         // "A owns playback output" is deterministic, not a race against the engine.
         self.nextTurnAudioPayloads = (0..<40).map { Data([UInt8($0)]) }
         let aGate = DispatchSemaphore(value: 0)
-        // Park the producer BEFORE its terminal so A is still live when B barges in — that is
-        // this case's subject. The park no longer costs A its receive: the stub opens it when an
-        // interrupt arrives, so A can read the answer it is owed and still never emit `done` on
-        // its own, which is what makes it a SUPERSEDED turn rather than a completed one.
         self.blockProducerAfterFrames = (40, aGate)
         let sink = makeSink()
         hookedSink = sink
@@ -2531,10 +2528,11 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // BEFORE B dispatches: the interrupt can be sent the instant B runs, and an answer installed
         // afterwards would miss it. A then reaches its terminal while B keeps waiting on the RETIRE
         // STOP, which is the suspension this case is about.
-        // A must stay LIVE (superseded, not completed) while B admits, so the interrupt opens the
-        // park without ending A's turn. A's own scripted `done` still never reaches it: the park
-        // closed after the frames, so `done` was never served.
-        aTask?.releasesParksOnInterrupt = true
+        // A has no terminal of its own to send, so the stub answers B's interrupt the way the
+        // server does: with the frame that ends the interrupted turn. That is also what a parked
+        // predecessor needs in order to be released — and it is configured BEFORE B dispatches so
+        // the answer cannot be missed.
+        aTask?.interruptTerminalFrame = Self.doneOnlyTextFrame
         let fast = Task { await sink.routeToCloud(request: "second", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-52") }
         // A's frames were retired synchronously; nothing new is admitted while B waits.
         let pendingNow: Bool = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? true }
@@ -3255,18 +3253,15 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             event: token
             data: {"text":"slow"}
 
-            event: done
-            data: {"usage":{"input_tokens":1,"output_tokens":1}}
-
             """
+        // A IS SUPERSEDED WHILE STILL ACTIVE, so its script has NO `done` (spec 43ab05d3): this
+        // case is about a turn that never finished, and a script that served `done` would describe
+        // the different case where A had already concluded. A's producer is parked and only B
+        // ever ends it.
         // A's frames are held IN THE BUFFER (drain-hold parks dequeue without consuming), so
         // "A owns playback output" is deterministic, not a race against the engine.
         self.nextTurnAudioPayloads = (0..<40).map { Data([UInt8($0)]) }
         let aGate = DispatchSemaphore(value: 0)
-        // Park the producer BEFORE its terminal so A is still live when B barges in — that is
-        // this case's subject. The park no longer costs A its receive: the stub opens it when an
-        // interrupt arrives, so A can read the answer it is owed and still never emit `done` on
-        // its own, which is what makes it a SUPERSEDED turn rather than a completed one.
         self.blockProducerAfterFrames = (40, aGate)
         let sink = makeSink()
         hookedSink = sink
@@ -3310,8 +3305,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // after its frames and cannot produce that terminal itself, so the stub answers B's
         // interrupt the way the server does (see `interruptTerminalFrame`). A's terminal is what
         // releases B's wait; the retire stop this case is about is still the next thing B owes.
-        // A stays LIVE (superseded) while B admits: open the park without ending A's turn.
-        aTaskForInterrupt?.releasesParksOnInterrupt = true
+        aTaskForInterrupt?.interruptTerminalFrame = Self.doneOnlyTextFrame
         let fast = Task { await sink.routeToCloud(request: "second", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-71") }
         // A's PRODUCER is parked after its frames (a hard stop inside its receive loop), so it can
         // never consume a terminal while parked — and B, as a barge-in, parks on exactly that
@@ -3594,6 +3588,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                             while sem.wait(timeout: .now() + 0.05) == .timedOut {}
                         }
                     }
+
                 }
                 if let action = self.firstFrameActionForNextBuild {
                     self.firstFrameActionForNextBuild = nil

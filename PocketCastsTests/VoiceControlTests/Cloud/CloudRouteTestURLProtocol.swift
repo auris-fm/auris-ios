@@ -622,12 +622,7 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
     /// Set once the interrupt's terminal is queued, so a control can wait for it to be SERVED
     /// rather than guess how long the turn needs.
     private(set) var interruptTerminalScheduled = false
-    /// TEST-ONLY: open a parked producer's receive when an interrupt is sent, WITHOUT ending the
-    /// turn. A control that needs the predecessor to stay LIVE (superseded, not completed) while
-    /// the successor admits still needs it to be able to READ — the park is inside the receive
-    /// callback, so leaving it closed would wedge the loop. Terminating A is a separate choice,
-    /// made with `interruptTerminalFrame`.
-    var releasesParksOnInterrupt = false
+
 
     /// TEST-ONLY: replace the events still to be served on this socket, for cases that need the
     /// turn to reach its TERMINAL after the case has already captured what it asserts on (a
@@ -703,19 +698,13 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
             incoming.append(.string(terminal))
             scriptLock.unlock()
             interruptTerminalScheduled = true
-            // SPEC fc4d3160 (Option 2): a park inside the receive callback must not cost the turn
-            // its ability to READ. A control keeps a predecessor alive by parking its producer on
-            // a semaphore inside `onFrameReceived`, which stops the loop BEFORE the frame is
-            // parsed — so an answer queued here could never be consumed and the successor parked
-            // on it would time out. Releasing every park when a terminal or interrupt arrives lets
-            // A read the answer it is owed while each test's subject stays unchanged.
+            // SPEC fc4d3160 (Option 2): the park sits inside the receive callback, BEFORE the
+            // frame is parsed, so a parked predecessor could never read the answer queued above —
+            // and the successor waiting on it would time out. Open the parks once the answer is
+            // queued, so A reads it and exits as the superseded turn it is.
             StubWebSocketTask.releaseProductionParks()
         }
-        if releasesParksOnInterrupt,
-           case let .string(text) = message,
-           text.contains("\"type\":\"interrupt\"") {
-            StubWebSocketTask.releaseProductionParks()
-        }
+
         if transmitsThenThrows { throw URLError(.networkConnectionLost) }
     }
 

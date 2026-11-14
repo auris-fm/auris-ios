@@ -88,14 +88,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     func terminalResultForTesting(token: CloudDispatchOwnership.DispatchToken) -> CloudRouteResult? {
         token.record?.terminalResult
     }
-    /// TEST-only: settle the record a token was admitted against, WITHOUT dispatching under it.
-    /// Lets a control establish a predecessor that is genuinely terminal (no live turn, no open
-    /// socket) before a successor starts, so the successor is a local supersede rather than the
-    /// barge-in its live socket would make it. No production caller.
-    func settleForTesting(token: CloudDispatchOwnership.DispatchToken, with result: CloudRouteResult) {
-        guard let record = token.record else { return }
-        settle(record, with: result)
-    }
     /// The record instance a token is bound to, for controls.
     func tokenRecordInstanceForTesting(token: CloudDispatchOwnership.DispatchToken) -> UUID? {
         token.record?.instance
