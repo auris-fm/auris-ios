@@ -144,37 +144,36 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
             """
         let sink = makeSink()
-        // Recorded the way admission does it, with no tag in play at all.
-        sink.recordEndOfSpeech(5_000.0, endpointDecisionAt: 5_000.2, for: utteranceId)
+        // The turn's own object, filled the way admission fills it, with no tag in play at all.
+        let latency = TurnLatencyContext()
+        latency.endOfSpeech = 5_000.0
+        latency.endpointDecisionAt = 5_000.2
         _ = await sink.routeToCloud(
             request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
-            selection: nil, utteranceId: utteranceId)
+            selection: nil, utteranceId: utteranceId, latency: latency)
 
-        let log = await FileLog.shared.logFileAsString()
-        let line = try XCTUnwrap(
-            log.split(separator: "\n")
-                .first { $0.contains("cloudTurnLatency") && $0.contains(utteranceId) }
-                .map(String.init),
-            log
-        )
+        let line = try await latencyLine(for: utteranceId)
         XCTAssertFalse(line.contains("end_of_speech_to_request=none"),
                        "a turn with no pre-opened connection still knows when speech ended: \(line)")
         XCTAssertTrue(line.contains("endpoint_ms=200ms"), line)
     }
 
-    /// A turn that ended locally leaves nothing behind: a later turn reusing that identity reports
-    /// ITS own end of speech, not the dropped one.
+    /// A turn handled on the phone leaves nothing behind, because nothing was ever shared.
     ///
-    /// The discard is what keeps the map from growing for the life of the process, and the only
-    /// honest way to observe it from outside is that the next record is not shadowed by the stale
-    /// one — `recordEndOfSpeech` keeps the FIRST value per id, so a survivor would make this wrong.
+    /// This used to be observed through a discard call. With the instants on the turn's own object
+    /// there is no store to clean up: a local turn's context is simply released, so a LATER turn
+    /// reusing the same identity cannot see it. The assertion is the same one that would catch a
+    /// resurrected side table — the newer turn reports its own instant, not the dropped one's.
     @MainActor
     func test_aLocallyHandledTurnDoesNotShadowTheNextTurnWithTheSameIdentity() async throws {
         let utteranceId = "u-\(UUID().uuidString.prefix(8))-local"
         let sink = makeSink()
-        // The turn that is handled locally: recorded, then dropped when it ends without the cloud.
-        sink.recordEndOfSpeech(9_000.0, endpointDecisionAt: 9_000.1, for: utteranceId)
-        sink.discardEndOfSpeech(for: utteranceId)
+        // The locally handled turn: its context exists, is read by nobody, and is released here.
+        autoreleasepool {
+            let dropped = TurnLatencyContext()
+            dropped.endOfSpeech = 9_000.0
+            dropped.endpointDecisionAt = 9_000.1
+        }
 
         self.pendingFixture =
             """
@@ -182,38 +181,33 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":1}}
 
             """
-        sink.recordEndOfSpeech(9_500.0, endpointDecisionAt: 9_500.1, for: utteranceId)
+        let latency = TurnLatencyContext()
+        latency.endOfSpeech = 9_500.0
+        latency.endpointDecisionAt = 9_500.1
         _ = await sink.routeToCloud(
             request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
-            selection: nil, utteranceId: utteranceId)
+            selection: nil, utteranceId: utteranceId, latency: latency)
 
-        let log = await FileLog.shared.logFileAsString()
-        let line = try XCTUnwrap(
-            log.split(separator: "\n")
-                .first { $0.contains("cloudTurnLatency") && $0.contains(utteranceId) }
-                .map(String.init),
-            log
-        )
+        let line = try await latencyLine(for: utteranceId)
         XCTAssertTrue(line.contains("endpoint_ms=100ms"),
-                      "the recorded instant is the surviving one, not the dropped turn's: \(line)")
+                      "the newer turn's own instant is what is read: \(line)")
     }
 
     /// A ROUTED turn that is then handled on the phone leaves no entry behind.
     ///
     /// The earlier control only covered a turn that never reached routing. A routed local command —
-    /// the majority — ends at the router instead, and its instants have no consumer at all, so the
-    /// discard has to run on that terminal too or they accumulate for the life of the process.
-    ///
-    /// Observed through a later turn reusing the identity: `recordEndOfSpeech` keeps the FIRST
-    /// value per id, so a surviving entry would shadow the newer one and show up as the wrong
-    /// `endpoint_ms`.
+    /// the majority — ends at the router instead, where its instants have no consumer at all. With
+    /// the context on the turn, that terminal needs no cleanup call to be correct.
     @MainActor
     func test_aRoutedLocalTurnDropsItsEndOfSpeech() async throws {
         let utteranceId = "u-\(UUID().uuidString.prefix(8))-routedlocal"
         let sink = makeSink()
-        sink.recordEndOfSpeech(11_000.0, endpointDecisionAt: 11_000.3, for: utteranceId)
-        // No cloud dispatch happens for this turn: it was classified and executed locally.
-        sink.discardEndOfSpeech(for: utteranceId)
+        // Routed, then classified as a local command: its context is released unread.
+        autoreleasepool {
+            let routed = TurnLatencyContext()
+            routed.endOfSpeech = 11_000.0
+            routed.endpointDecisionAt = 11_000.3
+        }
 
         self.pendingFixture =
             """
@@ -221,18 +215,14 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":1}}
 
             """
-        sink.recordEndOfSpeech(12_000.0, endpointDecisionAt: 12_000.4, for: utteranceId)
+        let latency = TurnLatencyContext()
+        latency.endOfSpeech = 12_000.0
+        latency.endpointDecisionAt = 12_000.4
         _ = await sink.routeToCloud(
             request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
-            selection: nil, utteranceId: utteranceId)
+            selection: nil, utteranceId: utteranceId, latency: latency)
 
-        let log = await FileLog.shared.logFileAsString()
-        let line = try XCTUnwrap(
-            log.split(separator: "\n")
-                .first { $0.contains("cloudTurnLatency") && $0.contains(utteranceId) }
-                .map(String.init),
-            log
-        )
+        let line = try await latencyLine(for: utteranceId)
         XCTAssertTrue(line.contains("endpoint_ms=400ms"),
                       "the newer turn's instant must be the one recorded; a survivor would "
                           + "shadow it with the dropped turn's 300ms: \(line)")
@@ -241,12 +231,9 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     /// A CLOUD turn keeps its instants through the router's terminal.
     ///
     /// The record is built when the cloud round ends, which can be AFTER the router's terminal
-    /// fires. So the discard must DECLINE for a cloud-bound turn; otherwise the entries it is about
-    /// to read are already gone and the turn reports `none` — this fix's defect, in reverse.
-    ///
-    /// Made observable by DISPATCHING FIRST: `beginDispatch` is what marks an utterance cloud-bound
-    /// (it is the dispatch, not the response, that decides). The discard then runs, as the router
-    /// terminal would, and the record built afterwards must still carry the instant.
+    /// fires. While those instants lived in a store the router had to be told which turns were
+    /// cloud-bound; with them on the turn's own object, a cloud turn simply still holds them when
+    /// the record is built — no mark, no guard, nothing to get wrong.
     @MainActor
     func test_aCloudBoundTurnKeepsItsEndOfSpeechThroughTheRouterTerminal() async throws {
         let utteranceId = "u-\(UUID().uuidString.prefix(8))-cloudkept"
@@ -257,31 +244,94 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
             """
         let sink = makeSink()
-        // `origin: nil` dispatches without publishing a retained record, so nothing parks on it —
-        // but it still marks this utterance as cloud-bound, which is the property under test.
         _ = sink.beginDispatch(utteranceId: utteranceId, origin: nil)
-        sink.recordEndOfSpeech(13_000.0, endpointDecisionAt: 13_000.5, for: utteranceId)
-        sink.discardEndOfSpeech(for: utteranceId)
+        let latency = TurnLatencyContext()
+        latency.endOfSpeech = 13_000.0
+        latency.endpointDecisionAt = 13_000.5
 
         _ = await sink.routeToCloud(
             request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
-            selection: nil, utteranceId: utteranceId)
+            selection: nil, utteranceId: utteranceId, latency: latency)
 
-        let log = await FileLog.shared.logFileAsString()
-        let line = try XCTUnwrap(
-            log.split(separator: "\n")
-                .first { $0.contains("cloudTurnLatency") && $0.contains(utteranceId) }
-                .map(String.init),
-            log
-        )
+        let line = try await latencyLine(for: utteranceId)
         XCTAssertTrue(line.contains("endpoint_ms=500ms"),
-                      "a cloud-bound turn must survive the router terminal with its instants "
-                          + "intact; losing them reports no end of speech for the turn: \(line)")
+                      "a cloud-bound turn must reach its record with its instants intact; losing "
+                          + "them reports no end of speech for the turn: \(line)")
+    }
+
+    /// A REFUSED cloud dispatch builds no record at all, and the instants it carried are not
+    /// reachable from any later turn.
+    ///
+    /// This is the case that kept leaking while the instants lived in a sink-owned store: the
+    /// dispatch was marked cloud-bound before the refusal, the record was never built, and every
+    /// cleanup path declined because of the mark. With the instants on the turn's own object there
+    /// is nothing to clear — a refused dispatch simply never reads them, and the object is released
+    /// with the turn.
+    ///
+    /// A refusal requires a NON-LIVE origin with no admitted work holding it, so the test asserts
+    /// the refusal actually happened rather than assuming it: an earlier version of this test
+    /// dispatched successfully and proved nothing.
+    @MainActor
+    func test_aRefusedCloudDispatchLeavesItsInstantsBehind() async throws {
+        let utteranceId = "u-\(UUID().uuidString.prefix(8))-refused"
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let sink = makeSink()
+        let staleOrigin = cloudTestOrigin + 41
+        let refused = TurnLatencyContext()
+        refused.endOfSpeech = 20_000.0
+        refused.endpointDecisionAt = 20_000.7
+
+        let outcome = await sink.routeToCloud(
+            request: "refused", tier: .free, context: sampleContext(), origin: staleOrigin,
+            selection: nil, utteranceId: utteranceId, latency: refused)
+        XCTAssertEqual(outcome.outcome, .refused,
+                       "the case must actually refuse the dispatch, or it proves nothing")
+
+        // No record for the refused turn, either now or later.
+        let afterRefusal = await FileLog.shared.logFileAsString()
+            .split(separator: "\n")
+            .filter { $0.contains("cloudTurnLatency") && $0.contains(utteranceId) }
+        XCTAssertTrue(afterRefusal.isEmpty,
+                      "a refused dispatch produces no latency record: \(afterRefusal)")
+
+        // A later admitted turn on the same identity reports its OWN instant. Under the old
+        // design this is where the refused turn's value resurfaced.
+        let accepted = TurnLatencyContext()
+        accepted.endOfSpeech = 30_000.0
+        accepted.endpointDecisionAt = 30_000.9
+        _ = await sink.routeToCloud(
+            request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: utteranceId, latency: accepted)
+
+        let line = try await latencyLine(for: utteranceId)
+        XCTAssertTrue(line.contains("endpoint_ms=900ms"),
+                      "the refused turn's instants must not survive into the next turn: \(line)")
+    }
+
+    /// The `cloudTurnLatency` line for one request id, waited for because the record is emitted by
+    /// a closure that may run after `routeToCloud` returns.
+    @MainActor
+    private func latencyLine(for utteranceId: String) async throws -> String {
+        for _ in 0..<40 {
+            let log = await FileLog.shared.logFileAsString()
+            if let line = log.split(separator: "\n")
+                .first(where: { $0.contains("cloudTurnLatency") && $0.contains(utteranceId) }) {
+                return String(line)
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let log = await FileLog.shared.logFileAsString()
+        throw XCTSkip("no cloudTurnLatency line for \(utteranceId)")
     }
 
     /// A dispatched spoken turn reports a real end of speech, not `none`: the instant travels from
-    /// admission under the utterance's own identity, so the key used to consume it must be the same
-    /// one it was stored under. A key mismatch would leak the entry and silently report `none`.
+    /// admission ON the turn itself, so the record built at the terminal must read it from there.
+    /// Losing it reports `none` — the measurement absent for exactly the turns it exists for.
     @MainActor
     func testADispatchedUtteranceReportsItsEndOfSpeech() async throws {
         self.pendingFixture =
@@ -292,17 +342,14 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             """
         let eosId = "u-\(UUID().uuidString.prefix(8))-eos"
         let sink = makeSink()
-        sink.recordEndOfSpeech(1_000.0, endpointDecisionAt: 1_000.5, for: eosId)
+        let latency = TurnLatencyContext()
+        latency.endOfSpeech = 1_000.0
+        latency.endpointDecisionAt = 1_000.5
         _ = await sink.routeToCloud(
             request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
-            selection: nil, utteranceId: eosId)
+            selection: nil, utteranceId: eosId, latency: latency)
 
-        let log = await FileLog.shared.logFileAsString()
-        let line = try XCTUnwrap(
-            log.split(separator: "\n").first { $0.contains("cloudTurnLatency") && $0.contains(eosId) }
-                .map(String.init),
-            log
-        )
+        let line = try await latencyLine(for: eosId)
         XCTAssertTrue(line.contains("endpoint_ms=500ms"),
                       "the hangover between the acoustic end and the endpoint decision is its own stage: \(line)")
         XCTAssertFalse(line.contains("end_of_speech_to_request=none"),

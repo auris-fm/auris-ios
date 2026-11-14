@@ -702,6 +702,9 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
     /// The selection the executor captured, so a case can assert the turn carries what selected
     /// it rather than whatever the window looks like later.
     var lastSelection: CloudConversationSelection?
+    /// The turn's timing object, so a case can assert the executor forwards the one the turn was
+    /// admitted with rather than minting a fresh one.
+    var lastLatency: TurnLatencyContext?
     /// The request ids a retry named, in order.
     var retriedRequestIds: [String] = []
 
@@ -711,9 +714,11 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
         utteranceId: String?,
         preparedObserver: CloudRouteSink.PreparedObserver?,
         sourceTranscript: String?, sourceLanguage: String?,
+        latency: TurnLatencyContext?,
         ownership: CloudDispatchOwnership?
     ) async -> CloudRouteResult {
         routeToCloudCalled = true
+        lastLatency = latency
         dispatchInProgress = true
         lastRequest = request
         lastContext = context

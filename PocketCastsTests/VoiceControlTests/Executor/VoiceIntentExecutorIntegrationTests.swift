@@ -256,6 +256,7 @@ private final class LimitRefusalCloudRouteSink: VoiceCloudRouteSink {
         utteranceId: String?,
         preparedObserver: CloudRouteSink.PreparedObserver?,
         sourceTranscript: String?, sourceLanguage: String?,
+        latency: TurnLatencyContext?,
         ownership: CloudDispatchOwnership?
     ) async -> CloudRouteResult {
         routeCallCount += 1
@@ -279,6 +280,7 @@ private final class IntegrationCloudRouteSink: VoiceCloudRouteSink {
         utteranceId: String?,
         preparedObserver: CloudRouteSink.PreparedObserver?,
         sourceTranscript: String?, sourceLanguage: String?,
+        latency: TurnLatencyContext?,
         ownership: CloudDispatchOwnership?
     ) async -> CloudRouteResult {
         CloudRouteResult(response: .spoken("Cloud response"), outcome: .completed)

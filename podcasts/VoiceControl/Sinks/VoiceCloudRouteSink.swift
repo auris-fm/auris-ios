@@ -52,6 +52,7 @@ protocol VoiceCloudRouteSink {
         preparedObserver: CloudRouteSink.PreparedObserver?,
         sourceTranscript: String?,
         sourceLanguage: String?,
+        latency: TurnLatencyContext?,
         ownership: CloudDispatchOwnership?
     ) async -> CloudRouteResult
 

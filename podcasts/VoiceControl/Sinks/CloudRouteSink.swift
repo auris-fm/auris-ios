@@ -113,47 +113,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// the chain the app builds rather than constructing its own.
     var audioPlayerForTesting: CloudAudioPlayer? { audioPlayer }
 
-    /// The acoustic end of speech for each utterance, keyed by the utterance's own identity.
-    ///
-    /// Recorded at admission — where the identity is minted, before any routing — and consumed by
-    /// the cloud request that utterance produces. A turn that escalates from a local `no_match`
-    /// still carries its own end of speech, because the key is the utterance, not the dispatch.
-    /// The instant is the capture-domain end of speech (`NativeVadSegmenter` derives it from the
-    /// utterance's own sample instants), not the endpoint decision a hangover later.
-    private var endOfSpeechByUtterance: [String: MonotonicTime] = [:]
-    /// The endpoint decision that followed each utterance's end of speech. The gap between the two
-    /// is the capture-side hangover, reported separately so a slow turn's cause is visible.
-    private var endpointDecisionByUtterance: [String: MonotonicTime] = [:]
-
-    /// Records when the user stopped talking for `utteranceId`. First value wins, so a duplicate
-    /// admission for the same utterance cannot move the turn's start later.
-    func recordEndOfSpeech(
-        _ instant: MonotonicTime?,
-        endpointDecisionAt: MonotonicTime?,
-        for utteranceId: String
-    ) {
-        guard let instant, endOfSpeechByUtterance[utteranceId] == nil else { return }
-        endOfSpeechByUtterance[utteranceId] = instant
-        endpointDecisionByUtterance[utteranceId] = endpointDecisionAt
-    }
-
-    /// Utterances that actually began a cloud dispatch. A turn is not cloud-bound until this is
-    /// set, so its absence is the honest test for "handled on the phone".
-    private var dispatchedToCloudByUtterance: Set<String> = []
-
-    /// Drops the instants recorded for `utteranceId`, unless the turn is cloud-bound.
-    ///
-    /// Called when a turn ends. A cloud turn consumes its own entry when its record is built, and
-    /// must keep it until then; a locally handled turn has no consumer at all, so its entry would
-    /// otherwise live for the process lifetime. Acknowledging that ending is what distinguishes
-    /// "the turn is over, nothing will read this" from "the turn is over at the router, the cloud
-    /// round is still coming".
-    func discardEndOfSpeech(for utteranceId: String) {
-        guard !dispatchedToCloudByUtterance.contains(utteranceId) else { return }
-        endOfSpeechByUtterance.removeValue(forKey: utteranceId)
-        endpointDecisionByUtterance.removeValue(forKey: utteranceId)
-    }
-
     /// The PRODUCTION client factory, extracted so the assembly reuses it VERBATIM and the test seam
     /// substitutes it. Production is unchanged: the default is this same factory.
     nonisolated static func productionClientFactory() -> () -> CloudRouteClient {
@@ -807,7 +766,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // CLOUD-BOUND, recorded before the admission decision: the dispatch is happening for this
         // utterance either way, and the router's terminal will consult this to decide whether a
         // locally-handled turn may drop its instants.
-        dispatchedToCloudByUtterance.insert(utteranceId)
         guard let origin else { return .refused }
         let decideAndPublish: () -> CloudDispatchOwnership = {
             // TEST HOOK (review 5fa6e007): an explicit interleaving barrier INSIDE the coherent
@@ -861,13 +819,14 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         preparedObserver: PreparedObserver? = nil,
         sourceTranscript: String? = nil,
         sourceLanguage: String? = nil,
+        latency: TurnLatencyContext? = nil,
         ownership: CloudDispatchOwnership? = nil
     ) async -> CloudRouteResult {
         guard let utteranceId else {
             return await routeToCloudOwned(
                 request: request, tier: tier, context: context, origin: origin,
                 selection: selection, utteranceId: nil, preparedObserver: preparedObserver,
-                sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage
+                sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage, latency: latency
             )
         }
         let disposition: CloudDispatchOwnership = ownership ?? beginDispatch(utteranceId: utteranceId, origin: origin)
@@ -880,7 +839,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             return await routeToCloudOwned(
                 request: request, tier: tier, context: context, origin: origin,
                 selection: selection, utteranceId: nil, preparedObserver: preparedObserver,
-                sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage
+                sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage, latency: latency
             )
         case let .owner(token):
             guard token.utteranceId == utteranceId else {
@@ -889,7 +848,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             return await ownDispatch(
                 token: token, request: request, tier: tier, context: context, origin: origin,
                 selection: selection, utteranceId: utteranceId, preparedObserver: preparedObserver,
-                sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage
+                sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage, latency: latency
             )
         }
     }
@@ -927,7 +886,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         utteranceId: String,
         preparedObserver: PreparedObserver?,
         sourceTranscript: String?,
-        sourceLanguage: String?
+        sourceLanguage: String?,
+        latency: TurnLatencyContext?
     ) async -> CloudRouteResult {
         guard let record = token.record else {
             return CloudRouteResult(response: .earcon(.error), outcome: .refused)
@@ -951,7 +911,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         let result = await routeToCloudOwned(
             request: request, tier: tier, context: context, origin: origin,
             selection: selection, utteranceId: utteranceId, preparedObserver: preparedObserver,
-            sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage
+            sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage, latency: latency
         )
         settle(record, with: result)
         return result
@@ -985,7 +945,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         utteranceId: String?,
         preparedObserver: PreparedObserver?,
         sourceTranscript: String?,
-        sourceLanguage: String?
+        sourceLanguage: String?,
+        latency: TurnLatencyContext?
     ) async -> CloudRouteResult {
         // Recorded before any guard: what selected this turn is a property of the TURN, not of
         // whether the sink happens to be configured. Recording after the configured check made
@@ -1385,9 +1346,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // The send's own instant, reported by the transport once the authenticated frame is
             // out — NOT inferred from the first reply frame, which would fold the server's
             // admission into the client's share of the turn.
-            onRequestSent: { [weak self] sentAt in
-                Task { @MainActor in self?.noteRequestSent(sentAt, requestId: turnRequestId) }
-            },
+            onRequestSent: { sentAt in latency?.requestSentAt = sentAt },
             // Confirm the report only once it actually left: a failed connection or token fetch
             // must not destroy a correction the user still owes the server.
             onReportAttached: { [weak self] requestId in
@@ -1443,8 +1402,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // ONCE at the terminal, whether or not audio was ever heard.
         let latencyRecord = CloudTurnLatencyRecord(
             requestId: turnRequestId,
-            endOfSpeech: endOfSpeechByUtterance.removeValue(forKey: turnRequestId),
-            endpointDecision: endpointDecisionByUtterance.removeValue(forKey: turnRequestId)
+            endOfSpeech: latency?.endOfSpeech,
+            endpointDecision: latency?.endpointDecisionAt
         )
         // Local names the closure and the loop below share. Swift forbids a local function that
         // captures a local declared before it, so the state lives in an explicit box.
@@ -1457,7 +1416,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // reply's arrival instead.
             self.emitTurnLatencyRecord(
                 latencyState.record,
-                requestSent: self.requestSentAt(turnRequestId),
+                requestSent: latency?.requestSentAt,
                 outcome: outcome
             )
         }
@@ -1764,22 +1723,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         }
     }
 
-    /// The instant each live request's authenticated frame actually reached the transport,
-    /// recorded by the client and cleared when the turn's record is emitted.
-    private var requestSentByRequestId: [String: MonotonicTime] = [:]
-
-    /// Records that `requestId`'s authenticated frame was sent. First value wins: a transport
-    /// retry of the same request must not move the turn's start later.
-    func noteRequestSent(_ instant: MonotonicTime, requestId: String) {
-        guard requestSentByRequestId[requestId] == nil else { return }
-        requestSentByRequestId[requestId] = instant
-    }
-
-    /// The recorded send instant for `requestId`, if the transport reported one.
-    func requestSentAt(_ requestId: String) -> MonotonicTime? {
-        requestSentByRequestId[requestId]
-    }
-
     /// Emits one turn's client-side latency line.
     ///
     /// A turn has ONE terminal, so this is called once per request; the caller guards it anyway
@@ -1797,10 +1740,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             firstAudible: audioPlayer.firstAudibleHostSeconds,
             outcome: outcome
         )
-        requestSentByRequestId.removeValue(forKey: record.requestId)
-        endOfSpeechByUtterance.removeValue(forKey: record.requestId)
-        endpointDecisionByUtterance.removeValue(forKey: record.requestId)
-        dispatchedToCloudByUtterance.remove(record.requestId)
         FileLog.shared.addMessage("[VoicePipeline] cloudTurnLatency \(line)")
     }
 

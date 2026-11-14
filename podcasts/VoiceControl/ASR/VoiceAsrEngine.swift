@@ -772,6 +772,12 @@ class VoiceAsrEngine {
         // trimming, router diagnostics, the prepared wire request_id and server diagnostics.
         let utteranceId = utteranceIdGeneratorForTesting?() ?? UUID().uuidString
         FileLog.shared.addMessage("[VoicePipeline] utterance admitted id=\(utteranceId)")
+        // The turn's latency bookkeeping, created HERE because this is where the turn begins and
+        // where its acoustic end is known. It travels on the routing input and dies with the turn,
+        // so no side table and no cleanup path is needed.
+        let latencyContext = TurnLatencyContext()
+        latencyContext.endOfSpeech = speechEndedAt
+        latencyContext.endpointDecisionAt = endpointDecisionAt
 
         if echoFilterRoute.appliesCorrelationWindow {
             // ONE consistent observation: samples, offset and anchor
@@ -1111,7 +1117,8 @@ class VoiceAsrEngine {
             routerText: finalized.text,
             translateNote: translateNote,
             selection: selection,
-            utteranceId: utteranceId
+            utteranceId: utteranceId,
+            latency: latencyContext
         )
         if onRoutingInputWithContext?(routingInput, utteranceContext) ?? false {
             admissionHandedToRouting = true
@@ -1126,7 +1133,8 @@ class VoiceAsrEngine {
         routerText: String,
         translateNote: String?,
         selection: CloudConversationSelection? = nil,
-        utteranceId: String
+        utteranceId: String,
+        latency: TurnLatencyContext? = nil
     ) -> IntentRoutingInput {
         if let translateNote, translateNote.hasPrefix("translate=skip(backend)") {
             return IntentRoutingInput(
@@ -1135,7 +1143,8 @@ class VoiceAsrEngine {
                 routerTranscript: routerText,
                 translationKind: .backend,
                 selection: selection,
-                utteranceId: utteranceId
+                utteranceId: utteranceId,
+                latency: latency
             )
         }
         if let translateNote,
@@ -1147,7 +1156,8 @@ class VoiceAsrEngine {
                 routerTranscript: routerText,
                 translationKind: .platform,
                 selection: selection,
-                utteranceId: utteranceId
+                utteranceId: utteranceId,
+                latency: latency
             )
         }
         // NO FABRICATED language: an unknown LID stays nil on the input (and is omitted on the
@@ -1156,7 +1166,8 @@ class VoiceAsrEngine {
             transcript: routerText,
             language: source.detectedLanguage,
             selection: selection,
-            utteranceId: utteranceId
+            utteranceId: utteranceId,
+            latency: latency
         )
     }
 
