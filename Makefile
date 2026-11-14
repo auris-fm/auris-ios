@@ -71,7 +71,7 @@ SOURCE_PACKAGES = $(abspath $(CURDIR)/../SourcePackages)
 # One line, because a multi-line `define` cannot be embedded in a quoted shell argument.
 SIMULATOR_TYPE_PICK = import json,sys; \
   _d = json.load(sys.stdin); \
-  _rs = sorted([r for r in _d.get("runtimes", []) if r.get("isAvailable") and "iOS" in r.get("identifier", "")], key=lambda r: r["version"], reverse=True); \
+  _rs = sorted([r for r in _d.get("runtimes", []) if r.get("isAvailable") and "iOS" in r.get("identifier", "")], key=lambda r: [int(n) for n in r["version"].split(".")], reverse=True); \
   print(next((t["identifier"] + " " + r["identifier"] for r in _rs for t in r.get("supportedDeviceTypes", []) if t.get("productFamily") == "iPhone"), ""))
 
 # The device UDID for a simulator name, resolved once so boot and install cannot disagree.
