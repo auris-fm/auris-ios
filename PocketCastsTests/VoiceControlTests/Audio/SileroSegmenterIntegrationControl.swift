@@ -699,6 +699,41 @@ final class SileroSegmenterIntegrationControl: XCTestCase {
             "the classifier reported speech for digital silence, so an endpoint could never arrive"
         )
     }
+    /// The reported speech end must be where SPEECH stopped, not where the hangover did.
+    ///
+    /// The segmenter keeps appending silent frames until the endpoint fires, so the buffer length
+    /// at emit time is the end of the hangover. Reporting that as the speech end would push the
+    /// wake-only boundary later by the whole timeout, and every "auris, stop" would read as a
+    /// bare wake and be silently dropped — the failure this measurement exists to prevent.
+    func test_speechEndExcludesTheHangoverThatClosedTheSegment() {
+        // `silenceTimeoutMs: -1` closes on the FIRST silent frame, so the hangover is known
+        // exactly: the one frame after the speech run. Any reported end that includes it is wrong.
+        let frameSize = 160
+        let frame: (Int) -> [Float] = { i in (0..<frameSize).map { _ in Float(i) / 1000 } }
+        let speechFrames = 4
+        let segmenter = NativeVadSegmenter(
+            threshold: 0.020,
+            silenceTimeoutMs: -1,
+            minSpeechFrames: 1,
+            classifier: ScriptedSpeechClassifier(silentFrames: 0, speechFrames: speechFrames)
+        )
+        var ends: [Int?] = []
+        segmenter.onUtterance = { _, _ in ends.append(segmenter.lastUtteranceSpeechEndSample) }
+
+        for i in 0..<speechFrames { segmenter.process(frame(i), capturedAt: MonotonicTime(i)) }
+        XCTAssertTrue(ends.isEmpty, "the segment closed before any silence arrived")
+        // This frame opens the silence run and closes the segment; it must NOT count as speech.
+        segmenter.process(frame(speechFrames), capturedAt: MonotonicTime(speechFrames))
+
+        // PRECONDITIONS the test's name asserts: it closed, and it reported an end at all.
+        XCTAssertEqual(ends.count, 1, "the silent frame must close the segment exactly once")
+        let speechEnd: Int? = ends.first ?? nil
+        XCTAssertNotNil(speechEnd, "an emitted utterance must report where speech stopped")
+        XCTAssertEqual(
+            speechEnd, speechFrames * frameSize,
+            "the closing silent frame is hangover, not speech")
+    }
+
 }
 
 /// Reports "no speech" for a fixed number of frames, then "speech" forever.

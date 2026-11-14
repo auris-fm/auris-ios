@@ -21,7 +21,14 @@ enum RouteInputEligibility: Equatable {
 /// null counter and eventually play the error earcon, which the silent rule
 /// forbids. Extracting it makes that reachable in tests without a service seam.
 enum RouteInputEligibilityPolicy {
-    static func decide(transcript: String) -> RouteInputEligibility {
+    /// - Parameter acousticWakeOnly: the engine's audio verdict, when it could make one.
+    ///   `true` is authoritative: the capture measurably ended with the wake word, so nothing was
+    ///   said after it however ASR spelled the phrase. `false` adds nothing (the text rule still
+    ///   applies). `nil` means no audio decision was possible.
+    static func decide(transcript: String, acousticWakeOnly: Bool? = nil) -> RouteInputEligibility {
+        // Checked before `.blank`: a capture that ended with the wake word is a session start even
+        // if the recogniser returned an empty string, and `.blank` would otherwise claim it.
+        if acousticWakeOnly == true { return .silentSessionStart }
         if transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return .blank }
         if WakeWordPhraseSet.isWakeOnly(transcript) { return .silentSessionStart }
         return .route

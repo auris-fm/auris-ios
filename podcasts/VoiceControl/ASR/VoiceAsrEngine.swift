@@ -10,6 +10,9 @@ class VoiceAsrEngine {
     private let gracePeriodSignal: GracePeriodSignal
     private let stageTimer: RecognitionStageTimer
     private let wakeThreshold: Float
+    /// `wake_only_margin_ms` from the eval manifest, or `nil` when the model publishes none.
+    /// `nil` disables the audio wake-only rule, leaving routing exactly as it was.
+    private let wakeOnlyMarginMs: Int?
     private let translationStage: TranslationStage?
 
     /// Which echo-filter scope applies to the current output route.
@@ -264,6 +267,7 @@ class VoiceAsrEngine {
         gracePeriodSignal: GracePeriodSignal,
         clock: MonotonicClock = SystemMonotonicClock(),
         wakeThreshold: Float = 0.8,
+        wakeOnlyMarginMs: Int? = nil,
         translationStage: TranslationStage? = nil
     ) {
         self.capture = capture
@@ -274,6 +278,7 @@ class VoiceAsrEngine {
         self.gracePeriodSignal = gracePeriodSignal
         self.stageTimer = RecognitionStageTimer(clock: clock)
         self.wakeThreshold = wakeThreshold
+        self.wakeOnlyMarginMs = wakeOnlyMarginMs
         self.translationStage = translationStage
     }
 
@@ -424,6 +429,9 @@ class VoiceAsrEngine {
     /// and be missing on another.
     private func wireCaptureCallbacks() {
         segmenter.onUtterance = { [weak self] utterance, capturedAt in
+            // Captured synchronously with the utterance it belongs to: a later one must not be
+            // measured against this segment's speech end.
+            let speechEndSample = self?.segmenter.lastUtteranceSpeechEndSample
             guard let self else { return }
             // Fenced as well as the notifications: an utterance emitted from a stopped session
             // is stale PCM, and suppressing only its UI event would still let that audio reach
@@ -444,7 +452,8 @@ class VoiceAsrEngine {
                     return
                 }
                 self.utteranceBodyGateForTesting?()
-                await self.processUtterance(utterance, capturedAt: capturedAt, frozenContext: frozen)
+                await self.processUtterance(
+                    utterance, capturedAt: capturedAt, speechEndSample: speechEndSample, frozenContext: frozen)
             }
         }
         segmenter.onSpeechStarted = { [weak self] count in
@@ -648,7 +657,12 @@ class VoiceAsrEngine {
     /// sites attribute their observations to. Test-visible so a control can report against the same capture.
     private(set) var lastUtteranceContextForTesting: VoiceSharingCollector.CaptureContext?
 
-    func processUtterance(_ utterance: [Float], capturedAt: MonotonicTime? = nil, frozenContext: VoiceSharingCollector.CaptureContext? = nil) async {
+    func processUtterance(
+        _ utterance: [Float],
+        capturedAt: MonotonicTime? = nil,
+        speechEndSample: Int? = nil,
+        frozenContext: VoiceSharingCollector.CaptureContext? = nil
+    ) async {
         let utteranceContext = frozenContext
         var captureHandedToRouting = false
         defer {
@@ -851,6 +865,20 @@ class VoiceAsrEngine {
         emitStageTiming(detectedConfidence: detectedConfidence)
 
         let isWakePositive = detectedConfidence != nil
+        // Wake-only when the audio says nothing followed the wake word, needing no transcript
+        // (recognition-pipeline.md "Wake-positive time band trim"). Fails towards routing.
+        let wakeOnlyDecision = WakeTranscriptTrimmer.wakeOnlyDecision(
+            wakePositive: isWakePositive,
+            completionSample: completionSample,
+            speechEndSample: speechEndSample,
+            sampleRateHz: 16000,
+            marginMs: wakeOnlyMarginMs
+        )
+        if wakeOnlyDecision == .wakeOnly {
+            FileLog.shared.addMessage(
+                "[VoicePipeline] wakeOnly ut=\(utteranceId) acoustic speechEnd=\(speechEndSample.map(String.init) ?? "?") completion=\(completionSample)"
+            )
+        }
         let trimmedText = WakeTranscriptTrimmer.commandText(
             result: asrResult,
             wakePositive: isWakePositive,
@@ -957,7 +985,8 @@ class VoiceAsrEngine {
             routerText: finalized.text,
             translateNote: translateNote,
             selection: selection,
-            utteranceId: utteranceId
+            utteranceId: utteranceId,
+            acousticWakeOnly: wakeOnlyDecision == .wakeOnly
         )
         if onRoutingInputWithContext?(routingInput, utteranceContext) ?? false {
             admissionHandedToRouting = true
@@ -972,7 +1001,8 @@ class VoiceAsrEngine {
         routerText: String,
         translateNote: String?,
         selection: CloudConversationSelection? = nil,
-        utteranceId: String
+        utteranceId: String,
+        acousticWakeOnly: Bool? = nil
     ) -> IntentRoutingInput {
         if let translateNote, translateNote.hasPrefix("translate=skip(backend)") {
             return IntentRoutingInput(
@@ -981,7 +1011,8 @@ class VoiceAsrEngine {
                 routerTranscript: routerText,
                 translationKind: .backend,
                 selection: selection,
-                utteranceId: utteranceId
+                utteranceId: utteranceId,
+                acousticWakeOnly: acousticWakeOnly
             )
         }
         if let translateNote,
@@ -993,7 +1024,8 @@ class VoiceAsrEngine {
                 routerTranscript: routerText,
                 translationKind: .platform,
                 selection: selection,
-                utteranceId: utteranceId
+                utteranceId: utteranceId,
+                acousticWakeOnly: acousticWakeOnly
             )
         }
         // NO FABRICATED language: an unknown LID stays nil on the input (and is omitted on the
@@ -1002,7 +1034,8 @@ class VoiceAsrEngine {
             transcript: routerText,
             language: source.detectedLanguage,
             selection: selection,
-            utteranceId: utteranceId
+            utteranceId: utteranceId,
+                acousticWakeOnly: acousticWakeOnly
         )
     }
 

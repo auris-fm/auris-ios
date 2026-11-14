@@ -1132,7 +1132,9 @@ class VoiceControlService: ObservableObject {
         // keeps the wake phrase in the transcript, so this is where that case is
         // caught rather than by the trimmer, which cannot recover the tokens it
         // never had.
-        switch RouteInputEligibilityPolicy.decide(transcript: transcript) {
+        switch RouteInputEligibilityPolicy.decide(
+            transcript: transcript,
+            acousticWakeOnly: input.acousticWakeOnly) {
         case .blank, .silentSessionStart:
             // Silent by contract and *before* classification: a wake-only or blank
             // capture is the start of a session (or nothing at all), not a failed
@@ -1145,7 +1147,9 @@ class VoiceControlService: ObservableObject {
             // The record still closes honestly: routing and execution did not run, and the
             // app owns that decision. A wake-only capture states the enumerated `wake_only`
             // reason; a blank capture never dispatched anything at all.
-            let skipReason = RouteInputEligibilityPolicy.decide(transcript: transcript) == .silentSessionStart
+            let skipReason = RouteInputEligibilityPolicy.decide(
+                transcript: transcript,
+                acousticWakeOnly: input.acousticWakeOnly) == .silentSessionStart
                 ? VoiceSharingCollector.wakeOnlySkipReason
                 : VoiceSharingCollector.notDispatchedReason
             for stage in ["routing", "execution"] {

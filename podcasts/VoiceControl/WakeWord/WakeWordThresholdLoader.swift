@@ -15,6 +15,26 @@ enum WakeWordThresholdLoader {
     struct Deployment {
         let threshold: Float
         let identity: VoiceSharingContributionEncoder.ModelRef?
+        /// `wake_only_margin_ms`, or `nil` when the manifest has no usable value.
+        ///
+        /// Unlike the threshold this is NOT required: the spec says a missing or invalid margin
+        /// disables the audio wake-only rule only, and does not make the detector not-ready. It
+        /// ships with the wake model, so older manifests legitimately lack it.
+        var wakeOnlyMarginMs: Int? = nil
+    }
+
+    /// Reads `wake_only_margin_ms` if, and only if, it is a non-negative integer.
+    ///
+    /// Anything else — absent, a string, a float, negative — is treated as "no margin", which
+    /// leaves the audio rule off and routing unchanged. Reading it strictly matters: a silently
+    /// coerced `-1` would invert the rule and drop ordinary commands.
+    static func wakeOnlyMarginMs(fromManifestJSON json: [String: Any]) -> Int? {
+        guard let number = json["wake_only_margin_ms"] as? NSNumber else { return nil }
+        // A JSON float ("80.5") is a Double bridging to NSNumber; comparing against the double
+        // rejects it, so an obviously wrong type cannot masquerade as a valid milliseconds value.
+        guard number.doubleValue == number.doubleValue.rounded() else { return nil }
+        let value = number.intValue
+        return value >= 0 ? value : nil
     }
 
     static func load(manifestURL: URL, modelDirectory: URL) -> Result<Float, Error> {
@@ -50,6 +70,7 @@ enum WakeWordThresholdLoader {
 
         return .success(Deployment(
             threshold: thresholdNumber.floatValue,
-            identity: LoadedModelAssets.reference(id: "auris", digests: assetHashes.mapValues { $0.lowercased() })))
+            identity: LoadedModelAssets.reference(id: "auris", digests: assetHashes.mapValues { $0.lowercased() }),
+            wakeOnlyMarginMs: wakeOnlyMarginMs(fromManifestJSON: json)))
     }
 }

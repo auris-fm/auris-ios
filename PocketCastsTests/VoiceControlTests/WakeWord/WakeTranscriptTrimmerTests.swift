@@ -94,4 +94,111 @@ final class WakeTranscriptTrimmerTests: XCTestCase {
         XCTAssertEqual(trim("something"), "something", "no tokens ⇒ never empty")
         XCTAssertEqual(trim("something", wakePositive: false), "something", "not detected ⇒ never empty")
     }
+
+    // MARK: - the audio wake-only rule (when timed tokens are absent)
+
+    /// Decides one capture through the rule, in the spec's own terms: a completion offset, a
+    /// margin, and where the segment's speech actually ended.
+    private func audioRule(
+        completionSample: Int,
+        marginMs: Int?,
+        speechEndMs: Int?,
+        transcript: String = "oris",
+        wakePositive: Bool = true
+    ) -> WakeTranscriptTrimmer.WakeOnlyDecision {
+        WakeTranscriptTrimmer.wakeOnlyDecision(
+            wakePositive: wakePositive,
+            completionSample: completionSample,
+            speechEndSample: speechEndMs.map { $0 * 16 },   // 16 kHz, so ms * 16 = samples
+            sampleRateHz: 16_000,
+            marginMs: marginMs
+        )
+    }
+
+    /// A capture of the wake word ALONE is wake-only when its speech ends at or before
+    /// `completionMs - wakeOnlyMarginMs`, whatever ASR spelled it.
+    ///
+    /// This is the rule that decides `'oris'`: it reads the acoustics, not the spelling, so a
+    /// mispronounced or mis-transcribed wake is recognised as a wake and dropped silently instead
+    /// of being escalated to the cloud as a question.
+    func test_audioRule_aWakeAloneIsWakeOnly() {
+        // 250 ms completion, 80 ms margin => boundary at 170 ms.
+        XCTAssertEqual(
+            audioRule(completionSample: 4_000, marginMs: 80, speechEndMs: 170),
+            .wakeOnly,
+            "speech that stops exactly at the boundary leaves nothing after the wake word")
+        XCTAssertEqual(
+            audioRule(completionSample: 4_000, marginMs: 80, speechEndMs: 120),
+            .wakeOnly,
+            "speech ending well before the boundary is the wake word and nothing else")
+    }
+
+    /// A mis-SPELLED rendering is still wake-only: the rule never looks at the text, so no
+    /// spelling tolerance is needed and none is guessed.
+    func test_audioRule_aMisspelledRenderingIsStillWakeOnly() {
+        for spelling in ["oris", "Oace.", "aris", "auris"] {
+            XCTAssertEqual(
+                audioRule(completionSample: 4_000, marginMs: 80, speechEndMs: 150, transcript: spelling),
+                .wakeOnly,
+                "'\(spelling)' is decided by when the speech ended, not how it was spelled")
+        }
+    }
+
+    /// A short command attached WITHOUT a pause still routes: its speech runs past the boundary.
+    ///
+    /// This is why the rule uses its own measured margin rather than the completion band: the
+    /// band's end sits 280-520 ms after the wake word, so a fast "Auris stop" would be swallowed.
+    func test_audioRule_aShortCommandWithoutAPauseStillRoutes() {
+        XCTAssertEqual(
+            audioRule(completionSample: 4_000, marginMs: 80, speechEndMs: 420, transcript: "auris stop"),
+            .route,
+            "speech continuing past the boundary means something followed the wake word")
+        XCTAssertEqual(
+            audioRule(completionSample: 4_000, marginMs: 80, speechEndMs: 171, transcript: "auris stop"),
+            .route,
+            "one millisecond past the boundary is still past it")
+    }
+
+    /// No usable margin means the rule is OFF, so routing is exactly as it is today.
+    ///
+    /// The margin ships with the wake model; until a model publishes one there is no measured
+    /// boundary to apply, and guessing one would silently swallow real commands.
+    func test_audioRule_withoutAMarginTheRuleIsOff() {
+        for margin in [nil, -5] {
+            XCTAssertEqual(
+                audioRule(completionSample: 4_000, marginMs: margin, speechEndMs: 100),
+                .route,
+                "a missing or negative margin (\(String(describing: margin))) disables the rule")
+        }
+    }
+
+    /// A zero margin is VALID, not absent: the boundary is the completion offset itself.
+    func test_audioRule_aZeroMarginIsAValidBoundary() {
+        XCTAssertEqual(
+            audioRule(completionSample: 4_000, marginMs: 0, speechEndMs: 250),
+            .wakeOnly,
+            "with no margin the boundary is the completion offset, and speech ends exactly there")
+        XCTAssertEqual(
+            audioRule(completionSample: 4_000, marginMs: 0, speechEndMs: 251),
+            .route)
+    }
+
+    /// `NotDetected` never applies the audio rule, even when the acoustics look wake-only.
+    func test_audioRule_neverAppliesWithoutAPositiveWake() {
+        XCTAssertEqual(
+            audioRule(completionSample: 4_000, marginMs: 80, speechEndMs: 100, wakePositive: false),
+            .route,
+            "a grace-period capture is not gated by a wake result at all")
+    }
+
+    /// An unknown speech end cannot decide anything, so the capture routes.
+    ///
+    /// Routing is the safe direction: it costs at most one dispatch, while a wrong wake-only
+    /// decision silently discards a question the user actually asked.
+    func test_audioRule_anUnknownSpeechEndRoutes() {
+        XCTAssertEqual(
+            audioRule(completionSample: 4_000, marginMs: 80, speechEndMs: nil),
+            .route,
+            "without a speech-end offset the rule has no evidence and must not drop the capture")
+    }
 }
