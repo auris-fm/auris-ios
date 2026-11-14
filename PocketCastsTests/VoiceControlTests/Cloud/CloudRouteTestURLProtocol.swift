@@ -700,7 +700,10 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
 
     func send(_ message: URLSessionWebSocketTask.Message) async throws {
         if throwsBeforeRecording { throw URLError(.notConnectedToInternet) }
-        sent.append(message)
+        // Recorded under `scriptLock`: `sent` is written from the client's task and read by the
+        // test task, so an unsynchronised append/read is a data race that can report a frame that
+        // was already written as absent.
+        scriptLock.lock(); sent.append(message); scriptLock.unlock()
         // AN INTERRUPTED TURN TERMINATES ON THE REAL SERVER. A control that keeps a predecessor
         // alive while a successor barges in needs that terminal to arrive, or the successor parks
         // on an acknowledgement the stub can never produce (and an emptied script surfaces as a
@@ -907,7 +910,8 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
 
     /// The JSON payloads the client sent, decoded for assertions.
     var sentTextFrames: [String] {
-        sent.compactMap { message in
+        scriptLock.lock(); let snapshot = sent; scriptLock.unlock()
+        return snapshot.compactMap { message in
             if case let .string(text) = message { return text }
             return nil
         }
