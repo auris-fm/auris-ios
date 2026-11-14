@@ -1459,7 +1459,12 @@ class VoiceControlService: ObservableObject {
                         // Omitting it dropped the turn to the sink's provider fallback, so an
                         // escalated turn was classified by live window state rather than by what
                         // selected it — the exact defect the caller-level control exists to catch.
-                        selection: capturedSelection
+                        selection: capturedSelection,
+                        // The SAME turn's latency context. An escalated turn is still the turn the
+                        // user spoke, so its end-of-speech instant must reach the cloud request;
+                        // defaulting it here measured the escalation path as if the user had never
+                        // stopped talking.
+                        latency: input.latency
                     ),
                     preparedObserver: preparedObserver
                 )

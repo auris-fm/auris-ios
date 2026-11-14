@@ -170,6 +170,35 @@ final class RenderLifecycleControlTests: XCTestCase {
         try body(player, engine, node, output, scheduledSamples)
     }
 
+    /// Reading the render position must not re-enter the first-audible mark.
+    ///
+    /// `renderPosition(of:)` called `noteFirstAudibleIfRendering()`, which read the position again
+    /// through that same function. While the node had rendered but the mark was still unset, the
+    /// two recursed until the stack overflowed - so EVERY cloud answer that played audio crashed.
+    /// No test caught it because no earlier control both rendered audio and then read the position
+    /// with the mark unset; this one does both, through the player's real API.
+    ///
+    /// The fix is structural, not an ordering tweak: the read is pure and the mark has one writer,
+    /// so there is no path from the read back into it. A reordered version would still recurse.
+    @MainActor
+    func testReadingTheRenderPositionDoesNotReenterTheFirstAudibleMark() throws {
+        try withPendingOfflineAudio { player, engine, node, _, _ in
+            XCTAssertNil(
+                player.firstAudibleHostSeconds,
+                "premise: the mark must still be unset, or the re-entrancy cannot happen")
+
+            // The precondition of the crash, stated rather than assumed: the node HAS rendered, so
+            // the read returns an anchor, and the mark is still unset, so the old implementation
+            // would have taken the mark by calling back into itself.
+            _ = try engine.renderOffline(1_024, to: try XCTUnwrap(
+                AVAudioPCMBuffer(pcmFormat: AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!,
+                                 frameCapacity: 4_096)))
+
+            let anchor = player.renderPosition(of: node)
+            XCTAssertNotNil(anchor, "premise: the real node has rendered, so the read returns a position")
+        }
+    }
+
     /// Queue emptiness must preserve the current clock while measured scheduled audio remains.
     /// After real catch-up retires that clock, its old observations must be refused.
     @MainActor

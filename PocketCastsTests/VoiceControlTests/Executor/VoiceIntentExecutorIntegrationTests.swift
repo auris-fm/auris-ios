@@ -61,7 +61,7 @@ final class VoiceIntentExecutorIntegrationTests: XCTestCase {
             cloudRouteSink: cloudSink,
             playbackContextProvider: IntegrationPlaybackContextProvider()
         )
-        let response = await executor.execute(CloudRouteIntent(request: "test", tier: .premium))
+        let response = await executor.execute(CloudRouteIntent(request: "test", tier: .premium, latency: LatencyHandle()))
         XCTAssertEqual(response, .spoken("Cloud response"))
     }
 
@@ -80,8 +80,7 @@ final class VoiceIntentExecutorIntegrationTests: XCTestCase {
         let executor = makeExecutor(cloudRouteSink: sink, gracePeriodSignal: grace)
 
         let rendered = await executor.execute(CloudRouteIntent(
-            request: "play something", tier: .free, origin: .modelCall, generation: generation
-        ))
+            request: "play something", tier: .free, origin: .modelCall, generation: generation, latency: LatencyHandle()))
 
         XCTAssertEqual(
             rendered,

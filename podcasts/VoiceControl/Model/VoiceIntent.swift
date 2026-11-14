@@ -163,7 +163,7 @@ struct CloudRouteIntent: VoiceIntent, Equatable {
         origin: CloudRouteOrigin = .modelCall,
         generation: Int? = nil,
         selection: CloudConversationSelection? = nil,
-        latency: LatencyHandle = LatencyHandle()
+        latency: LatencyHandle
     ) {
         self.request = request
         self.tier = tier

@@ -1006,7 +1006,9 @@ final class CloudAudioPlayer: @unchecked Sendable {
             cloudSchedulingLogged = false
             // A new turn starts with nothing audible: carrying the previous turn's instant would
             // report a turn that played nothing as having played immediately.
+            firstAudibleLock.lock()
             firstAudibleInstant = nil
+            firstAudibleLock.unlock()
         }
         echoReferenceHandoff?.rotateIncarnation(for: .cloud, to: nodeIncarnation)
     }
@@ -1222,24 +1224,40 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// and the node may still be rendering audio queued before it, so scheduling can precede the
     /// first audible sound by an arbitrary amount. That earlier reading is still logged, named for
     /// what it is (`cloudAudioScheduled`), and this is the number the latency work reports.
+    /// Written only by `noteFirstAudibleIfRendering` and read from the terminal, which runs on a
+    /// different queue from the scheduling/rendering callbacks, so it is guarded by `firstAudibleLock`.
     private var firstAudibleInstant: Double?
+    private let firstAudibleLock = NSLock()
 
     /// Records first audible audio if this turn has not already. Called from the scheduling path
     /// and again whenever the node's render position is read, so the mark is observed even when the
     /// node had not started rendering at schedule time. Once set it never moves: later renders,
     /// later schedules and a mid-turn node rebuild (underrun) all leave it alone.
     private func noteFirstAudibleIfRendering() {
-        guard firstAudibleInstant == nil, let node = playerNode else { return }
-        guard let position = renderPosition(of: node), position.hostTime > 0 else { return }
-        let blockStart = position.hostTime
+        // Takes the mark in the ONE place, from a PURE read.
+        //
+        // This used to call `renderPosition(of:)`, which called back into here whenever the read
+        // returned an anchor - so while the node had rendered but the mark was still unset, the
+        // pair recursed until the stack overflowed. Every cloud answer that played audio crashed
+        // there. `renderPosition(of:)` is now a pure read and this is the only writer, so there is
+        // no path from the read back into the mark.
+        guard let node = playerNode else { return }
+        firstAudibleLock.lock()
+        defer { firstAudibleLock.unlock() }
+        guard firstAudibleInstant == nil else { return }
+        guard let position = readRenderPosition(of: node), position.hostTime > 0 else { return }
+        firstAudibleInstant = position.hostTime
             - position.renderedFrames / max(position.sourceSampleRate, 1)
-        firstAudibleInstant = blockStart
     }
 
     /// The instant this turn's answer first became audible, or nil when nothing has been heard yet.
     /// Read by the turn's latency record at its terminal; on the same monotonic clock the rest of
     /// the pipeline measures with (`CACurrentMediaTime`).
-    var firstAudibleHostSeconds: Double? { firstAudibleInstant }
+    var firstAudibleHostSeconds: Double? {
+        firstAudibleLock.lock()
+        defer { firstAudibleLock.unlock() }
+        return firstAudibleInstant
+    }
 
     /// The output node's rendered position, or nil when the node is not rendering.
     ///
@@ -1261,12 +1279,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// Internal but test-visible: the deterministic queue-lead control drives a real node whose
     /// counter advances without hardware, and asserts THIS function's reading of it.
     func renderPosition(of node: AVAudioPlayerNode) -> PlaybackRenderAnchor? {
-        let anchor = readRenderPosition(of: node)
-        // Every render-position read is also an opportunity to observe audibility: the first
-        // buffer is scheduled before the node has rendered anything, so the schedule-time read can
-        // legitimately come back nil and this is where the mark is actually taken.
-        if anchor != nil, node === playerNode { noteFirstAudibleIfRendering() }
-        return anchor
+        readRenderPosition(of: node)
     }
 
     private func readRenderPosition(of node: AVAudioPlayerNode) -> PlaybackRenderAnchor? {

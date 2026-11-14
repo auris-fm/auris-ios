@@ -66,8 +66,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
             request: "what did they say",
             tier: .unknown,
             origin: .routingFailure,
-            generation: generation
-        ))
+            generation: generation, latency: LatencyHandle()))
 
         XCTAssertTrue(mockCloudRouteSink.routeToCloudCalled, "the fallback still dispatches")
         XCTAssertFalse(
@@ -88,8 +87,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         _ = await executor.execute(CloudRouteIntent(
             request: "what did they say",
             tier: .unknown,
-            generation: generation
-        ))
+            generation: generation, latency: LatencyHandle()))
 
         XCTAssertTrue(mockCloudRouteSink.routeToCloudCalled)
         XCTAssertTrue(
@@ -115,8 +113,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
 
         let owner = CloudRouteIntent(
             request: "play something", tier: .unknown,
-            utteranceId: "utterance-dup", origin: .modelCall, generation: generation
-        )
+            utteranceId: "utterance-dup", origin: .modelCall, generation: generation, latency: LatencyHandle())
         // The REAL executor path with the sink's once-per-utterance effect claim (the mock's
         // default): the first call owns, later calls for the same id are duplicates.
         _ = await executor.execute(owner)
@@ -138,8 +135,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         // An INDEPENDENT utterance in the same window still gets its effects.
         let independent = CloudRouteIntent(
             request: "skip forward", tier: .unknown,
-            utteranceId: "utterance-ind", origin: .modelCall, generation: generation
-        )
+            utteranceId: "utterance-ind", origin: .modelCall, generation: generation, latency: LatencyHandle())
         _ = await executor.execute(independent)
         XCTAssertTrue(
             gracePeriodSignal.windowIsRenewedForTesting(),
@@ -158,8 +154,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
 
         let intentA = CloudRouteIntent(
             request: "play something", tier: .unknown,
-            utteranceId: "utterance-A", origin: .modelCall, generation: generationA
-        )
+            utteranceId: "utterance-A", origin: .modelCall, generation: generationA, latency: LatencyHandle())
         _ = await executor.execute(intentA)  // A owns its effects
 
         // A NEW window: generation B.
@@ -168,8 +163,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         XCTAssertNotEqual(generationB, generationA, "premise: a new generation")
         let intentB = CloudRouteIntent(
             request: "skip forward", tier: .unknown,
-            utteranceId: "utterance-B", origin: .modelCall, generation: generationB
-        )
+            utteranceId: "utterance-B", origin: .modelCall, generation: generationB, latency: LatencyHandle())
         _ = await executor.execute(intentB)  // B owns its effects
         XCTAssertTrue(gracePeriodSignal.windowIsRenewedForTesting(), "B renewed its own window")
 
@@ -177,8 +171,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         XCTAssertTrue(gracePeriodSignal.claimRefusalTone(), "re-arm the observable for B's window")
         let lateA = CloudRouteIntent(
             request: "play something", tier: .unknown,
-            utteranceId: "utterance-A", origin: .modelCall, generation: generationA
-        )
+            utteranceId: "utterance-A", origin: .modelCall, generation: generationA, latency: LatencyHandle())
         let lateAResponse = await executor.execute(lateA)
         XCTAssertEqual(lateAResponse, .silent, "the delayed duplicate renders nothing")
         XCTAssertFalse(
@@ -203,8 +196,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         _ = await executor.execute(CloudRouteIntent(
             request: "what did they say",
             tier: .unknown,
-            generation: oldGeneration
-        ))
+            generation: oldGeneration, latency: LatencyHandle()))
 
         XCTAssertEqual(
             gracePeriodSignal.currentGeneration(), newGeneration,
@@ -227,8 +219,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         _ = await executor.execute(CloudRouteIntent(
             request: "what did they say",
             tier: .unknown,
-            origin: .routingFailure
-        ))
+            origin: .routingFailure, latency: LatencyHandle()))
 
         XCTAssertTrue(mockCloudRouteSink.routeToCloudCalled, "the dispatch itself still happened")
         XCTAssertFalse(
@@ -253,8 +244,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         _ = await executor.execute(CloudRouteIntent(
             request: "what did they say",
             tier: .unknown,
-            generation: generation
-        ))
+            generation: generation, latency: LatencyHandle()))
 
         XCTAssertFalse(gracePeriodSignal.windowIsRenewedForTesting(),
                        "a spoken cloud error was treated as a completed turn")
@@ -274,8 +264,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         _ = await executor.execute(CloudRouteIntent(
             request: "what did they say",
             tier: .unknown,
-            generation: generation
-        ))
+            generation: generation, latency: LatencyHandle()))
 
         XCTAssertFalse(gracePeriodSignal.windowIsRenewedForTesting(),
                        "the coming-soon refusal was recorded as a completed cloud turn")
@@ -295,8 +284,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         _ = await executor.execute(CloudRouteIntent(
             request: "what did they say",
             tier: .unknown,
-            generation: generation
-        ))
+            generation: generation, latency: LatencyHandle()))
 
         XCTAssertEqual(
             mockCloudRouteSink.lastOrigin, generation,
@@ -316,8 +304,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         _ = await executor.execute(CloudRouteIntent(
             request: "what should I listen to",
             tier: .unknown,
-            generation: generation
-        ))
+            generation: generation, latency: LatencyHandle()))
 
         XCTAssertTrue(
             mockCloudRouteSink.routeToCloudCalled,
@@ -346,8 +333,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
             request: "and then",
             tier: .unknown,
             generation: generation,
-            selection: .followUp
-        ))
+            selection: .followUp, latency: LatencyHandle()))
 
         XCTAssertEqual(
             mockCloudRouteSink.lastSelection, .followUp,
@@ -440,7 +426,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
             previousReferencePositionMs: 3_000
         )
         mockPlaybackContextProvider.context = context
-        let intent = CloudRouteIntent(request: "find similar", tier: .premium)
+        let intent = CloudRouteIntent(request: "find similar", tier: .premium, latency: LatencyHandle())
         _ = await executor.execute(intent)
         XCTAssertTrue(mockCloudRouteSink.routeToCloudCalled)
         XCTAssertEqual(mockCloudRouteSink.lastRequest, "find similar")

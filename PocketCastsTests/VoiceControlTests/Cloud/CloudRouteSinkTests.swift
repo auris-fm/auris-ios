@@ -381,7 +381,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     func test_aTurnWithATimingContextEqualsTheSameTurnWithout() {
         let withContext = CloudRouteIntent(
             request: "hi", tier: .free, latency: LatencyHandle(TurnLatencyContext()))
-        let withoutContext = CloudRouteIntent(request: "hi", tier: .free)
+        let withoutContext = CloudRouteIntent(request: "hi", tier: .free, latency: LatencyHandle())
         XCTAssertEqual(
             withContext, withoutContext,
             "the timing context takes no part in identity, so carrying one must not make two "
@@ -4963,8 +4963,7 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
         // OWNER turn: renders the daily-limit line.
         let owner = await executor.execute(CloudRouteIntent(
             request: "play something", tier: .free,
-            utteranceId: utterance, origin: .modelCall, generation: generation
-        ))
+            utteranceId: utterance, origin: .modelCall, generation: generation, latency: LatencyHandle()))
         renderer.render(owner)
         XCTAssertEqual(
             owner,
@@ -4973,14 +4972,14 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
         // DUPLICATE of the SAME utterance: the sink settles it and the executor renders nothing.
         let duplicate = await executor.execute(CloudRouteIntent(
             request: "play something", tier: .free,
-            utteranceId: utterance, origin: .modelCall, generation: generation
-        ))
+            utteranceId: utterance, origin: .modelCall, generation: generation, latency: LatencyHandle()))
         renderer.render(duplicate)
         // TERMINAL CLOSE on a FRESH utterance (stream ends without a terminal frame).
         self.pendingFixture = ""
         let closeResponse = await executor.execute(CloudRouteIntent(
             request: "play something", tier: .free,
-            utteranceId: "limit-close-\(UUID().uuidString)", origin: .modelCall, generation: generation
+            utteranceId: "limit-close-\(UUID().uuidString)", origin: .modelCall, generation: generation,
+            latency: LatencyHandle()
         ))
         renderer.render(closeResponse)
 

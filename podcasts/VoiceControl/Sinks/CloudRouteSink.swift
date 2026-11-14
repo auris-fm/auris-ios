@@ -1408,6 +1408,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // Local names the closure and the loop below share. Swift forbids a local function that
         // captures a local declared before it, so the state lives in an explicit box.
         let latencyState = TurnLatencyState(record: latencyRecord, emitted: false)
+        // Snapshot the audible instant WHILE audio is still playing. Teardown clears the player's
+        // mark, so a terminal that cancels before emitting would otherwise lose it.
+        let noteAudioStillPlaying: () -> Void = {
+            guard latencyState.firstAudible == nil else { return }
+            latencyState.firstAudible = self.audioPlayer.firstAudibleHostSeconds
+        }
         let emitLatencyRecord: (String) -> Void = { outcome in
             guard !latencyState.emitted else { return }
             latencyState.emitted = true
@@ -1417,7 +1423,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             self.emitTurnLatencyRecord(
                 latencyState.record,
                 requestSent: latency.context?.requestSentAt,
-                outcome: outcome
+                outcome: outcome,
+                firstAudible: latencyState.firstAudible ?? self.audioPlayer.firstAudibleHostSeconds
             )
         }
         var turnResult: CloudRouteOutcome?
@@ -1442,6 +1449,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // after cancel must not reach the player.
                     if ownerCancelledFlag.isSet || Task.isCancelled { break turnLoop }
                     audioPlayer.enqueue(frame)
+                    noteAudioStillPlaying()
                 case let .action(tool, action, params, operationId, capabilityVersion):
                     // BUFFERED admission check: an event drained from the buffer after the owner
                     // was cancelled must not admit any later effect or a completed result. The
@@ -1717,6 +1725,15 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     private final class TurnLatencyState {
         let record: CloudTurnLatencyRecord
         var emitted: Bool
+        /// The player's first-audible instant, snapshotted the FIRST time this turn is seen to have
+        /// played audio.
+        ///
+        /// Read at the terminal it would sometimes be gone: `cancel()` and `finish()` are
+        /// turn-ending reasons, and the player clears its mark on both, so an error or early-close
+        /// terminal that cancels before emitting reported `first_audible=absent` for a turn the
+        /// user had already heard part of. Snapshotting while the audio is still playing keeps the
+        /// measurement independent of what the teardown does.
+        var firstAudible: MonotonicTime?
         init(record: CloudTurnLatencyRecord, emitted: Bool) {
             self.record = record
             self.emitted = emitted
@@ -1733,11 +1750,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     private func emitTurnLatencyRecord(
         _ record: CloudTurnLatencyRecord,
         requestSent: Double?,
-        outcome: String
+        outcome: String,
+        firstAudible: Double?
     ) {
         let line = record.logLine(
             requestSent: requestSent,
-            firstAudible: audioPlayer.firstAudibleHostSeconds,
+            firstAudible: firstAudible,
             outcome: outcome
         )
         FileLog.shared.addMessage("[VoicePipeline] cloudTurnLatency \(line)")
