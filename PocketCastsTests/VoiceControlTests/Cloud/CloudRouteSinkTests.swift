@@ -1698,7 +1698,13 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         data: {"usage":{"input_tokens":1,"output_tokens":1}}
 
         """
-        let sink = makeSink()
+        // PARKED PRODUCER, so the prior turn is still live when the barge-in arrives. Without the
+        // park it can finish first, leaving no predecessor to claim — the control then fails on
+        // its own premise rather than on the behaviour, and did so only when run with the whole
+        // class (a standalone run happened to be slow enough).
+        let latch = HoldLatch()
+        pendingProducerHold = latch
+        let sink = makeSinkWithConsumer(RecordingResultConsumer())
         playback.clearCalls()
 
         // The prior turn runs in a Task because a barge-in has to land WHILE it is still in
@@ -1725,6 +1731,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             origin: cloudTestOrigin, selection: CloudConversationSelection.followUp)
         XCTAssertEqual(emitted, priorRequestId, "the barge-in must claim the live predecessor")
 
+        latch.release()
         _ = await prior.value
         let seeks = playback.calls.filter { if case .seekTo = $0 { return true }; return false }
         XCTAssertTrue(seeks.isEmpty,
