@@ -340,7 +340,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         // Let the sink observe the audible audio before the terminal arrives.
         try await Task.sleep(nanoseconds: 100_000_000)
         park.release()
-        _ = await turn.value
+        // Bounded: a turn that never returns must fail this test, not hang the whole plan.
+        defer { turn.cancel() }
 
         let line = try await latencyLine(for: utteranceId)
         XCTAssertTrue(line.contains("outcome=error"), line)
