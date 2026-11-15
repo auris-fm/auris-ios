@@ -29,7 +29,8 @@ final class EpisodeManagerTests: DBTestCase {
         XCTAssertEqual(localUrl, streamingUrl, "Both calls should return the same URL when no local content exists")
     }
 
-    func testUrlForEpisodeStreamingOnlyWithUserEpisode() {
+    func testUrlForEpisodeStreamingOnlyWithUserEpisode() throws {
+        try skipWithoutKeychainEntitlement()
         // Given: A user episode (uploaded content)
         let userEpisode = UserEpisode()
         userEpisode.uuid = "user-episode-abc"

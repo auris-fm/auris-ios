@@ -224,7 +224,8 @@ class EndOfYearStoriesBuilderTests: XCTestCase {
         XCTAssertNotNil(model.data.episodesStartedAndCompleted)
     }
 
-    func testSyncWhenNeeded() async {
+    func testSyncWhenNeeded() async throws {
+        try skipWithoutKeychainEntitlement()
         var syncCalled = false
         let endOfYearManager = EndOfYearManagerMock()
         let dataManager = DataManagerMock(endOfYearManager: endOfYearManager)
@@ -255,7 +256,8 @@ class EndOfYearStoriesBuilderTests: XCTestCase {
     /// When a user syncs their listening history but aren't Plus users
     /// the app doesn't sync their 2022 data.
     /// So if they become Plus we should re-sync again.
-    func testSyncWhenAlreadySyncedButAsFreeUser() async {
+    func testSyncWhenAlreadySyncedButAsFreeUser() async throws {
+        try skipWithoutKeychainEntitlement()
         var syncCalledTimes = 0
         var plusUser = false
         let endOfYearManager = EndOfYearManagerMock()
@@ -272,7 +274,8 @@ class EndOfYearStoriesBuilderTests: XCTestCase {
         XCTAssertEqual(syncCalledTimes, 2)
     }
 
-    func testDontSyncAgainWhenSubscriptionStatusDontChange() async {
+    func testDontSyncAgainWhenSubscriptionStatusDontChange() async throws {
+        try skipWithoutKeychainEntitlement()
         var syncCalledTimes = 0
         let plusUser = false
         let endOfYearManager = EndOfYearManagerMock()
