@@ -185,6 +185,10 @@ final class CloudInterruptionState: @unchecked Sendable {
         resolved.insert(requestId)
         self.held = nil
         if interruptSentForRequestId == requestId { interruptSentForRequestId = nil }
+        // The released follow-up always carries a context, so the tag survives a held utterance that
+        // was admitted without one (a fresh context knows no end of speech, which is the truth).
+        let latencyContext = held.latency.context ?? TurnLatencyContext()
+        latencyContext.followUpHeld = true
         return ReleasedFollowUp(
             request: held.request,
             utteranceId: held.utteranceId,
@@ -193,7 +197,7 @@ final class CloudInterruptionState: @unchecked Sendable {
             sourceTranscript: held.sourceTranscript,
             sourceLanguage: held.sourceLanguage,
             translationKind: held.translationKind,
-            latency: held.latency,
+            latency: LatencyHandle(latencyContext),
             interruptedRequestId: requestId
         )
     }

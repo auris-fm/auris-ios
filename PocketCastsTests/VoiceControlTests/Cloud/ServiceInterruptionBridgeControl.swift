@@ -1,4 +1,5 @@
 import XCTest
+import PocketCastsUtils
 @testable import podcasts
 
 /// SERVICE-LEVEL INTERRUPTION BRIDGE CONTROL
@@ -360,6 +361,43 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
     }
 
     // MARK: - The bridge
+
+    /// The follow-up resubmitted after the acknowledgement writes a latency record tagged
+    /// `follow_up=held`, observed through the real release path: the interruption state forgets the
+    /// hold before the follow-up is submitted, so a tag derived from the hold at submission time can
+    /// never be true.
+    func testTheResubmittedFollowUpWritesItsLatencyRecordTaggedHeld() async throws {
+        let service = try await readyService(fixture: { self.doneFixture })
+        let sink = service.executorForTesting.cloudRouteSinkForTesting
+        let state = sink.interruptionStateForTesting
+        // The app log persists across runs: count this id's lines first and require a NEW one.
+        let linesBefore = await latencyLines(forRequestId: "u-barge").count
+
+        speak(service, "first question", "u-prior")
+        let priorLive = await waitUntil(timeout: 15) {
+            await MainActor.run { sink.activeResultSocketForTesting?.requestId == "u-prior" }
+        }
+        XCTAssertTrue(priorLive, "premise: turn 1 must be in flight")
+        speak(service, "play the next one", "u-barge")
+        let held = await waitUntil(timeout: 15) {
+            await MainActor.run { state.heldFollowUpForTesting?.utteranceId == "u-barge" }
+        }
+        XCTAssertTrue(held, "premise: the follow-up must be retained before the acknowledgement")
+
+        firstTurnLatch.release()
+
+        let wrote = await waitUntil(timeout: 30) { await self.latencyLines(forRequestId: "u-barge").count > linesBefore }
+        XCTAssertTrue(wrote, "the resubmitted follow-up never wrote a latency record")
+        let line = await latencyLines(forRequestId: "u-barge").last ?? ""
+        XCTAssertTrue(line.contains("follow_up=held"),
+                      "a follow-up held for its predecessor must say so on its record: \(line)")
+    }
+
+    private func latencyLines(forRequestId requestId: String) async -> [String] {
+        await FileLog.shared.logFileAsString().split(separator: "\n")
+            .map(String.init)
+            .filter { $0.contains("cloudTurnLatency") && $0.contains("request_id=\(requestId) ") }
+    }
 
     /// ACKNOWLEDGEMENT FIRST — the follow-up is submitted once, and only after the acknowledgement.
     ///

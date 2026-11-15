@@ -21,8 +21,18 @@ final class TurnLatencyContext: @unchecked Sendable {
     private var endOfSpeechStorage: MonotonicTime?
     private var endpointDecisionStorage: MonotonicTime?
     private var requestSentStorage: MonotonicTime?
+    private var followUpHeldStorage = false
 
     init() {}
+
+    /// True once this turn's utterance was a barge-in follow-up held while the turn it interrupted
+    /// settled and then released for submission. Set at the release, the only place that knows;
+    /// read by the latency record, because the interruption state has already forgotten the hold
+    /// by the time the follow-up is submitted.
+    var followUpHeld: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return followUpHeldStorage }
+        set { lock.lock(); defer { lock.unlock() }; followUpHeldStorage = newValue }
+    }
 
     /// The acoustic end of speech, i.e. the last SPEECH sample of the utterance. First value wins:
     /// a duplicate admission for the same capture must not move the turn's start later.

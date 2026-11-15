@@ -1428,7 +1428,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             requestId: turnRequestId,
             endOfSpeech: latency.context?.endOfSpeech,
             endpointDecision: latency.context?.endpointDecisionAt,
-            followUpHeld: isRetainedFollowUpSubmission
+            followUpHeld: latency.context?.followUpHeld ?? false
         )
         // Local names the closure and the loop below share. Swift forbids a local function that
         // captures a local declared before it, so the state lives in an explicit box.
@@ -1457,6 +1457,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         var receivedAudio = false
         await withTaskCancellationHandler {
             turnLoop: for await event in routed.stream {
+                // Snapshot the audible instant at every event: the terminals below cancel the
+                // player, which clears its mark, before they write the record.
+                noteAudioStillPlaying()
                 // Superseded mid-stream: stop consuming so this turn cannot execute
                 // late actions or overwrite the new turn's state. The stream's own
                 // termination closes the transport. (`break turnLoop` — a bare
@@ -1672,6 +1675,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             ownerCancelledFlag.mark()
             turnSocket.finishTurn()
         }
+        // The stream ended or the owner was cancelled: the early-close classification below
+        // cancels the player, so take the instant first.
+        noteAudioStillPlaying()
         if let turnResult {
             return CloudRouteResult(response: turnResponse, outcome: turnResult, fact: Self.aggregateActionFact(turnActionFacts))
         }

@@ -1223,8 +1223,8 @@ final class CloudAudioPlayer: @unchecked Sendable {
         if timingEnabled { timingScheduledFrames += Double(pcmBuffer.frameLength) }
         observeTiming("schedule")
         // The node has audio to render now, so this is the first instant it can be audible. The
-        // read is refused until the node has actually rendered, which is why it is re-attempted
-        // wherever a render position is taken rather than only here.
+        // read is refused until the node has actually rendered, which is why it is re-attempted at
+        // the per-block render observation and in the drain's wait loop rather than only here.
         noteFirstAudibleIfRendering()
     }
 
@@ -1514,6 +1514,11 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // bounded, and cancel/shutdown can wake this wait and take ownership of the stop.
         let renderDeadline = Date().addingTimeInterval(nodeIncarnationFrames / negotiatedSampleRate * 2 + 1)
         while pendingAudibleOrUnverified && Date() < renderDeadline {
+            // A short reply's audio is scheduled here, after `done`, and the node renders it while
+            // this loop waits: this is the only place that can take the mark for such a turn, and
+            // the stop below clears it. The mark is the first rendered block's start, so taking it
+            // a poll late reports the same instant.
+            noteFirstAudibleIfRendering()
             runnerLock.lock()
             if stopRequested || shutdownRequested {
                 runnerLock.unlock()
@@ -1524,6 +1529,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
             runnerLock.unlock()
             if interrupted { break }
         }
+        noteFirstAudibleIfRendering()
         // OWNED-STOP (spec a9e27935): the stop's identity is the CURRENT OWNER published at
         // request time — the drain claim when nothing displaced it, the cancel that landed
         // mid-window otherwise. Never a fresh re-read of `drainEpoch` (that let a successor's
