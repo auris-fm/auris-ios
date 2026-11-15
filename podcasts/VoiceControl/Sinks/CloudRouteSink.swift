@@ -1687,10 +1687,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     turnResponse = .silent
                     break turnLoop
                 case let .error(_, code, _):
-                    // Count up to the terminal, before any await: the cancel below is skipped when a
-                    // successor already owns the turn, and a clear another actor issued since the last
-                    // frame must still be in this turn's window.
-                    snapshotAudioCounters()
                     // A terminal — refused or failed — settles the latch too: a waiter must not be
                     // left parked because the answer was an error rather than a `done`. It settles
                     // as `.refused`, so a successor DISCARDS the held follow-up instead of
