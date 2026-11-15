@@ -340,8 +340,20 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         // Let the sink observe the audible audio before the terminal arrives.
         try await Task.sleep(nanoseconds: 100_000_000)
         park.release()
-        // Bounded: a turn that never returns must fail this test, not hang the whole plan.
-        defer { turn.cancel() }
+        // Bounded: a turn that never returns after the error is a defect (it would wedge the next
+        // turn), so it fails here by name instead of hanging the plan.
+        // Polled, not awaited: awaiting a stuck turn's value is itself uncancellable.
+        let returnedFlag = TurnReturnedFlag()
+        Task { _ = await turn.value; returnedFlag.set() }
+        let returnDeadline = Date().addingTimeInterval(3)
+        while !returnedFlag.isSet && Date() < returnDeadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let returned = returnedFlag.isSet
+        if !returned {
+            turn.cancel()
+            XCTFail("the turn never returned after the error")
+        }
 
         let line = try await latencyLine(for: utteranceId)
         XCTAssertTrue(line.contains("outcome=error"), line)
@@ -6012,4 +6024,11 @@ private final class OfflineEngineBox: @unchecked Sendable {
         get { lock.lock(); defer { lock.unlock() }; return stored }
         set { lock.lock(); stored = newValue; lock.unlock() }
     }
+}
+
+private final class TurnReturnedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
+    func set() { lock.lock(); value = true; lock.unlock() }
 }

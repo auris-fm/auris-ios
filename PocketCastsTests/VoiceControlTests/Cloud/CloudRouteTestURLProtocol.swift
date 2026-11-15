@@ -346,7 +346,9 @@ final class Promise<Value>: @unchecked Sendable {
 final class HoldLatch: @unchecked Sendable {
     private let lock = NSLock()
     private var open = false
-    private var resume: (() -> Void)?
+    // Every parked waiter, not one: a second `wait` on the same latch used to overwrite the first's
+    // continuation, which then leaked and left its task suspended forever.
+    private var resumes: [() -> Void] = []
 
     /// True once `release()` has run — the still-held probe for controls.
     var released: Bool {
@@ -363,7 +365,7 @@ final class HoldLatch: @unchecked Sendable {
                 lock.unlock()
                 cont.resume()
             } else {
-                resume = cont.resume
+                resumes.append(cont.resume)
                 lock.unlock()
             }
         }
@@ -390,7 +392,7 @@ final class HoldLatch: @unchecked Sendable {
                 lock.unlock()
                 cont.resume()
             } else {
-                resume = cont.resume
+                resumes.append(cont.resume)
                 lock.unlock()
             }
         }
@@ -403,10 +405,10 @@ final class HoldLatch: @unchecked Sendable {
         guard !open else { lock.unlock(); return }
         open = true
         openedByRetirement = true
-        let r = resume
-        resume = nil
+        let r = resumes
+        resumes = []
         lock.unlock()
-        r?()
+        r.forEach { $0() }
     }
 
     private var retiredCheck: (@Sendable () -> Bool)?
@@ -423,10 +425,10 @@ final class HoldLatch: @unchecked Sendable {
     func release() {
         lock.lock()
         open = true
-        let r = resume
-        resume = nil
+        let r = resumes
+        resumes = []
         lock.unlock()
-        r?()
+        r.forEach { $0() }
     }
 }
 
