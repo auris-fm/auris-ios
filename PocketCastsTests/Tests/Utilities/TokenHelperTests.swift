@@ -22,6 +22,14 @@ class TokenHelperTests: XCTestCase {
 
     override func setUpWithError() throws {
         try super.setUpWithError()
+        // Environment limitation, checked first so a real credential defect can never hide behind it:
+        // an unsigned host build (test_fast) has no keychain entitlement and every keychain call
+        // fails with errSecMissingEntitlement. Skip on exactly that status and no other.
+        do {
+            _ = try KeychainHelper.string(for: credentialKeys[0])
+        } catch KeychainHelper.KeychainError.status(let status) where status == errSecMissingEntitlement {
+            throw XCTSkip("host build has no keychain entitlement (errSecMissingEntitlement); run the signed `make test`")
+        }
         previousUserID = ServerSettings.userId
         previousIncompleteWrite = UserDefaults.standard.bool(forKey: "AurisIncompleteCredentialWrite")
         ServerSettings.invalidateAuthentication {}
