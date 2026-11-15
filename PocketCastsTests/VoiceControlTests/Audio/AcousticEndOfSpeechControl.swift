@@ -1,7 +1,7 @@
 @testable import podcasts
 import XCTest
 
-/// CONTROLS FOR THE ACOUSTIC END OF SPEECH (reviewer 77e5f4bc, iOS PR 65).
+/// CONTROLS FOR THE ACOUSTIC END OF SPEECH.
 ///
 /// A latency figure has to start when the USER stopped talking. The retained utterance buffer is
 /// not that: every silent frame of the endpoint hangover is appended to it too ("Hangover frames

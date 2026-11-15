@@ -90,7 +90,7 @@ final class EarlyWakeResultUsageControl: XCTestCase {
 
     /// An early result that is computed but never delivered must not reach the next utterance.
     ///
-    /// This is the leak @reviewer named: a long positive utterance scores its prefix early, is then
+    /// The leak this pins: a long positive utterance scores its prefix early, is then
     /// abandoned (duration ceiling), and never reaches `processUtterance`. If the score survived,
     /// the next short utterance would be addressed using the previous command's audio — a wrong
     /// command rather than a missing one.
@@ -117,7 +117,7 @@ final class EarlyWakeResultUsageControl: XCTestCase {
         // The score that utterance WOULD have produced. Placed here, after abandonment and before
         // any recovery: recovering from the fault calls `reset()`, which clears this slot on its
         // own, so a sequence that recovered first would pass whether or not abandonment clears it.
-        // This is exactly the sequence @reviewer described — a prefix scored, then discarded
+        // This is exactly the sequence that leaks — a prefix scored, then discarded
         // without ever reaching `processUtterance`.
         segmenter.earlyWakeResultForCurrentUtterance = .detected(confidence: 0.99, completionSample: 0)
 
@@ -134,9 +134,9 @@ final class EarlyWakeResultUsageControl: XCTestCase {
     /// The result must travel with its own utterance, exercised through the real callback
     /// handoff.
     ///
-    /// @reviewer was right that the earlier version of this test called `processUtterance` with
-    /// explicit results and never touched the callback, so it could not have caught a slot being
-    /// overwritten — the defect it is named for. This drives the segmenter: two utterances are
+    /// A version of this test that called `processUtterance` with explicit results never touched
+    /// the callback, so it could not have caught a slot being overwritten — the defect it is named
+    /// for. This drives the segmenter: two utterances are
     /// emitted with DIFFERENT early scores, and the values the callback delivered must match them.
     func test_twoUtterancesDeliverTheirOwnEarlyResults() {
         let classifier = SwitchableClassifier()

@@ -243,6 +243,53 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(all.count, 1, "exactly one record per turn: \(all)")
     }
 
+    /// A stop for an EARLIER drain says nothing about this turn's audio.
+    ///
+    /// A held follow-up is the likely case: the interrupted turn's cancel stop can arrive after the
+    /// follow-up's `done`. Written by that stop, the follow-up's record would read `absent` for
+    /// audio still on its way to the speaker - the defect the hold exists to remove, reached by
+    /// another door. The record waits for the stop of ITS drain (or a later one) or for the mark.
+    @MainActor
+    func testAnEarlierDrainsStopDoesNotWriteAHeldLatencyRecord() async throws {
+        let utteranceId = "u-\(UUID().uuidString.prefix(12))-stale"
+        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        defer { CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil }
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let sink = makeSinkWithConsumer(
+            RecordingResultConsumer(),
+            audioPayloads: (0..<40).map { Data([UInt8($0)]) }
+        )
+        let context = TurnLatencyContext()
+        context.endOfSpeech = 0
+        _ = await sink.routeToCloud(
+            request: "x", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: nil, utteranceId: utteranceId,
+            latency: LatencyHandle(context))
+
+        let player = try XCTUnwrap(sink.audioPlayerForTesting)
+        try XCTSkipUnless(
+            player.hasOutstandingOutput,
+            "the stub drained before the turn returned, so no hold can be observed")
+        // No suspension between the check above and this call, so this stop cannot be the real one.
+        sink.audioPlayerDidStop(drainEpoch: Int.min)
+        let afterStaleStop = await FileLog.shared.logFileAsString().split(separator: "\n")
+            .filter { Self.requestId(of: String($0)) == utteranceId }
+        XCTAssertTrue(
+            afterStaleStop.isEmpty,
+            "a stop for an earlier drain wrote the held record: \(afterStaleStop)")
+
+        // Its own drain's stop (or the mark) still settles it, exactly once.
+        _ = try await latencyLine(for: utteranceId)
+        let all = await FileLog.shared.logFileAsString().split(separator: "\n")
+            .filter { Self.requestId(of: String($0)) == utteranceId }
+        XCTAssertEqual(all.count, 1, "exactly one record per turn: \(all)")
+    }
+
     /// A turn with NO early-connection tag still reports its end of speech.
     ///
     /// The tag exists only when a pause pre-opened a connection, which most turns never do. While
@@ -432,7 +479,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     /// The wrapper only does its job if the field is NON-optional. With an optional field, Swift
     /// compares the optionals by case before `==` is ever consulted, so `.some(handle)` and `.none`
     /// compare unequal and identical dispatches stop being equal — the leak the wrapper was meant
-    /// to close. Reviewer caught that on `ccc7a212b`.
+    /// to close.
     func test_aTurnWithATimingContextEqualsTheSameTurnWithout() {
         let withContext = CloudRouteIntent(
             request: "hi", tier: .free, latency: LatencyHandle(TurnLatencyContext()))

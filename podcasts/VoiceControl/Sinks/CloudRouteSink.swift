@@ -400,10 +400,16 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// nothing marked, or when the next turn starts (a flush, so a record is never left behind).
     /// The argument is the instant taken, nil when none was.
     private var heldLatencyRecord: ((Double?) -> Void)?
+    /// The drain this record waits on, bound when the turn schedules it. A stop for an EARLIER
+    /// drain (the interrupted turn's cancel, arriving after a follow-up's `done`) says nothing
+    /// about this turn's audio and must not write the record; any stop at or after this epoch
+    /// proves the output quiesced, the same monotonic rule the playback restore uses.
+    private var heldLatencyDrainEpoch: Int?
 
     private func writeHeldLatencyRecord(firstAudible: Double?) {
         guard let held = heldLatencyRecord else { return }
         heldLatencyRecord = nil
+        heldLatencyDrainEpoch = nil
         held(firstAudible)
     }
     /// THIS sink's live playback hold. Acquired at the turn's admitted dispatch; ownership
@@ -1542,6 +1548,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // A coalesced request has no notification of its own. Bind the hold to the
                     // stop owner captured atomically with this request, not its superseded epoch.
                     let scheduledDrain = audioPlayer.finishWithStopBinding()
+                    if heldLatencyRecord != nil { heldLatencyDrainEpoch = scheduledDrain.stopEpoch }
                     if needsDeferral {
                         restoreHeldForPlayerDrain = (owner: turnToken, drainEpoch: scheduledDrain.stopEpoch)
                         // The hold was acquired at this turn's admitted dispatch; it RETAINS
@@ -2520,8 +2527,10 @@ extension CloudRouteSink {
 
     func audioPlayerDidStop(drainEpoch: Int) {
         // Playback settled with nothing marked for a record still held: it is written as it
-        // stands (absent), exactly once.
-        writeHeldLatencyRecord(firstAudible: nil)
+        // stands (absent), exactly once - but only by the stop for ITS drain or a later one.
+        if let heldEpoch = heldLatencyDrainEpoch, drainEpoch >= heldEpoch {
+            writeHeldLatencyRecord(firstAudible: nil)
+        }
         // A rolled-back admission's hold releases exactly here: the stop it was waiting on
         // has confirmed (epoch identity, monotonic), so the output it covered is quiescent
         // and the window's allowance may be re-armed by THIS end — never earlier.
