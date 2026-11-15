@@ -94,6 +94,47 @@ final class RenderLifecycleControlTests: XCTestCase {
         }
     }
 
+    /// A reply's audio that renders while the DRAIN waits must be marked by the drain.
+    ///
+    /// A short reply is finished before its audio is heard: the runner leaves its playback loop for
+    /// the drain, which waits for the node to render what was scheduled and then stops, and the stop
+    /// clears the mark. The per-block observation lives in the playback loop, so while the runner
+    /// sits in the drain only the drain's own wait loop can take the mark. The stop gate holds the
+    /// stop open so the mark can be read before it is cleared, and the node renders only when this
+    /// test renders it, so the order is fixed rather than a race.
+    @MainActor
+    func testTheDrainMarksAudioThatRendersWhileItWaits() throws {
+        // No initial render: a render before the finish would let the playback loop mark first.
+        try withPendingOfflineAudio(rendersInitialQuantum: false) { player, engine, node, output, scheduledSamples in
+            XCTAssertNil(player.firstAudibleHostSeconds,
+                         "premise: nothing is marked before the turn is finished")
+            player.armPhysicalStopGateForTesting(allow: 0)
+            let drainClaimed = DispatchSemaphore(value: 0)
+            player.claimReached = drainClaimed
+            player.finish()
+            XCTAssertEqual(drainClaimed.wait(timeout: .now() + 2), .success,
+                           "premise: the runner left its playback loop for the drain")
+            XCTAssertNil(player.firstAudibleHostSeconds,
+                         "premise: nothing has rendered while the drain waits")
+
+            let deadline = Date().addingTimeInterval(1.5)
+            while player.firstAudibleHostSeconds == nil && Date() < deadline {
+                if (player.renderPosition(of: node)?.renderedFrames ?? 0) < Double(scheduledSamples / 2) {
+                    XCTAssertEqual(try engine.renderOffline(1_024, to: output), .success)
+                }
+                RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+            }
+
+            XCTAssertEqual(player.physicalStopGateArrivalsForTesting, 0,
+                           "premise: the stop is still held, so the mark was not read after it")
+            XCTAssertNotNil(
+                player.firstAudibleHostSeconds,
+                "audio rendered while the drain waited was never marked, and the stop that follows"
+                + " clears the mark, so the turn would report first_audible=absent")
+            player.openPhysicalStopGateForTesting()
+        }
+    }
+
     @MainActor
     func testCancelPreemptsFinishWhileScheduledAudioHasNotRendered() throws {
         try withPendingOfflineAudio { player, _, _, _, _ in
@@ -165,6 +206,7 @@ final class RenderLifecycleControlTests: XCTestCase {
     @MainActor
     private func withPendingOfflineAudio(
         timing: CloudPlaybackTiming? = nil,
+        rendersInitialQuantum: Bool = true,
         _ body: (CloudAudioPlayer, AVAudioEngine, AVAudioPlayerNode, AVAudioPCMBuffer, Int) throws -> Void
     ) throws {
         CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
@@ -208,10 +250,12 @@ final class RenderLifecycleControlTests: XCTestCase {
         let node = try XCTUnwrap(player.playerNodeForTesting)
         XCTAssertEqual(engine.manualRenderingMode, .offline)
         let output = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: 4_096))
-        XCTAssertEqual(try engine.renderOffline(128, to: output), .success)
-        let initial = try XCTUnwrap(player.renderPosition(of: node), "premise: the real node rendered the initial quantum")
-        XCTAssertLessThan(initial.renderedFrames, Double(scheduledSamples - 8_000),
-                          "premise: scheduled audio remains at done")
+        if rendersInitialQuantum {
+            XCTAssertEqual(try engine.renderOffline(128, to: output), .success)
+            let initial = try XCTUnwrap(player.renderPosition(of: node), "premise: the real node rendered the initial quantum")
+            XCTAssertLessThan(initial.renderedFrames, Double(scheduledSamples - 8_000),
+                              "premise: scheduled audio remains at done")
+        }
         try body(player, engine, node, output, scheduledSamples)
     }
 

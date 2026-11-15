@@ -187,21 +187,28 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
     /// A SHORT reply's stream ends before its first buffer reaches the player.
     ///
-    /// The whole answer can arrive, and `done` with it, while the player is still starting: the
+    /// The whole answer can arrive, and `done` with it, while the node has rendered nothing: the
     /// first-audible mark is taken only once the node renders, so a record written AT `done` reports
-    /// `first_audible=absent` for audio that then plays (seen on a device: the line was written
-    /// 53 ms before the first buffer was scheduled). The record must be HELD while audio is
-    /// outstanding and unmarked, then written once - when the mark lands, or when playback ends
-    /// with nothing played.
+    /// `first_audible=absent` for audio that then plays. The record must be HELD while audio is
+    /// outstanding and unmarked, then written once, when the mark lands.
     ///
-    /// This pins the HOLD (no line at `done`, exactly one line once the player settles, and that
-    /// line is either absence or a measured leg), not a particular duration: whether the
-    /// simulator's engine renders the fixture is the host's business.
+    /// The engine renders offline, so the node renders only when this test renders it: the record is
+    /// absent from the log at `done`, and the mark taken once the test renders must be what it
+    /// carries - a measured request leg, never absence.
     @MainActor
     func testAShortReplyHoldsItsLatencyRecordUntilPlaybackSettles() async throws {
         let utteranceId = "u-\(UUID().uuidString.prefix(12))-short"
         CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
-        defer { CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil }
+        let fmt = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1))
+        let engineBox = OfflineEngineBox()
+        CloudAudioPlayer.configureEngineForTesting = { engine in
+            try engine.enableManualRenderingMode(.offline, format: fmt, maximumFrameCount: 4_096)
+            engineBox.engine = engine
+        }
+        defer {
+            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
+            CloudAudioPlayer.configureEngineForTesting = nil
+        }
         self.pendingFixture =
             """
             event: done
@@ -210,8 +217,17 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             """
         let sink = makeSinkWithConsumer(
             RecordingResultConsumer(),
-            audioPayloads: (0..<40).map { Data([UInt8($0)]) }
+            // Whole 16-bit samples, enough frames to start the engine.
+            audioPayloads: (0..<8).map { _ in Data(repeating: 0x10, count: 4_800) }
         )
+        // Production wires the echo reference and its handoff; the player counts the audio it
+        // scheduled (what the drain waits on) only through them.
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 16)
+        defer { withExtendedLifetime(handoff) {} }
+        let sinkPlayer = try XCTUnwrap(sink.audioPlayerForTesting)
+        sinkPlayer.emittedPCMReference = reference
+        sinkPlayer.echoReferenceHandoff = handoff
         let context = TurnLatencyContext()
         context.endOfSpeech = 0
         _ = await sink.routeToCloud(
@@ -231,16 +247,103 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             early.isEmpty,
             "the record was written at `done` while audio was still outstanding and unmarked: \(early)")
 
-        let line = try await latencyLine(for: utteranceId)
+        // Render the held audio: the drain's wait loop takes the mark, and the record is written with it.
+        let engineDeadline = Date().addingTimeInterval(3)
+        while engineBox.engine == nil && Date() < engineDeadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let engine = try XCTUnwrap(engineBox.engine, "premise: the player built its offline engine")
+        let output = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: 4_096))
+        var found: String?
+        let renderDeadline = Date().addingTimeInterval(8)
+        while found == nil && Date() < renderDeadline {
+            _ = try? engine.renderOffline(1_024, to: output)
+            try await Task.sleep(nanoseconds: 20_000_000)
+            found = await FileLog.shared.logFileAsString().split(separator: "\n")
+                .map(String.init).first { Self.requestId(of: $0) == utteranceId }
+        }
+        let line = try XCTUnwrap(found, "the held record was never written")
         XCTAssertTrue(line.contains("outcome=done"), line)
-        // Settled, the record is final either way: absence stated as absence, or a measured leg.
-        // Which one the simulator's engine produces is not what this pins; the hold is.
-        XCTAssertTrue(
-            line.contains("first_audible=absent") || !line.contains("request_to_first_audible=none"),
-            "the settled record must state absence or carry a measured request leg: \(line)")
+        XCTAssertFalse(line.contains("first_audible=absent"),
+                       "audio rendered after `done` must be what the record reports, not absence: \(line)")
+        XCTAssertFalse(line.contains("end_of_speech_to_first_audible=none"),
+                       "a measured turn carries its end-of-speech leg: \(line)")
         let all = await FileLog.shared.logFileAsString().split(separator: "\n")
             .filter { Self.requestId(of: String($0)) == utteranceId }
         XCTAssertEqual(all.count, 1, "exactly one record per turn: \(all)")
+    }
+
+    /// A terminal that arrives AFTER audio was heard must still report when it was heard.
+    ///
+    /// The error path cancels the player before it writes its record, and the cancel clears the
+    /// player's first-audible mark, so the sink snapshots the mark while audio is still playing.
+    /// The transport parks after the audio, the offline node renders it (the mark lands), and only
+    /// then does the `error` arrive: a record that reads `absent` here means the snapshot was
+    /// not taken before the cancel.
+    @MainActor
+    func testAnErrorAfterAudibleAudioStillReportsWhenItWasHeard() async throws {
+        let utteranceId = "u-\(UUID().uuidString.prefix(12))-errheard"
+        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        let fmt = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1))
+        let engineBox = OfflineEngineBox()
+        CloudAudioPlayer.configureEngineForTesting = { engine in
+            try engine.enableManualRenderingMode(.offline, format: fmt, maximumFrameCount: 4_096)
+            engineBox.engine = engine
+        }
+        defer {
+            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
+            CloudAudioPlayer.configureEngineForTesting = nil
+        }
+        self.pendingFixture =
+            """
+            event: error
+            data: {"code":"provider_error","message":"upstream failed"}
+
+            """
+        let park = HoldLatch()
+        defer { park.release() } // a failed premise must not leave the turn parked
+        pendingDeclaredPark = park
+        pendingDeclaredParkAfterFrames = 8
+        let sink = makeSinkWithConsumer(
+            RecordingResultConsumer(),
+            audioPayloads: (0..<8).map { _ in Data(repeating: 0x10, count: 4_800) }
+        )
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 16)
+        defer { withExtendedLifetime(handoff) {} }
+        let player = try XCTUnwrap(sink.audioPlayerForTesting)
+        player.emittedPCMReference = reference
+        player.echoReferenceHandoff = handoff
+        let context = TurnLatencyContext()
+        context.endOfSpeech = 0
+        let turn = Task { @MainActor in
+            await sink.routeToCloud(
+                request: "x", tier: .free, context: self.sampleContext(),
+                origin: cloudTestOrigin, selection: nil, utteranceId: utteranceId,
+                latency: LatencyHandle(context))
+        }
+
+        let engineDeadline = Date().addingTimeInterval(3)
+        while engineBox.engine == nil && Date() < engineDeadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let engine = try XCTUnwrap(engineBox.engine, "premise: the player built its offline engine")
+        let output = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: 4_096))
+        let renderDeadline = Date().addingTimeInterval(5)
+        while player.firstAudibleHostSeconds == nil && Date() < renderDeadline {
+            _ = try? engine.renderOffline(1_024, to: output)
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertNotNil(player.firstAudibleHostSeconds, "premise: the audio was heard before the error")
+        // Let the sink observe the audible audio before the terminal arrives.
+        try await Task.sleep(nanoseconds: 100_000_000)
+        park.release()
+        _ = await turn.value
+
+        let line = try await latencyLine(for: utteranceId)
+        XCTAssertTrue(line.contains("outcome=error"), line)
+        XCTAssertFalse(line.contains("first_audible=absent"),
+                       "audio was audible before the error, so the record must carry when: \(line)")
     }
 
     /// A stop for an EARLIER drain says nothing about this turn's audio.
@@ -5894,4 +5997,14 @@ private final class NoOpCloudStatsQuerySink: VoiceStatsQuerySink {
 
     // MARK: - Buffered playback after an ordinary `done` (reviewer 79614a4f item 3)
 
+}
+
+/// Hands the engine the player built (on its runner thread) to the test that renders it.
+private final class OfflineEngineBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: AVAudioEngine?
+    var engine: AVAudioEngine? {
+        get { lock.lock(); defer { lock.unlock() }; return stored }
+        set { lock.lock(); stored = newValue; lock.unlock() }
+    }
 }
