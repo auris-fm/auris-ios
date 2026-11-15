@@ -169,7 +169,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         bufferLock.lock()
         buffer.removeAll()
         if timingEnabled { timingQueuedBytes = 0 }
-        bufferClearCountForTesting += 1
+        bufferClearCount += 1
         bufferLock.unlock()
         runnerLock.lock()
         // COALESCED ACCOUNTING (review 4fc59e2c): cancel/finish coalesce through the runner's
@@ -833,8 +833,9 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// (review 8eb9fb44). Incremented at request time in the same critical section that
     /// signals the runner; decremented when the stop notification is issued.
     private var pendingStopNotifications = 0
-    /// Test-only: how many times cancel() cleared the buffer (each retire shed buffered audio).
-    private(set) var bufferClearCountForTesting = 0
+    /// How many times cancel() cleared the buffer (each retire shed buffered audio). Read by the
+    /// turn latency record and by tests.
+    private(set) var bufferClearCount = 0
     var hasQueuedStop: Bool {
         runnerLock.lock()
         defer { runnerLock.unlock() }
@@ -1491,7 +1492,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
     var audioCountersSnapshot: (framesEnqueued: Int, bufferClears: Int) {
         bufferLock.lock()
         defer { bufferLock.unlock() }
-        return (framesEnqueued, bufferClearCountForTesting)
+        return (framesEnqueued, bufferClearCount)
     }
 
     /// Whether this player holds nothing left to play. A turn that produced no

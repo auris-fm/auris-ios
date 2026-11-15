@@ -1467,11 +1467,15 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         )
         // Local names the closure and the loop below share. Swift forbids a local function that
         // captures a local declared before it, so the state lives in an explicit box.
-        let latencyState = TurnLatencyState(record: latencyRecord, emitted: false)
         let audioCountersAtStart = audioPlayer.audioCountersSnapshot
+        let latencyState = TurnLatencyState(record: latencyRecord, emitted: false, audioCounters: audioCountersAtStart)
+        let snapshotAudioCounters: () -> Void = {
+            latencyState.audioCountersAtLastTouch = self.audioPlayer.audioCountersSnapshot
+        }
         // Snapshot the audible instant WHILE audio is still playing. Teardown clears the player's
         // mark, so a terminal that cancels before emitting would otherwise lose it.
         let noteAudioStillPlaying: () -> Void = {
+            snapshotAudioCounters()
             guard latencyState.firstAudible == nil else { return }
             latencyState.firstAudible = self.audioPlayer.firstAudibleHostSeconds
         }
@@ -1486,7 +1490,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 requestSent: latency.context?.requestSentAt,
                 outcome: outcome,
                 firstAudible: latencyState.firstAudible ?? self.audioPlayer.firstAudibleHostSeconds,
-                audioCountersAtStart: audioCountersAtStart
+                audioCountersAtStart: audioCountersAtStart,
+                audioCountersAtEnd: latencyState.audioCountersAtLastTouch
             )
         }
         var turnResult: CloudRouteOutcome?
@@ -1705,6 +1710,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // (identity-bound). On a timeout the confirmed stop notification itself
                     // releases via the deferral record — never an unconfirmed resume.
                     let stopEpoch = audioPlayer.cancel()
+                    snapshotAudioCounters()
                     if await audioPlayer.awaitActualStop(after: stopEpoch) {
                         // REVALIDATE after the suspension: a successor may have started while
                         // this turn was suspended on the stop wait. Release only if the captured
@@ -1773,6 +1779,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // never an unconfirmed release.
             if activeTurn === turnToken {
                 let stopEpoch = audioPlayer.cancel()
+                snapshotAudioCounters()
                 if await audioPlayer.awaitActualStop(after: stopEpoch) {
                     guard activeTurn == nil || activeTurn === turnToken else {
                         emitLatencyRecord("early_close")
@@ -1819,6 +1826,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // notification releases via the deferral record. Successor-safe: the cancel touches only
         // audio this turn enqueued.
         let stopEpoch = audioPlayer.cancel()
+        snapshotAudioCounters()
         if await audioPlayer.awaitActualStop(after: stopEpoch) {
             // REVALIDATE after the suspension (review 5295572f): a successor B can start while
             // this turn was suspended on the stop wait; release ONLY the own token. A successor
@@ -1852,7 +1860,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         /// user had already heard part of. Snapshotting while the audio is still playing keeps the
         /// measurement independent of what the teardown does.
         var firstAudible: MonotonicTime?
-        init(record: CloudTurnLatencyRecord, emitted: Bool) {
+        /// The player's counters as of the last moment THIS turn touched the player (a frame it
+        /// enqueued, or a cancel it issued), never read later. A terminal waits (bounded) for the
+        /// player to stop, and a successor can already be enqueuing on the same player during that
+        /// wait; reading the counters at emission would count the successor's audio as this turn's.
+        var audioCountersAtLastTouch: (framesEnqueued: Int, bufferClears: Int)
+        init(record: CloudTurnLatencyRecord, emitted: Bool, audioCounters: (framesEnqueued: Int, bufferClears: Int)) {
+            self.audioCountersAtLastTouch = audioCounters
             self.record = record
             self.emitted = emitted
         }
@@ -1870,9 +1884,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         requestSent: Double?,
         outcome: String,
         firstAudible: Double?,
-        audioCountersAtStart: (framesEnqueued: Int, bufferClears: Int)
+        audioCountersAtStart: (framesEnqueued: Int, bufferClears: Int),
+        audioCountersAtEnd counters: (framesEnqueued: Int, bufferClears: Int)
     ) {
-        let counters = audioPlayer.audioCountersSnapshot
         let line = record.logLine(
             requestSent: requestSent,
             firstAudible: firstAudible,

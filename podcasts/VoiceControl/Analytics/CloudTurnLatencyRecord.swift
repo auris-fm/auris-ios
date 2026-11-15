@@ -101,6 +101,10 @@ final class CloudTurnLatencyRecord: Equatable {
             "end_of_speech_to_first_audible=\(ms(toAudible))",
         ]
         if firstAudible == nil { parts.append("first_audible=absent") }
+        // PLAYER-WIDE deltas over this turn's window, not this turn's own frames: a successor that
+        // overlaps the window (a barge-in while this turn's loop still runs) lands its frames and
+        // clears in these counts, so `buffer_cleared=1` may mean another turn's audio was shed.
+        // Check the neighbouring turn before reading it as this turn's.
         // What the player was handed during this turn, so an absent first-audible is attributable:
         // zero frames means the audio never arrived; frames with clears means it arrived and was
         // shed; frames without clears means it arrived and was never scheduled.

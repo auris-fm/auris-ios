@@ -3380,6 +3380,55 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertTrue(line.contains("buffer_cleared=1"), "the error shed the buffer once: \(line)")
     }
 
+    /// The counts stop at the turn's own last touch of the player. The error terminal waits
+    /// (bounded) for the stop it requested, and a successor can enqueue on the same player during
+    /// that wait: its frames must not be counted as this turn's.
+    @MainActor
+    func testLatencyRecordDoesNotCountASuccessorsFramesEnqueuedDuringTheTerminalsStopWait() async throws {
+        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1))
+        CloudAudioPlayer.configureEngineForTesting = { engine in
+            try engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: 4_096)
+        }
+        addTeardownBlock {
+            CloudAudioPlayer.configureEngineForTesting = nil
+            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
+        }
+        let id = "u-wait-\(UUID().uuidString)"
+        nextTurnAudioPayloads = (0..<3).map { _ in Data(repeating: 0x33, count: 4_800 * 2) }
+        nextTurnFixture =
+            """
+            event: error
+            data: {"code":"provider_error","message":"upstream failed"}
+
+            """
+        let sink = makeSink()
+        let player = try XCTUnwrap(sink.audioPlayerForTesting)
+        player.armPhysicalStopGateForTesting(allow: 0)
+        addTeardownBlock { @MainActor in player.openPhysicalStopGateForTesting() }
+        let turn = Task {
+            await sink.routeToCloud(request: "hi", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: nil, utteranceId: id)
+        }
+        try await waitUntil("the error terminal is waiting on its stop", timeout: 3) {
+            player.physicalStopGateArrivalsForTesting >= 1
+        }
+        // A successor's audio lands on the same player while this turn still waits.
+        for _ in 0..<4 { player.enqueue(CloudAudioFrame(data: Data(repeating: 0x44, count: 4_800 * 2))) }
+        player.openPhysicalStopGateForTesting()
+        _ = await turn.value
+        var line = ""
+        for _ in 0..<40 {
+            line = (await FileLog.shared.logFileAsString()).split(separator: "\n")
+                .first { $0.contains("cloudTurnLatency") && $0.contains("request_id=\(id) ") }
+                .map(String.init) ?? ""
+            if !line.isEmpty { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertTrue(line.contains("audio_frames=3 "), "the successor's four frames are not this turn's: \(line)")
+        XCTAssertTrue(line.contains("buffer_cleared=1"), line)
+    }
+
     /// A SUCCESSOR ADMITTED OVER A FINISHED TURN'S AUDIO TAIL MUST PLAY ITS OWN ANSWER.
     ///
     /// Observed on a device: turn N ended `done` with its answer still playing, the next utterance
@@ -4223,7 +4272,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                        "C is suspended: the queued stop it cannot see holds its admission while the runner is parked")
         // And C RETIRED before admitting: E1's clear (A's leftovers) plus C's own retire clear.
         // A C that skipped its wait (queued stop invisible) never performs the second clear.
-        let clears: Int = await MainActor.run { sink.audioPlayerForTesting?.bufferClearCountForTesting ?? 0 }
+        let clears: Int = await MainActor.run { sink.audioPlayerForTesting?.bufferClearCount ?? 0 }
         XCTAssertEqual(clears, 2, "C retired B's queued-stop-window output before admitting")
         // Process the queue: the runner handles E1 then E2; confirmations withheld until now.
         await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(false) }
