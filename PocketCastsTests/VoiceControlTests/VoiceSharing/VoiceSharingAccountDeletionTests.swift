@@ -385,6 +385,7 @@ final class VoiceSharingSignOutNotificationTests: XCTestCase {
 final class VoiceSharingRealSignOutCompositionTests: XCTestCase {
     @MainActor
     func testRealSyncManagerSignoutPurgesRetainedAudioAndFencesTheOldLease() async throws {
+        try skipWithoutKeychainEntitlement()
         let keys = [ServerConstants.Values.syncingEmailKey, ServerConstants.Values.syncingPasswordKey,
                     ServerConstants.Values.syncingV2TokenKey, ServerConstants.Values.refreshTokenKey,
                     ServerConstants.Values.appleAuthUserIDKey]
@@ -487,6 +488,7 @@ final class VoiceSharingDeletionCallbackCompositionTests: XCTestCase {
 
     @MainActor
     private func exerciseDeletion(success: Bool, dropCompletion: Bool) async throws {
+        try skipWithoutKeychainEntitlement()
         // Real SignOutHelper also cleans account data. This focused test host must have none to lose.
         guard DataManager.sharedManager.allPaidPodcasts().isEmpty,
               DataManager.sharedManager.allUserEpisodesUploaded().isEmpty else {
