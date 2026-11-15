@@ -1245,11 +1245,13 @@ final class CloudAudioPlayer: @unchecked Sendable {
     private var firstAudibleInstant: Double?
     private let firstAudibleLock = NSLock()
 
-    /// Records first audible audio if this turn has not already. Called from the scheduling path
-    /// and from the per-block render observation, so the mark is taken even when the node had not
-    /// started rendering at schedule time — audio scheduled entirely before the first render is the
-    /// ordinary case, and reading the position is NOT what triggers this: the read is pure. Once set
-    /// it never moves: later renders, later schedules and a mid-turn node rebuild leave it alone.
+    /// Records first audible audio if this turn has not already. Called from the scheduling path,
+    /// the per-block render observation, the runner's `processFrames` probe while audio is still
+    /// scheduled, and the drain's wait loop (and once before its stop), so the mark is taken even
+    /// when the node had not started rendering at schedule time — audio scheduled entirely before the
+    /// first render is the ordinary case, and reading the position is NOT what triggers this: the
+    /// read is pure. Once set it never moves: later renders, later schedules and a mid-turn node
+    /// rebuild leave it alone.
     private func noteFirstAudibleIfRendering() {
         // Takes the mark in the ONE place, from a PURE read.
         //
