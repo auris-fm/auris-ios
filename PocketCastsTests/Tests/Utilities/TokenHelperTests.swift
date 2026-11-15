@@ -17,11 +17,24 @@ class TokenHelperTests: XCTestCase {
     private var previous: [String: String] = [:]
     private var previousUserID: String?
     private var previousIncompleteWrite = false
+    private var setUpCompleted = false
     private let credentialKeys = [ServerConstants.Values.syncingV2TokenKey, ServerConstants.Values.refreshTokenKey,
                                   ServerConstants.Values.syncingEmailKey, ServerConstants.Values.syncingPasswordKey, ServerConstants.Values.appleAuthUserIDKey]
 
     override func setUpWithError() throws {
         try super.setUpWithError()
+        // Environment limitation, checked before any shared state is captured or changed so a skipped
+        // test leaves the host untouched: an unsigned host build (test_fast) has no keychain
+        // entitlement and every keychain call fails with errSecMissingEntitlement. Skip on exactly
+        // that status and no other.
+        setUpCompleted = false
+        do {
+            _ = try KeychainHelper.string(for: credentialKeys[0])
+        } catch KeychainHelper.KeychainError.status(let status) where status == errSecMissingEntitlement {
+            throw XCTSkip("host build has no keychain entitlement (errSecMissingEntitlement); run the signed `make test`")
+        }
+        // Past the probe, tearDown must restore whatever setUp captured, even if the capture below throws.
+        setUpCompleted = true
         previousUserID = ServerSettings.userId
         previousIncompleteWrite = UserDefaults.standard.bool(forKey: "AurisIncompleteCredentialWrite")
         ServerSettings.invalidateAuthentication {}
@@ -33,6 +46,8 @@ class TokenHelperTests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
+        // Only a skipped setUp bypasses this: it captured nothing, so restoring would overwrite the host's real state.
+        guard setUpCompleted else { return try super.tearDownWithError() }
         for key in credentialKeys {
             XCTAssertTrue(KeychainHelper.save(string: previous[key], key: key, accessibility: kSecAttrAccessibleAfterFirstUnlock))
         }
