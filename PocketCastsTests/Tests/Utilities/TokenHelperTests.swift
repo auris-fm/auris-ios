@@ -23,16 +23,9 @@ class TokenHelperTests: XCTestCase {
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        // Environment limitation, checked before any shared state is captured or changed so a skipped
-        // test leaves the host untouched: an unsigned host build (test_fast) has no keychain
-        // entitlement and every keychain call fails with errSecMissingEntitlement. Skip on exactly
-        // that status and no other.
+        // Checked before any shared state is captured or changed, so a skipped test leaves the host untouched.
         setUpCompleted = false
-        do {
-            _ = try KeychainHelper.string(for: credentialKeys[0])
-        } catch KeychainHelper.KeychainError.status(let status) where status == errSecMissingEntitlement {
-            throw XCTSkip("host build has no keychain entitlement (errSecMissingEntitlement); run the signed `make test`")
-        }
+        try skipWithoutKeychainEntitlement()
         // Past the probe, tearDown must restore whatever setUp captured, even if the capture below throws.
         setUpCompleted = true
         previousUserID = ServerSettings.userId
