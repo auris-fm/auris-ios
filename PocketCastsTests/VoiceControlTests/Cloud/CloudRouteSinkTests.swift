@@ -3380,6 +3380,62 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertTrue(line.contains("buffer_cleared=1"), "the error shed the buffer once: \(line)")
     }
 
+    /// A clear issued by someone else between this turn's last frame and its terminal belongs to
+    /// the turn's window: it is exactly the late clear of an answer's frames that the record
+    /// exists to expose. Asserted for both terminals the stream can end on.
+    @MainActor
+    private func exerciseAClearBetweenTheLastFrameAndTheTerminal(terminal: String) async throws -> String {
+        let id = "u-between-\(UUID().uuidString)"
+        let release = DispatchSemaphore(value: 0)
+        nextTurnAudioPayloads = (0..<3).map { _ in Data(repeating: 0x33, count: 4_800 * 2) }
+        blockProducerAfterFrames = (4, release) // three binary frames, then park before the terminal
+        nextTurnFixture = terminal
+        let sink = makeSink()
+        let player = try XCTUnwrap(sink.audioPlayerForTesting)
+        addTeardownBlock { release.signal() }
+        let turn = Task {
+            await sink.routeToCloud(request: "hi", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: nil, utteranceId: id)
+        }
+        try await waitUntil("the three frames reached the player", timeout: 3) {
+            player.framesEnqueuedForTesting >= 3
+        }
+        // Another actor clears the player after this turn's last frame and before its terminal.
+        _ = player.cancel()
+        release.signal()
+        _ = await turn.value
+        var line = ""
+        for _ in 0..<40 {
+            line = (await FileLog.shared.logFileAsString()).split(separator: "\n")
+                .first { $0.contains("cloudTurnLatency") && $0.contains("request_id=\(id) ") }
+                .map(String.init) ?? ""
+            if !line.isEmpty { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return line
+    }
+
+    @MainActor
+    func testAClearBetweenTheLastFrameAndDoneIsInTheTurnsCount() async throws {
+        let line = try await exerciseAClearBetweenTheLastFrameAndTheTerminal(terminal: Self.doneOnlyFixture)
+        XCTAssertTrue(line.contains("outcome=done"), line)
+        XCTAssertTrue(line.contains("audio_frames=3 buffer_cleared=1"), line)
+    }
+
+    @MainActor
+    func testAClearBetweenTheLastFrameAndAnErrorIsInTheTurnsCount() async throws {
+        let line = try await exerciseAClearBetweenTheLastFrameAndTheTerminal(
+            terminal: """
+            event: error
+            data: {"code":"provider_error","message":"upstream failed"}
+
+            """
+        )
+        XCTAssertTrue(line.contains("outcome=error"), line)
+        // The error's own cancel adds one more clear (it sheds whatever the turn still holds).
+        XCTAssertTrue(line.contains("audio_frames=3 buffer_cleared=2"), line)
+    }
+
     /// The counts stop at the turn's own last touch of the player. The error terminal waits
     /// (bounded) for the stop it requested, and a successor can enqueue on the same player during
     /// that wait: its frames must not be counted as this turn's.
