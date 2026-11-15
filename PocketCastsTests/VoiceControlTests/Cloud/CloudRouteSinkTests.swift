@@ -1,3 +1,4 @@
+import PocketCastsUtils
 /// The origin these cases dispatch under. The conversation bound refuses a turn whose origin
 /// is not live, so a sink built for these cases must be given one — otherwise every turn would
 /// be refused before it dials and the case would exercise the bound rather than the sink.
@@ -2604,6 +2605,171 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             XCTAssertEqual(player.confirmedStopEpochForTesting, priorDrain.stopEpoch,
                            "the superseded done request must not be relabelled as a physical stop")
         }
+    }
+
+    /// THIRD UTTERANCE OVER A FINISHED TURN'S AUDIO TAIL.
+    ///
+    /// Turn N completes with answer audio still scheduled, so its socket is finished. Utterance 2
+    /// is admitted as N+1 (N left no `activeTurn`, so it is not a barge-in) and parks in the
+    /// quiescence wait on N's tail. Utterance 3 then arrives the way the service delivers it:
+    /// `emitBargeIn` first, and its own `routeToCloud` when nothing was interrupted.
+    ///
+    /// Everything is measured at the wire and the executor, never through `activeResultSocket`.
+    private struct ThirdUtteranceOutcome {
+        var emitted: String?
+        var thirdOutcome: CloudRouteOutcome?
+        var nPlusOneOutcome: CloudRouteOutcome?
+        var nPlusOneFrames: [String] = []
+        var allFrames: [String] = []
+        var thirdAuthFrames: [String] = []
+        var seeks = 0
+        var log = ""
+        var stopConfirmedAfterTail = false
+    }
+
+    @MainActor
+    private func exerciseThirdUtteranceOverAFinishedTurnsTail(thirdUtterance: Bool) async throws -> ThirdUtteranceOutcome {
+        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1))
+        CloudAudioPlayer.configureEngineForTesting = { engine in
+            try engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: 4_096)
+        }
+        addTeardownBlock {
+            CloudAudioPlayer.configureEngineForTesting = nil
+            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
+        }
+        let producerRelease = DispatchSemaphore(value: 0)
+        blockProducerAfterFrames = (8, producerRelease)
+        nextTurnFixture = Self.doneOnlyFixture
+        nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x11, count: 4_800 * 2) }
+        playback.setPlaying(true)
+        mapper.playbackSecondsForReference = [1130.0: 1200.0, 1500.0: 1600.0]
+        let sink = makeSink()
+        let player = try XCTUnwrap(sink.audioPlayerForTesting)
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 16)
+        player.emittedPCMReference = reference
+        player.echoReferenceHandoff = handoff
+        addTeardownBlock { @MainActor in
+            producerRelease.signal()
+            player.openPhysicalStopGateForTesting()
+            let stop = player.cancel()
+            _ = await player.awaitActualStop(after: stop)
+            withExtendedLifetime(handoff) {}
+            withExtendedLifetime(sink) {}
+        }
+
+        // Turn N: done, with its answer audio still scheduled.
+        let turnN = Task {
+            await sink.routeToCloud(request: "first", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: .wakeWord, utteranceId: "u-n")
+        }
+        try await waitUntil("N's audio reached the real player", timeout: 3) {
+            reference.streamIndex == 22_400 && player.bufferedFrameCountForTesting == 0
+        }
+        XCTAssertTrue(player.hasOutstandingOutput, "premise: N's audio is still outstanding")
+        let nTask = try XCTUnwrap(capturedTask, "premise: N's socket")
+        producerRelease.signal()
+        let nResult = await turnN.value
+        XCTAssertEqual(nResult.outcome, .completed, "premise: N completed")
+
+        // Utterance 2: admitted as N+1, parked on a held stop of N's tail. It carries an action.
+        let seekFixture = { (positionMs: Int) in
+            """
+            event: action
+            data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":\(positionMs)}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        }
+        nextTurnFixture = seekFixture(1_130_000)
+        player.armPhysicalStopGateForTesting(allow: 0)
+        let successor = Task {
+            await sink.routeToCloud(request: "second", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-n1")
+        }
+        try await waitUntil("N+1 is admitted and waiting on a held stop", timeout: 3) {
+            sink.activeTurnIsCancelledForTesting == false && player.physicalStopGateArrivalsForTesting >= 1
+        }
+        // N+1's client exists (it is built at admission) but must have sent nothing yet.
+        let nPlusOneTask = try XCTUnwrap(capturedTask, "premise: N+1's socket")
+        XCTAssertFalse(nPlusOneTask === nTask, "premise: N+1 has its own socket")
+        XCTAssertTrue(nPlusOneTask.sentTextFrames.isEmpty, "premise: N+1 has not reached the wire")
+
+        let stopBefore = player.confirmedStopEpoch()
+        let before = await FileLog.shared.logFileAsString()
+        var outcome = ThirdUtteranceOutcome()
+        var third: Task<CloudRouteResult, Never>?
+        if thirdUtterance {
+            outcome.emitted = await sink.emitBargeIn(
+                request: "third", utteranceId: "u-n2", origin: cloudTestOrigin,
+                selection: CloudConversationSelection.followUp
+            )
+            if outcome.emitted == nil {
+                // Nothing was interrupted, so the service routes the utterance itself.
+                nextTurnFixture = seekFixture(1_500_000)
+                third = Task {
+                    await sink.routeToCloud(request: "third", tier: .free, context: sampleContext(),
+                                            origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-n2")
+                }
+            }
+        }
+        player.openPhysicalStopGateForTesting()
+        let nPlusOne = await successor.value
+        outcome.nPlusOneOutcome = nPlusOne.outcome
+        if let third { outcome.thirdOutcome = await third.value.outcome }
+        outcome.nPlusOneFrames = nPlusOneTask.sentTextFrames
+        var thirdFrames: [String] = []
+        if let latest = capturedTask, latest !== nPlusOneTask, latest !== nTask { thirdFrames = latest.sentTextFrames }
+        outcome.allFrames = nTask.sentTextFrames + nPlusOneTask.sentTextFrames + thirdFrames
+        outcome.thirdAuthFrames = thirdFrames.filter { $0.contains("\"authenticate\"") }
+        outcome.seeks = playback.calls.filter { if case .seekTo = $0 { return true } else { return false } }.count
+        outcome.log = String((await FileLog.shared.logFileAsString()).dropFirst(before.count))
+        outcome.stopConfirmedAfterTail = player.confirmedStopEpoch() > stopBefore
+        return outcome
+    }
+
+    /// POSITIVE CONTROL: with no third utterance, N+1 reaches the wire, its action executes once
+    /// and nothing is refused. Without this the assertions below could be measuring a fixture
+    /// that never executes or always refuses.
+    @MainActor
+    func testControlNPlusOneRunsWithoutAThirdUtterance() async throws {
+        let measured = try await exerciseThirdUtteranceOverAFinishedTurnsTail(thirdUtterance: false)
+        XCTAssertEqual(measured.nPlusOneOutcome, .completed)
+        XCTAssertEqual(measured.seeks, 1, "control: N+1's action reaches the executor exactly once")
+        XCTAssertFalse(measured.log.contains("rejected: the interrupt was already sent"), "control: nothing interrupted N+1")
+    }
+
+    /// NEWEST WINS: utterance 3 submits, N+1 is superseded before it reaches the wire, nothing is
+    /// interrupted, and N's tail stops.
+    @MainActor
+    func testAThirdUtteranceOverAFinishedTurnsTailSupersedesTheWaitingSuccessor() async throws {
+        let m = try await exerciseThirdUtteranceOverAFinishedTurnsTail(thirdUtterance: true)
+        // 1. Utterance 3 reaches the wire: one auth frame on a new socket, not refused.
+        XCTAssertNil(m.emitted, "a finished turn is not an interrupt target, so utterance 3 is not claimed")
+        XCTAssertEqual(m.thirdAuthFrames.count, 1, "utterance 3 sends exactly one authenticate frame; frames=\(m.allFrames)")
+        XCTAssertTrue(m.thirdAuthFrames.first?.contains("u-n2") ?? false, "that frame carries utterance 3's request id")
+        XCTAssertEqual(m.thirdOutcome, .completed, "utterance 3 is not refused")
+        // 2. N+1 never reaches the wire, ends superseded (not refused), and its action never executes.
+        XCTAssertTrue(m.nPlusOneFrames.isEmpty, "N+1 never sends a frame")
+        XCTAssertFalse(m.allFrames.contains { $0.contains("u-n1") }, "no frame carries N+1's request id")
+        XCTAssertNotEqual(m.nPlusOneOutcome, .refused)
+        XCTAssertNotEqual(m.nPlusOneOutcome, .completed, "N+1 is superseded, not completed")
+        // 3. No interrupt is sent or attempted: N is finished.
+        XCTAssertFalse(m.allFrames.contains { $0.contains("\"interrupt\"") }, "no interrupt frame on any socket")
+        XCTAssertFalse(m.log.contains("interrupt undelivered"), "no interrupt is attempted")
+        // 4. N's audio stops.
+        XCTAssertTrue(m.stopConfirmedAfterTail, "N's tail is physically stopped")
+        // 5. N's buffered-playback report rides utterance 3's authentication frame exactly once.
+        let reports = m.allFrames.filter { $0.contains("\"interrupts\"") }
+        XCTAssertEqual(reports.count, 1, "the report is sent exactly once")
+        XCTAssertEqual(reports.first, m.thirdAuthFrames.first, "and on utterance 3's authenticate frame")
+        XCTAssertTrue(reports.first?.contains("\"request_id\":\"u-n\"") ?? false, "naming N")
+        // 6. Utterance 3's own action executes once, with effects open.
+        XCTAssertEqual(m.seeks, 1, "utterance 3's action reaches the executor once and N+1's never")
+        XCTAssertFalse(m.log.contains("rejected: the interrupt was already sent"), "no effects were closed")
     }
 
     /// OWNER-CANCEL STOP ORDERING (review dee03708/fa03b7f9, reworked for 14f66b72): a

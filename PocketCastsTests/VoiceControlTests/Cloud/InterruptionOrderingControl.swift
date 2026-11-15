@@ -762,35 +762,21 @@ private struct EmptyInterruptionMapper: FingerprintMappingProviding {
 }
 
 private final class InterruptPlaybackSink: VoicePlaybackSink, @unchecked Sendable {
-    private let lock = NSLock()
-    private var seeks = 0
-
-    /// How many seek effects reached the player. The observable for "did an interrupted turn's
-    /// late action still take effect": a refusal leaves this at zero, an admission moves it.
-    var seekCount: Int {
-        lock.lock(); defer { lock.unlock() }
-        return seeks
-    }
-
     private(set) var positionMs: Int64 = 0
     func setPositionMs(_ ms: Int64) { positionMs = ms }
     var isPlaying: Bool { false }
     func pause() -> VoiceResponse { .silent }
     func resume() -> VoiceResponse { .silent }
     func seekRelative(deltaSeconds: Int?, direction: SeekDirection) -> VoiceResponse {
-        lock.lock(); seeks += 1; lock.unlock()
         return .silent
     }
     func seekTo(positionSeconds: Int) -> VoiceResponse {
-        lock.lock(); seeks += 1; lock.unlock()
         return .silent
     }
     func seekTo(positionSeconds: Int, episodeDurationSeconds: Int) -> VoiceResponse {
-        lock.lock(); seeks += 1; lock.unlock()
         return .silent
     }
     func nextEpisode() -> VoiceResponse {
-        lock.lock(); seeks += 1; lock.unlock()
         return .silent
     }
 }

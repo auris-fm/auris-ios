@@ -900,7 +900,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         var interruptedRequestIdForThisTurn: String? = nil
         if !isRetainedFollowUpSubmission,
            let priorRequestId = activeResultSocket?.requestId,
-           (activeTurn.map { !$0.isCancelled }) ?? false,
+           (activeResultSocketOwner.map { !$0.isCancelled }) ?? false,
            interruptionState.claimInterruptEmission(forRequestId: priorRequestId) {
             interruptedRequestIdForThisTurn = priorRequestId
             interruptionState.hold(
@@ -1181,8 +1181,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         )
         // The turn's own result socket: sends bind to THIS registration, so a superseded turn's
         // late results can never ride a successor's socket.
-        activeResultSocket = routed.resultSocket
-        resultSendClient = client
+        activeResultBinding = ResultSocketBinding(socket: routed.resultSocket, owner: turnToken, client: client)
 
         // The consumer takes ownership of the turn socket here: the bounded never-consumed
         // cleanup no longer applies, however long this turn's awaited effect/result takes.
@@ -1211,6 +1210,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         defer {
             routed.resultSocket.finishTurn()
             currentOwnerCancelFlag = nil
+            // A finished turn's socket must not stay named as the turn to interrupt: a barge-in
+            // reads the socket to learn WHICH turn it is interrupting, and a retired registration
+            // can neither deliver the interrupt nor acknowledge it. Identity-guarded, so a
+            // successor that already published its own socket is never cleared.
+            if activeResultBinding?.socket === routed.resultSocket {
+                activeResultBinding = nil
+            }
             // A turn that ENDS (any exit) leaves no predecessor behind: the retire-at-admission
             // must fire only when a successor actually SUPERSEDES a still-running turn, never
             // for a sequential turn that starts after the previous one fully returned.
@@ -1922,15 +1928,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // then WAITS for this turn's terminal, so between the two the interrupted turn is still
         // live and still receiving. Anything it executed BEFORE this point stands; the interrupt
         // only forbids what comes after it.
-        // `activeTurn` is the right turn to close here BECAUSE admission cannot interleave with
-        // this wait. Admitting a successor cancels its predecessor in the same synchronous step
-        // that publishes the successor (`activeTurn?.cancel()` immediately precedes
-        // `activeTurn = turnToken`), so there is no moment where `activeTurn` names an admitted
-        // successor while this turn is still uncancelled. Before admission the field still names
-        // the turn being interrupted, which is the turn that must stop taking effect. Should
-        // admission ever gain an interleaving point, this line would close the wrong turn and the
-        // closing would have to move to the turn that owns the socket being interrupted.
-        activeTurn?.closeEffects()
+        // Close the turn that OWNS the socket being interrupted, never `activeTurn` by assumption:
+        // `activeTurn` moves at admission, but the socket moves only when the successor publishes
+        // its own after its quiescence wait. In between, `activeTurn` names a waiting successor
+        // that owns nothing being interrupted, and closing it would refuse that successor's own
+        // effects.
+        activeResultSocketOwner?.closeEffects()
 
         guard let priorSocket = activeResultSocket, let client = resultSendClient else {
             // No transport to interrupt: no acknowledgement can come, so nothing may stay held.
@@ -2001,7 +2004,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // it, silently losing the turn.
         guard activeResultSocket?.requestId != utteranceId else { return nil }
         guard let priorRequestId = activeResultSocket?.requestId,
-              (activeTurn.map { !$0.isCancelled }) ?? false,
+              (activeResultSocketOwner.map { !$0.isCancelled }) ?? false,
               interruptionState.claimInterruptEmission(forRequestId: priorRequestId) else {
             return nil
         }
@@ -2184,7 +2187,17 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// Read-only test seam: the socket whose lifetime the current turn owns (nil between turns).
     var currentTurnResultSocketForTesting: AppOperationResultSocket? { activeResultSocket }
 
-    private var activeResultSocket: AppOperationResultSocket?
+    /// ONE fact, stored once: which turn owns which socket and client. A barge-in reads this to
+    /// learn what it is interrupting, so the three may never drift apart — they are set together
+    /// where the turn publishes its socket and cleared together, identity-guarded, when it ends.
+    private struct ResultSocketBinding {
+        let socket: AppOperationResultSocket
+        let owner: CloudTurnToken
+        let client: CloudRouteClient
+    }
+    private var activeResultBinding: ResultSocketBinding?
+    private var activeResultSocket: AppOperationResultSocket? { activeResultBinding?.socket }
+    private var activeResultSocketOwner: CloudTurnToken? { activeResultBinding?.owner }
     /// The follow-up released by an interruption acknowledgement, waiting to be submitted on its
     /// own socket. Read-and-clear by the submitter so it is submitted exactly once.
     @MainActor private(set) var pendingFollowUpSubmission: CloudInterruptionState.ReleasedFollowUp?
@@ -2194,7 +2207,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     private var operationJournal: OperationJournal?
 
     /// The client this turn routed on result sends ride the SAME client/socket.
-    private var resultSendClient: CloudRouteClient?
+    private var resultSendClient: CloudRouteClient? { activeResultBinding?.client }
 
     /// Capture the current playback position before a relative seek so that a
     /// subsequent "go back to where I was" restores the correct place. The
