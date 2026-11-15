@@ -239,7 +239,8 @@ class EndOfYearStoriesBuilderTests: XCTestCase {
         XCTAssertTrue(syncCalled)
     }
 
-    func testDontSyncWhenAlreadySynced() async {
+    func testDontSyncWhenAlreadySynced() async throws {
+        try skipWithoutKeychainEntitlement()
         var syncCalled = false
         let endOfYearManager = EndOfYearManagerMock()
         let dataManager = DataManagerMock(endOfYearManager: endOfYearManager)
