@@ -33,6 +33,8 @@ class TokenHelperTests: XCTestCase {
         } catch KeychainHelper.KeychainError.status(let status) where status == errSecMissingEntitlement {
             throw XCTSkip("host build has no keychain entitlement (errSecMissingEntitlement); run the signed `make test`")
         }
+        // Past the probe, tearDown must restore whatever setUp captured, even if the capture below throws.
+        setUpCompleted = true
         previousUserID = ServerSettings.userId
         previousIncompleteWrite = UserDefaults.standard.bool(forKey: "AurisIncompleteCredentialWrite")
         ServerSettings.invalidateAuthentication {}
@@ -41,11 +43,10 @@ class TokenHelperTests: XCTestCase {
             XCTAssertTrue(KeychainHelper.removeKey(key))
         }
         UserDefaults.standard.set(false, forKey: "AurisIncompleteCredentialWrite")
-        setUpCompleted = true
     }
 
     override func tearDownWithError() throws {
-        // A skipped setUp captured nothing, so restoring would overwrite the host's real state.
+        // Only a skipped setUp bypasses this: it captured nothing, so restoring would overwrite the host's real state.
         guard setUpCompleted else { return try super.tearDownWithError() }
         for key in credentialKeys {
             XCTAssertTrue(KeychainHelper.save(string: previous[key], key: key, accessibility: kSecAttrAccessibleAfterFirstUnlock))
