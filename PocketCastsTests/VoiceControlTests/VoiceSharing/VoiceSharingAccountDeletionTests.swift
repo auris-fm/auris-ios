@@ -380,17 +380,6 @@ final class VoiceSharingSignOutNotificationTests: XCTestCase {
     }
 }
 
-/// Environment limitation, checked before a test captures or changes any host state: an unsigned host
-/// build (test_fast) has no keychain entitlement and every keychain call fails with
-/// errSecMissingEntitlement. Skip on exactly that status; any other keychain error still fails.
-private func skipWithoutKeychainEntitlement() throws {
-    do {
-        _ = try KeychainHelper.string(for: ServerConstants.Values.syncingEmailKey)
-    } catch KeychainHelper.KeychainError.status(let status) where status == errSecMissingEntitlement {
-        throw XCTSkip("host build has no keychain entitlement (errSecMissingEntitlement); run the signed `make test`")
-    }
-}
-
 /// Exercises SyncManager's real signout body and default notification delivery. Enrollment and
 /// remote policy are controlled premises; this does not execute the account deletion API or UI.
 final class VoiceSharingRealSignOutCompositionTests: XCTestCase {
