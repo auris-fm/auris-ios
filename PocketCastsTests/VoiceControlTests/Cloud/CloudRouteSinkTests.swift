@@ -237,10 +237,12 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
         let player = try XCTUnwrap(sink.audioPlayerForTesting)
         // The precondition the name claims: audio is still outstanding when the turn returns.
-        // If it were not, "held" would be indistinguishable from "emitted at done".
-        try XCTSkipUnless(
-            player.hasOutstandingOutput,
-            "the stub drained before the turn returned, so no hold can be observed")
+        // If it were not, "held" would be indistinguishable from "emitted at done". The offline
+        // engine renders nothing until this test does, so a failure here is a broken premise.
+        guard player.hasOutstandingOutput else {
+            XCTFail("premise: audio is still outstanding when the turn returns")
+            return
+        }
         let early = await FileLog.shared.logFileAsString().split(separator: "\n")
             .filter { Self.requestId(of: String($0)) == utteranceId }
         XCTAssertTrue(
@@ -344,6 +346,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertTrue(line.contains("outcome=error"), line)
         XCTAssertFalse(line.contains("first_audible=absent"),
                        "audio was audible before the error, so the record must carry when: \(line)")
+        XCTAssertFalse(line.contains("end_of_speech_to_first_audible=none"),
+                       "the audible instant must be measured, not merely not absent: \(line)")
     }
 
     /// A stop for an EARLIER drain says nothing about this turn's audio.
