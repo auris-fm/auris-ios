@@ -3351,6 +3351,113 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         return outcome
     }
 
+    /// A turn that received audio and then ended in an error sheds its buffer: its record must say
+    /// frames arrived AND a clear happened, so an absent first-audible is attributable. The normal
+    /// turn's counts are asserted in `testASuccessorOverAFinishedTurnsTailPlaysItsOwnAudio`.
+    @MainActor
+    func testLatencyRecordCountsFramesAndTheClearForATurnThatEndsInAnError() async throws {
+        let id = "u-cleared-\(UUID().uuidString)"
+        nextTurnAudioPayloads = (0..<3).map { _ in Data(repeating: 0x33, count: 4_800 * 2) }
+        nextTurnFixture =
+            """
+            event: error
+            data: {"code":"provider_error","message":"upstream failed"}
+
+            """
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "hi", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: nil, utteranceId: id)
+        var line = ""
+        for _ in 0..<40 {
+            line = (await FileLog.shared.logFileAsString()).split(separator: "\n")
+                .first { $0.contains("cloudTurnLatency") && $0.contains("request_id=\(id) ") }
+                .map(String.init) ?? ""
+            if !line.isEmpty { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertTrue(line.contains("outcome=error"), line)
+        XCTAssertTrue(line.contains("audio_frames=3"), "the three frames arrived: \(line)")
+        XCTAssertTrue(line.contains("buffer_cleared=1"), "the error shed the buffer once: \(line)")
+    }
+
+    /// A SUCCESSOR ADMITTED OVER A FINISHED TURN'S AUDIO TAIL MUST PLAY ITS OWN ANSWER.
+    ///
+    /// Observed on a device: turn N ended `done` with its answer still playing, the next utterance
+    /// was admitted as N+1 (retiring N's tail, then waiting for its stop), and the worker sent
+    /// N+1 about 2.5 s of audio and a normal `done`, yet the player never scheduled a buffer for
+    /// it. Asserted at the player: every frame N+1 receives must be enqueued, and the first one
+    /// must start a new scheduling boundary.
+    @MainActor
+    func testASuccessorOverAFinishedTurnsTailPlaysItsOwnAudio() async throws {
+        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1))
+        CloudAudioPlayer.configureEngineForTesting = { engine in
+            try engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: 4_096)
+        }
+        addTeardownBlock {
+            CloudAudioPlayer.configureEngineForTesting = nil
+            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
+        }
+        let producerRelease = DispatchSemaphore(value: 0)
+        blockProducerAfterFrames = (8, producerRelease)
+        nextTurnFixture = Self.doneOnlyFixture
+        nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x11, count: 4_800 * 2) }
+        playback.setPlaying(true)
+        let sink = makeSink()
+        let player = try XCTUnwrap(sink.audioPlayerForTesting)
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 16)
+        player.emittedPCMReference = reference
+        player.echoReferenceHandoff = handoff
+        addTeardownBlock { @MainActor in
+            producerRelease.signal()
+            player.openPhysicalStopGateForTesting()
+            let stop = player.cancel()
+            _ = await player.awaitActualStop(after: stop)
+            withExtendedLifetime(handoff) {}
+            withExtendedLifetime(sink) {}
+        }
+
+        let turnN = Task {
+            await sink.routeToCloud(request: "first", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: .wakeWord, utteranceId: "u-n")
+        }
+        try await waitUntil("N's audio reached the real player", timeout: 3) {
+            reference.streamIndex == 22_400 && player.bufferedFrameCountForTesting == 0
+        }
+        XCTAssertTrue(player.hasOutstandingOutput, "premise: N's audio is still outstanding")
+        producerRelease.signal()
+        let nResult = await turnN.value
+        XCTAssertEqual(nResult.outcome, .completed, "premise: N completed")
+        XCTAssertTrue(player.hasOutstandingOutput, "premise: N's tail is still outstanding when N+1 arrives")
+
+        // N+1: its own answer, delivered whole, with no parked producer.
+        blockProducerAfterFrames = nil
+        nextTurnFixture = Self.doneOnlyFixture
+        nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x22, count: 4_800 * 2) }
+        let enqueuedBefore = player.framesEnqueuedForTesting
+        let boundariesBefore = player.schedulingBoundaryCount
+        let successorId = "u-successor-\(UUID().uuidString)"
+        let successor = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext(),
+                                                origin: cloudTestOrigin, selection: .followUp, utteranceId: successorId)
+        XCTAssertEqual(successor.outcome, .completed, "N+1 completes")
+        XCTAssertEqual(player.framesEnqueuedForTesting - enqueuedBefore, 7,
+                       "every audio frame N+1 receives must reach the player")
+        try await waitUntil("N+1's audio is scheduled", timeout: 3) {
+            player.schedulingBoundaryCount > boundariesBefore
+        }
+        // The record says the same thing the player does: a normal turn reports its frames and no clear.
+        var line = ""
+        for _ in 0..<40 {
+            line = (await FileLog.shared.logFileAsString()).split(separator: "\n")
+                .first { $0.contains("cloudTurnLatency") && $0.contains("request_id=\(successorId) ") }
+                .map(String.init) ?? ""
+            if !line.isEmpty { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertTrue(line.contains("audio_frames=7 buffer_cleared=0"), "normal turn counts: \(line)")
+    }
+
     /// POSITIVE CONTROL: with no third utterance, N+1 reaches the wire, its action executes once
     /// and nothing is refused. Without this the assertions below could be measuring a fixture
     /// that never executes or always refuses.

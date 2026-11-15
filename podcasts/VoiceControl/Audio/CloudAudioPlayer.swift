@@ -1484,6 +1484,16 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     private var framesEnqueued = 0
 
+    /// Cumulative audio frames handed to this player and cumulative buffer clears (each `cancel()`
+    /// sheds whatever is buffered). Read by the turn's latency record as before/after counts, so a
+    /// turn with `first_audible=absent` says whether its audio arrived and was cleared or never
+    /// arrived.
+    var audioCountersSnapshot: (framesEnqueued: Int, bufferClears: Int) {
+        bufferLock.lock()
+        defer { bufferLock.unlock() }
+        return (framesEnqueued, bufferClearCountForTesting)
+    }
+
     /// Whether this player holds nothing left to play. A turn that produced no
     /// audio can restore immediately; one that is still draining restores when
     /// the drain completes.

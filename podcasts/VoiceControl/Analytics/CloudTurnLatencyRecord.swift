@@ -74,7 +74,13 @@ final class CloudTurnLatencyRecord: Equatable {
     /// The single line this turn contributes, named after what each number is. Written whether or
     /// not audio was ever heard: a turn that produced no audio is the interesting case, and a
     /// missing line would be indistinguishable from a turn that never ran.
-    func logLine(requestSent: Double?, firstAudible: Double?, outcome: String) -> String {
+    func logLine(
+        requestSent: Double?,
+        firstAudible: Double?,
+        outcome: String,
+        audioFrames: Int? = nil,
+        bufferClears: Int? = nil
+    ) -> String {
         let endpointMs = self.endpointMs
         let ms: (Double?) -> String = { $0.map { String(format: "%.0fms", $0) } ?? "none" }
         let toRequest = requestSent.flatMap { endOfSpeechToRequestMs(requestSent: $0) }
@@ -95,6 +101,11 @@ final class CloudTurnLatencyRecord: Equatable {
             "end_of_speech_to_first_audible=\(ms(toAudible))",
         ]
         if firstAudible == nil { parts.append("first_audible=absent") }
+        // What the player was handed during this turn, so an absent first-audible is attributable:
+        // zero frames means the audio never arrived; frames with clears means it arrived and was
+        // shed; frames without clears means it arrived and was never scheduled.
+        if let audioFrames { parts.append("audio_frames=\(audioFrames)") }
+        if let bufferClears { parts.append("buffer_cleared=\(bufferClears)") }
         if followUpHeld { parts.append("follow_up=held") }
         return parts.joined(separator: " ")
     }

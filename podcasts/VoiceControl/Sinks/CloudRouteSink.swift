@@ -1468,6 +1468,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // Local names the closure and the loop below share. Swift forbids a local function that
         // captures a local declared before it, so the state lives in an explicit box.
         let latencyState = TurnLatencyState(record: latencyRecord, emitted: false)
+        let audioCountersAtStart = audioPlayer.audioCountersSnapshot
         // Snapshot the audible instant WHILE audio is still playing. Teardown clears the player's
         // mark, so a terminal that cancels before emitting would otherwise lose it.
         let noteAudioStillPlaying: () -> Void = {
@@ -1484,7 +1485,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 latencyState.record,
                 requestSent: latency.context?.requestSentAt,
                 outcome: outcome,
-                firstAudible: latencyState.firstAudible ?? self.audioPlayer.firstAudibleHostSeconds
+                firstAudible: latencyState.firstAudible ?? self.audioPlayer.firstAudibleHostSeconds,
+                audioCountersAtStart: audioCountersAtStart
             )
         }
         var turnResult: CloudRouteOutcome?
@@ -1867,12 +1869,16 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         _ record: CloudTurnLatencyRecord,
         requestSent: Double?,
         outcome: String,
-        firstAudible: Double?
+        firstAudible: Double?,
+        audioCountersAtStart: (framesEnqueued: Int, bufferClears: Int)
     ) {
+        let counters = audioPlayer.audioCountersSnapshot
         let line = record.logLine(
             requestSent: requestSent,
             firstAudible: firstAudible,
-            outcome: outcome
+            outcome: outcome,
+            audioFrames: counters.framesEnqueued - audioCountersAtStart.framesEnqueued,
+            bufferClears: counters.bufferClears - audioCountersAtStart.bufferClears
         )
         FileLog.shared.addMessage("[VoicePipeline] cloudTurnLatency \(line)")
     }

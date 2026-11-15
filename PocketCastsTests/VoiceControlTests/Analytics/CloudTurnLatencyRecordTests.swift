@@ -20,6 +20,22 @@ final class CloudTurnLatencyRecordTests: XCTestCase {
         XCTAssertTrue(line.contains("request_id=r1"), line)
     }
 
+    /// The audio counts are appended when the sink supplies them and absent otherwise, so a line
+    /// never reports a count nobody measured.
+    func test_reportsTheAudioFrameAndBufferClearCountsOnlyWhenGiven() {
+        let record = CloudTurnLatencyRecord(requestId: "r-counts", endOfSpeech: 10.0)
+        let plain = record.logLine(requestSent: 10.2, firstAudible: nil, outcome: "done")
+        XCTAssertFalse(plain.contains("audio_frames="), plain)
+        XCTAssertFalse(plain.contains("buffer_cleared="), plain)
+
+        let counted = record.logLine(requestSent: 10.2, firstAudible: nil, outcome: "done",
+                                     audioFrames: 7, bufferClears: 1)
+        XCTAssertTrue(counted.contains("first_audible=absent audio_frames=7 buffer_cleared=1"), counted)
+        let zero = record.logLine(requestSent: 10.2, firstAudible: nil, outcome: "done",
+                                  audioFrames: 0, bufferClears: 0)
+        XCTAssertTrue(zero.contains("audio_frames=0 buffer_cleared=0"), "zero is reported, not omitted: \(zero)")
+    }
+
     /// A turn that produced no audio says so. A record that silently omitted the number would be
     /// indistinguishable from one that never ran, which is exactly the failure worth measuring.
     func test_aTurnWithNoAudioReportsAbsenceRatherThanZero() {
