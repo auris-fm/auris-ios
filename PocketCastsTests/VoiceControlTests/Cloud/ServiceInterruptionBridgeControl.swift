@@ -262,6 +262,27 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
 
     // MARK: - Baseline
 
+    /// A barge-in follow-up is resubmitted after the interrupted turn settles. It must carry the
+    /// latency context it was admitted with: built without it, the resubmitted turn writes a record
+    /// with no end of speech, so a spoken turn is reported as if it had no start.
+    func testAHeldFollowUpCarriesItsOriginalLatencyContext() {
+        let state = CloudInterruptionState()
+        let context = TurnLatencyContext()
+        context.endOfSpeech = 1_000.0
+        XCTAssertTrue(state.claimInterruptEmission(forRequestId: "u-prior"))
+        XCTAssertTrue(
+            state.hold(request: "play the next one", utteranceId: "u-barge", origin: nil,
+                       latency: LatencyHandle(context), forRequestId: "u-prior"),
+            "premise: the follow-up is retained")
+
+        let released = state.recordTerminalAcknowledgement(forRequestId: "u-prior")
+
+        XCTAssertTrue(
+            released?.latency.context === context,
+            "the released follow-up must carry the SAME context it was admitted with")
+        XCTAssertEqual(released?.latency.context?.endOfSpeech, 1_000.0)
+    }
+
     /// An ordinary turn reaches the wire exactly once. This makes the zeros below meaningful:
     /// without it, "zero authenticate frames" could be satisfied by a harness that never reached
     /// the service at all.

@@ -135,20 +135,16 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertTrue(failed.contains("first_audible=absent"), failed)
     }
 
-    /// A turn with an AUDIO FIXTURE still reports absence, because the stub never renders.
+    /// A turn with an AUDIO FIXTURE reports its own line, consistently, whether or not the
+    /// simulator's engine rendered.
     ///
-    /// What this pins is the pass-through once more: the line is produced by the sink reading
-    /// `audioPlayer.firstAudibleHostSeconds` at the terminal, and it must attribute itself to ITS
-    /// request. The sibling test above cannot do the second half - its `=absent` assertion is
-    /// satisfied whether or not the line belongs to the turn under test.
-    ///
-    /// WHAT THIS DELIBERATELY DOES NOT CLAIM: it does not prove the positive case. The stub feeds
-    /// raw byte payloads, so `AVAudioPlayerNode` has no `lastRenderTime`, `noteFirstAudibleIfRendering`
-    /// never takes the mark, and every line here reads `first_audible=absent`. A rendered turn
-    /// cannot be produced through this harness without adding a test-only setter on the player,
-    /// which would pass against logic production never runs. The positive leg is pinned where it
-    /// CAN be reached - `CloudTurnLatencyRecordTests` asserts `2100ms` from the record - and the
-    /// real end-to-end figure needs a signed-in device, which is Merlin's manual check.
+    /// It used to assert `first_audible=absent`, "because the stub never renders". That was true
+    /// only because the record was written at `done`, before the node had rendered anything: the
+    /// engine does start on the simulator, and the mark lands moments later. The record now waits
+    /// for it, so this turn can legitimately report a duration. Whether the simulator's engine
+    /// renders is the host's business, so the assertion is the part that cannot depend on it:
+    /// the line belongs to THIS request, and it is internally consistent - absence is stated as
+    /// absence, and a measured turn has a measured request leg rather than `none`.
     @MainActor
     func testAnAudioFixtureTurnReportsItsOwnLineWithoutClaimingAudio() async throws {
         // Unique per RUN: the app log persists, so a fixed id would read the previous run's line.
@@ -177,15 +173,74 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             Self.requestId(of: line), utteranceId,
             "the line must be THIS turn's, not a stale one from an earlier run: \(line)")
         XCTAssertTrue(line.contains("outcome=done"), line)
-        // The honest expectation for a stub turn: absence, stated as absence rather than as a
-        // label that happens to match. A duration here would mean the player reported audio it
-        // never played.
+        let measured = !line.contains("first_audible=absent")
+        if measured {
+            XCTAssertFalse(
+                line.contains("request_to_first_audible=none"),
+                "a turn that reports an audible instant must report the request leg to it: \(line)")
+        } else {
+            XCTAssertTrue(
+                line.contains("end_of_speech_to_first_audible=none"),
+                "no audible instant means the leg is unmeasured, not zero: \(line)")
+        }
+    }
+
+    /// A SHORT reply's stream ends before its first buffer reaches the player.
+    ///
+    /// The whole answer can arrive, and `done` with it, while the player is still starting: the
+    /// first-audible mark is taken only once the node renders, so a record written AT `done` reports
+    /// `first_audible=absent` for audio that then plays (seen on a device: the line was written
+    /// 53 ms before the first buffer was scheduled). The record must be HELD while audio is
+    /// outstanding and unmarked, then written once - when the mark lands, or when playback ends
+    /// with nothing played.
+    ///
+    /// This pins the HOLD (no line at `done`, exactly one line once the player settles, and that
+    /// line is either absence or a measured leg), not a particular duration: whether the
+    /// simulator's engine renders the fixture is the host's business.
+    @MainActor
+    func testAShortReplyHoldsItsLatencyRecordUntilPlaybackSettles() async throws {
+        let utteranceId = "u-\(UUID().uuidString.prefix(12))-short"
+        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        defer { CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil }
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let sink = makeSinkWithConsumer(
+            RecordingResultConsumer(),
+            audioPayloads: (0..<40).map { Data([UInt8($0)]) }
+        )
+        let context = TurnLatencyContext()
+        context.endOfSpeech = 0
+        _ = await sink.routeToCloud(
+            request: "x", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: nil, utteranceId: utteranceId,
+            latency: LatencyHandle(context))
+
+        let player = try XCTUnwrap(sink.audioPlayerForTesting)
+        // The precondition the name claims: audio is still outstanding when the turn returns.
+        // If it were not, "held" would be indistinguishable from "emitted at done".
+        try XCTSkipUnless(
+            player.hasOutstandingOutput,
+            "the stub drained before the turn returned, so no hold can be observed")
+        let early = await FileLog.shared.logFileAsString().split(separator: "\n")
+            .filter { Self.requestId(of: String($0)) == utteranceId }
         XCTAssertTrue(
-            line.contains("first_audible=absent"),
-            "a stub turn plays no audio, so it must not claim any: \(line)")
+            early.isEmpty,
+            "the record was written at `done` while audio was still outstanding and unmarked: \(early)")
+
+        let line = try await latencyLine(for: utteranceId)
+        XCTAssertTrue(line.contains("outcome=done"), line)
+        // Settled, the record is final either way: absence stated as absence, or a measured leg.
+        // Which one the simulator's engine produces is not what this pins; the hold is.
         XCTAssertTrue(
-            line.contains("end_of_speech_to_first_audible=none"),
-            "no audible instant means the leg is unmeasured, not zero: \(line)")
+            line.contains("first_audible=absent") || !line.contains("request_to_first_audible=none"),
+            "the settled record must state absence or carry a measured request leg: \(line)")
+        let all = await FileLog.shared.logFileAsString().split(separator: "\n")
+            .filter { Self.requestId(of: String($0)) == utteranceId }
+        XCTAssertEqual(all.count, 1, "exactly one record per turn: \(all)")
     }
 
     /// A turn with NO early-connection tag still reports its end of speech.

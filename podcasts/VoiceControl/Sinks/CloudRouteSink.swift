@@ -392,6 +392,20 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// can be the same turn when a foreign notification arrives, and a drain identity alone cannot
     /// say whether this turn still owns the release.
     private var restoreHeldForPlayerDrain: (owner: CloudTurnToken, drainEpoch: Int)?
+
+    /// A turn's latency record, held because its `done` arrived while audio was outstanding and
+    /// not yet audible. A short reply's whole stream can end before the first buffer reaches the
+    /// player, and a record written at `done` then says `first_audible=absent` for audio that plays.
+    /// Written exactly once: when the first audible instant lands, or when playback settles with
+    /// nothing marked, or when the next turn starts (a flush, so a record is never left behind).
+    /// The argument is the instant taken, nil when none was.
+    private var heldLatencyRecord: ((Double?) -> Void)?
+
+    private func writeHeldLatencyRecord(firstAudible: Double?) {
+        guard let held = heldLatencyRecord else { return }
+        heldLatencyRecord = nil
+        held(firstAudible)
+    }
     /// THIS sink's live playback hold. Acquired at the turn's admitted dispatch; ownership
     /// TRANSFERS atomically (begin-successor before end-predecessor) when a new turn is admitted,
     /// so a successor never runs hold-free between turns. Released at every terminal: error,
@@ -1075,6 +1089,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 request: request,
                 utteranceId: utteranceId,
                 origin: origin,
+                latency: latency,
                 forRequestId: priorRequestId
             )
             if await sendInterruptOnPriorSocket(forRequestId: priorRequestId) == .undelivered {
@@ -1398,12 +1413,16 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         if ownerCancelledFlag.isSet || Task.isCancelled {
             activeResultSocket?.finishTurn()
         }
+        // A previous turn's record still held for its first audible instant is written now, as
+        // it stands: this turn is about to own the player, which clears that mark.
+        writeHeldLatencyRecord(firstAudible: nil)
         // The turn's client-side latency record: created when the request goes out and emitted
         // ONCE at the terminal, whether or not audio was ever heard.
         let latencyRecord = CloudTurnLatencyRecord(
             requestId: turnRequestId,
             endOfSpeech: latency.context?.endOfSpeech,
-            endpointDecision: latency.context?.endpointDecisionAt
+            endpointDecision: latency.context?.endpointDecisionAt,
+            followUpHeld: isRetainedFollowUpSubmission
         )
         // Local names the closure and the loop below share. Swift forbids a local function that
         // captures a local declared before it, so the state lives in an explicit box.
@@ -1429,6 +1448,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         }
         var turnResult: CloudRouteOutcome?
         var turnResponse: VoiceResponse = .silent
+        var receivedAudio = false
         await withTaskCancellationHandler {
             turnLoop: for await event in routed.stream {
                 // Superseded mid-stream: stop consuming so this turn cannot execute
@@ -1449,6 +1469,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // after cancel must not reach the player.
                     if ownerCancelledFlag.isSet || Task.isCancelled { break turnLoop }
                     audioPlayer.enqueue(frame)
+                    receivedAudio = true
                     noteAudioStillPlaying()
                 case let .action(tool, action, params, operationId, capabilityVersion):
                     // BUFFERED admission check: an event drained from the buffer after the owner
@@ -1495,7 +1516,17 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                         requestId: turnRequestId,
                         conversationId: turnConversationId
                     )
-                    emitLatencyRecord("done")
+                    // Audio received but not yet audible: hold the record for the mark (see
+                    // `heldLatencyRecord`). Anything else - no audio, or already marked - is final now.
+                    noteAudioStillPlaying()
+                    if receivedAudio, latencyState.firstAudible == nil, audioPlayer.hasOutstandingOutput {
+                        heldLatencyRecord = { mark in
+                            if latencyState.firstAudible == nil { latencyState.firstAudible = mark }
+                            emitLatencyRecord("done")
+                        }
+                    } else {
+                        emitLatencyRecord("done")
+                    }
                     analytics?.recordCloudAssistantTurn(
                         outcome: "done",
                         inputTokens: usage.inputTokens,
@@ -2167,6 +2198,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         sourceTranscript: String? = nil,
         sourceLanguage: String? = nil,
         translationKind: TranslationKind? = nil,
+        latency: LatencyHandle = LatencyHandle(),
         validatingEpoch: UInt64? = nil,
         isEpochStillCurrent: (@Sendable (UInt64) -> Bool)? = nil
     ) async -> String? {
@@ -2201,6 +2233,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             sourceTranscript: sourceTranscript,
             sourceLanguage: sourceLanguage,
             translationKind: translationKind,
+            latency: latency,
             forRequestId: priorRequestId
         ) else {
             // A different turn is already holding a follow-up: the contract allows exactly one
@@ -2481,7 +2514,14 @@ extension CloudRouteSink {
         // frames arrive.
     }
 
+    func audioPlayerDidTakeFirstAudible(at instant: Double) {
+        writeHeldLatencyRecord(firstAudible: instant)
+    }
+
     func audioPlayerDidStop(drainEpoch: Int) {
+        // Playback settled with nothing marked for a record still held: it is written as it
+        // stands (absent), exactly once.
+        writeHeldLatencyRecord(firstAudible: nil)
         // A rolled-back admission's hold releases exactly here: the stop it was waiting on
         // has confirmed (epoch identity, monotonic), so the output it covered is quiescent
         // and the window's allowance may be re-armed by THIS end — never earlier.

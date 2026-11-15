@@ -31,11 +31,17 @@ final class CloudTurnLatencyRecord: Equatable {
     /// configured hangover. Reported as its own stage: that gap is real wait the user pays before
     /// recognition even starts.
     let endpointDecision: Double?
+    /// True for a barge-in follow-up that was held while the turn it interrupted settled. Its end
+    /// of speech is the user's real one, but its request went out only after that hold, so its
+    /// end-of-speech-to-request time is not the phone's normal send path. Tagged on the line so
+    /// medians can separate or exclude these turns.
+    let followUpHeld: Bool
 
-    init(requestId: String, endOfSpeech: Double?, endpointDecision: Double? = nil) {
+    init(requestId: String, endOfSpeech: Double?, endpointDecision: Double? = nil, followUpHeld: Bool = false) {
         self.requestId = requestId
         self.endOfSpeech = endOfSpeech
         self.endpointDecision = endpointDecision
+        self.followUpHeld = followUpHeld
     }
 
     /// Milliseconds of capture-side hangover between the last speech sample and the endpoint
@@ -89,6 +95,7 @@ final class CloudTurnLatencyRecord: Equatable {
             "end_of_speech_to_first_audible=\(ms(toAudible))",
         ]
         if firstAudible == nil { parts.append("first_audible=absent") }
+        if followUpHeld { parts.append("follow_up=held") }
         return parts.joined(separator: " ")
     }
 }

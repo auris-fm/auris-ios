@@ -27,6 +27,11 @@ final class CloudAudioPlayer: @unchecked Sendable {
         /// drain was SCHEDULED. Delivery is asynchronous, so an identity taken at delivery time
         /// would belong to whichever drain is current then.
         func audioPlayerDidStop(drainEpoch: Int)
+        /// Called once per turn, when the first audible instant is taken (`at` is on the same
+        /// monotonic clock as `firstAudibleHostSeconds`). The value is passed rather than re-read
+        /// because the player clears its mark when the turn's audio ends, which can happen before
+        /// a delivery hopped to the main queue runs.
+        func audioPlayerDidTakeFirstAudible(at instant: Double)
     }
 
     /// Codecs this player can actually decode and play.
@@ -1255,11 +1260,18 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // no path from the read back into the mark.
         guard let node = playerNode else { return }
         firstAudibleLock.lock()
-        defer { firstAudibleLock.unlock() }
-        guard firstAudibleInstant == nil else { return }
-        guard let position = readRenderPosition(of: node), position.hostTime > 0 else { return }
-        firstAudibleInstant = position.hostTime
-            - position.renderedFrames / max(position.sourceSampleRate, 1)
+        guard firstAudibleInstant == nil,
+              let position = readRenderPosition(of: node), position.hostTime > 0 else {
+            firstAudibleLock.unlock()
+            return
+        }
+        let instant = position.hostTime - position.renderedFrames / max(position.sourceSampleRate, 1)
+        firstAudibleInstant = instant
+        firstAudibleLock.unlock()
+        // Outside the lock. Queued on the main queue here, ahead of the stop notification's own
+        // hop (the stop can only come later), so a record held for this mark is written with it
+        // before the stop that would otherwise find the mark already cleared.
+        DispatchQueue.main.async { [weak self] in self?.delegate?.audioPlayerDidTakeFirstAudible(at: instant) }
     }
 
     /// The instant this turn's answer first became audible, or nil when nothing has been heard yet.
@@ -1711,4 +1723,9 @@ final class CloudAudioPlayer: @unchecked Sendable {
         capturedStopNotification = capture
         bufferLock.unlock()
     }
+}
+
+extension CloudAudioPlayer.Delegate {
+    /// Optional: only a delegate that holds something for the first audible instant needs it.
+    func audioPlayerDidTakeFirstAudible(at instant: Double) {}
 }

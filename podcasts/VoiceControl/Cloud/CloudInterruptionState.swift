@@ -81,6 +81,10 @@ final class CloudInterruptionState: @unchecked Sendable {
         /// How the recognized text was produced (native / platform / backend translation), so the
         /// follow-up dispatches under the same translation regime it was admitted with.
         let translationKind: TranslationKind?
+        /// The latency context the utterance was ADMITTED with (end of speech, endpoint decision).
+        /// Without it the resubmitted turn writes a record with no start: its measurement would be
+        /// absent for exactly the turns that were spoken over a playing answer.
+        let latency: LatencyHandle
         /// The INTERRUPTED turn this follow-up was addressed to — the subject of the pending
         /// report and, with the release, the whole authority to submit.
         let interruptedRequestId: String
@@ -94,6 +98,7 @@ final class CloudInterruptionState: @unchecked Sendable {
         let translationKind: TranslationKind?
         let utteranceId: String
         let origin: Int?
+        let latency: LatencyHandle
         /// The turn this utterance interrupts. Bound at hold time; a terminal for any other turn
         /// must not resolve it.
         let interruptedRequestId: String
@@ -145,6 +150,7 @@ final class CloudInterruptionState: @unchecked Sendable {
         sourceTranscript: String? = nil,
         sourceLanguage: String? = nil,
         translationKind: TranslationKind? = nil,
+        latency: LatencyHandle = LatencyHandle(),
         forRequestId interruptedRequestId: String
     ) -> Bool {
         lock.lock(); defer { lock.unlock() }
@@ -158,6 +164,7 @@ final class CloudInterruptionState: @unchecked Sendable {
             translationKind: translationKind,
             utteranceId: utteranceId,
             origin: origin,
+            latency: latency,
             interruptedRequestId: interruptedRequestId
         )
         return true
@@ -186,6 +193,7 @@ final class CloudInterruptionState: @unchecked Sendable {
             sourceTranscript: held.sourceTranscript,
             sourceLanguage: held.sourceLanguage,
             translationKind: held.translationKind,
+            latency: held.latency,
             interruptedRequestId: requestId
         )
     }

@@ -787,6 +787,7 @@ class VoiceControlService: ObservableObject {
             sourceTranscript: input.sourceTranscript,
             sourceLanguage: input.sourceLanguage,
             translationKind: input.translationKind,
+            latency: input.latency,
             // The window this capture was ADMITTED under, carried to the effect boundary
             // (reviewer c38ff4ba item 3). A service stop/restart between the caller's check and
             // the main-actor hop is otherwise invisible: the sink would interrupt on behalf of a
@@ -1020,7 +1021,8 @@ class VoiceControlService: ObservableObject {
                 routerTranscript: released.request,
                 translationKind: released.translationKind ?? .none,
                 selection: released.selection,
-                utteranceId: released.utteranceId
+                utteranceId: released.utteranceId,
+                latency: released.latency
             ),
             origin: released.origin,
             selection: released.selection

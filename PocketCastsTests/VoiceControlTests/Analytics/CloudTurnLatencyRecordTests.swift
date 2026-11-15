@@ -51,4 +51,19 @@ final class CloudTurnLatencyRecordTests: XCTestCase {
         XCTAssertNil(record.endOfSpeechToFirstAudibleMs(firstAudible: 99.0))
         XCTAssertNil(record.endOfSpeechToRequestMs(requestSent: 99.0))
     }
+
+    /// A barge-in follow-up went out only after the turn it interrupted settled, so its
+    /// end-of-speech-to-request time includes that hold. The line says so, and an ordinary turn
+    /// does not, so the two can be separated when the medians are taken.
+    func test_aHeldFollowUpIsTaggedAndAnOrdinaryTurnIsNot() {
+        let held = CloudTurnLatencyRecord(requestId: "r5", endOfSpeech: 10.0, followUpHeld: true)
+            .logLine(requestSent: 13.0, firstAudible: 14.0, outcome: "done")
+        let ordinary = CloudTurnLatencyRecord(requestId: "r6", endOfSpeech: 10.0)
+            .logLine(requestSent: 11.0, firstAudible: 12.0, outcome: "done")
+
+        XCTAssertTrue(held.contains("follow_up=held"), held)
+        XCTAssertTrue(held.contains("end_of_speech_to_request=3000ms"),
+                      "the carried end of speech is the user's own, so the hold shows in the number: \(held)")
+        XCTAssertFalse(ordinary.contains("follow_up="), ordinary)
+    }
 }
