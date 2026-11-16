@@ -3569,10 +3569,20 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// path: N+1 receives its frames only AFTER that wait confirms N's stop, which is why N's stop
     /// can no longer be outstanding when they arrive — the retire wait is the admission barrier.
     /// The break this catches: any path that lets N+1's frames reach the player while N's stop is
-    /// still unconfirmed (or drops them outright) fails the epoch-ordering or frame-count
-    /// assertions below. Falsified: delivering N's withheld confirmation early (before N+1
-    /// waits) fails both premise assertions — the epoch advances and all 7 successor frames
-    /// enqueue while the wait should still be holding them.
+    /// still unconfirmed (or drops them outright) fails the premise or frame-count assertions
+    /// below.
+    ///
+    /// The release is gated on PROOF the retire was reached, never on the client's existence: the
+    /// client is built at admission, ~180 lines BEFORE the retire cancel, so a new captured task
+    /// alone says nothing about the wait. Two measured facts gate it instead — the retire cancel
+    /// was requested (`cancelRequestCountForTesting` grew), and the runner's physical stop for it
+    /// has run and its notification is HELD in the box. Only then is the capture uninstalled and
+    /// the held confirmation delivered.
+    ///
+    /// Falsified two ways: delivering the held confirmation early (while the stop is still parked
+    /// at the armed gate) advances the epoch and enqueues all 7 successor frames while the wait
+    /// should still be holding them; and an admission that skips the retire wait leaves the cancel
+    /// count unchanged, so the gate barrier itself fails.
     @MainActor
     func testASuccessorsAudioIsNeverLostToAPredecessorsStop() async throws {
         CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
@@ -3588,7 +3598,9 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         let player = try XCTUnwrap(sink.audioPlayerForTesting)
         addTeardownBlock { @MainActor in
             producerRelease.signal()
+            player.setDrainHoldForTesting(false)
             player.openPhysicalStopGateForTesting()
+            player.setCapturedStopNotificationForTesting(nil)
             let stop = player.cancel()
             _ = await player.awaitActualStop(after: stop)
             withExtendedLifetime(sink) {}
@@ -3608,36 +3620,63 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         blockProducerAfterFrames = nil
         nextTurnFixture = Self.doneOnlyFixture
         nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x22, count: 4_800 * 2) }
-        // Withhold N's stop-notification delivery so the retire wait is observable, not a race:
-        // without this the simulator confirms the stop before N+1 arrives and the ordering
-        // assertion below would pass vacuously. N's engine HAS stopped; only the confirmation
-        // that admits N+1 is held. Delivered once N+1 is provably waiting on it.
+        // Hold N's drain at the claim seam so its terminal stop cannot run before N+1's retire
+        // cancel lands: the cancel then OWNS the single physical stop (coalesced accounting), and
+        // that stop is parked at the armed gate. The confirmation that admits N+1 is withheld in
+        // the box; N's engine stop is real, only its delivery is held.
         final class StopDeliveryBox: @unchecked Sendable {
             private let lock = NSLock()
-            private var deliveries: [() -> Void] = []
-            func store(_ d: @escaping () -> Void) { lock.lock(); deliveries.append(d); lock.unlock() }
-            func deliverAll() { lock.lock(); let all = deliveries; deliveries = []; lock.unlock(); all.forEach { $0() } }
+            private var deliveries: [(epoch: Int, deliver: () -> Void)] = []
+            func store(_ epoch: Int, _ d: @escaping () -> Void) { lock.lock(); deliveries.append((epoch, d)); lock.unlock() }
+            var count: Int { lock.lock(); defer { lock.unlock() }; return deliveries.count }
+            func deliverAll() { lock.lock(); let all = deliveries; deliveries = []; lock.unlock(); all.forEach { $0.deliver() } }
         }
         let stopBox = StopDeliveryBox()
-        player.setCapturedStopNotificationForTesting { _, deliver in stopBox.store(deliver) }
+        let claimReached = DispatchSemaphore(value: 0)
+        let claimRelease = DispatchSemaphore(value: 0)
+        player.claimReached = claimReached
+        player.claimRelease = claimRelease
+        player.setCapturedStopNotificationForTesting { epoch, deliver in stopBox.store(epoch, deliver) }
         let confirmedBefore = player.confirmedStopEpoch()
         let enqueuedBefore = player.framesEnqueuedForTesting
+        let cancelsBefore = player.cancelRequestCountForTesting
         let boundariesBefore = player.schedulingBoundaryCount
+        let nTask = capturedTask
         let successor = Task {
             await sink.routeToCloud(request: "second", tier: .free, context: sampleContext(),
                                     origin: cloudTestOrigin, selection: .followUp,
                                     utteranceId: "u-successor-\(UUID().uuidString)")
         }
-        // N+1's client is built at admission, so a NEW captured task proves it reached the
-        // retire wait; its socket must still be silent because N's confirmation is withheld.
-        let nTask = capturedTask
-        try await waitUntil("N+1 is admitted and waiting on N's held stop", timeout: 3) {
-            self.capturedTask !== nTask && self.capturedTask?.sentTextFrames.isEmpty == true
+        // PROOF 1: the retire cancel was requested. An admission that skips the retire wait never
+        // requests it, so this barrier fails rather than the test passing without the barrier.
+        try await waitUntil("N+1's retire cancel was requested", timeout: 3) {
+            player.cancelRequestCountForTesting > cancelsBefore
+        }
+        XCTAssertEqual(player.confirmedStopEpoch(), confirmedBefore,
+                       "premise: N's stop is still unconfirmed when the retire cancel lands")
+        // Let the claimed drain proceed: its physical stop IS the retire cancel's stop, and it
+        // parks at the armed gate (allow 0) instead of confirming.
+        player.armPhysicalStopGateForTesting(allow: 0)
+        claimRelease.signal()
+        // PROOF 2: the physical stop reached the armed gate and parked.
+        try await waitUntil("the retire's physical stop parked at the gate", timeout: 3) {
+            player.physicalStopGateArrivalsForTesting >= 1
+        }
+        // Release the park: the engine stop runs and its notification is captured, not delivered.
+        player.openPhysicalStopGateForTesting()
+        // PROOF 3: the stop's confirmation is genuinely HELD — the box owns a delivery for an
+        // epoch at or after the retire's, and nothing has confirmed it yet.
+        try await waitUntil("the retire stop's confirmation is held in the box", timeout: 3) {
+            stopBox.count >= 1
         }
         XCTAssertEqual(player.confirmedStopEpoch(), confirmedBefore,
                        "premise: N's stop is still unconfirmed while N+1 waits")
         XCTAssertEqual(player.framesEnqueuedForTesting, enqueuedBefore,
                        "no successor audio may be enqueued before the retire wait confirms N's stop")
+        XCTAssertNotNil(capturedTask)
+        XCTAssertFalse(capturedTask === nTask, "premise: N+1 has its own socket")
+        XCTAssertTrue(capturedTask?.sentTextFrames.isEmpty == true,
+                      "premise: N+1 has not reached the wire while N's confirmation is withheld")
         // Uninstall the capture first so N+1's OWN drain stop delivers normally, then deliver
         // N's withheld confirmation: the retire wait resolves and N+1 admits its own audio.
         player.setCapturedStopNotificationForTesting(nil)
@@ -3651,6 +3690,8 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         try await waitUntil("N+1's audio is scheduled", timeout: 3) {
             player.schedulingBoundaryCount > boundariesBefore
         }
+        player.claimReached = nil
+        player.claimRelease = nil
     }
 
     /// POSITIVE CONTROL: with no third utterance, N+1 reaches the wire, its action executes once
