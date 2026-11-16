@@ -3563,8 +3563,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertTrue(line.contains("audio_frames=7 buffer_cleared=0"), "normal turn counts: \(line)")
     }
 
-    /// A PREDECESSOR'S STOP THAT IS STILL UNCONFIRMED CANNOT DELETE THE SUCCESSOR'S AUDIO
-    /// (turn C6F16A1C).
+    /// A PREDECESSOR'S STOP THAT IS STILL UNCONFIRMED CANNOT DELETE THE SUCCESSOR'S AUDIO.
     ///
     /// N ended `done` with its audio outstanding, so N+1 is admitted through the retire-then-wait
     /// path: N+1 receives its frames only AFTER that wait confirms N's stop, which is why N's stop
@@ -3646,7 +3645,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         let successorResult = await successor.value
         XCTAssertEqual(successorResult.outcome, .completed, "N+1 completes")
         XCTAssertGreaterThan(player.confirmedStopEpoch(), confirmedBefore,
-                             "the retire wait confirmed N's stop BEFORE N+1 admitted")
+                             "N's stop was confirmed")
         XCTAssertEqual(player.framesEnqueuedForTesting - enqueuedBefore, 7,
                        "every audio frame N+1 receives must reach the player")
         try await waitUntil("N+1's audio is scheduled", timeout: 3) {
