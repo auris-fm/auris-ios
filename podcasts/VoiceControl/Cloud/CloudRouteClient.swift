@@ -886,7 +886,11 @@ final class CloudRouteClient {
 
         case "done":
             let usage = parseDone(json: json)
-            return [.done(usage: usage)]
+            // The wire's REQUIRED `outcome`. Anything other than the one interruption value is
+            // read as a completion, so an omitted field keeps the behaviour it always had rather
+            // than discarding a finished answer.
+            let outcome = CloudTurnDoneOutcome(rawValue: json["outcome"] as? String ?? "") ?? .completed
+            return [.done(usage: usage, outcome: outcome)]
 
         case "error":
             guard let code = json["code"] as? String,

@@ -1307,7 +1307,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // the terminal still has to arrive to release the successor.
                     if turnToken.effectsClosed { continue }
                     presentDiscoveryResults(DiscoveryResultsViewModel(result: result))
-                case let .done(usage):
+                case let .done(usage, outcome):
                     // Buffered-`done` admission check: a cancelled owner must not report a
                     // completed result for an event drained after cancellation (mirrors the
                     // action guard above; earlyClose classification follows below).
@@ -1334,6 +1334,34 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                         requestId: turnRequestId,
                         conversationId: turnConversationId
                     )
+                    // INTERRUPTED `done` (`cloud-assistant.md` → event table and Interruption):
+                    // "discard output and release this turn's audio ownership without draining".
+                    // The user took this answer back, so playing its buffered tail out to the end
+                    // is exactly what must not happen. Shed it here — a cancel, not a finish — and
+                    // wait for the ACTUAL stop before releasing the window, on the same identity
+                    // rules as every other terminal. The turn is not a completion either.
+                    if outcome == .interrupted {
+                        analytics?.recordCloudAssistantTurn(
+                            outcome: "interrupted",
+                            inputTokens: usage.inputTokens,
+                            outputTokens: usage.outputTokens
+                        )
+                        let stopEpoch = audioPlayer.cancel()
+                        if await audioPlayer.awaitActualStop(after: stopEpoch) {
+                            // Revalidate after the suspension: a successor may own the window now.
+                            if activeTurn == nil || activeTurn === turnToken {
+                                restoreTransientAudioState()
+                            }
+                        } else {
+                            let stillOwner = activeTurn == nil || activeTurn === turnToken
+                            if stillOwner && restoreHeldForPlayerDrain == nil {
+                                restoreHeldForPlayerDrain = (owner: turnToken, drainEpoch: stopEpoch)
+                            }
+                        }
+                        turnResult = .earlyClose
+                        turnResponse = .silent
+                        break turnLoop
+                    }
                     analytics?.recordCloudAssistantTurn(
                         outcome: "done",
                         inputTokens: usage.inputTokens,
