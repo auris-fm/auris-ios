@@ -3598,7 +3598,6 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         let player = try XCTUnwrap(sink.audioPlayerForTesting)
         addTeardownBlock { @MainActor in
             producerRelease.signal()
-            player.setDrainHoldForTesting(false)
             player.openPhysicalStopGateForTesting()
             player.setCapturedStopNotificationForTesting(nil)
             let stop = player.cancel()
@@ -3632,9 +3631,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             func deliverAll() { lock.lock(); let all = deliveries; deliveries = []; lock.unlock(); all.forEach { $0.deliver() } }
         }
         let stopBox = StopDeliveryBox()
-        let claimReached = DispatchSemaphore(value: 0)
         let claimRelease = DispatchSemaphore(value: 0)
-        player.claimReached = claimReached
         player.claimRelease = claimRelease
         player.setCapturedStopNotificationForTesting { epoch, deliver in stopBox.store(epoch, deliver) }
         let confirmedBefore = player.confirmedStopEpoch()
@@ -3690,7 +3687,6 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         try await waitUntil("N+1's audio is scheduled", timeout: 3) {
             player.schedulingBoundaryCount > boundariesBefore
         }
-        player.claimReached = nil
         player.claimRelease = nil
     }
 
