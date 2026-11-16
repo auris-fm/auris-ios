@@ -7,6 +7,8 @@ class RefreshOperation: Operation, @unchecked Sendable {
 
     private var completionHandler: ((RefreshFetchResult) -> Void)?
 
+    private let createdDate = Date()
+
     private lazy var apiQueue: OperationQueue = {
         let queue = OperationQueue()
         queue.maxConcurrentOperationCount = 1
@@ -31,6 +33,8 @@ class RefreshOperation: Operation, @unchecked Sendable {
             let trace = TraceManager.shared.beginTracing(eventName: "SERVER_REFRESH")
             defer { TraceManager.shared.endTracing(trace: trace) }
 
+            FileLog.shared.addMessage("Refresh - Processing response after waiting \(createdDate.elapsedTimeDescription) in the queue")
+
             // look for new podcasts from the server
             let refreshResult = performRefresh()
 
@@ -54,18 +58,26 @@ class RefreshOperation: Operation, @unchecked Sendable {
             // refresh is done, now perform a sync if the user has a sync account
             if SyncManager.isUserLoggedIn() {
                 NotificationCenter.default.post(name: ServerNotifications.syncStarted, object: nil)
+                let syncStartDate = Date()
 
-                if SubscriptionHelper.hasActiveSubscription() { apiQueue.addOperation(RetrieveCustomFilesTask()) }
-                apiQueue.addOperation(UpNextSyncTask())
+                if SubscriptionHelper.hasActiveSubscription() { addTimedOperation(RetrieveCustomFilesTask()) }
                 let syncTask = SyncTask()
-                apiQueue.addOperation(syncTask)
+                let upNextAndSyncTasks = Self.upNextAndSyncTasks(
+                    upNextSyncTask: UpNextSyncTask(),
+                    syncTask: syncTask,
+                    isFullSyncPending: SyncTask.isFullSyncPending(),
+                    isUpNextEmpty: DataManager.shared.playlistEpisodeCount() == 0
+                )
+                for task in upNextAndSyncTasks {
+                    addTimedOperation(task)
+                }
 
-                apiQueue.addOperation(SyncHistoryTask())
+                addTimedOperation(SyncHistoryTask())
 
-                apiQueue.addOperation(SyncSettingsTask())
+                addTimedOperation(SyncSettingsTask())
 
                 #if !os(watchOS)
-                    ServerSettings.iapUnverifiedPurchaseReceiptDate() == nil ? apiQueue.addOperation(SubscriptionStatusTask()) : apiQueue.addOperation(PurchaseReceiptTask())
+                    ServerSettings.iapUnverifiedPurchaseReceiptDate() == nil ? addTimedOperation(SubscriptionStatusTask()) : addTimedOperation(PurchaseReceiptTask())
                 #endif
 
                 #if !os(watchOS)
@@ -78,12 +90,13 @@ class RefreshOperation: Operation, @unchecked Sendable {
                 // we use the sync task as the main indication of whether the sync has failed
                 let syncResult = syncTask.status
                 if syncResult == .failed || syncResult == .cancelled {
+                    FileLog.shared.addMessage("Sync failed in \(syncStartDate.elapsedTimeDescription)")
                     completionHandler?(.failed)
                 } else {
                     // however we use the refresh to indicate to iOS whether we found new stuff or not
                     completionHandler?(refreshResult == .successNewData ? .newData : .noData)
 
-                    FileLog.shared.addMessage("Sync succeeded")
+                    FileLog.shared.addMessage("Sync succeeded in \(syncStartDate.elapsedTimeDescription)")
 
                     ServerNotificationsHelper.shared.fireSyncCompleted()
                     ServerConfig.shared.syncDelegate?.playlistChanged()
@@ -92,12 +105,29 @@ class RefreshOperation: Operation, @unchecked Sendable {
                 completionHandler?(refreshResult == .successNewData ? .newData : .noData)
             }
 
+            let afterSyncStartDate = Date()
+
             ServerConfig.shared.syncDelegate?.applyAutoArchivingToAllPodcasts()
 
             processAutoAddUpNextCandidates()
 
             ServerConfig.shared.syncDelegate?.performActionsAfterSync()
+
+            FileLog.shared.addMessage("Refresh - Finished the work after sync in \(afterSyncStartDate.elapsedTimeDescription)")
         }
+    }
+
+    private func addTimedOperation(_ task: ApiBaseTask) {
+        task.logsDuration = true
+        apiQueue.addOperation(task)
+    }
+
+    /// `UpNextSyncTask` and `SyncTask`, in the order they run
+    static func upNextAndSyncTasks(upNextSyncTask: UpNextSyncTask, syncTask: SyncTask, isFullSyncPending: Bool, isUpNextEmpty: Bool) -> [ApiBaseTask] {
+        if FeatureFlag.syncUpNextAfterFullSync.enabled, isFullSyncPending, isUpNextEmpty {
+            return [syncTask, upNextSyncTask]
+        }
+        return [upNextSyncTask, syncTask]
     }
 
     func performRefresh() -> UpdateStatus {
@@ -107,10 +137,11 @@ class RefreshOperation: Operation, @unchecked Sendable {
             return .cancelled
         }
 
+        let startDate = Date()
         var newEpisodesAdded = 0
 
         // the returned dictionary is indexed by podcast UUID and contains all the new episodes for that podcast
-        let podcasts = DataManager.sharedManager.allPodcasts(includeUnsubscribed: false)
+        let podcasts = DataManager.shared.allPodcasts(includeUnsubscribed: false)
         let updatedPodcasts = refreshResult.podcastUpdates
         var metadataRequestsQueued = 0
         for podcast in podcasts {
@@ -118,7 +149,7 @@ class RefreshOperation: Operation, @unchecked Sendable {
 
             let episodes: [Episode] = podcastEpisodes.reversed().compactMap({ episode in
                 guard let episodeUuid = episode.uuid else { return nil }
-                if let _ = DataManager.sharedManager.findEpisode(uuid: episodeUuid) { return nil }
+                if let _ = DataManager.shared.findEpisode(uuid: episodeUuid) { return nil }
 
                 let newEpisode = Episode()
                 newEpisode.podcast_id = podcast.id
@@ -130,7 +161,7 @@ class RefreshOperation: Operation, @unchecked Sendable {
                 return newEpisode
             })
 
-            DataManager.sharedManager.bulkSave(episodes: episodes)
+            DataManager.shared.bulkSave(episodes: episodes)
 
             for episode in episodes {
                 if isCancelled {
@@ -141,7 +172,7 @@ class RefreshOperation: Operation, @unchecked Sendable {
 
                 // store episodes that we might possibly add to Up Next for processing after a sync
                 if podcast.autoAddToUpNextOn() {
-                    DataManager.sharedManager.autoAddCandidates.add(podcastUUID: podcast.uuid, episodeUUID: episode.uuid)
+                    DataManager.shared.autoAddCandidates.add(podcastUUID: podcast.uuid, episodeUUID: episode.uuid)
                 }
 
                 #if !os(watchOS)
@@ -165,7 +196,7 @@ class RefreshOperation: Operation, @unchecked Sendable {
 
         UserDefaults.standard.set(Date(), forKey: ServerConstants.UserDefaults.lastRefreshEndTime)
 
-        FileLog.shared.addMessage("Refresh complete found \(newEpisodesAdded) new episodes")
+        FileLog.shared.addMessage("Refresh complete found \(newEpisodesAdded) new episodes in \(startDate.elapsedTimeDescription)")
 
         return (newEpisodesAdded > 0) ? .successNewData : .successNoNewData
     }
@@ -178,10 +209,10 @@ class RefreshOperation: Operation, @unchecked Sendable {
         // look through our candidate episodes that are new and should be added to Up Next, and add any that haven't been played or archived as part of the sync
         let upNextLimit = ServerSettings.autoAddToUpNextLimit()
 
-        let autoAddCandidates = DataManager.sharedManager.autoAddCandidates.candidates()
+        let autoAddCandidates = DataManager.shared.autoAddCandidates.candidates()
 
         if !autoAddCandidates.isEmpty {
-            let startingCount = ServerConfig.shared.playbackDelegate?.upNextQueueCount() ?? 0
+            let startingCount = ServerConfig.shared.playbackDelegate?.upNextQueueCount ?? 0
             FileLog.shared.addMessage("Checking for auto add to up next episodes in \(autoAddCandidates.count) podcasts that have been updated with auto add to up next turned on limit is \(upNextLimit) starting count is \(startingCount)")
         }
 
@@ -194,9 +225,9 @@ class RefreshOperation: Operation, @unchecked Sendable {
             let episodeUuid = candidate.episodeUuid
             let toTop = candidate.autoAddToUpNextSetting == .addFirst
 
-            guard let episode = DataManager.sharedManager.findEpisode(uuid: episodeUuid), !episode.played(), !episode.archived, let inUpNext = ServerConfig.shared.playbackDelegate?.inUpNext(episode: episode), inUpNext == false else { continue }
+            guard let episode = DataManager.shared.findEpisode(uuid: episodeUuid), !episode.played(), !episode.archived, let inUpNext = ServerConfig.shared.playbackDelegate?.inUpNext(episode: episode), inUpNext == false else { continue }
 
-            let currentCount = ServerConfig.shared.playbackDelegate?.upNextQueueCount() ?? 0
+            let currentCount = ServerConfig.shared.playbackDelegate?.upNextQueueCount ?? 0
             if currentCount < upNextLimit {
                 FileLog.shared.addMessage("Current Up Next count \(currentCount) is less than the limit, adding \(episode.displayableTitle()) to the \(toTop ? "top" : "bottom") of Up Next")
                 ServerConfig.shared.playbackDelegate?.addToUpNext(episode: episode, ignoringQueueLimit: false, toTop: toTop)
@@ -209,13 +240,13 @@ class RefreshOperation: Operation, @unchecked Sendable {
             }
 
             // The candidate has been processed, remove it from the database
-            DataManager.sharedManager.autoAddCandidates.remove(candidate)
+            DataManager.shared.autoAddCandidates.remove(candidate)
         }
 
         // We have finished processing all of the up next candidates.
         //
         // There is a chance that some candidates are invalid and were not processed. We'll solve this by deleting all
         // of the candidates from the DB to ensure there are no ghost episodes left over.
-        DataManager.sharedManager.autoAddCandidates.clearAll()
+        DataManager.shared.autoAddCandidates.clearAll()
     }
 }

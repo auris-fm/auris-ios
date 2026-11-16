@@ -1,26 +1,27 @@
-## Formatting
-
-Format all code using the linter formatter:
-```bash
-make format
-```
-
-Both SwiftLint build phases (`PreBuildActions/SwiftLint` and the app target's lenient phase) are
-unconditional and run on *every* build. Set `SKIP_LINT=1` to short-circuit them for a local
-iteration — `make build_fast` / `make test_fast` already do. `make lint` and CI still enforce the
-rules, so nothing reaches review unlinted.
-
 ## Building and Running
 
+When the `xcode` MCP server is available, prefer it for building, testing, running the app and more. Otherwise go through `make` — the targets are the project's only supported entry point (see the discipline section below):
+
 ```bash
-make build                # the Debug build against the staging gateway — what verification
-                          # before a PR should use (build_staging is an alias for it)
+make build                # the Debug build — what verification before a PR should use
+                          # (build_staging is an alias for it)
 make build_fast           # local iteration: no dSYM, no code signing, no lint, no package re-resolution
+make test                 # PocketCastsTests with the app's test plan
+make test ONLY_TESTING=PocketCastsTests/YourTestClass/testMethodName
+make test ONLY_TESTING=PocketCastsDataModelTests  # or PocketCastsServerTests, PocketCastsUtilsTests, PocketCastsAnalyticsTests
+make test_fast            # same tests, FAST_FLAGS only
 ```
+
+There are no `StagingDebug`/`StagingRelease` build configurations in this fork: the staging gateway
+is chosen at runtime, so `build_staging`/`test_staging` are aliases for `build`/`test`.
 
 Build output is tee'd into `artifacts/*.log` (gitignored) and the recipes run under
 `set -o pipefail`, so a failed build still exits non-zero and a killed one still leaves its
 partial log behind.
+
+Auris-only prerequisite: `make build`/`test` depend on `ensure_llama_ios`, which builds the
+CPU-only llama.cpp runtime (`ThirdParty/llama-cpp-build/*/lfm/liblfm_runtime.a`) used by the voice
+intent router. A bare `xcodebuild` skips it and fails to link.
 
 ### Simulator install (voice / ASR testing)
 
@@ -43,41 +44,62 @@ Only uninstall when you intentionally want a clean slate.
 make clean
 ```
 
-## Running Tests
+## Formatting
 
-```bash
-make test
+In Claude Code, a hook (`.claude/hooks/swiftlint.sh`) autocorrects each edited Swift file and reports the violations it can't fix. Otherwise, run `make lint_changed` to lint the branch's changes, or `make format` to autocorrect. `make format` covers the whole repo, so it can also change unrelated files.
+
+Both SwiftLint build phases (`PreBuildActions/SwiftLint` and the app target's lenient phase) are
+unconditional and run on *every* build. Set `SKIP_LINT=1` to short-circuit them for a local
+iteration — `make build_fast` / `make test_fast` already do. `make lint` and CI still enforce the
+rules, so nothing reaches review unlinted.
+
+## Architecture
+
+- `podcasts/`: the iOS app, a UIKit and SwiftUI hybrid with XIBs and storyboards, organized by feature. CarPlay lives in `podcasts/CarPlay/`.
+- Other targets: `Pocket Casts Watch App/`, `Pocket Casts TV App/`, `Pocket Casts App Clip/`, `WidgetExtension/`, `Share Extension/`.
+- `PocketCastsTests/`: app unit tests.
+- `BuildTools/`: pins the SwiftLint and SwiftGen versions.
+- `Modules/Package.swift`: a single Swift package, with targets in `Modules/Sources/` and tests in `Modules/Tests/`:
+  - **PocketCastsDataModel**: GRDB persistence. All data access goes through `DataManager.shared` (`Public/DataManager.swift`).
+  - **PocketCastsServer**: the API client, using Protocol Buffers.
+  - **PocketCastsUtils**: shared utilities.
+  - **PocketCastsAnalytics**: `Analytics`, the Tracks and logging adapters, and the A/B test provider. Add new events to `AnalyticsEvent.swift`.
+- `podcasts/VoiceControl/`: Auris-only voice control — wake word, on-device ASR, and intent routing. Assembled in `AppDelegate` (`VoiceControlAssembly`) and reached through `VoiceControlService.shared`, never through an upstream feature flag.
+
+## Localization
+
+Add strings to `podcasts/en.lproj/Localizable.strings`. The build regenerates the SwiftGen `L10n` enum, used as `L10n.featureDescriptionKey(value)`.
+
+```
+/* Context for translators, including what each placeholder is */
+"feature_relevantIdentifier_description" = "Value with %1$@ placeholder";
 ```
 
-### Running a Single Test
+- Use positional specifiers (`%1$@`, `%2$@`), never string interpolation.
+- Handle plurals with separate `_singular` and `_plural` keys.
+- Never use `LocalizedStringKey` in SwiftUI. Use `L10n` instead.
+
+## Code Style
+
+For RTL support, use `.natural` text alignment and `naturalContentHorizontalAlignment` instead of `.left`/`.right`. Custom SwiftLint rules enforce this.
+
+## Themes
+
+- In SwiftUI, use `@EnvironmentObject private var theme: Theme`, inject `.environmentObject(Theme.shared)` where the view is used, and read colors with `AppTheme.color(for: .primaryText01, theme: theme)`.
+- `ThemeColor.swift` and `ThemeStyle.swift` are generated. Edit `scripts/themes/theme.csv`, then run `make generate_colors`.
+
+## Protocol Buffers
+
+After API changes, regenerate the server objects (the script installs `protobuf` and `swift-protobuf` with Homebrew):
 
 ```bash
-make test ONLY_TESTING=PocketCastsTests/YourTestClass/testMethodName
-```
-
-### Running Module Tests
-
-```bash
-# DataModel module tests
-make test ONLY_TESTING=PocketCastsDataModelTests
-
-# Server module tests
-make test ONLY_TESTING=PocketCastsServerTests
-
-# Utils module tests
-make test ONLY_TESTING=PocketCastsUtilsTests
+make update_proto API_PATH=/path/to/pocketcasts-api/api/modules/protobuf/src/main/proto
 ```
 
 ## Build and test invocation discipline
 
 These rules exist because one lane session was measured spending **154 minutes inside xcodebuild**,
 roughly 114 of them avoidable. Each rule names the failure it prevents.
-
-**Always go through `make`.** The `build*` / `test*` targets depend on `ensure_llama_ios`, which
-produces `ThirdParty/llama-cpp-build/*/lfm/liblfm_runtime.a`. A bare `xcodebuild` skips that
-prerequisite and dies with `Library 'lfm_runtime' not found` — on the Share Extension first,
-because the llama link flags are inherited project-wide. That cost ~14 minutes of failed builds
-in the session above, in a worktree whose `ThirdParty/llama-cpp-build` had not been built yet.
 
 **Never add `-destination 'generic/platform=iOS Simulator'` yourself.** A generic simulator
 destination has no active arch, so `ONLY_ACTIVE_ARCH` cannot narrow `ARCHS`: every source file is
@@ -114,103 +136,6 @@ The unsigned `.app` still installs and launches on a simulator (verified), but d
 flags for anything you intend to trust, archive, or put on a device — and do not alternate fast
 and normal flags on the same worktree, because each change to the build description invalidates
 the cache and costs one full rebuild.
-
-## Architecture
-
-### Modular Structure
-
-The codebase uses Swift Package Manager modules under `Modules/`:
-
-- **DataModel** (`Modules/DataModel/`) - Core data persistence using GRDB. Contains podcast, episode, and playback models. Uses custom GRDB macros for model generation.
-- **Server** (`Modules/Server/`) - API communication layer using Protocol Buffers. Depends on DataModel and Utils.
-- **Utils** (`Modules/Utils/`) - Shared utilities including localization helpers.
-- **DependencyInjection** (`Modules/DependencyInjection/`) - DI container for the app.
-
-### Main App Structure
-
-The main iOS app lives in `podcasts/` with:
-- UIKit + SwiftUI hybrid (123+ ViewControllers, XIBs/Storyboards)
-- Feature-based organization (Analytics, Bookmarks, Folders, IAP, Player, etc.)
-- Multi-platform targets: iOS, watchOS, widgets, App Clip, CarPlay
-
-### Key Directories
-
-| Directory | Purpose |
-|-----------|---------|
-| `podcasts/` | Main iOS app source |
-| `PocketCastsTests/` | Unit tests organized by feature |
-| `Pocket Casts Watch App/` | watchOS companion |
-| `WidgetExtension/` | Home screen widgets |
-| `BuildTools/` | SwiftLint and SwiftGen plugins |
-
-## Data Access - DataManager (Singleton Facade)
-
-All data operations go through `DataManager.sharedManager`:
-
-```swift
-// Located at: Modules/DataModel/Sources/PocketCastsDataModel/Public/DataManager.swift
-let dataManager = DataManager.sharedManager
-
-// Podcast operations
-let podcasts = dataManager.allPodcasts(includeUnsubscribed: false)
-let podcast = dataManager.findPodcast(uuid: "...")
-dataManager.save(podcast: podcast)
-
-// Episode operations
-let episode = dataManager.findEpisode(uuid: "...")
-dataManager.save(episode: episode)
-let downloadedCount = dataManager.downloadedEpisodeCount()
-
-// Playlist/Filter operations
-let playlists = dataManager.allPlaylists(includeDeleted: false)
-let episodes = dataManager.playlistEpisodes(for: playlist)
-
-// Up Next queue
-let queue = dataManager.allUpNextEpisodes()
-
-// Folder operations
-let folders = dataManager.allFolders(includeDeleted: false)
-let podcastsInFolder = dataManager.allPodcastsInFolder(folder: folder)
-```
-
-## Localization
-
-Strings are managed via SwiftGen. Add new strings to `podcasts/en.lproj/Localizable.strings`:
-
-```swift
-/* Description for translators with placeholder info */
-"feature_description_key" = "Value with %1$@ placeholder";
-```
-
-Use generated `L10n` enum:
-```swift
-let text = L10n.featureDescriptionKey(value)
-```
-
-Key rules:
-- Use snake_case keys with pattern: `feature_relevantIdentifier_description`
-- Always include comment describing context and placeholders
-- Use positional specifiers (`%1$@`, `%2$@`), never string interpolation
-- Handle plurals manually with separate `_singular`/`_plural` keys
-
-## Code Style
-
-SwiftLint is configured with opt-in rules. Notable custom rules:
-- Use `naturalContentHorizontalAlignment` instead of `.left`/`.right` for RTL support
-- Use `.natural` text alignment instead of `.left`
-- Never use `LocalizedStringKey` in SwiftUI - use `NSLocalizedString` with L10n
-
-## Themes
-- When styling Views, use `@EnvironmentObject private var theme: Theme` and inject `.environmentObject(Theme.sharedTheme)` where the View is used.
-- Use `AppTheme.color(for: .primaryText01, theme: theme)` to access themed colors
-
-## Protocol Buffers
-
-Server objects use protobuf. To regenerate after API changes:
-```bash
-brew install protobuf swift-protobuf  # One-time setup
-make update_proto API_PATH=/path/to/pocketcasts-api/api/modules/protobuf/src/main/proto
-```
 
 ## Verification and cleanup discipline
 

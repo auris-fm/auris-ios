@@ -1,5 +1,5 @@
 {
-  "originHash" : "6fceac743e7a1ab2a2922f1a72a1641e3a31040c7baf0cd18c26121297573a19",
+  "originHash" : "fb459418ded5a494242a4d5292269aed81013c34c253605f57e4797b42d728e2",
   "pins" : [
     {
       "identity" : "abseil-cpp-binary",
@@ -218,6 +218,15 @@
       }
     },
     {
+      "identity" : "pocket-casts-client-dependencies",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Automattic/pocket-casts-client-dependencies",
+      "state" : {
+        "revision" : "a921f837843ece1ca9826e2c02be5c1b6d2b1588",
+        "version" : "0.2.0"
+      }
+    },
+    {
       "identity" : "pocket-casts-ios-fingerprint",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/Automattic/pocket-casts-ios-fingerprint",
@@ -260,15 +269,6 @@
       "state" : {
         "revision" : "e7e799cd1eaa4d0f6d3eab56832e7f4b377f4a4f",
         "version" : "0.10.0"
-      }
-    },
-    {
-      "identity" : "swift-syntax",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/swiftlang/swift-syntax.git",
-      "state" : {
-        "revision" : "79e4b74a295b6eb74a8b585e3a39d29e70c1dbd1",
-        "version" : "603.0.2"
       }
     },
     {

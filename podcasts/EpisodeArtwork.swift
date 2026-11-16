@@ -13,7 +13,7 @@ final class EpisodeArtwork {
     /// Track in-progress artwork load tasks by episode UUID to prevent redundant requests and allow cancellation
     private var inProgressArtworkLoads: [String: Task<Void, Never>] = [:]
 
-    init(imageManager: ImageManager = .sharedManager) {
+    init(imageManager: ImageManager = .shared) {
         self.imageManager = imageManager
     }
 
@@ -48,31 +48,25 @@ final class EpisodeArtwork {
 
             // Priority 2: Embedded artwork from audio file metadata
             if let assetEpisodeArtwork = await self.loadEpisodeArtwork(from: asset) {
-                self.imageManager.save(assetEpisodeArtwork, for: episodeUuid)
+                self.imageManager.save(assetEpisodeArtwork.image, original: assetEpisodeArtwork.data, for: episodeUuid)
             }
         }
 
         inProgressArtworkLoads[episodeUuid] = task
     }
 
-    /// Cancel any in-progress artwork load for the given episode
-    func cancelArtworkLoad(for episodeUuid: String) {
-        inProgressArtworkLoads[episodeUuid]?.cancel()
-        inProgressArtworkLoads[episodeUuid] = nil
-    }
-
     func isCached(episodeUuid: String) -> Bool {
         imageManager.subscribedPodcastsCache.isCached(forKey: episodeUuid)
     }
 
-    private func loadEpisodeArtwork(from asset: AVAsset?) async -> UIImage? {
+    private func loadEpisodeArtwork(from asset: AVAsset?) async -> (image: UIImage, data: Data)? {
         guard let asset, let commonMetadata = try? await asset.load(.commonMetadata) else {
             return nil
         }
         let artworkItems = AVMetadataItem.metadataItems(from: commonMetadata, filteredByIdentifier: .commonIdentifierArtwork)
         for item in artworkItems {
             if let data = try? await item.load(.dataValue), let image = UIImage(data: data) {
-                return image
+                return (image, data)
             }
         }
         return nil

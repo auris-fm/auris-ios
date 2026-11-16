@@ -45,7 +45,7 @@ class SyncTask: ApiBaseTask, @unchecked Sendable {
             return nil
         }
 
-        let episodesToSync = DataManager.sharedManager.unsyncedEpisodes(limit: ServerConstants.Limits.maxEpisodesToSync)
+        let episodesToSync = DataManager.shared.unsyncedEpisodes(limit: ServerConstants.Limits.maxEpisodesToSync)
         guard let dataToSend = createIncrementalSyncData(episodesToSync: episodesToSync) else { return nil }
 
         var request = createRequest(url: url, method: "POST", token: token)
@@ -54,15 +54,20 @@ class SyncTask: ApiBaseTask, @unchecked Sendable {
         return request
     }
 
+    /// Whether the next sync is a full sync, which imports every podcast from the server
+    static func isFullSyncPending(defaults: UserDefaults = .standard) -> Bool {
+        defaults.string(forKey: ServerConstants.UserDefaults.lastModifiedServerDate)?.isEmpty ?? true
+    }
+
     private func performSync(token: String) {
-        if let lastServerModified = UserDefaults.standard.string(forKey: ServerConstants.UserDefaults.lastModifiedServerDate), !lastServerModified.isEmpty {
+        if Self.isFullSyncPending() {
+            performFullSync(token: token)
+        } else {
             if ServerSettings.homeGridNeedsRefresh() {
                 performHomeGridRefresh()
             }
 
             performIncrementalSync(token: token)
-        } else {
-            performFullSync(token: token)
         }
     }
 
@@ -89,7 +94,7 @@ class SyncTask: ApiBaseTask, @unchecked Sendable {
                 let serverReturnsSortPosition: Bool = podcasts.compactMap { $0.sortPosition }.map { Int($0) }.reduce(0, +) > 0
 
                 for podcast in podcasts {
-                    guard let uuid = podcast.uuid, let localPodcast = DataManager.sharedManager.findPodcast(uuid: uuid) else { continue }
+                    guard let uuid = podcast.uuid, let localPodcast = DataManager.shared.findPodcast(uuid: uuid) else { continue }
 
                     // If server's folderUuid is `nil` then we don't change
                     if podcast.folderUuid?.isEmpty == false {
@@ -107,7 +112,7 @@ class SyncTask: ApiBaseTask, @unchecked Sendable {
                     // mark podcast as unsynced so that if our addedDate or sortOrder was preserved that gets sent to the server
                     localPodcast.syncStatus = SyncStatus.notSynced.rawValue
 
-                    DataManager.sharedManager.save(podcast: localPodcast)
+                    DataManager.shared.save(podcast: localPodcast)
                 }
             }
 
@@ -180,7 +185,7 @@ class SyncTask: ApiBaseTask, @unchecked Sendable {
         let trace = TraceManager.shared.beginTracing(eventName: "SERVER_INCREMENTAL_SYNC")
         defer { TraceManager.shared.endTracing(trace: trace) }
 
-        let episodesToSync = DataManager.sharedManager.unsyncedEpisodes(limit: ServerConstants.Limits.maxEpisodesToSync)
+        let episodesToSync = DataManager.shared.unsyncedEpisodes(limit: ServerConstants.Limits.maxEpisodesToSync)
         guard let dataToSend = createIncrementalSyncData(episodesToSync: episodesToSync) else { return }
         if isCancelled {
             status = .cancelled
@@ -210,9 +215,9 @@ class SyncTask: ApiBaseTask, @unchecked Sendable {
         defer { objc_sync_exit(SyncTask.processDataLock) }
 
         do {
-            DataManager.sharedManager.markAllPodcastsSynced()
-            DataManager.sharedManager.markAllPlaylistsSynced()
-            DataManager.sharedManager.markAllFoldersSynced()
+            DataManager.shared.markAllPodcastsSynced()
+            DataManager.shared.markAllPlaylistsSynced()
+            DataManager.shared.markAllFoldersSynced()
 
             Task {
                 await dataManager.bookmarks.markAllBookmarksAsSynced()
@@ -227,7 +232,6 @@ class SyncTask: ApiBaseTask, @unchecked Sendable {
             if response.lastModified > 0 {
                 UserDefaults.standard.set("\(response.lastModified)", forKey: ServerConstants.UserDefaults.lastModifiedServerDate)
             }
-            UserDefaults.standard.synchronize()
 
             return .success
         } catch {

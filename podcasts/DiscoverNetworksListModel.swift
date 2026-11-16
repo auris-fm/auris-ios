@@ -25,11 +25,19 @@ class DiscoverNetworksListModel: ObservableObject {
         item?.expandedStyle != nil
     }
 
+    /// The networks the row shows before "Show all", when the layout doesn't ask for a number.
+    private let defaultVisibleNetworkCount = 10
+
+    /// The networks the row shows, with the rest of them behind "Show all".
+    var visibleNetworks: [NetworkListSummary] {
+        Array(networks.prefix(max(0, item?.summaryItemCount ?? defaultVisibleNetworkCount)))
+    }
+
     func registerDiscoverDelegate(_ delegate: DiscoverDelegate) {
         self.delegate = delegate
     }
 
-    func populateFrom(item: DiscoverItem, region: String?, category: DiscoverCategory?) {
+    func populateFrom(item: DiscoverItem, region: String?, category: DiscoverCategory?, completion: (() -> Void)? = nil) {
         if item != self.item {
             networks = []
         }
@@ -44,12 +52,13 @@ class DiscoverNetworksListModel: ObservableObject {
             DispatchQueue.main.async {
                 self?.datetime = collection?.datetime
                 self?.networks = networks
+                completion?()
             }
         }
     }
 
     func showAll() {
-        guard let delegate, let item else { return }
+        guard delegate != nil, let item else { return }
 
         if let listId = item.uuid {
             AnalyticsHelper.listShowAllTapped(listId: listId, dateTime: datetime)
@@ -57,8 +66,24 @@ class DiscoverNetworksListModel: ObservableObject {
             Analytics.track(.discoverShowAllTapped, properties: ["list_id": item.inferredListId])
         }
 
-        let gridController = DiscoverNetworksGridViewController(item: item, networks: networks) { [weak self] network in
-            self?.show(network: network)
+        showGrid()
+    }
+
+    /// Loads the networks and opens every one of them, as "Show all" does, for when they're asked
+    /// for from outside the row, such as by a What's New message.
+    func showAll(item: DiscoverItem) {
+        populateFrom(item: item, region: nil, category: nil) {
+            self.showGrid()
+        }
+    }
+
+    /// Pushes the grid, which keeps the model alive for as long as it's on screen to open the
+    /// network picked from it.
+    private func showGrid() {
+        guard let delegate, let item else { return }
+
+        let gridController = DiscoverNetworksGridViewController(item: item, networks: networks) { network in
+            self.show(network: network)
         }
         delegate.navController()?.pushViewController(gridController, animated: true)
     }
@@ -73,14 +98,6 @@ class DiscoverNetworksListModel: ObservableObject {
                 delegate.showExpanded(item: self.discoverItem(for: network), podcasts: collection.podcasts ?? [], podcastCollection: collection, datetime: collection.datetime)
             }
         }
-    }
-
-    func pageDidChange(to currentPage: Int, totalPages: Int) {
-        guard let item else { return }
-
-        Analytics.track(.discoverLargeListPageChanged, properties: ["current_page": currentPage,
-                                                                    "total_pages": totalPages,
-                                                                    "list_id": item.inferredListId])
     }
 
     /// The list the network points at, as the `DiscoverItem` the expanded screens expect.

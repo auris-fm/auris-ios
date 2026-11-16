@@ -64,6 +64,15 @@ class DiscoverFeaturedView: ThemeableView {
     var onSubscribe: (() -> Void)?
     private var discoverPodcast: DiscoverPodcast?
 
+    /// The horizontal insets of the content, which the background runs under.
+    var contentInsets: UIEdgeInsets {
+        get { contentView.layoutMargins }
+        set {
+            guard newValue != contentView.layoutMargins else { return }
+            contentView.layoutMargins = newValue
+        }
+    }
+
     override init(frame: CGRect) {
         super.init(frame: frame)
         commonInit()
@@ -83,7 +92,9 @@ class DiscoverFeaturedView: ThemeableView {
         contentView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(contentView)
         contentView.anchorToAllSidesOf(view: self)
-        backgroundView.backgroundColor = AppTheme.defaultPodcastBackgroundColor()
+        contentView.insetsLayoutMarginsFromSafeArea = false
+        contentView.layoutMargins = .zero
+        backgroundView.backgroundColor = AppTheme.defaultPodcastBackgroundColor
         setupAlternativeConstraints()
         updateSize()
     }
@@ -105,10 +116,13 @@ class DiscoverFeaturedView: ThemeableView {
         if let title = discoverPodcast.title?.localized {
             if isExplicit {
                 podcastTitle.attributedText = ExplicitBadgeHelper.attributedTitle(title, font: podcastTitle.font)
+                podcastTitle.accessibilityLabel = ExplicitBadgeHelper.accessibilityTitle(title)
             } else {
                 podcastTitle.text = title
+                podcastTitle.accessibilityLabel = nil
             }
         }
+        subscribeButton.setFollowAccessibilityLabels(podcastTitle: discoverPodcast.title?.localized)
 
         if let author = discoverPodcast.author {
             podcastAuthor.text = author
@@ -129,6 +143,7 @@ class DiscoverFeaturedView: ThemeableView {
         if let title = discoverPodcast.title?.localized {
             podcastTitle.text = title
         }
+        subscribeButton.setFollowAccessibilityLabels(podcastTitle: discoverPodcast.title?.localized)
 
         if let author = discoverPodcast.author {
             podcastAuthor.text = author
@@ -139,7 +154,7 @@ class DiscoverFeaturedView: ThemeableView {
         }
         subscribeButton.currentlyOn = false
         if let uuid = discoverPodcast.uuid {
-            if let _ = DataManager.sharedManager.findPodcast(uuid: uuid) {
+            if let _ = DataManager.shared.findPodcast(uuid: uuid) {
                 subscribeButton.currentlyOn = true
             }
         }

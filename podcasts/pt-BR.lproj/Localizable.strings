@@ -29,14 +29,20 @@
     <string>Cancelar multisseleção</string>
     <key>accessibility_close_dialog</key>
     <string>Fechar janela</string>
+    <key>accessibility_close_player</key>
+    <string>Fechar reprodutor</string>
     <key>accessibility_deselect_episode</key>
     <string>Remover seleção de episódio</string>
     <key>accessibility_disabled</key>
     <string>Desativado</string>
     <key>accessibility_dismiss</key>
     <string>Dispensar</string>
+    <key>accessibility_episode_actions</key>
+    <string>Ações do episódio</string>
     <key>accessibility_episode_playback</key>
     <string>Reprodução do episódio</string>
+    <key>accessibility_follow_podcast</key>
+    <string>Seguir %1$@</string>
     <key>accessibility_hide_filter_details</key>
     <string>Toque para ocultar os detalhes do filtro</string>
     <key>accessibility_hint_player_navigate_to_podcast_label</key>
@@ -45,6 +51,10 @@
     <string>Toque duas vezes para favoritar o episódio</string>
     <key>accessibility_hint_unstar</key>
     <string>Toque duas vezes para remover o episódio dos favoritos</string>
+    <key>accessibility_mini_player</key>
+    <string>Reprodutor</string>
+    <key>accessibility_mini_player_hint</key>
+    <string>Toque para abrir o reprodutor no tamanho original</string>
     <key>accessibility_more_actions</key>
     <string>Mais ações</string>
     <key>accessibility_patron_only</key>
@@ -63,6 +73,8 @@
     <string>Imagem da playlist</string>
     <key>accessibility_plus_only</key>
     <string>Bloqueado: recurso Plus</string>
+    <key>accessibility_podcast_artwork</key>
+    <string>Arte do podcast</string>
     <key>accessibility_profile_settings</key>
     <string>Configurações do Pocket Casts</string>
     <key>accessibility_select_episode</key>
@@ -73,6 +85,10 @@
     <string>Toque para ver ou configurar a conta</string>
     <key>accessibility_sort_and_options</key>
     <string>Ordem e opções</string>
+    <key>accessibility_unfollow_podcast</key>
+    <string>Deixar de seguir %1$@</string>
+    <key>accessibility_up_next_list</key>
+    <string>Lista de Próximos</string>
     <key>account</key>
     <string>Conta</string>
     <key>account_change_email</key>
@@ -337,8 +353,12 @@ Faça download do aplicativo para ter uma experiência completa!</string>
     <string>Favorito</string>
     <key>bookmark_delete_warning_body</key>
     <string>Tem certeza de que deseja excluir esses favoritos? Essa ação não pode ser desfeita.</string>
+    <key>bookmark_delete_warning_body_singular</key>
+    <string>Tem certeza de que deseja excluir esse favorito? Essa ação não pode ser desfeita.</string>
     <key>bookmark_delete_warning_title</key>
     <string>Excluir favoritos?</string>
+    <key>bookmark_delete_warning_title_singular</key>
+    <string>Excluir favorito?</string>
     <key>bookmark_details_title</key>
     <string>Marcar como favorito</string>
     <key>bookmark_edit_transcript_subtitle</key>
@@ -690,6 +710,8 @@ Você pode se desconectar a qualquer momento nas Configurações.</string>
     <string>O temporizador reiniciou devido ao sacudir do dispositivo.</string>
     <key>discover</key>
     <string>Explorar</string>
+    <key>discover_all_categories</key>
+    <string>Todas as categorias</string>
     <key>discover_all_episodes</key>
     <string>Todos os episódios</string>
     <key>discover_all_podcasts</key>
@@ -754,6 +776,8 @@ Você pode se desconectar a qualquer momento nas Configurações.</string>
     <string>TV e cinema</string>
     <key>discover_change_region</key>
     <string>Mudar região (atualmente %1$@)</string>
+    <key>discover_clear_category</key>
+    <string>Apagar categoria</string>
     <key>discover_episode_fail_to_load</key>
     <string>The episode couldn't be loaded</string>
     <key>discover_featured</key>
@@ -864,6 +888,8 @@ Você pode se desconectar a qualquer momento nas Configurações.</string>
     <string>Falha na pesquisa</string>
     <key>discover_search_failed_msg</key>
     <string>Verifique sua conexão com a Internet.</string>
+    <key>discover_select_a_category</key>
+    <string>Selecione uma categoria</string>
     <key>discover_select_region</key>
     <string>Selecionar região do conteúdo</string>
     <key>discover_show_all</key>
@@ -1181,12 +1207,6 @@ que você ouviu foi
     <string>Reprodução aleatória da fila</string>
     <key>feature_marketing_watch_playback</key>
     <string>Aplicativos para Wear OS e Apple Watch</string>
-    <key>feature_tour_end_tour</key>
-    <string>Fim do tour</string>
-    <key>feature_tour_new</key>
-    <string>NOVO</string>
-    <key>feature_tour_step_format</key>
-    <string>%1$@ de %2$@</string>
     <key>feedback_continue_with_mail</key>
     <string>Abrir aplicativo de e-mail padrão</string>
     <key>feedback_mail_not_configured_msg</key>
@@ -1349,6 +1369,8 @@ que você ouviu foi
     <string>Criar pasta</string>
     <key>folder_create_new</key>
     <string>Criar nova pasta</string>
+    <key>folder_create_skip</key>
+    <string>Pular</string>
     <key>folder_delete</key>
     <string>Excluir pasta</string>
     <key>folder_delete_prompt_msg</key>
@@ -1968,6 +1990,10 @@ ATUALIZAÇÕES</string>
     <string>Ouça seus episódios no modo aleatório e muito mais com o Pocket Casts Plus</string>
     <key>paywall_dynamic_headline_watch</key>
     <string>Ouça usando seu relógio e muito mais com o Pocket Casts Plus</string>
+    <key>pcasts_import_message</key>
+    <string>Isso substituirá seus podcasts e configurações pelo conteúdo desse arquivo, e o Pocket Casts será fechado.</string>
+    <key>pcasts_import_title</key>
+    <string>Importar podcasts e configurações</string>
     <key>phone</key>
     <string>Telefone</string>
     <key>play</key>
@@ -2185,8 +2211,12 @@ Isso que é compromisso!</string>
     <string>Este episódio não pode ser reproduzido.</string>
     <key>player_error_internet_connection</key>
     <string>Verifique sua conexão com a Internet e tente novamente.</string>
+    <key>player_error_not_enough_storage</key>
+    <string>Seu dispositivo está sem armazenamento. Libere espaço e tente novamente.</string>
     <key>player_error_short_no_connection</key>
     <string>Você está offline</string>
+    <key>player_error_short_not_enough_storage</key>
+    <string>O armazenamento no dispositivo está cheio</string>
     <key>player_error_short_playback_error</key>
     <string>Falha na reprodução, tente novamente</string>
     <key>player_increment_time</key>
@@ -2215,6 +2245,10 @@ Isso que é compromisso!</string>
     <string>Erro na reprodução</string>
     <key>player_user_episode_upload_error</key>
     <string>Erro no upload</string>
+    <key>player_video_exit_full_screen</key>
+    <string>Sair da tela cheia</string>
+    <key>player_video_full_screen</key>
+    <string>Tela cheia</string>
     <key>playlist_add_to_title</key>
     <string>Adicionar a "%@"</string>
     <key>playlist_create_no_episodes_description</key>
@@ -2259,8 +2293,10 @@ Tente ajustá-las ou salve esta playlist para futuros episódios correspondentes
     <string>Procurar podcasts</string>
     <key>playlist_manual_create_error_message</key>
     <string>Ocorreu um erro ao criar sua playlist.</string>
+    <key>playlist_manual_empty_state_subtitle</key>
+    <string>Escolha episódios dos podcasts que você segue. Se preferir, deslize um episódio para a esquerda para adicioná-lo conforme assiste.</string>
     <key>playlist_manual_empty_state_subtitle_no_podcasts</key>
-    <string>Passe o dedo para a esquerda em um episódio para adicioná-lo à sua playlist.</string>
+    <string>Encontre um podcast do qual você goste e deslize um episódio para a esquerda para adicioná-lo.</string>
     <key>playlist_manual_empty_state_title</key>
     <string>Comece a criar sua playlist</string>
     <key>playlist_manual_empty_state_title_no_podcasts</key>
@@ -2286,7 +2322,7 @@ Tente ajustá-las ou salve esta playlist para futuros episódios correspondentes
     <key>playlist_play_all_sheet_button_title</key>
     <string>Substituir e reproduzir</string>
     <key>playlist_play_all_sheet_description</key>
-    <string>Reproduzir isto substituirá sua lista de Próximos atual.</string>
+    <string>Reproduzir isso substituirá sua lista de Próximos atual. Salve como uma playlist para mantê-la.</string>
     <key>playlist_play_all_sheet_title</key>
     <string>Substituir lista de Próximos?</string>
     <key>playlist_play_all_sheet_toggle</key>
@@ -2317,12 +2353,6 @@ Tente ajustá-las ou salve esta playlist para futuros episódios correspondentes
     <string>Todos os podcasts seguidos</string>
     <key>playlist_smart_rule_save_button</key>
     <string>Salvar regra inteligente</string>
-    <key>playlist_smart_rule_starred_header_subtitle_toggle_off</key>
-    <string>Episódios favoritados ainda poderão aparecer se corresponderem às suas outras regras.</string>
-    <key>playlist_smart_rule_starred_header_subtitle_toggle_on</key>
-    <string>Inclua apenas episódios favoritados que correspondam às suas outras regras.</string>
-    <key>playlist_smart_rule_starred_header_title</key>
-    <string>Episódios favoritados</string>
     <key>playlist_smart_rules_title</key>
     <string>Regras inteligentes</string>
     <key>playlists</key>
@@ -2529,8 +2559,6 @@ Tente ajustá-las ou salve esta playlist para futuros episódios correspondentes
     <string>Pocket Casts Plus</string>
     <key>pocket_casts_plus_short</key>
     <string>Plus</string>
-    <key>pocket_casts_welcome_newsletter_title</key>
-    <string>Receba a newsletter</string>
     <key>podcast_access_ended</key>
     <string>O acesso terminou em: %1$@</string>
     <key>podcast_access_ends</key>
@@ -3259,8 +3287,8 @@ Aqui está um passe de convidado de %1$@ para o Pocket Casts Plus, meu reproduto
     <string>Abrir links no navegador</string>
     <key>settings_general_play_back_actions</key>
     <string>Mais ações de reprodução</string>
-    <key>settings_general_play_back_actions_subtitle</key>
-    <string>Adiciona a opção de classificar por estrelas à tela de bloqueio do seu celular.</string>
+    <key>settings_general_play_back_actions_subtitle_device</key>
+    <string>Adiciona a opção de classificar por estrelas à tela de bloqueio.</string>
     <key>settings_general_player_header</key>
     <string>REPRODUTOR</string>
     <key>settings_general_publish_chapter_titles</key>
@@ -3295,6 +3323,10 @@ Aqui está um passe de convidado de %1$@ para o Pocket Casts Plus, meu reproduto
     <string>VoiceBoostN</string>
     <key>settings_general_voice_boost_n_subtitle</key>
     <string>Use a otimização de volume atualizada com níveis de voz mais consistentes.</string>
+    <key>settings_general_whats_new_unread_dot</key>
+    <string>Mostrar ponto de conteúdo não lido</string>
+    <key>settings_general_whats_new_unread_dot_subtitle</key>
+    <string>Mostre um ponto no perfil quando houver novas mensagens de novidades não lidas.</string>
     <key>settings_global_settings</key>
     <string>Configurações gerais</string>
     <key>settings_headphone_controls</key>
@@ -3407,8 +3439,8 @@ Aqui está um passe de convidado de %1$@ para o Pocket Casts Plus, meu reproduto
     <string>Hosts comuns de podcast</string>
     <key>settings_status_host_description</key>
     <string>Os autores de podcasts hospedam os arquivos de episódios em diversos servidores de hospedagem que não são gerenciados pelo Pocket Casts.</string>
-    <key>settings_status_host_failure_message</key>
-    <string>A causa mais comum é ter um bloqueador de anúncios configurado no seu telefone ou na sua rede. Você precisa desbloquear este domínio para fazer download dos podcasts. O Pocket Casts não hospeda nem escolhe onde os podcasts são hospedados. Isso cabe ao autor do programa e está fora da nossa alçada.</string>
+    <key>settings_status_host_failure_message_device</key>
+    <string>A causa mais comum é ter um bloqueador de anúncios configurado no seu dispositivo ou na sua rede. Você precisa desbloquear este domínio para fazer download dos podcasts. O Pocket Casts não hospeda nem escolhe onde os podcasts são hospedados. Isso cabe ao autor do programa e está fora da nossa alçada.</string>
     <key>settings_status_internet</key>
     <string>Internet</string>
     <key>settings_status_internet_description</key>
@@ -3421,8 +3453,8 @@ Aqui está um passe de convidado de %1$@ para o Pocket Casts Plus, meu reproduto
     <string>O serviço usado para encontrar novos episódios.</string>
     <key>settings_status_run</key>
     <string>Executar agora</string>
-    <key>settings_status_service_ad_blocker_help_singular</key>
-    <string>A causa mais comum é ter um bloqueador de anúncios configurado no seu telefone ou na sua rede. Você precisa desbloquear o domínio %1$@</string>
+    <key>settings_status_service_ad_blocker_help_singular_device</key>
+    <string>A causa mais comum é ter um bloqueador de anúncios configurado no seu dispositivo ou na sua rede. Você precisa desbloquear o domínio %1$@</string>
     <key>settings_storage</key>
     <string>Uso de dados e armazenamento</string>
     <key>settings_storage_data_warning</key>
@@ -3433,8 +3465,8 @@ Aqui está um passe de convidado de %1$@ para o Pocket Casts Plus, meu reproduto
     <string>DADOS MÓVEIS</string>
     <key>settings_storage_usage</key>
     <string>USO</string>
-    <key>settings_storage_usage_footer</key>
-    <string>Pode ser diferente do armazenamento mostrado nos Ajustes do iPhone. O iOS gerencia dados armazenados em cache automaticamente e os libera quando necessário.</string>
+    <key>settings_storage_usage_footer_device</key>
+    <string>Isso pode ser diferente do armazenamento mostrado nos Ajustes do %1$@. Seu dispositivo gerencia dados armazenados em cache automaticamente e os libera quando necessário.</string>
     <key>settings_third_party_analytics</key>
     <string>Análises de terceiros</string>
     <key>settings_title</key>
@@ -3473,8 +3505,8 @@ Aqui está um passe de convidado de %1$@ para o Pocket Casts Plus, meu reproduto
     <string>Configurar conta</string>
     <key>shake_to_restart_sleep_timer</key>
     <string>Balançar para reiniciar o temporizador</string>
-    <key>shake_to_restart_sleep_timer_description</key>
-    <string>Se ativado, o temporizador será reiniciado quando você balançar seu celular.</string>
+    <key>shake_to_restart_sleep_timer_description_device</key>
+    <string>Se ativado, o temporizador será reiniciado quando você balançar seu dispositivo.</string>
     <key>share</key>
     <string>Compartilhar</string>
     <key>share_clip</key>
@@ -4274,6 +4306,8 @@ Toque no botão abaixo para entrar novamente na sua conta do Pocket Casts.</stri
     <string>É fácil reproduzir um episódio aleatório sem mudar a ordem da sua fila.</string>
     <key>up_next_shuffle_announcement_title</key>
     <string>Apresentamos a ordem aleatória</string>
+    <key>up_next_shuffle_button</key>
+    <string>Aleatório</string>
     <key>up_next_shuffle_toast_message</key>
     <string>A ordem aleatória está ativada. Os episódios serão reproduzidos aleatoriamente.</string>
     <key>up_next_sort_duration_tooltip_body</key>
@@ -4426,26 +4460,30 @@ As duas opções são boas. 🙂</string>
     <string>Nada na fila de Próximos</string>
     <key>week</key>
     <string>semana</string>
-    <key>welcome_discover_button</key>
-    <string>Encontrar meu próximo podcast</string>
-    <key>welcome_discover_description</key>
-    <string>Veja nossa curadoria de podcasts que estão em alta ou que passaram despercebidos na página Explorar.</string>
-    <key>welcome_discover_title</key>
-    <string>Descubra algo novo</string>
     <key>welcome_import_button</key>
     <string>Importar podcasts</string>
-    <key>welcome_import_description</key>
-    <string>Vindo de outro aplicativo? Leve seus podcasts com você.</string>
-    <key>welcome_import_title</key>
-    <string>Importe seus podcasts</string>
-    <key>welcome_new_account_title</key>
-    <string>Desejamos as boas-vindas, agora solta o som!</string>
-    <key>welcome_plus_title</key>
-    <string>Agradecemos, agora solta o som!</string>
     <key>whats_new</key>
     <string>Novidades</string>
     <key>whats_new_blog_more_link_text</key>
     <string>Leia mais sobre esta atualização no nosso blog</string>
+    <key>whats_new_category_announcement</key>
+    <string>Anúncio</string>
+    <key>whats_new_category_known_issue</key>
+    <string>Problema conhecido</string>
+    <key>whats_new_category_new_feature</key>
+    <string>Nova funcionalidade</string>
+    <key>whats_new_category_research</key>
+    <string>Pesquisa de usuário</string>
+    <key>whats_new_category_tip</key>
+    <string>Dicas e truques</string>
+    <key>whats_new_feed_empty_description</key>
+    <string>Novas funcionalidades, dicas e anúncios aparecerão aqui.</string>
+    <key>whats_new_feed_empty_title</key>
+    <string>Ainda sem mensagens</string>
+    <key>whats_new_feed_read_all</key>
+    <string>Ler tudo</string>
+    <key>whats_new_feed_unable_to_load</key>
+    <string>Não foi possível carregar as novidades</string>
     <key>whats_new_in_version</key>
     <string>Novidades na versão %1$@</string>
     <key>whats_new_page_one_7_20</key>
@@ -4460,6 +4498,8 @@ Agradecemos seu suporte. Sua tela inicial nunca esteve melhor!</string>
 Então, pode ficar tranquilo porque enquanto você organiza sua página de podcasts, seu trabalho está sendo sincronizado com a sua conta.</string>
     <key>whats_new_page_two_title_7_20</key>
     <string>Sincronização de grade da página inicial</string>
+    <key>whats_new_poll_answered</key>
+    <string>Obrigado por responder.</string>
     <key>widgets_app_icon_description</key>
     <string>Abra rapidamente o Pocket Casts</string>
     <key>widgets_app_icon_name</key>

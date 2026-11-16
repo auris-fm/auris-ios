@@ -15,16 +15,15 @@ struct LongestEpisode2025Story: ShareableStory {
 
     private let backgroundColor = Color(hex: "#17423B")
     private let foregroundColor = Color.white
-    private let imageSize: CGFloat = UIScreen.isSmallScreen ? 190 : 206
-    private let portionFactor: CGFloat = UIScreen.isSmallScreen ? 3.5 : 3.0
 
     @State private var imageScale = CGFloat(1.1)
-    @State private var isAnimating: Bool = true
 
     private let scaleAnimation: Animation = .timingCurve(0.18, 0.00, 0.08, 1.00, duration: 1.25)
 
     var body: some View {
         GeometryReader { proxy in
+            let isSmallScreen = proxy.size.height <= 667
+            let imageSize: CGFloat = isSmallScreen ? 190 : 206
             ZStack {
                 VStack(alignment: .center, spacing: 0) {
                     headerView
@@ -34,7 +33,7 @@ struct LongestEpisode2025Story: ShareableStory {
                         .frame(width: imageSize * imageScale, height: imageSize * imageScale)
                         .cornerRadius(4)
                         .background {
-                            background(size: proxy.size).offset(x: 0, y: proxy.size.width / 6)
+                            background(size: proxy.size, isSmallScreen: isSmallScreen).offset(x: 0, y: proxy.size.width / 6)
                         }
                         .padding(.bottom, proxy.size.width / 6)
                     Spacer()
@@ -75,14 +74,14 @@ struct LongestEpisode2025Story: ShareableStory {
         )
     }
 
-    @ViewBuilder func background(size: CGSize) -> some View {
+    @ViewBuilder func background(size: CGSize, isSmallScreen: Bool) -> some View {
         LottieView(animation: .named("2025_longest_episode"))
             .configure({ animationView in
                 animationView.contentMode = .scaleAspectFill
             })
             .playbackMode(renderForSharing ? .paused(at: .progress(1)) : .playing(.fromProgress(0, toProgress: 1, loopMode: .autoReverse)))
             .frame(width: size.width, height: size.width)
-            .scaleEffect(UIScreen.isSmallScreen ? 1.2 : 1.4)
+            .scaleEffect(isSmallScreen ? 1.2 : 1.4)
             .scaledToFill()
     }
 

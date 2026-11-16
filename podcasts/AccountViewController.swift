@@ -44,7 +44,7 @@ class AccountViewController: UIViewController, ChangeEmailDelegate {
         let headerView = AccountHeaderView(viewModel: headerViewModel)
 
         let view = headerView.themedUIView
-        view.backgroundColor = AppTheme.colorForStyle(.primaryUi03, themeOverride: nil)
+        view.backgroundColor = .clear
         self.tableView.themeStyle =  ThemeStyle.primaryUi03
 
         return view
@@ -162,7 +162,7 @@ class AccountViewController: UIViewController, ChangeEmailDelegate {
     }
 
     @IBAction func learnMoreTapped(_ sender: Any) {
-        NavigationManager.sharedManager.navigateTo(NavigationManager.showPlusMarketingPageKey, data: nil)
+        NavigationManager.shared.navigateTo(NavigationManager.showPlusMarketingPageKey, data: nil)
     }
 
     @objc func themeDidChange() {

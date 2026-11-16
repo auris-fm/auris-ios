@@ -21,6 +21,8 @@ class PlaylistDetailsViewModel {
 
     var playlist: PlaylistItem
     var episodes: [Episode] = []
+    /// Row models for `episodes`, built once per load so rows keep their observers across re-renders.
+    private(set) var episodeRows: [EpisodeRowViewModel] = []
     var showArchived: Bool = false
     var playlistColor: Color
     var episodesCount: Int = 0
@@ -30,6 +32,7 @@ class PlaylistDetailsViewModel {
     private var allEpisodes: [Episode] = []
     private let dataManager: DataManager
     private let playbackManager: PlaybackManager
+    private let detail: Bool
 
     private static func archiveStorageKey(for playlist: EpisodeFilter) -> String {
         "showArchived_playlist_\(playlist.uuid)"
@@ -37,11 +40,12 @@ class PlaylistDetailsViewModel {
 
     init(playlist: PlaylistItem,
          detail: Bool = false,
-         dataManager: DataManager = DataManager.sharedManager,
+         dataManager: DataManager = DataManager.shared,
          playbackManager: PlaybackManager = PlaybackManager.shared) {
         self.playlist = playlist
         self.dataManager = dataManager
         self.playbackManager = playbackManager
+        self.detail = detail
         self.showArchived = UserDefaults.standard.bool(forKey: Self.archiveStorageKey(for: playlist.playlist))
         self.playlistColor = Self.fallbackPillColor(for: playlist.playlist.uuid)
         observePodcastColorDownloads()
@@ -116,6 +120,9 @@ class PlaylistDetailsViewModel {
 
     private func applyArchivedFilter() {
         episodes = showArchived ? allEpisodes : allEpisodes.filter { !$0.archived }
+        // Playlist cards only need counts and covers, so skip the per-row observers there.
+        guard detail else { return }
+        episodeRows = episodes.map { EpisodeRowViewModel(episode: $0, podcast: nil, source: .filters) }
     }
 
     func playAll() {
@@ -199,7 +206,7 @@ class PlaylistDetailsViewModel {
     private func refreshPlaylistColor() {
         if let uuid = episodes.first?.podcastUuid,
            let podcast = dataManager.findPodcast(uuid: uuid, includeUnsubscribed: true),
-           let color = Self.pillColor(from: ColorManager.lightThemeTintForPodcast(podcast)) {
+           let color = Self.pillColor(from: ColorManager.lightThemeTint(for: podcast)) {
             playlistColor = color
         } else {
             playlistColor = Self.fallbackPillColor(for: playlist.playlist.uuid)
