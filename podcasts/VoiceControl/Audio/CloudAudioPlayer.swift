@@ -1256,11 +1256,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
     private func noteFirstAudibleIfRendering() {
         // Takes the mark in the ONE place, from a PURE read.
         //
-        // This used to call `renderPosition(of:)`, which called back into here whenever the read
-        // returned an anchor - so while the node had rendered but the mark was still unset, the
-        // pair recursed until the stack overflowed. Every cloud answer that played audio crashed
-        // there. `renderPosition(of:)` is now a pure read and this is the only writer, so there is
-        // no path from the read back into the mark.
+        // `renderPosition(of:)` is a PURE read and this is the only writer of the mark, so there is
+        // no path from the read back into here. A read that took the mark itself would recurse with
+        // this method whenever it returned an anchor while the mark was still unset, until the
+        // stack overflowed — on every cloud answer that played audio.
         guard let node = playerNode else { return }
         firstAudibleLock.lock()
         guard firstAudibleInstant == nil,

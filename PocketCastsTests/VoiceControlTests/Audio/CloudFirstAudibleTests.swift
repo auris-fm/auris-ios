@@ -5,10 +5,9 @@ import XCTest
 /// The cloud turn must report first AUDIBLE audio, measured on the client's own clock.
 ///
 /// `cloud-assistant.md` (L33) requires it, and the latency work needs the same number from iOS and
-/// Android. The value that used to stand in for it — the instant the first buffer was handed to the
-/// output node — is scheduling, not audibility: `scheduleBuffer` only enqueues, and the node may
-/// still be rendering audio queued before it, so that instant can precede what the user hears by an
-/// arbitrary amount.
+/// Android. The scheduling instant — when the first buffer is handed to the output node — is NOT
+/// this number: `scheduleBuffer` only enqueues, and the node may still be rendering audio queued
+/// before it, so that instant can precede what the user hears by an arbitrary amount.
 ///
 /// These controls read the PRODUCTION property (`firstAudibleHostSeconds`) and drive the production
 /// path; there is no test-only setter, because a control that wrote the mark directly would pass

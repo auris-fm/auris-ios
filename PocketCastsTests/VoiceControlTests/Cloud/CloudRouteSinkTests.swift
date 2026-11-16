@@ -139,13 +139,12 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     /// A turn with an AUDIO FIXTURE reports its own line, consistently, whether or not the
     /// simulator's engine rendered.
     ///
-    /// It used to assert `first_audible=absent`, "because the stub never renders". That was true
-    /// only because the record was written at `done`, before the node had rendered anything: the
-    /// engine does start on the simulator, and the mark lands moments later. The record now waits
-    /// for it, so this turn can legitimately report a duration. Whether the simulator's engine
-    /// renders is the host's business, so the assertion is the part that cannot depend on it:
-    /// the line belongs to THIS request, and it is internally consistent - absence is stated as
-    /// absence, and a measured turn has a measured request leg rather than `none`.
+    /// `first_audible=absent` is NOT assertable here. The engine does start on the simulator and the
+    /// mark lands moments after `done`, and the record waits for it, so this turn can legitimately
+    /// report a duration. Whether the simulator's engine renders is the host's business, so the
+    /// assertion is the part that cannot depend on it: the line belongs to THIS request, and it is
+    /// internally consistent - absence is stated as absence, and a measured turn has a measured
+    /// request leg rather than `none`.
     @MainActor
     func testAnAudioFixtureTurnReportsItsOwnLineWithoutClaimingAudio() async throws {
         // Unique per RUN: the app log persists, so a fixed id would read the previous run's line.
@@ -442,10 +441,10 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
     /// A turn handled on the phone leaves nothing behind, because nothing was ever shared.
     ///
-    /// This used to be observed through a discard call. With the instants on the turn's own object
-    /// there is no store to clean up: a local turn's context is simply released, so a LATER turn
-    /// reusing the same identity cannot see it. The assertion is the same one that would catch a
-    /// resurrected side table — the newer turn reports its own instant, not the dropped one's.
+    /// The instants live on the turn's own object, so there is no store to clean up: a local turn's
+    /// context is simply released, and a LATER turn reusing the same identity cannot see it. The
+    /// assertion is the one that would catch a resurrected side table — the newer turn reports its
+    /// own instant, not the dropped one's.
     @MainActor
     func test_aLocallyHandledTurnDoesNotShadowTheNextTurnWithTheSameIdentity() async throws {
         let utteranceId = "u-\(UUID().uuidString.prefix(8))-local"
@@ -477,9 +476,9 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
     /// A ROUTED turn that is then handled on the phone leaves no entry behind.
     ///
-    /// The earlier control only covered a turn that never reached routing. A routed local command —
-    /// the majority — ends at the router instead, where its instants have no consumer at all. With
-    /// the context on the turn, that terminal needs no cleanup call to be correct.
+    /// Distinct from a turn that never reaches routing: a routed local command — the majority —
+    /// ends at the router instead, where its instants have no consumer at all. With the context on
+    /// the turn, that terminal needs no cleanup call to be correct.
     @MainActor
     func test_aRoutedLocalTurnDropsItsEndOfSpeech() async throws {
         let utteranceId = "u-\(UUID().uuidString.prefix(8))-routedlocal"

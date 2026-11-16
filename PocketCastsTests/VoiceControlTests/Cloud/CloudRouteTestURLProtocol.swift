@@ -346,8 +346,8 @@ final class Promise<Value>: @unchecked Sendable {
 final class HoldLatch: @unchecked Sendable {
     private let lock = NSLock()
     private var open = false
-    // Every parked waiter, not one: a second `wait` on the same latch used to overwrite the first's
-    // continuation, which then leaked and left its task suspended forever.
+    // Every parked waiter, not one. A single stored continuation would let a second `wait` on the
+    // same latch displace the first's, leaking it and leaving its task suspended forever.
     private var resumes: [() -> Void] = []
 
     /// True once `release()` has run — the still-held probe for controls.

@@ -51,12 +51,10 @@ final class RenderLifecycleControlTests: XCTestCase {
 
     /// AUDIO SCHEDULED BEFORE THE NODE RENDERS MUST STILL BE MARKED.
     ///
-    /// Making the position read pure removed the ONLY thing that took the mark during rendering:
-    /// `renderPosition(of:)` used to call `noteFirstAudibleIfRendering()` whenever it got an anchor.
-    /// Audio scheduled entirely before the first render — the ordinary case, and what this fixture
-    /// does — was then never marked and reported `first_audible=absent` for a turn the user heard.
-    /// The mark is now taken from the per-block render observation instead, so it survives the read
-    /// becoming pure.
+    /// The position read is PURE, so it cannot be what takes the mark: the mark comes from the
+    /// per-block render observation. Taking it from the read instead leaves audio scheduled
+    /// entirely before the first render — the ordinary case, and what this fixture does — unmarked,
+    /// reporting `first_audible=absent` for a turn the user heard.
     @MainActor
     func testAudioScheduledBeforeRenderingIsStillMarkedAudible() throws {
         try withPendingOfflineAudio { player, engine, node, output, scheduledSamples in
@@ -261,14 +259,14 @@ final class RenderLifecycleControlTests: XCTestCase {
 
     /// Reading the render position must not re-enter the first-audible mark.
     ///
-    /// `renderPosition(of:)` called `noteFirstAudibleIfRendering()`, which read the position again
-    /// through that same function. While the node had rendered but the mark was still unset, the
-    /// two recursed until the stack overflowed - so EVERY cloud answer that played audio crashed.
-    /// No test caught it because no earlier control both rendered audio and then read the position
-    /// with the mark unset; this one does both, through the player's real API.
+    /// If the read took the mark, it would call `noteFirstAudibleIfRendering()`, which reads the
+    /// position again through that same function. While the node has rendered but the mark is still
+    /// unset, the two recurse until the stack overflows — crashing EVERY cloud answer that plays
+    /// audio. Reaching it needs a control that both renders audio and then reads the position with
+    /// the mark unset; this one does both, through the player's real API.
     ///
-    /// The fix is structural, not an ordering tweak: the read is pure and the mark has one writer,
-    /// so there is no path from the read back into it. A reordered version would still recurse.
+    /// The property is structural, not an ordering tweak: the read is pure and the mark has one
+    /// writer, so there is no path from the read back into it. A reordered version still recurses.
     @MainActor
     func testReadingTheRenderPositionDoesNotReenterTheFirstAudibleMark() throws {
         try withPendingOfflineAudio { player, engine, node, _, _ in
@@ -277,8 +275,8 @@ final class RenderLifecycleControlTests: XCTestCase {
                 "premise: the mark must still be unset, or the re-entrancy cannot happen")
 
             // The precondition of the crash, stated rather than assumed: the node HAS rendered, so
-            // the read returns an anchor, and the mark is still unset, so the old implementation
-            // would have taken the mark by calling back into itself.
+            // the read returns an anchor, and the mark is still unset — the state in which a read
+            // that took the mark would call back into itself.
             _ = try engine.renderOffline(1_024, to: try XCTUnwrap(
                 AVAudioPCMBuffer(pcmFormat: AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!,
                                  frameCapacity: 4_096)))

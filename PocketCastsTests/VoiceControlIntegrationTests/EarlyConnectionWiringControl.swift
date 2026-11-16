@@ -155,9 +155,9 @@ final class EarlyConnectionWiringControl: XCTestCase {
 
     /// A connection may only be consumed by the utterance it belongs to.
     ///
-    /// Without the owner check the turn takes any held connection, so a predecessor's socket is
-    /// used to send a successor's request — the same "one utterance using another's state" defect
-    /// the tag was introduced to end, arriving from the other side.
+    /// Without the owner check the turn takes any held connection, so a predecessor's socket sends
+    /// a successor's request — "one utterance using another's state", arriving from the connection
+    /// side rather than the identity side the tag guards.
     func test_aTurnDoesNotTakeAConnectionOwnedByAnotherUtterance() async throws {
         guard let service = makeService() else {
             return XCTFail("the assembly built no service, so the case proves nothing")
