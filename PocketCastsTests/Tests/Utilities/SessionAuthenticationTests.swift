@@ -114,6 +114,7 @@ final class SessionAuthenticationTests: XCTestCase {
     /// the first renewal commit after a cold start is otherwise read as a different account;
     /// * with no stored credential there is nothing to present.
     func testStoredCredentialIdentityIsReadableWithoutACommit_andMatchesTheCommittedForm() throws {
+        try skipWithoutKeychainEntitlement()
         // Start from a device with NOTHING to present. The test host's Keychain is shared and dirty
         // from other suites, so this needs an explicit clear, not an assumption about its contents.
         ServerSettings.clearAuthentication(defaults: defaults)

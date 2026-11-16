@@ -63,6 +63,7 @@ final class PodcastManagerTests: DBTestCase {
     }
 
     func testUnsubscribeRemovesDownloadsInPlaylist() throws {
+        try skipWithoutKeychainEntitlement()
         ServerSettings.setSyncingEmail(email: "test@example.com")
         defer { ServerSettings.setSyncingEmail(email: nil) }
 
@@ -83,6 +84,7 @@ final class PodcastManagerTests: DBTestCase {
     }
 
     func testUnsubscribeRemovesDownloadsNotInPlaylist() throws {
+        try skipWithoutKeychainEntitlement()
         ServerSettings.setSyncingEmail(email: "test@example.com")
         defer { ServerSettings.setSyncingEmail(email: nil) }
 
