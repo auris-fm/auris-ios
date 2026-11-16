@@ -2493,7 +2493,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// so once ANY test had released a park, a LATER test's brand-new semaphore could land on a
     /// recycled address and be treated as already-open: `registerProductionPark` returned false
     /// and that park silently did not block. The turn then ran on instead of parking, which is
-    /// what made `testSupersededTurnDoesNotRestoreOrRecordAnalytics` fail only in suite order.
+    /// what made `testSupersededTurnDoesNotRestoreButRecordsInterrupted` fail only in suite order.
     ///
     /// This pins the property directly and deterministically, so the failure does not depend on
     /// flake luck: after a release, a FRESH park must still block.
@@ -3712,7 +3712,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         }
     }
 
-    func testSupersededTurnDoesNotRestoreOrRecordAnalytics() async throws {
+    func testSupersededTurnDoesNotRestoreButRecordsInterrupted() async throws {
         // Turn A: held open, so it is still running when B starts. Its fixture is
         // bound to A's client explicitly, because B's turn is built in between.
         self.nextTurnFixture =
