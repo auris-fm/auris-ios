@@ -5864,3 +5864,258 @@ private final class NoOpCloudStatsQuerySink: VoiceStatsQuerySink {
     // MARK: - Buffered playback after an ordinary `done` (reviewer 79614a4f item 3)
 
 }
+
+/// An expired conversation is a NORMAL end of a conversation, not a malfunction: the user hears
+/// that it ended, in their own language, and the next request opens a new conversation instead of
+/// resuming one the server no longer holds. Without the second half every later follow-up in the
+/// same window fails the same way until a wake word starts over.
+final class CloudRouteExpiredConversationTests: SocketCapturingTestCase {
+    private var playback: RecordingPlaybackSink!
+    private var suiteName: String!
+    private var defaults: UserDefaults!
+
+    override func setUp() {
+        super.setUp()
+        playback = RecordingPlaybackSink()
+        suiteName = "cloud_expired_\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suiteName)!
+        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+    }
+
+    override func tearDown() {
+        CloudRouteTestURLProtocol.reset()
+        defaults.removePersistentDomain(forName: suiteName)
+        super.tearDown()
+    }
+
+    /// The spoken line comes from the client's own table for this code — never the wire message,
+    /// which is operator diagnostics.
+    func testExpiredConversationIsSpokenRatherThanSoundedAsAnError() async {
+        let manager = CloudConversationManager()
+        manager.registerLiveOrigin(cloudTestOrigin)
+        self.pendingFixture = Self.expiredFixture
+        let response = await makeSink(manager: manager).routeToCloud(
+            request: "x", tier: .free, context: context(), origin: cloudTestOrigin,
+            selection: .wakeWord, utteranceId: "expired-spoken-1"
+        )
+        XCTAssertEqual(
+            response.response, .spoken("That conversation has ended."),
+            "an ended conversation is explained in words; an earcon tells the user nothing (outcome \(response.outcome))"
+        )
+    }
+
+    /// The break this catches: the handle survives the refusal, so the NEXT follow-up resumes the
+    /// same dead id and is refused again. Asserted on the wire identity the second turn actually
+    /// sends, not on a manager accessor.
+    func testTheNextFollowUpOpensANewConversationInsteadOfResumingTheDeadOne() async throws {
+        let manager = CloudConversationManager()
+        manager.registerLiveOrigin(cloudTestOrigin)
+        let sink = makeSink(manager: manager)
+
+        var first: CloudPreparedConversation?
+        self.pendingFixture = Self.expiredFixture
+        _ = await sink.routeToCloud(
+            request: "first", tier: .free, context: context(), origin: cloudTestOrigin,
+            selection: .wakeWord, utteranceId: "expired-seq-1",
+            preparedObserver: { first = $0 }
+        )
+        let dead = try XCTUnwrap(first, "the first turn must have been admitted and prepared")
+        XCTAssertEqual(dead.mode, "create", "a wake-word turn opens the conversation")
+
+        var second: CloudPreparedConversation?
+        self.pendingFixture = Self.doneFixture
+        _ = await sink.routeToCloud(
+            request: "second", tier: .free, context: context(), origin: cloudTestOrigin,
+            selection: .followUp, utteranceId: "expired-seq-2",
+            preparedObserver: { second = $0 }
+        )
+        let next = try XCTUnwrap(second, "the follow-up must be admitted")
+        XCTAssertEqual(
+            next.mode, "create",
+            "after the server said the conversation ended, the next request must open a new one"
+        )
+        XCTAssertNotEqual(
+            next.conversationId, dead.conversationId,
+            "resuming the id the server just expired would fail exactly the same way"
+        )
+    }
+
+    /// Only the expired code leaves the conversation. A transport failure says nothing about the
+    /// server's conversation, so dropping the handle there would start a new conversation and lose
+    /// the thread of a conversation that is still alive.
+    func testAnotherFailureKeepsTheConversationForTheNextFollowUp() async throws {
+        let manager = CloudConversationManager()
+        manager.registerLiveOrigin(cloudTestOrigin)
+        let sink = makeSink(manager: manager)
+
+        var first: CloudPreparedConversation?
+        self.pendingFixture = Self.connectionLostFixture
+        _ = await sink.routeToCloud(
+            request: "first", tier: .free, context: context(), origin: cloudTestOrigin,
+            selection: .wakeWord, utteranceId: "kept-seq-1",
+            preparedObserver: { first = $0 }
+        )
+        let opened = try XCTUnwrap(first)
+
+        var second: CloudPreparedConversation?
+        self.pendingFixture = Self.doneFixture
+        _ = await sink.routeToCloud(
+            request: "second", tier: .free, context: context(), origin: cloudTestOrigin,
+            selection: .followUp, utteranceId: "kept-seq-2",
+            preparedObserver: { second = $0 }
+        )
+        let next = try XCTUnwrap(second)
+        XCTAssertEqual(next.mode, "resume", "a connection failure does not end the conversation")
+        XCTAssertEqual(next.conversationId, opened.conversationId)
+    }
+
+    /// Every language the app ships carries the line, through the resolver's own locale discovery.
+    /// An English-only entry would leave a non-English user with an earcon.
+    func testExpiredConversationLineExistsInEveryShippedResponseLanguage() {
+        let expected: [String: String] = [
+            "en": "That conversation has ended.",
+            "de": "Dieses Gespräch ist beendet.",
+            "es": "Esa conversación ha terminado.",
+            "es-MX": "Esa conversación ha terminado.",
+            "fr": "Cette conversation est terminée.",
+            "fr-CA": "Cette conversation est terminée.",
+            "ja": "その会話は終了しました。",
+            "ko": "그 대화는 종료되었습니다.",
+            "zh-Hans": "该对话已结束。",
+            "zh-Hant": "該對話已結束。",
+            "yue": "嗰個對話已經結束咗。",
+        ]
+        for (dir, line) in expected {
+            guard let path = Bundle.main.path(forResource: dir, ofType: "lproj"),
+                  let bundle = Bundle(path: path) else {
+                XCTFail("\(dir).lproj is missing from the app bundle")
+                continue
+            }
+            let resolver = SpokenTemplateResolver(localeBundle: bundle)
+            XCTAssertEqual(
+                resolver.resolveForUserLocale("cloud_error_conversation_expired"), line,
+                "\(dir) must speak the same ended-conversation line as the other app"
+            )
+        }
+    }
+
+    /// A turn the server could not voice is still a turn the user asked for: they must hear that it
+    /// did not work and can be retried. Without a line for this code the app plays a bare error tone,
+    /// which says nothing about what happened or what to do next.
+    func testSpeechUnavailableIsSpokenRatherThanSoundedAsAnError() async {
+        let manager = CloudConversationManager()
+        manager.registerLiveOrigin(cloudTestOrigin)
+        self.pendingFixture = Self.speechUnavailableFixture
+        let response = await makeSink(manager: manager).routeToCloud(
+            request: "x", tier: .free, context: context(), origin: cloudTestOrigin,
+            selection: .wakeWord, utteranceId: "unavailable-spoken-1"
+        )
+        XCTAssertEqual(
+            response.response,
+            .spoken("Sorry, I couldn't answer that just now. Please try again."),
+            "a failed answer needs words, not a tone (outcome \(response.outcome))"
+        )
+    }
+
+    /// The same apology for an internal failure: from the listener's side these are one situation —
+    /// the answer did not come — so they say one thing, and neither may fall back to a tone.
+    func testInternalErrorSpeaksTheSameLineAsSpeechUnavailable() async {
+        let manager = CloudConversationManager()
+        manager.registerLiveOrigin(cloudTestOrigin)
+        self.pendingFixture = Self.internalErrorFixture
+        let response = await makeSink(manager: manager).routeToCloud(
+            request: "x", tier: .free, context: context(), origin: cloudTestOrigin,
+            selection: .wakeWord, utteranceId: "internal-spoken-1"
+        )
+        XCTAssertEqual(
+            response.response,
+            .spoken("Sorry, I couldn't answer that just now. Please try again."),
+            "an internal failure is explained the same way as a missing voice (outcome \(response.outcome))"
+        )
+    }
+
+    /// Both codes carry the line in every shipped language, and it is the SAME sentence in each —
+    /// one decision, so the two keys must not drift apart in any locale.
+    func testBothFailureCodesSpeakOneLocalizedLineInEveryShippedLanguage() {
+        let expected: [String: String] = [
+            "en": "Sorry, I couldn't answer that just now. Please try again.",
+            "de": "Entschuldigung, ich konnte das gerade nicht beantworten. Bitte versuche es noch einmal.",
+            "es": "Lo siento, no he podido responder a eso ahora mismo. Inténtalo de nuevo.",
+            "es-MX": "Lo siento, no he podido responder a eso ahora mismo. Inténtalo de nuevo.",
+            "fr": "Désolé, je n'ai pas pu répondre à cela pour le moment. Veuillez réessayer.",
+            "fr-CA": "Désolé, je n'ai pas pu répondre à cela pour le moment. Veuillez réessayer.",
+            "ja": "申し訳ありません。今はお答えできませんでした。もう一度お試しください。",
+            "ko": "죄송합니다. 지금은 답변드리지 못했습니다. 다시 시도해 주세요.",
+            "zh-Hans": "抱歉，我刚才没能回答这个问题。请再试一次。",
+            "zh-Hant": "抱歉，我剛才沒能回答這個問題。請再試一次。",
+            "yue": "唔好意思，我啱啱答唔到你呢個問題。唔該再試一次。",
+        ]
+        for (dir, line) in expected {
+            guard let path = Bundle.main.path(forResource: dir, ofType: "lproj"),
+                  let bundle = Bundle(path: path) else {
+                XCTFail("\(dir).lproj is missing from the app bundle")
+                continue
+            }
+            let resolver = SpokenTemplateResolver(localeBundle: bundle)
+            XCTAssertEqual(
+                resolver.resolveForUserLocale("cloud_error_speech_unavailable"), line,
+                "\(dir) must explain a missing voice in its own language"
+            )
+            XCTAssertEqual(
+                resolver.resolveForUserLocale("cloud_error_internal_error"), line,
+                "\(dir) must say the same sentence for an internal failure"
+            )
+        }
+    }
+
+    private static let speechUnavailableFixture = """
+        event: error
+        data: {"code":"speech_unavailable","message":""}
+
+        """
+
+    private static let internalErrorFixture = """
+        event: error
+        data: {"code":"internal_error","message":""}
+
+        """
+
+    private static let expiredFixture = """
+        event: error
+        data: {"code":"conversation_expired","message":"conversation no longer held"}
+
+        """
+
+    private static let connectionLostFixture = """
+        event: error
+        data: {"code":"connection_lost","message":""}
+
+        """
+
+    private static let doneFixture = """
+        event: done
+        data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+        """
+
+    private func makeSink(manager: CloudConversationManager) -> CloudRouteSink {
+        let cloudConfig = CloudConfig(defaults: defaults)
+        return CloudRouteSink(
+            clientFactory: {
+                let built = CloudRouteClient.stubbed(baseURL: cloudConfig.baseUrl, fixture: self.nextFixture())
+                self.capturedTask = built.task
+                return built.client
+            },
+            isConfigured: { !cloudConfig.baseUrl.isEmpty },
+            playbackSink: playback,
+            fingerprintMapper: RecordingFingerprintMapper(),
+            playbackPositionMs: { 0 },
+            cloudPlaybackContextState: CloudPlaybackContextState(),
+            conversationManager: manager
+        )
+    }
+
+    private func context() -> PlaybackContext {
+        PlaybackContext(episodeId: "ep", podcastId: "pod", referencePositionMs: 1_000, clientPositionMs: 1_100, recentReferencePositions: [], previousReferencePositionMs: nil)
+    }
+}

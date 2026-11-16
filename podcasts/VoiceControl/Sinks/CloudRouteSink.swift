@@ -1405,6 +1405,15 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     turnResponse = .silent
                     break turnLoop
                 case let .error(_, code, _):
+                    // AN ENDED CONVERSATION IS NOT A BROKEN ONE: the server no longer holds this
+                    // id, so every later resume of it is refused the same way. Leave it here, at
+                    // the code that says so, and the next request opens a new conversation. No
+                    // other failure code may do this — a transport failure says nothing about the
+                    // server's conversation, and dropping the handle there would abandon a
+                    // conversation that is still alive.
+                    if code == "conversation_expired" {
+                        conversationManager.forget()
+                    }
                     // A terminal — refused or failed — settles the latch too: a waiter must not be
                     // left parked because the answer was an error rather than a `done`. It settles
                     // as `.refused`, so a successor DISCARDS the held follow-up instead of
