@@ -42,6 +42,64 @@ final class CloudConversationManagerTests: XCTestCase {
         )
     }
 
+    /// Leaving ONE conversation must not leave the others. A turn that is told its conversation
+    /// ended may be a delayed turn of an earlier window, while a newer window has already opened
+    /// its own conversation; releasing everything there would make the live window's next
+    /// follow-up start over and lose the thread the user is still in.
+    func testLeavingOneConversationKeepsAnotherWindowsConversation() throws {
+        let signal = GracePeriodSignal(timeout: 30)
+        manager.admittedWorkAuthority = { signal.admittedWorkAuthority }
+
+        signal.onWakeWordDetected()
+        let olderOrigin = signal.currentGeneration()
+        manager.registerLiveOrigin(olderOrigin)
+        signal.admitInFlightTurn(utteranceId: "old-1", origin: olderOrigin)
+        let older = try XCTUnwrap(manager.prepare(selection: .wakeWord, origin: olderOrigin, utteranceId: "old-1"))
+
+        // A newer window opens its own conversation while the older turn is still in flight.
+        signal.onWakeWordDetected()
+        let liveOrigin = signal.currentGeneration()
+        manager.registerLiveOrigin(liveOrigin)
+        let live = try XCTUnwrap(manager.prepare(selection: .wakeWord, origin: liveOrigin, utteranceId: "live-1"))
+        XCTAssertNotEqual(older.conversationId, live.conversationId, "premise: two distinct conversations")
+
+        manager.forget(conversationId: older.conversationId)
+
+        let liveFollowUp = try XCTUnwrap(manager.prepare(selection: .followUp, origin: liveOrigin, utteranceId: "live-2"))
+        XCTAssertEqual(
+            liveFollowUp.conversationId, live.conversationId,
+            "the live window's conversation was dropped by another window's expired turn"
+        )
+        XCTAssertEqual(liveFollowUp.mode, "resume")
+
+        // The named conversation really is gone: a delayed follow-up of that same admitted window
+        // opens a new one rather than resuming the id the server no longer holds.
+        signal.admitInFlightTurnForTesting(utteranceId: "old-2", origin: olderOrigin)
+        let olderFollowUp = try XCTUnwrap(manager.prepare(selection: .followUp, origin: olderOrigin, utteranceId: "old-2"))
+        XCTAssertEqual(olderFollowUp.mode, "create", "the released conversation must not be resumed")
+        XCTAssertNotEqual(olderFollowUp.conversationId, older.conversationId)
+    }
+
+    /// The live conversation is released when it is the one named, so the next request in that
+    /// window opens a new conversation instead of resuming an id the server dropped.
+    func testLeavingTheLiveConversationMakesTheNextRequestOpenANewOne() throws {
+        let opened = try XCTUnwrap(manager.prepare(selection: .wakeWord, origin: 1, utteranceId: "u-open"))
+        manager.forget(conversationId: opened.conversationId)
+        let next = try XCTUnwrap(manager.prepare(selection: .followUp, origin: 1, utteranceId: "u-next"))
+        XCTAssertEqual(next.mode, "create")
+        XCTAssertNotEqual(next.conversationId, opened.conversationId)
+    }
+
+    /// An id this client never opened releases nothing. A stale or foreign id must not be able to
+    /// clear the conversation the user is actually in.
+    func testLeavingAnUnknownConversationKeepsTheLiveOne() throws {
+        let opened = try XCTUnwrap(manager.prepare(selection: .wakeWord, origin: 1, utteranceId: "u-keep"))
+        manager.forget(conversationId: "not-a-conversation-this-client-opened")
+        let next = try XCTUnwrap(manager.prepare(selection: .followUp, origin: 1, utteranceId: "u-after"))
+        XCTAssertEqual(next.mode, "resume")
+        XCTAssertEqual(next.conversationId, opened.conversationId)
+    }
+
     func testDuplicatePreparationForTheSameUtteranceReusesTheWireIdentity() throws {
         let first = try XCTUnwrap(manager.prepare(selection: .wakeWord, origin: 1, utteranceId: "u-1"))
         let duplicate = try XCTUnwrap(manager.prepare(selection: .wakeWord, origin: 1, utteranceId: "u-1"))

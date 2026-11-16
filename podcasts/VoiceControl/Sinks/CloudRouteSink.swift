@@ -1411,8 +1411,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // other failure code may do this — a transport failure says nothing about the
                     // server's conversation, and dropping the handle there would abandon a
                     // conversation that is still alive.
+                    //
+                    // SCOPED TO THE ID THIS TURN SENT: a delayed turn of an earlier window can be
+                    // told its conversation ended after a newer window has opened its own.
+                    // Releasing everything here would drop the conversation the user is actually
+                    // in, and their next follow-up would silently start over.
                     if code == "conversation_expired" {
-                        conversationManager.forget()
+                        conversationManager.forget(conversationId: turnConversationId)
                     }
                     // A terminal — refused or failed — settles the latch too: a waiter must not be
                     // left parked because the answer was an error rather than a `done`. It settles

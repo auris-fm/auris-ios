@@ -5865,18 +5865,29 @@ private final class NoOpCloudStatsQuerySink: VoiceStatsQuerySink {
 
 }
 
+/// Records the turn outcomes the sink reports, so a control can prove WHICH turn ran a path.
+private final class ExpiredTurnAnalytics: AnalyticsService {
+    private(set) var turnOutcomes: [String] = []
+    func track(_ event: String, properties: [String: Any]) {
+        guard event == "cloud_assistant_turn", let outcome = properties["outcome"] as? String else { return }
+        turnOutcomes.append(outcome)
+    }
+}
+
 /// An expired conversation is a NORMAL end of a conversation, not a malfunction: the user hears
 /// that it ended, in their own language, and the next request opens a new conversation instead of
 /// resuming one the server no longer holds. Without the second half every later follow-up in the
 /// same window fails the same way until a wake word starts over.
 final class CloudRouteExpiredConversationTests: SocketCapturingTestCase {
     private var playback: RecordingPlaybackSink!
+    private var analytics: ExpiredTurnAnalytics!
     private var suiteName: String!
     private var defaults: UserDefaults!
 
     override func setUp() {
         super.setUp()
         playback = RecordingPlaybackSink()
+        analytics = ExpiredTurnAnalytics()
         suiteName = "cloud_expired_\(UUID().uuidString)"
         defaults = UserDefaults(suiteName: suiteName)!
         defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
@@ -6068,6 +6079,95 @@ final class CloudRouteExpiredConversationTests: SocketCapturingTestCase {
         }
     }
 
+    /// A turn that is told its conversation ended may belong to an EARLIER window, while a newer
+    /// window has already opened its own conversation. Releasing every conversation there would
+    /// drop the one the user is actually in, and their next follow-up would silently start over.
+    /// Only the conversation this turn sent may be released.
+    ///
+    /// The refusal is delivered while the turn is still the live one — a superseded turn stops
+    /// consuming before its error branch, so it never reaches this code at all. What makes it a
+    /// delayed turn is that its WINDOW has moved on: it was admitted earlier, and a newer window
+    /// opened its own conversation before this answer came back.
+    @MainActor
+    func testAnExpiredDelayedTurnDoesNotReleaseTheLiveWindowsConversation() async throws {
+        let signal = GracePeriodSignal(timeout: 30)
+        let manager = CloudConversationManager()
+        manager.admittedWorkAuthority = { signal.admittedWorkAuthority }
+
+        // The older window opens a conversation; its turn stays in flight with its terminal withheld.
+        signal.onWakeWordDetected()
+        let olderOrigin = signal.currentGeneration()
+        manager.registerLiveOrigin(olderOrigin)
+        signal.admitInFlightTurn(utteranceId: "delayed-1", origin: olderOrigin)
+
+        var olderPrepared: CloudPreparedConversation?
+        let hold = HoldLatch()
+        self.pendingFixture = Self.expiredFixture
+        let sink = makeSink(
+            manager: manager, firstReceiveHold: hold,
+            admittedWorkAuthority: { signal.admittedWorkAuthority }
+        )
+        let delayed = Task { @MainActor in
+            await sink.routeToCloud(
+                request: "older question", tier: .free, context: self.context(), origin: olderOrigin,
+                selection: .wakeWord, utteranceId: "delayed-1",
+                preparedObserver: { olderPrepared = $0 }
+            )
+        }
+        // PREMISE: the older turn must have prepared AND own the live socket before anything else
+        // happens — otherwise there is no in-flight turn to refuse and this proves nothing.
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if olderPrepared != nil, sink.activeResultSocketForTesting?.requestId == "delayed-1" { break }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        let older = try XCTUnwrap(olderPrepared, "premise: the delayed turn must have prepared")
+        XCTAssertEqual(
+            sink.activeResultSocketForTesting?.requestId, "delayed-1",
+            "premise: the delayed turn must still be the live turn when its refusal lands"
+        )
+        XCTAssertFalse(hold.released, "premise: the delayed turn's terminal is still withheld")
+
+        // A NEWER WINDOW opens its own conversation while that turn is still waiting for its answer.
+        // Prepared directly at the manager: this is the state a second window leaves behind, and it
+        // keeps the older turn live so its refusal is actually processed.
+        signal.onWakeWordDetected()
+        let liveOrigin = signal.currentGeneration()
+        manager.registerLiveOrigin(liveOrigin)
+        let live = try XCTUnwrap(
+            manager.prepare(selection: .wakeWord, origin: liveOrigin, utteranceId: "live-1"),
+            "premise: the newer window must open its own conversation"
+        )
+        XCTAssertNotEqual(live.conversationId, older.conversationId, "premise: two distinct conversations")
+
+        // Now the older turn's refusal lands and is processed.
+        hold.release()
+        let delayedResult = await delayed.value
+        XCTAssertEqual(
+            delayedResult.response, .spoken("That conversation has ended."),
+            "premise: the delayed turn must report the expired conversation (outcome \(delayedResult.outcome))"
+        )
+
+        // The newer window's follow-up must still continue ITS conversation.
+        let next = try XCTUnwrap(manager.prepare(selection: .followUp, origin: liveOrigin, utteranceId: "live-2"))
+        XCTAssertEqual(
+            next.conversationId, live.conversationId,
+            "the live window lost its conversation to another window's expired turn"
+        )
+        XCTAssertEqual(next.mode, "resume", "the user's next follow-up must continue the conversation they are in")
+
+        // And the expired conversation really was released for its OWN window: a later admitted
+        // turn of that window opens a new conversation rather than resuming the dead id. Without
+        // this the control would also pass for a client that releases nothing.
+        signal.admitInFlightTurnForTesting(utteranceId: "delayed-2", origin: olderOrigin)
+        let olderFollowUp = try XCTUnwrap(
+            manager.prepare(selection: .followUp, origin: olderOrigin, utteranceId: "delayed-2"),
+            "the older window's admitted turn must still prepare"
+        )
+        XCTAssertEqual(olderFollowUp.mode, "create", "the expired conversation must not be resumed by its own window either")
+        XCTAssertNotEqual(olderFollowUp.conversationId, older.conversationId)
+    }
+
     private static let speechUnavailableFixture = """
         event: error
         data: {"code":"speech_unavailable","message":""}
@@ -6098,11 +6198,18 @@ final class CloudRouteExpiredConversationTests: SocketCapturingTestCase {
 
         """
 
-    private func makeSink(manager: CloudConversationManager) -> CloudRouteSink {
+    private func makeSink(
+        manager: CloudConversationManager,
+        firstReceiveHold: HoldLatch? = nil,
+        admittedWorkAuthority: (() -> GracePeriodSignal.AdmittedWorkAuthority?)? = nil
+    ) -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
         return CloudRouteSink(
             clientFactory: {
-                let built = CloudRouteClient.stubbed(baseURL: cloudConfig.baseUrl, fixture: self.nextFixture())
+                let built = CloudRouteClient.stubbed(
+                    baseURL: cloudConfig.baseUrl, fixture: self.nextFixture(),
+                    prepareTask: { task in firstReceiveHold.map(task.holdFirstReceiveUntilReleased) }
+                )
                 self.capturedTask = built.task
                 return built.client
             },
@@ -6111,7 +6218,9 @@ final class CloudRouteExpiredConversationTests: SocketCapturingTestCase {
             fingerprintMapper: RecordingFingerprintMapper(),
             playbackPositionMs: { 0 },
             cloudPlaybackContextState: CloudPlaybackContextState(),
-            conversationManager: manager
+            analytics: VoiceAnalytics(analytics: analytics),
+            conversationManager: manager,
+            admittedWorkAuthority: admittedWorkAuthority
         )
     }
 
