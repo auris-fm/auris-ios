@@ -1,15 +1,12 @@
 import Foundation
 import PocketCastsDataModel
 import PocketCastsUtils
+import SJUtils
 import SwipeCellKit
 
 extension UpNextViewController: SwipeTableViewCellDelegate {
-    func swipeCurrentlyAllowed() -> Bool {
-        return isReorderInProgress == false
-    }
-
     func tableView(_ tableView: UITableView, editActionsForRowAt indexPath: IndexPath, for orientation: SwipeActionsOrientation) -> [SwipeAction]? {
-        switch orientation {
+        switch orientation.resolvedForLayoutDirection {
         case .left:
             let moveToTopAction = SwipeAction(style: .default, title: nil) { [weak self] _, indexPath in
                 guard let self, let episode = PlaybackManager.shared.queue.episodeAt(index: indexPath.row) else { return }
@@ -43,6 +40,7 @@ extension UpNextViewController: SwipeTableViewCellDelegate {
                 PlaybackManager.shared.removeIfPlayingOrQueued(episode: episode, fireNotification: true, userInitiated: true)
                 Analytics.track(.episodeSwipeActionPerformed, properties: ["action": "delete", "source": "up_next"])
                 let remainingEpisodes = PlaybackManager.shared.queue.upNextCount()
+                self.displayedUpNextCount = remainingEpisodes
                 if remainingEpisodes > 0 {
                     do {
                         try SJCommonUtils.catchException {
@@ -64,7 +62,7 @@ extension UpNextViewController: SwipeTableViewCellDelegate {
             deleteAction.backgroundColor = ThemeColor.support05(for: themeOverride)
             deleteAction.accessibilityLabel = L10n.removeFromUpNext
 
-            if let episode = DataManager.sharedManager.episodeInUpNextAt(index: indexPath.row + 1) as? Episode {
+            if let episode = DataManager.shared.episodeInUpNextAt(index: indexPath.row + 1) as? Episode {
                 let shareAction = SwipeAction(style: .default, title: nil) { [weak self] _, _ in
                     guard let self else { return }
                     Analytics.track(
@@ -75,7 +73,7 @@ extension UpNextViewController: SwipeTableViewCellDelegate {
                         ]
                     )
                     let presentModal: () -> Void = { [weak self] in
-                        NavigationManager.sharedManager.navigateTo(
+                        NavigationManager.shared.navigateTo(
                             NavigationManager.manualPlaylistsChooserKey,
                             data: [
                                 NavigationManager.manualPlaylistsChooserEpisodeKey: episode,
@@ -103,7 +101,7 @@ extension UpNextViewController: SwipeTableViewCellDelegate {
     func tableView(_ tableView: UITableView, editActionsOptionsForRowAt indexPath: IndexPath, for orientation: SwipeActionsOrientation) -> SwipeOptions {
         var options = SwipeOptions()
 
-        switch orientation {
+        switch orientation.resolvedForLayoutDirection {
         case .left:
             options.expansionStyle = .selection
         case .right:

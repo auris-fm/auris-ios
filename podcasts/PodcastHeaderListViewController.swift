@@ -44,7 +44,7 @@ class PodcastHeaderListViewController: PCViewController, UITableViewDataSource, 
         chartsTable.register(UINib(nibName: "FeaturedTableViewCell", bundle: nil), forCellReuseIdentifier: PodcastHeaderListViewController.featuredCellId)
 
         if source != nil && isAuthenticated == false {
-            customRightBtn = UIBarButtonItem(image: UIImage(named: "podcast-share"), style: .plain, target: self, action: #selector(handleShare))
+            customRightBtn = UIBarButtonItem(image: UIImage(named: "podcast-share"), style: .plain, target: self, action: #selector(handleShare(_:)))
         }
 
         insetAdjuster.setupInsetAdjustmentsForMiniPlayer(scrollView: chartsTable)
@@ -58,10 +58,11 @@ class PodcastHeaderListViewController: PCViewController, UITableViewDataSource, 
         chartsTable.reloadData()
     }
 
-    @objc private func handleShare() {
+    @objc private func handleShare(_ sender: UIBarButtonItem) {
         guard let source = source?.deletingPathExtension() else { return }
         Analytics.track(.discoverListShareTapped)
         let activityViewController = UIActivityViewController(activityItems: [source], applicationActivities: nil)
+        activityViewController.popoverPresentationController?.barButtonItem = sender
         present(activityViewController, animated: true)
     }
 
@@ -96,7 +97,7 @@ class PodcastHeaderListViewController: PCViewController, UITableViewDataSource, 
             featuredCell.populateFrom(podcast, listName: labelTitle ?? L10n.top)
             featuredCell.showRanking()
             if let uuid = podcast.uuid {
-                ColorManager.darkThemeTintColorForPodcastUuid(uuid, completion: { (color: UIColor) in
+                ColorManager.darkThemeTintColor(forPodcastUuid: uuid, completion: { (color: UIColor) in
                     DispatchQueue.main.async {
                         featuredCell.setPodcastColor(color)
                     }

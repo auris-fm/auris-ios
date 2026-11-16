@@ -183,6 +183,7 @@ struct PodcastHeaderView: View {
                 .clipped()
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(viewModel.isSubscribed ? L10n.unfollow : L10n.follow)
     }
 
     private var fundingButton: some View {
@@ -316,40 +317,6 @@ struct PodcastHeaderView: View {
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(linkTint == nil ? [] : .isButton)
         .allowsHitTesting(action != nil)
-    }
-}
-
-extension AnyTransition {
-    static var collapse: AnyTransition { get {
-        AnyTransition.modifier(
-            active: ShapeClipModifier(shape: CollapseShape(pct: 1)),
-            identity: ShapeClipModifier(shape: CollapseShape(pct: 0)))
-        }
-    }
-}
-
-struct ShapeClipModifier<S: Shape>: ViewModifier {
-    let shape: S
-
-    func body(content: Content) -> some View {
-        content.clipShape(shape)
-    }
-}
-
-struct CollapseShape: Shape {
-    var pct: CGFloat
-
-    var animatableData: CGFloat {
-        get { pct }
-        set { pct = newValue }
-    }
-
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-
-        path.addRect(CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: (1.0-pct) * rect.height))
-
-        return path
     }
 }
 

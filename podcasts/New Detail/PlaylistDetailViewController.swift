@@ -4,6 +4,7 @@ import DifferenceKit
 import SwiftUI
 import PocketCastsServer
 import PocketCastsUtils
+import SJUtils
 
 class PlaylistDetailViewController: PCViewController, UIScrollViewDelegate {
     private(set) var viewModel: PlaylistDetailViewModel!
@@ -66,7 +67,7 @@ class PlaylistDetailViewController: PCViewController, UIScrollViewDelegate {
     @MainActor
     var isMultiSelectEnabled = false {
         didSet {
-            setEnclosingTabBarHidden(isMultiSelectEnabled, animated: false)
+            setHidesEnclosingTabBar(isMultiSelectEnabled, animated: false)
             tableView.beginUpdates()
             tableView.setEditing(isMultiSelectEnabled, animated: true)
             insetAdjuster.isMultiSelectEnabled = isMultiSelectEnabled
@@ -85,7 +86,7 @@ class PlaylistDetailViewController: PCViewController, UIScrollViewDelegate {
                     tableView.selectIndexPath(selectedIndexPath)
                     longPressMultiSelectIndexPath = nil
                 }
-                multiSelectFooterBottomConstraint.constant = Constants.effectiveFooterViewPadding
+                multiSelectFooterBottomConstraint.constant = LiquidGlass.isEnabled ? 17 : Constants.effectiveFooterViewPadding
             } else {
                 track(.filterMultiSelectExited)
                 multiSelectFooter.isHidden = true
@@ -102,7 +103,6 @@ class PlaylistDetailViewController: PCViewController, UIScrollViewDelegate {
         }
     }
 
-    var keyBoardHeight: CGFloat = .zero
     var multiSelectGestureInProgress = false
     var longPressMultiSelectIndexPath: IndexPath?
     var multiSelectActionInProgress = false
@@ -165,6 +165,7 @@ class PlaylistDetailViewController: PCViewController, UIScrollViewDelegate {
 
         super.viewDidLoad()
 
+        view.keyboardLayoutGuide.usesBottomSafeArea = false
         setupContent()
         setupNavigation()
         setupRefreshControl()
@@ -203,7 +204,8 @@ class PlaylistDetailViewController: PCViewController, UIScrollViewDelegate {
         super.viewDidLayoutSubviews()
 
         let multiSelectFooterOffset: CGFloat = isMultiSelectEnabled ? 80 : 0
-        let keyBoardHeight = viewModel.isSearching ? keyBoardHeight : 0
+        let keyboardHeight = max(0, view.bounds.maxY - view.keyboardLayoutGuide.layoutFrame.minY)
+        let keyBoardHeight = viewModel.isSearching ? keyboardHeight : 0
         tableView.contentInset.bottom = Constants.effectiveMiniPlayerOffset + multiSelectFooterOffset + keyBoardHeight
         tableView.verticalScrollIndicatorInsets.bottom = tableView.contentInset.bottom
     }
@@ -265,7 +267,7 @@ class PlaylistDetailViewController: PCViewController, UIScrollViewDelegate {
     }
 
     private func setupContent() {
-        view.backgroundColor = AppTheme.viewBackgroundColor()
+        view.backgroundColor = AppTheme.viewBackgroundColor
 
         tableView = ThemeableTable(frame: .zero, style: .grouped)
         view.insertSubview(tableView, at: 0)
@@ -283,7 +285,8 @@ class PlaylistDetailViewController: PCViewController, UIScrollViewDelegate {
         multiSelectFooter = MultiSelectFooterView(frame: .zero)
         view.addSubview(multiSelectFooter)
 
-        multiSelectFooterBottomConstraint = view.safeAreaLayoutGuide.bottomAnchor.constraint(equalTo: multiSelectFooter.bottomAnchor)
+        let multiSelectFooterBottomAnchor = LiquidGlass.isEnabled ? view.bottomAnchor : view.safeAreaLayoutGuide.bottomAnchor
+        multiSelectFooterBottomConstraint = multiSelectFooterBottomAnchor.constraint(equalTo: multiSelectFooter.bottomAnchor)
 
         NSLayoutConstraint.activate([
             tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -428,7 +431,7 @@ class PlaylistDetailViewController: PCViewController, UIScrollViewDelegate {
         track(.filterAddEpisodesTapped, properties: ["is_playlist_full": isPlaylistFull])
 
         if isPlaylistFull {
-            let theme: any ToastTheme = ToastIconTheme(iconName: "option-alert", iconColor: Theme.sharedTheme.primaryIcon01)
+            let theme: any ToastTheme = ToastIconTheme(iconName: "option-alert", iconColor: Theme.shared.primaryIcon01)
             Toast.show(L10n.playlistManualAddEpisodeFullPlaylistToast, theme: theme)
             return
         }
@@ -443,7 +446,7 @@ class PlaylistDetailViewController: PCViewController, UIScrollViewDelegate {
                 }
             }
         )
-            .environmentObject(Theme.sharedTheme)
+            .environmentObject(Theme.shared)
             .environmentObject(searchAnalyticsHelper)
             .environmentObject(searchResults)
         )
@@ -451,8 +454,7 @@ class PlaylistDetailViewController: PCViewController, UIScrollViewDelegate {
         // Disable drag-to-dismiss gesture to ensure viewModel reload is called
         vc.isModalInPresentation = true
 
-        let navVC = SJUIUtils.navController(for: vc)
-        present(navVC, animated: true, completion: nil)
+        present(vc, animated: true, completion: nil)
     }
 
     // MARK: - Scroll handling
