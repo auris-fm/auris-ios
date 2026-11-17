@@ -169,8 +169,14 @@ xcodebuild build-for-testing \
   CODE_SIGN_STYLE=Automatic \
   CODE_SIGN_IDENTITY="-" \
   SKIP_LINT=1 \
-  -quiet \
-  2>&1 | tee "$LOG_DIR/build.log"
+  > "$LOG_DIR/build.log" 2>&1
+BUILD_STATUS=$?
+# The live log gets the tail, not the whole build: this agent streams its log in
+# chunks over a link that drops them, and a run has been lost to upload retries
+# alone. The file keeps everything, so a failure's detail is never only in the
+# stream. On success the tail is the summary; on failure it is where to look.
+tail -n 60 "$LOG_DIR/build.log"
+[ "$BUILD_STATUS" -eq 0 ] || echo "xcodebuild exited $BUILD_STATUS"
 grep -q "BUILD SUCCEEDED\|BUILD FOR TESTING SUCCEEDED" "$LOG_DIR/build.log" || {
   echo "building for testing failed; see $LOG_DIR/build.log"
   exit 1
@@ -205,11 +211,11 @@ rm -rf "$RESULT_BUNDLE"
 # the simulator would each run part of the plan, and a runner that dies in one
 # clone leaves the others reporting success.
 #
-# -quiet: xcodebuild's per-file progress is enormous, and this agent uploads its
-# live log chunk by chunk over a link that has been dropping connections all day.
-# A run has been lost to that alone: 107 chunks failed to upload, the retries
-# consumed the job, and the finish call failed too. The full output still goes to
-# artifacts/build.log, which is uploaded as a file rather than streamed.
+# The build's output goes to a file and only its tail reaches the live log. This
+# agent uploads that log chunk by chunk over a link that drops them — a run was
+# lost to 107 failed chunks and the retries that followed. Filtering xcodebuild's
+# output instead would shorten the file as well, and the file is what a failure is
+# read from afterwards.
 #
 # SKIP_LINT: the two SwiftLint build phases shell out to `make lint`, which needs
 # the BuildTools package built; linting is not this job's subject.
@@ -249,7 +255,6 @@ xcodebuild test-without-building \
   CODE_SIGN_STYLE=Automatic \
   CODE_SIGN_IDENTITY="-" \
   SKIP_LINT=1 \
-  -quiet \
   > "$LOG_DIR/test.log" 2>&1 &
 XCODEBUILD_PID=$!
 
@@ -300,7 +305,13 @@ XCODEBUILD_PID=$!
 ) &
 WATCHDOG_PID=$!
 
-tail -f "$LOG_DIR/test.log" &
+# The live log gets test results, not the whole run. Two thousand tests each print
+# a start line and a result line, and this agent streams its log in chunks over a
+# link that drops them; a run has been lost to upload retries alone. Filtering here
+# rather than at xcodebuild keeps every line in test.log, which is what the watchdog
+# and the failure reader read, and what a failure is diagnosed from afterwards.
+tail -f "$LOG_DIR/test.log" \
+  | grep --line-buffered -E "^--- |Test Suite .* (started|passed|failed)|Executed [0-9]+ test|error:|exceeded execution time allowance|Restarting after unexpected exit|Testing started|TEST (SUCCEEDED|FAILED)|◇ Suite|✘ Test |✔ Suite" &
 TAIL_PID=$!
 
 wait "$XCODEBUILD_PID"
@@ -343,6 +354,15 @@ echo "--- :mag: Checking the watchdog itself"
 set +e
 bash .buildkite/lib/test-watchdog.sh
 WATCHDOG_SELFTEST_STATUS=$?
+set -e
+
+echo "--- :mag: Checking what reaches the live log"
+# The live log is filtered so a dropped chunk cannot cost a whole run. That filter
+# is only safe if it keeps every line a verdict or a diagnosis is read from, which
+# these cases assert against the expression this script actually uses.
+set +e
+bash .buildkite/lib/test-live-log-filter.sh
+FILTER_SELFTEST_STATUS=$?
 set -e
 
 echo "--- :mag: Checking the coverage guard itself"
@@ -392,8 +412,10 @@ echo "xcodebuild exit: $TEST_STATUS"
 echo "coverage check exit: $COVERAGE_STATUS"
 echo "guard self-test exit: $SELFTEST_STATUS"
 echo "watchdog self-test exit: $WATCHDOG_SELFTEST_STATUS"
+echo "live-log filter self-test exit: $FILTER_SELFTEST_STATUS"
 [ "$TEST_STATUS" -eq 0 ] || { echo "tests failed"; exit "$TEST_STATUS"; }
 [ "$COVERAGE_STATUS" -eq 0 ] || { echo "the run did not cover the whole plan"; exit "$COVERAGE_STATUS"; }
 [ "$SELFTEST_STATUS" -eq 0 ] || { echo "the coverage guard did not prove it can fail"; exit "$SELFTEST_STATUS"; }
 [ "$WATCHDOG_SELFTEST_STATUS" -eq 0 ] || { echo "the watchdog did not prove it can stop a run"; exit "$WATCHDOG_SELFTEST_STATUS"; }
+[ "$FILTER_SELFTEST_STATUS" -eq 0 ] || { echo "the live log would lose a failure's detail"; exit "$FILTER_SELFTEST_STATUS"; }
 echo "Build and full plan passed."
