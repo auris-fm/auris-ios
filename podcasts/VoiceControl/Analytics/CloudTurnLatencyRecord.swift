@@ -12,6 +12,9 @@ import Foundation
 /// - `requestSent` — a send of the authenticated request returned. When the turn re-dialled a dead
 ///   inherited socket this is the second send, so the span from `endOfSpeech` includes the failed
 ///   attempt and the new handshake: it measures what the user waited, not one socket's round trip.
+///   The server anchors its own clocks at the auth frame of the socket that was admitted, so on a
+///   re-dialled turn the two ends differ by that failed attempt and reconnect. Neither is wrong;
+///   they answer different questions.
 /// - `firstAudible` — the output node began rendering this turn's first sound, read from its own
 ///   render state (see `CloudAudioPlayer`). Deliberately not the instant the first buffer was
 ///   scheduled. A server lead-in clip arrives on the same stream unmarked, so this includes it:
