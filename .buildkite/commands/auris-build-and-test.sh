@@ -372,6 +372,16 @@ if [ -d "$RESULT_BUNDLE" ]; then
   (cd "$LOG_DIR" && zip -qry "$(basename "$RESULT_BUNDLE").zip" "$(basename "$RESULT_BUNDLE")")
 fi
 
+# The live log is streamed over a link that has dropped chunks, so a failure's
+# detail can be missing from what Buildkite shows. These files under artifacts are
+# then the only complete record, which is why they are listed here as well as in
+# the pipeline's artifact_paths: this says what should be there, and a missing one
+# is visible in the step's own output rather than noticed later by whoever needs it.
+echo "--- :package: Artifacts"
+for f in "$LOG_DIR"/*.log "$LOG_DIR"/*.xcresult.zip; do
+  [ -e "$f" ] && echo "  $(basename "$f")  $(wc -c < "$f" | tr -d ' ') bytes"
+done
+
 echo "--- :package: Shutting the simulator down"
 # Run here as well as on exit so the step reports it rather than only doing it.
 shutdown_simulator
