@@ -351,6 +351,38 @@ def plan_selections(plan_path: Path) -> dict:
     }
 
 
+def bundle_failures(report: dict) -> set:
+    """Test cases the result bundle marks Failed.
+
+    A test that reaches its execution time allowance is killed and the runner
+    restarted. It never prints a pass or fail line, so it appears in no failure
+    list from the log — but the bundle records it Failed, with a duration equal to
+    the allowance. Reading only the log misses every one of them.
+
+    Only test cases are read: a suite, its bundle and the plan are all marked
+    Failed when one test inside them fails, and those are not failures themselves.
+    """
+    failed = set()
+    for node in walk_test_cases(report):
+        identifier = node.get("nodeIdentifier", "")
+        if node.get("result") == "Failed" and "/" in identifier:
+            # The log names tests without the trailing parentheses.
+            failed.add(identifier.removesuffix("()"))
+    return failed
+
+
+def timed_out_tests(log_path: Path) -> set:
+    """Tests xcodebuild reported as exceeding their execution time allowance."""
+    pattern = re.compile(r"Test Case '-\[(\S+) (\S+)\]' exceeded execution time allowance")
+    found = set()
+    for line in log_path.read_text(errors="replace").splitlines():
+        match = pattern.search(line)
+        if match:
+            bundle_suite, test = match.groups()
+            found.add(f"{bundle_suite.split('.')[-1]}/{test}")
+    return found
+
+
 def reported_failures(log_path: Path) -> set:
     """Test identifiers xcodebuild reported a failure for, from its own output.
 
@@ -567,7 +599,18 @@ def main() -> int:
         counts, Path(args.plan), skips, reasons,
         signed=SIGNED_HOST,
     )
-    failed = reported_failures(Path(args.log))
+    # Failures come from both places. The log names the tests that reported a
+    # failure; the bundle also marks the ones that were killed at their execution
+    # time allowance, which print no result line and so appear in no log list.
+    # Reading only the log counts those as passing.
+    failed = reported_failures(Path(args.log)) | bundle_failures(report)
+    timeouts = timed_out_tests(Path(args.log))
+    if timeouts:
+        print(f"{len(timeouts)} test(s) reached their execution time allowance and "
+              "were killed. Each one forced the test runner to restart; a restart "
+              "that does not reconnect ends the run partway through:")
+        for name in sorted(timeouts):
+            print(f"  {name}")
     failures += check_failures(failed)
     if failures:
         print("\nCoverage check FAILED:", file=sys.stderr)

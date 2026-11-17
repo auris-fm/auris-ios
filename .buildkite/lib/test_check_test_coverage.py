@@ -256,6 +256,36 @@ def main():
     )
     print(f"{'PASS' if ok else 'FAIL'}  an intermittent test reads passed, failed or not run")
     results.append(ok)
+    # A test killed at its execution time allowance prints no result line, so it
+    # is absent from the log's failure list while the bundle marks it Failed. It
+    # must fail the run, and it must not read as passed or as never run.
+    timed_out = sorted(check.bundle_failures(base) - reported)
+    timeout_ok = bool(timed_out) and bool(
+        check.check_failures(reported | set(timed_out))
+    )
+    print(f"{'PASS' if timeout_ok else 'FAIL'}  a timed-out test fails the run")
+    if not timed_out:
+        print("        -> this recording contains no timed-out test, so the case "
+              "proves nothing; use a recording that has one")
+    results.append(timeout_ok)
+
+    if timed_out:
+        victim = timed_out[0]
+        # On the flaky list it is still a failure: either result is accepted, but
+        # the outcome reported must be the one that happened.
+        check.FLAKY_TESTS[victim] = "added by this case"
+        outcome = check.intermittent_outcome(
+            victim, reported | {victim}, check.executed_tests(base)
+        )
+        excused = check.check_failures(reported | {victim}) == []
+        del check.FLAKY_TESTS[victim]
+        flaky_timeout_ok = outcome == "failed" and excused
+        print(f"{'PASS' if flaky_timeout_ok else 'FAIL'}  "
+              "a timed-out test on the flaky list reports failed")
+        if not flaky_timeout_ok:
+            print(f"        -> outcome was '{outcome}', expected 'failed'")
+        results.append(flaky_timeout_ok)
+
     for name, ok in (
         ("a failure that is not a known failure fails the run",
          bool(check.check_failures(reported | {"SomethingTests/testNew()"}))),
