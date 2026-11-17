@@ -5451,6 +5451,126 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                       "the seven frames this turn received are its own: \(line)")
         XCTAssertTrue(line.contains("buffer_cleared=1"),
                       "the interrupted turn's own cancel is the one clear: \(line)")
+        // The audible leg is asserted as INTERNAL CONSISTENCY, not as a duration: whether this
+        // host's engine renders is the host's business. A record that names an instant must also
+        // name the leg to it; one that names none must say so rather than report zero.
+        if line.contains("first_audible=absent") {
+            XCTAssertTrue(line.contains("request_to_first_audible=none"),
+                          "no audible instant means the leg is unmeasured, not zero: \(line)")
+        } else {
+            XCTAssertFalse(line.contains("request_to_first_audible=none"),
+                           "a turn that reports an audible instant must report the leg to it: \(line)")
+        }
+    }
+
+    /// THE AUDIBLE INSTANT SURVIVES THE STOP THE INTERRUPT REQUESTED
+    /// (`cloud-assistant.md` → Conversational latency: the record carries the turn's first audible
+    /// instant; the player's teardown clears its mark).
+    ///
+    /// The break this catches: reading the mark AFTER `awaitActualStop`. The stop that sheds the
+    /// answer also clears the player's first-audible mark, so a turn the user actually HEARD before
+    /// taking it back would be recorded as silent — the one case where knowing it was heard matters
+    /// most, because it explains why the user interrupted.
+    ///
+    /// SCOPE: the sibling control above proves the record EXISTS with the right counters. This one
+    /// pins the instant, which that test cannot see: its audio is never rendered, so it reads
+    /// `first_audible=absent` either way. Audio is rendered here BEFORE the terminal, so there is a
+    /// real instant to lose.
+    ///
+    /// WHAT IT PINS, precisely: the record carries the instant measured while the answer was
+    /// playing. The player's own mark is nil by the time the terminal writes (measured), so the
+    /// value can only come from the sink's per-event snapshot. This is a REGRESSION CONTROL on that
+    /// property, not a mutation-proof of one line: the snapshot is taken at two points (loop top and
+    /// audio admission) and either alone preserves the value, so removing one is not observable.
+    @MainActor
+    func testAnInterruptedTurnKeepsTheAudibleInstantItMeasuredBeforeTheStop() async throws {
+        let utteranceId = "u-\(UUID().uuidString.prefix(12))-int-audible"
+        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        let fmt = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1))
+        let engineBox = OfflineEngineBox()
+        CloudAudioPlayer.configureEngineForTesting = { engine in
+            try engine.enableManualRenderingMode(.offline, format: fmt, maximumFrameCount: 4_096)
+            engineBox.engine = engine
+        }
+        addTeardownBlock {
+            CloudAudioPlayer.configureEngineForTesting = nil
+            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
+        }
+        let release = DispatchSemaphore(value: 0)
+        blockProducerAfterFrames = (8, release)
+        nextTurnFixture = """
+        event: done
+        data: {"outcome":"interrupted","usage":{"input_tokens":1,"output_tokens":0}}
+
+        """
+        nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x11, count: 4_800 * 2) }
+        playback.setPlaying(true)
+        let sink = makeSink()
+        let player = try XCTUnwrap(sink.audioPlayerForTesting)
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 16)
+        player.emittedPCMReference = reference
+        player.echoReferenceHandoff = handoff
+        addTeardownBlock { @MainActor in
+            release.signal()
+            player.openPhysicalStopGateForTesting()
+            let stop = player.cancel()
+            _ = await player.awaitActualStop(after: stop)
+            withExtendedLifetime(handoff) {}
+            withExtendedLifetime(sink) {}
+        }
+        // The request leg needs a send instant; without a context the record reports `none` for
+        // every leg regardless of the audible mark, which would make this case vacuous.
+        let latencyContext = TurnLatencyContext()
+        latencyContext.endOfSpeech = 0
+        let turn = Task {
+            await sink.routeToCloud(request: "answer", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: .wakeWord, utteranceId: utteranceId,
+                                    latency: LatencyHandle(latencyContext))
+        }
+        try await waitUntil("all seven frames reached the player", timeout: 5) {
+            player.framesEnqueuedForTesting == 7
+        }
+        // Render the answer BEFORE the terminal, so the player has taken its first-audible mark
+        // while the turn is still live. This is the premise the whole case rests on.
+        let engineDeadline = Date().addingTimeInterval(5)
+        while engineBox.engine == nil && Date() < engineDeadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let engine = try XCTUnwrap(engineBox.engine, "premise: the player built its offline engine")
+        let output = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: 4_096))
+        let renderDeadline = Date().addingTimeInterval(8)
+        while player.firstAudibleHostSeconds == nil && Date() < renderDeadline {
+            _ = try? engine.renderOffline(1_024, to: output)
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let measuredBeforeTerminal = player.firstAudibleHostSeconds
+        XCTAssertNotNil(measuredBeforeTerminal,
+                        "premise: the answer was audible BEFORE the interrupt, so there is an instant to lose")
+        release.signal()
+        _ = await turn.value
+
+        let log = await FileLog.shared.logFileAsString()
+        let line = try XCTUnwrap(
+            log.split(separator: "\n").map(String.init)
+                .first { $0.contains("cloudTurnLatency") && $0.contains("request_id=\(utteranceId) ") },
+            "the interrupted turn must contribute a record")
+        XCTAssertTrue(line.contains("outcome=interrupted"), line)
+        XCTAssertFalse(line.contains("first_audible=absent"),
+                       "an answer heard before the interrupt must not be recorded as silent: \(line)")
+        // The leg is named EXACTLY, not by substring: `end_of_speech_to_first_audible=` contains
+        // `to_first_audible=`, so a loose match would be satisfied by the other field.
+        let leg = line.split(separator: " ").first { $0.hasPrefix("end_of_speech_to_first_audible=") }
+        let value = leg.flatMap { $0.split(separator: "=").last }.map(String.init)
+        XCTAssertNotNil(value, "the record carries the end-of-speech leg: \(line)")
+        XCTAssertNotEqual(value, "none",
+                          "an answer heard before the interrupt has a measured audible leg: \(line)")
+        // And it is the instant measured BEFORE the stop, not a later read: the mark never moves
+        // once taken, so the reported leg must match the one the premise observed.
+        let reportedMs = Double((value ?? "").replacingOccurrences(of: "ms", with: ""))
+        let expectedMs = try XCTUnwrap(measuredBeforeTerminal) * 1000
+        XCTAssertEqual(try XCTUnwrap(reportedMs), expectedMs, accuracy: 1.0,
+                       "the record reports the instant taken while the answer was playing: \(line)")
     }
 
     /// THE RACE THE CONTRACT NAMES (`cloud-assistant.md` → Interruption): "A terminal `done` for

@@ -1616,7 +1616,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                             inputTokens: usage.inputTokens,
                             outputTokens: usage.outputTokens
                         )
+                        // Counters BEFORE the stop wait: the stop itself is this turn's clear, and
+                        // a successor admitted during the wait would add its own. The audible
+                        // instant is already captured by the loop-top snapshot on every event.
                         let stopEpoch = audioPlayer.cancel()
+                        snapshotAudioCounters()
                         if await audioPlayer.awaitActualStop(after: stopEpoch) {
                             // Revalidate after the suspension: a successor may own the window now.
                             if activeTurn == nil || activeTurn === turnToken {
@@ -1628,6 +1632,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                                 restoreHeldForPlayerDrain = (owner: turnToken, drainEpoch: stopEpoch)
                             }
                         }
+                        // "Measure every turn" (`cloud-assistant.md` → Conversational latency): an
+                        // interrupted turn sent a request and may have been heard, so it contributes
+                        // its line like any other terminal. A missing line is indistinguishable from
+                        // a turn that never ran.
+                        emitLatencyRecord("interrupted")
                         turnResult = .earlyClose
                         turnResponse = .silent
                         break turnLoop
