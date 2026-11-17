@@ -1,4 +1,5 @@
 import XCTest
+import PocketCastsUtils
 
 @testable import podcasts
 
@@ -197,6 +198,170 @@ final class CloudRouteStaleConnectionTests: XCTestCase {
             request: "skip forward", context: sampleContext, turn: makeTurn()
         ))
         XCTAssertEqual(issued.count, 2, "the turn must open its own connection after a discard")
+    }
+
+    /// A socket that DIED inside the age limit is still young, so the age rule cannot see it. The
+    /// turn must complete anyway: the user already spoke, and a server close or a network change
+    /// within nine seconds is ordinary on a phone.
+    ///
+    /// The break this catches: the inherited socket is used because it is fresh, its first send
+    /// fails, and the turn ends in `connection_lost` — the answer is lost with no second attempt.
+    /// Age is knowable before the send; death is not, so a pre-send freshness check can never
+    /// cover this case however carefully it is placed.
+    func test_aDeadInheritedConnectionStillCompletesItsTurn() async {
+        let dead = StubWebSocketTask(textFrames: [])
+        // The socket is DEAD, which is what the take-time liveness read must notice. Its send also
+        // fails, so a client that ignores liveness still cannot complete the turn on it.
+        dead.reportsAlive = false
+        dead.throwsBeforeRecording = true
+        // `connected` precedes the terminal on a real turn: codec negotiation happens before
+        // admission, so a script that starts at `done` is one no server produces.
+        let fresh = StubWebSocketTask(textFrames: [
+            #"{"type":"connected","codec":"pcm_s16le@24k"}"#,
+            #"{"type":"done","outcome":"completed","usage":{"input_tokens":1,"output_tokens":0}}"#
+        ])
+        var issued: [StubWebSocketTask] = []
+        let clock = SteppableClock()
+        let client = CloudRouteClient(
+            baseURL: "https://cloud.test",
+            tokenProvider: StubTokenProvider(token: "test_token"),
+            webSocketTaskFactory: { _ in
+                let task = issued.isEmpty ? dead : fresh
+                issued.append(task)
+                return task
+            },
+            now: { clock.read() }
+        )
+
+        XCTAssertTrue(client.openEarlyConnection(), "premise: the turn must inherit a connection")
+        // Well inside the limit, so staleness cannot be what triggers a replacement — the case
+        // would otherwise pass for a reason unrelated to the socket being dead.
+        clock.set(clock.read().addingTimeInterval(1))
+
+        let turn = makeTurn()
+        let events = await collect(client.route(
+            request: "skip forward", context: sampleContext, turn: turn
+        ))
+
+        XCTAssertTrue(dead.sent.isEmpty,
+                      "premise: the first send must fail before the frame leaves, or a retry could duplicate the turn")
+        // The dead socket must be refused BEFORE any send is attempted on it. Asserting only that
+        // the turn completes is also satisfied by the retry path, and asserting the refusal LOG LINE
+        // is satisfied by other tests in the same run — the log is shared. So assert the absence of
+        // a send attempt on THIS socket, which only the take-time check can prevent.
+        let attemptLog = await FileLog.shared.logFileAsString()
+        XCTAssertFalse(attemptLog.split(separator: "\n").contains {
+            $0.contains("inherited connection failed before the turn was sent") && $0.contains(turn.requestId)
+        }, "a dead socket must be refused at take time, not discovered by a failed send")
+        XCTAssertEqual(issued.count, 2, "a dead inherited socket must be replaced by a fresh one")
+        XCTAssertFalse(fresh.sentTextFrames.isEmpty, "the turn must send on the replacement")
+        let completed = events.contains { event in
+            if case .done(_, let outcome) = event { return outcome == .completed }
+            return false
+        }
+        XCTAssertTrue(completed,
+                      "the turn must COMPLETE, not end in connection_lost: \(events)")
+        let transportLoss = events.contains { event in
+            if case .error(_, let code, _) = event { return code == "connection_lost" }
+            return false
+        }
+        XCTAssertFalse(transportLoss, "a recoverable first send must not surface as a lost turn: \(events)")
+    }
+
+    /// A send that fails on an INHERITED connection is retried once on a fresh socket, carrying the
+    /// SAME request id — the turn is the same logical turn, and a new id would make the server run
+    /// two turns for one utterance.
+    ///
+    /// The break this catches: the failure is surfaced immediately, so an utterance whose socket
+    /// died between the liveness check and the send loses its answer with no second attempt.
+    func test_aFailedSendOnAnInheritedConnectionIsRetriedOnceWithTheSameRequestId() async {
+        let first = StubWebSocketTask(textFrames: [])
+        // ALIVE when taken, so the liveness read passes and the turn commits to this socket. It
+        // then fails before the frame leaves — the window no pre-send check can close.
+        first.throwsBeforeRecording = true
+        let second = StubWebSocketTask(textFrames: [
+            #"{"type":"connected","codec":"pcm_s16le@24k"}"#,
+            #"{"type":"done","outcome":"completed","usage":{"input_tokens":1,"output_tokens":0}}"#
+        ])
+        var issued: [StubWebSocketTask] = []
+        let client = CloudRouteClient(
+            baseURL: "https://cloud.test",
+            tokenProvider: StubTokenProvider(token: "test_token"),
+            webSocketTaskFactory: { _ in
+                let task = issued.isEmpty ? first : second
+                issued.append(task)
+                return task
+            }
+        )
+
+        XCTAssertTrue(client.openEarlyConnection(), "premise: the turn must inherit a connection")
+
+        let events = await collect(client.route(
+            request: "skip forward", context: sampleContext, turn: makeTurn()
+        ))
+
+        XCTAssertEqual(issued.count, 2, "exactly one retry, not a loop")
+        XCTAssertFalse(second.sentTextFrames.isEmpty, "the retry must actually send")
+        let firstId = first.sentAuthFrame?["request_id"] as? String
+        let secondId = second.sentAuthFrame?["request_id"] as? String
+        XCTAssertNil(firstId, "premise: the first frame never left, so it carries no id on the wire")
+        XCTAssertNotNil(secondId, "the retry must carry a request id")
+        let completed = events.contains { event in
+            if case .done(_, let outcome) = event { return outcome == .completed }
+            return false
+        }
+        XCTAssertTrue(completed, "the retried turn must complete: \(events)")
+    }
+
+    /// A retry answered `duplicate_request` means the FIRST frame did start a turn whose answer was
+    /// going to a dead socket. The user must hear the ordinary connection-loss feedback, never a
+    /// refusal that reads as "you may not do that" — the turn is running, not forbidden.
+    ///
+    /// The break this catches: the server's code is passed through verbatim, so a recoverable
+    /// transport loss is spoken as a request refusal.
+    func test_aRetryAnsweredDuplicateRequestIsReportedAsConnectionLost() async {
+        let first = StubWebSocketTask(textFrames: [])
+        first.transmitsThenThrows = true
+        // A refused retry gets `error` as its FIRST and ONLY frame, then the socket closes:
+        // `connected` carries the reservation and is sent only once a turn is ADMITTED, which a
+        // duplicate never is. Scripting a `connected` here would wait for a frame that never comes.
+        let second = StubWebSocketTask(textFrames: [
+            #"{"type":"error","code":"duplicate_request","message":"already admitted"}"#
+        ])
+        var issued: [StubWebSocketTask] = []
+        let client = CloudRouteClient(
+            baseURL: "https://cloud.test",
+            tokenProvider: StubTokenProvider(token: "test_token"),
+            webSocketTaskFactory: { _ in
+                let task = issued.isEmpty ? first : second
+                issued.append(task)
+                return task
+            }
+        )
+
+        XCTAssertTrue(client.openEarlyConnection(), "premise: the turn must inherit a connection")
+
+        let events = await collect(client.route(
+            request: "skip forward", context: sampleContext, turn: makeTurn()
+        ))
+
+        XCTAssertEqual(first.sent.count, 1,
+                       "premise: the first frame must have been transmitted, or this is not the ambiguous case")
+        XCTAssertEqual(issued.count, 2, "the retry must have happened for its answer to be classified")
+        // Without this the code assertion below is satisfied by the FIRST failure alone: a client
+        // that never retries also reports `connection_lost`, so the mapping would never be exercised.
+        // The retry must have sent, and the server's `duplicate_request` must have come back on it.
+        XCTAssertFalse(second.sentTextFrames.isEmpty,
+                       "premise: the retry must reach the server, or no duplicate was ever answered")
+        let log = await FileLog.shared.logFileAsString()
+        XCTAssertTrue(log.split(separator: "\n").contains { $0.contains("server error code=duplicate_request") },
+                      "premise: the duplicate must actually arrive, or the code below is the first failure's")
+        let codes = events.compactMap { event -> String? in
+            if case .error(_, let code, _) = event { return code }
+            return nil
+        }
+        XCTAssertEqual(codes, ["connection_lost"],
+                       "a duplicate after a transmitted first frame is a lost answer, not a refusal: \(events)")
     }
 
     /// With nothing inherited there is no freshness question at all: the ordinary turn path must be

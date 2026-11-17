@@ -72,6 +72,10 @@ final class CloudRouteClient {
         func send(_ message: URLSessionWebSocketTask.Message) async throws
         func receive() async throws -> URLSessionWebSocketTask.Message
         func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?)
+        /// Whether the socket can still carry a frame. Read when a turn TAKES an early connection:
+        /// age says how long it has been idle, not whether it is still open, and a socket that died
+        /// inside the age limit would otherwise be handed a turn whose first send cannot succeed.
+        var isAlive: Bool { get }
     }
 
     init(
@@ -626,15 +630,21 @@ final class CloudRouteClient {
         let inheritedAge = heldConnectionAge() ?? inheritedConnectionAge?()
         var inheritedTask: WebSocketTasking?
         if let age = inheritedAge {
-            if EarlyConnectionPolicy.canSend(connectionAge: age) {
+            // BOTH conditions, because they answer different questions: age bounds how long the
+            // socket has been idle, liveness says whether it is still open. A socket the server
+            // closed inside the age limit passes the age rule and fails this one.
+            if EarlyConnectionPolicy.canSend(connectionAge: age), earlyConnection?.task.isAlive == true {
                 inheritedTask = earlyConnection?.task
                 FileLog.shared.addMessage(
                     "[CloudRoute] using the early connection (\(EarlyConnectionPolicy.describe(connectionAge: age)))"
                 )
             } else {
-                FileLog.shared.addMessage(
-                    "[CloudRoute] \(EarlyConnectionPolicy.describe(connectionAge: age)) — not reusing it; opening a fresh connection"
-                )
+                // Which rule refused is recorded: "too old" and "already dead" call for different
+                // readings of a run, and one line for both would leave them indistinguishable.
+                let reason = earlyConnection?.task.isAlive == true
+                    ? EarlyConnectionPolicy.describe(connectionAge: age)
+                    : "the early connection is no longer open"
+                FileLog.shared.addMessage("[CloudRoute] \(reason) — not reusing it; opening a fresh connection")
                 earlyConnection?.task.cancel(with: .goingAway, reason: nil)
             }
         }
@@ -642,7 +652,15 @@ final class CloudRouteClient {
         // leaving it set would offer a consumed socket to the next turn.
         earlyConnection = nil
 
-        let wsTask: WebSocketTasking
+        var wsTask: WebSocketTasking
+        // Only an INHERITED socket may be re-dialled. A connection this turn opened itself has no
+        // idle window in which it could have died unseen, so a failure on it is the server's or the
+        // network's answer about this turn — retrying that would repeat a request, not recover one.
+        let usedInheritedConnection = inheritedTask != nil
+        // Set only when this turn actually re-dialled. A `duplicate_request` on a turn that never
+        // re-dialled is a different fact — some other socket carried this id — and is passed through
+        // unchanged rather than relabelled as a loss this turn did not suffer.
+        var redialledInheritedConnection = false
         if let inheritedTask {
             // Already connecting since the early open: no new handshake, which is the whole point.
             wsTask = inheritedTask
@@ -669,7 +687,7 @@ final class CloudRouteClient {
         // `app_operation_result` sends ride the SAME socket the operation arrived on. The
         // registration identity is retired conditionally at close (a duplicate live id keeps
         // its own registration).
-        let socketRegistration = registerSocket(wsTask, requestId: turn.requestId, resultSocket: resultSocket)
+        var socketRegistration = registerSocket(wsTask, requestId: turn.requestId, resultSocket: resultSocket)
         // DETERMINISTIC BIND SEAM (test-only). This point is the last instant before the bind makes
         // its ACCEPTANCE DECISION, and the registration has already been published into the live
         // table — so a lifetime settled here is exactly the window that a publish-then-check bind
@@ -705,18 +723,16 @@ final class CloudRouteClient {
             }
         }
 
-        // THERE IS NO never-submitted PRODUCER IN THIS TRANSPORT, and this is the place to say so
-        // plainly rather than leave a dead branch implying otherwise.
+        // WHAT MAY BE RE-DIALLED, AND WHY IT IS ONLY THIS.
         //
-        // The failure kinds that could precede submission — frame construction and encoding —
-        // already return above as `invalid_request` BEFORE this point. Everything that can fail
-        // from here on happens after the send has been INVOKED, and a send may transmit and then
-        // throw, so admission is possible and the outcome must be preserved rather than replayed.
+        // A send can TRANSMIT and then throw, so a failed send does not by itself prove the frame
+        // never left. Re-driving it is safe anyway on an INHERITED socket, because the retry carries
+        // the SAME `request_id`: if the first frame was admitted, the server answers the retry with
+        // `duplicate_request` and runs nothing a second time. That refusal is reported below as
+        // `connection_lost`, which is the truth — the answer went to a socket that died.
         //
-        // Consequence, stated as a limit: this client cannot currently produce the one outcome that
-        // would make eligible automatic recovery possible. The transport never reports "provably
-        // never submitted", so any recovery caller has nothing eligible to act on. Supplying that
-        // producer is separate work; until then, automatic retry of a turn is not available.
+        // Frame construction and encoding failures still return above as `invalid_request`; they are
+        // not transport failures and are never re-dialled.
 
         // PENDING INTERRUPTION REPORT ON THE AUTH FRAME (cloud-assistant.md → Interruption, spec
         // c5fe3416): the contract says to report the interruption in the NEXT turn's
@@ -755,7 +771,39 @@ final class CloudRouteClient {
             // admitted. The conservative reading is the correct one here: once the send is
             // INVOKED, admission is possible, so only a failure BEFORE entry proves the frame
             // never left.
-            try await wsTask.send(.string(authText))
+            do {
+                try await wsTask.send(.string(authText))
+            } catch {
+                // Cancellation is the consumer abandoning the turn, not a transport failure.
+                if Task.isCancelled { throw error }
+                guard usedInheritedConnection else { throw error }
+                // ONE attempt, on a fresh socket, with the SAME frame — so the same request id.
+                // A loop here would turn a dead network into repeated submissions.
+                FileLog.shared.addMessage(
+                    "[CloudRoute] the inherited connection failed before the turn was sent — dialling a fresh one (request_id=\(turn.requestId))"
+                )
+                wsTask.cancel(with: .goingAway, reason: nil)
+                retireSocket(requestId: turn.requestId, identity: socketRegistration)
+                let replacement: WebSocketTasking
+                if let injected = webSocketTaskFactory?(req) {
+                    replacement = injected
+                } else {
+                    let production = session.webSocketTask(with: req)
+                    production.resume()
+                    replacement = production
+                }
+                redialledInheritedConnection = true
+                wsTask = replacement
+                socketRegistration = registerSocket(replacement, requestId: turn.requestId, resultSocket: resultSocket)
+                if let lifetime, !lifetime.bind(requestId: turn.requestId, identity: socketRegistration, client: self, wsTask: replacement) {
+                    retireSocket(requestId: turn.requestId, identity: socketRegistration)
+                    replacement.cancel(with: .goingAway, reason: nil)
+                    continuation.yield(.error(source: .requestConstruction, code: "connection_lost", message: "turn closed before submission"))
+                    continuation.finish()
+                    return true
+                }
+                try await replacement.send(.string(authText))
+            }
             // CLOUD REQUEST SENT — the first instant the client can honestly say the turn is on
             // the wire. Logged AFTER the send returns, so a failed send is never reported as sent,
             // and before any response is awaited, so it marks our send rather than the reply.
@@ -817,6 +865,16 @@ final class CloudRouteClient {
                             // an arbitrary server string is not known to be free of sensitive content,
                             // and the allowlist here is the acceptance protocol, not general traffic.
                             FileLog.shared.addMessage("[CloudRoute] server error code=\(code)")
+                        }
+                        // A DUPLICATE after this turn re-dialled an inherited socket means the
+                        // first frame WAS admitted and its answer went to the dead socket. The
+                        // user's turn was lost to the transport, not refused, so it is reported as
+                        // the same connection loss any other dead socket produces — never as a
+                        // refusal, which would read as "you may not do that".
+                        if redialledInheritedConnection, case .error(_, "duplicate_request", _) = event {
+                            continuation.yield(.error(source: .transport, code: "connection_lost", message: ""))
+                            terminalFlag.set()
+                            break receiveLoop
                         }
                         continuation.yield(event)
                         // A terminal event ends the turn: the server closes the
@@ -1088,8 +1146,12 @@ extension CloudRouteJSONValue {
     }
 }
 
-// The real task satisfies the seam unchanged.
-extension URLSessionWebSocketTask: CloudRouteClient.WebSocketTasking {}
+// The real task satisfies the seam's calls unchanged; liveness reads its own state.
+extension URLSessionWebSocketTask: CloudRouteClient.WebSocketTasking {
+    /// `.running` is the only state that can carry a frame. `.suspended` has not started,
+    /// `.canceling`/`.completed` are finished — all three mean this socket cannot serve the turn.
+    var isAlive: Bool { state == .running }
+}
 
 /// A one-way flag shared between the receive loop and the first-frame timeout
 /// task. Plain cross-task `Bool` access is a data race; this is the smallest

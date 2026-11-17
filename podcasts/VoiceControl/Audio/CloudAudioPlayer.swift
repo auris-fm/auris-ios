@@ -1276,7 +1276,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
         DispatchQueue.main.async { [weak self] in self?.delegate?.audioPlayerDidTakeFirstAudible(at: instant) }
     }
 
-    /// The instant this turn's answer first became audible, or nil when nothing has been heard yet.
+    /// The instant this turn's first sound became audible, lead-in clip included, or nil when
+    /// nothing has been heard yet. The server sends its lead-in as ordinary audio frames on the
+    /// same stream and codec as the answer, with no marker distinguishing them, so this mark
+    /// cannot separate the two: it measures when sound started, not when the answer started.
     /// Read by the turn's latency record at its terminal; on the same monotonic clock the rest of
     /// the pipeline measures with (`CACurrentMediaTime`).
     var firstAudibleHostSeconds: Double? {

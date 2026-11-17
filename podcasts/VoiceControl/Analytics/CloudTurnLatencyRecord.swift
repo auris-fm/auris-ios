@@ -10,8 +10,10 @@ import Foundation
 /// - `endOfSpeech` — the VAD decided the utterance had ended, i.e. the user stopped talking. This is
 ///   the instant the user's wait begins, so it is the start of the number that matters.
 /// - `requestSent` — the authenticated request went out on the socket.
-/// - `firstAudible` — the output node began rendering this answer, read from its own render state
-///   (see `CloudAudioPlayer`). Deliberately not the instant the first buffer was scheduled.
+/// - `firstAudible` — the output node began rendering this turn's first sound, read from its own
+///   render state (see `CloudAudioPlayer`). Deliberately not the instant the first buffer was
+///   scheduled. A server lead-in clip arrives on the same stream unmarked, so this includes it:
+///   the number is when sound started, not when the answer started.
 ///
 /// A turn that escalates from a local `no_match` to the cloud logs ONE record, for the cloud
 /// request that actually carries it: the local attempt produced no audio, so there is nothing

@@ -700,6 +700,16 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
     /// automatic recovery may re-drive.
     var throwsBeforeRecording = false
 
+    /// What the control says about this socket's liveness, reported verbatim rather than inferred
+    /// from the script: a stub that guessed would let a test pass on the guess instead of on the
+    /// condition it set. Defaults to open, which is what a freshly issued socket is.
+    var reportsAlive = true
+
+    var isAlive: Bool {
+        snapshotLock.lock(); defer { snapshotLock.unlock() }
+        return reportsAlive && cancelled == nil
+    }
+
     func send(_ message: URLSessionWebSocketTask.Message) async throws {
         if throwsBeforeRecording { throw URLError(.notConnectedToInternet) }
         // Recorded under `scriptLock`: `sent` is written from the client's task and read by the
