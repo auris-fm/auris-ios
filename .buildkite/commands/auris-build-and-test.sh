@@ -121,6 +121,15 @@ shutdown_simulator() {
   xcrun simctl shutdown "$SIMULATOR_ID" 2>/dev/null || true
 }
 trap shutdown_simulator EXIT
+
+# Start from a clean container. State left by an earlier run — a database, a
+# keychain item, a file in the app's documents — is one way a test passes or fails
+# depending on what ran before it, and the runner has hung after connecting on
+# several runs. Erasing keeps the device (same name and identifier, so nothing
+# else has to change) while removing everything the last run left behind.
+echo "Erasing $CI_SIMULATOR_NAME so no state carries over from the previous run"
+xcrun simctl shutdown "$SIMULATOR_ID" 2>/dev/null || true
+xcrun simctl erase "$SIMULATOR_ID"
 xcrun simctl bootstatus "$SIMULATOR_ID" -b
 
 echo "--- :closed_lock_with_key: Generating the credentials stub"
@@ -155,6 +164,10 @@ rm -rf "$RESULT_BUNDLE"
 # No `-only-testing:` — that flag overrides the plan's target list and is how a
 # run ends up covering one group while reporting success.
 #
+# Parallel testing is off explicitly rather than left at its default: clones of
+# the simulator would each run part of the plan, and a runner that dies in one
+# clone leaves the others reporting success.
+#
 # SKIP_LINT: the two SwiftLint build phases shell out to `make lint`, which needs
 # the BuildTools package built; linting is not this job's subject.
 # Ad-hoc signing (`CODE_SIGN_IDENTITY=-`) needs no account or certificate, and the
@@ -176,6 +189,7 @@ xcodebuild test \
   -clonedSourcePackagesDirPath "$DERIVED/SourcePackages" \
   -disableAutomaticPackageResolution \
   -resultBundlePath "$RESULT_BUNDLE" \
+  -parallel-testing-enabled NO \
   -test-timeouts-enabled YES \
   -default-test-execution-time-allowance 60 \
   -maximum-test-execution-time-allowance 120 \
