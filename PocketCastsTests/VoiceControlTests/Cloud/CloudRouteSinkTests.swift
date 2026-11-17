@@ -550,8 +550,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     /// with the turn.
     ///
     /// A refusal requires a NON-LIVE origin with no admitted work holding it, so the test asserts
-    /// the refusal actually happened rather than assuming it: an earlier version of this test
-    /// dispatched successfully and proved nothing.
+    /// the refusal actually happened rather than assuming it: a dispatch that succeeds leaves the
+    /// instants in use and proves nothing about leaving them behind.
     @MainActor
     func test_aRefusedCloudDispatchLeavesItsInstantsBehind() async throws {
         let utteranceId = "u-\(UUID().uuidString.prefix(8))-refused"

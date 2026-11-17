@@ -229,8 +229,7 @@ final class EarlyWakeResultUsageControl: XCTestCase {
     /// and nothing opens there. Its positive verdict only appears when the gate decides, still
     /// before the backend wait. This drives a genuinely short segment through the endpoint and the
     /// engine's own capture wiring, and asserts the open without calling any decision entry point
-    /// directly — an earlier version of this control did, creating an ordering production cannot
-    /// produce.
+    /// directly: calling one would create an ordering production cannot produce.
     func test_shortUtteranceOpensThroughTheEndpointAndGate() {
         let classifier = SwitchableClassifier()
         let segmenter = NativeVadSegmenter(threshold: 0.0, silenceTimeoutMs: 500, classifier: classifier)

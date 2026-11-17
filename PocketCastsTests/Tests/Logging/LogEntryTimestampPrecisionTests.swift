@@ -15,8 +15,8 @@ final class LogEntryTimestampPrecisionTests: XCTestCase {
     /// other — which is the ordinary case for utterance stages. These two times differ by 400ms.
     ///
     /// Compares the timestamp field only. Comparing whole lines proves nothing here: two entries one
-    /// second apart also differ in their message text, and my first version of this test passed
-    /// against the second-resolution log for exactly that reason.
+    /// second apart also differ in their message text, so a whole-line comparison passes against a
+    /// second-resolution log.
     func test_timestampFieldDistinguishesSubSecondTimes() {
         let base = Date(timeIntervalSince1970: 1_760_000_000)
         let earlier = LogEntryFormat.timestampField(of: base)
