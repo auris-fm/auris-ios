@@ -2,7 +2,8 @@ import Foundation
 
 /// One cloud request's latency, measured on the client's own clock.
 ///
-/// `cloud-assistant.md` (L33) requires clients to measure first audible audio themselves; the
+/// `cloud-assistant.md`, KPIs: "Clients separately measure first validated action, first audible
+/// audio, and terminal event on their own clock"; the
 /// server's own figure (request in → first audio frame sent) cannot include the client's decode and
 /// playback, and Android reports the same pair. Three instants, one record:
 ///

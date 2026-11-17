@@ -4,7 +4,8 @@ import XCTest
 
 /// The per-turn latency record: what it reports, and that it reports it exactly once per request.
 ///
-/// `cloud-assistant.md` (L33) requires clients to measure first audible audio on their own clock.
+/// `cloud-assistant.md`, KPIs: "Clients separately measure ... first audible audio ... on their own
+/// clock".
 /// Android already reports `end of speech → first audible`; these controls pin the same numbers on
 /// this side, including the cases where a number must be ABSENT rather than invented.
 final class CloudTurnLatencyRecordTests: XCTestCase {

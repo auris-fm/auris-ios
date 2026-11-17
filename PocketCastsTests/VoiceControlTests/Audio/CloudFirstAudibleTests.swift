@@ -4,7 +4,8 @@ import XCTest
 
 /// The cloud turn must report first AUDIBLE audio, measured on the client's own clock.
 ///
-/// `cloud-assistant.md` (L33) requires it, and the latency work needs the same number from iOS and
+/// `cloud-assistant.md`, KPIs: "Clients separately measure ... first audible audio ... on their own
+/// clock". The latency work needs the same number from iOS and
 /// Android. The scheduling instant — when the first buffer is handed to the output node — is NOT
 /// this number: `scheduleBuffer` only enqueues, and the node may still be rendering audio queued
 /// before it, so that instant can precede what the user hears by an arbitrary amount.
