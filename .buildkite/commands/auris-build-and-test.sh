@@ -178,6 +178,15 @@ rm -rf "$RESULT_BUNDLE"
 # log for the first sign of testing and stop the run if it never appears, so the
 # step says what happened instead of consuming the job's whole timeout.
 TEST_START_DEADLINE="${BUILDKITE_AURIS_TEST_START_DEADLINE:-900}"
+# A test that reaches its execution time allowance is killed and the runner is
+# relaunched, and the relaunch starts the selection over. One hanging test can
+# therefore cost many minutes: a run has been seen making fourteen launches, most
+# of which executed nothing before dying again. Watching only for the first sign
+# of testing leaves that loop unwatched, so progress is watched too — and the
+# whole testing phase is bounded, because the per-test allowance is per launch
+# and does not limit how many launches there are.
+TEST_PROGRESS_DEADLINE="${BUILDKITE_AURIS_TEST_PROGRESS_DEADLINE:-300}"
+TEST_TOTAL_DEADLINE="${BUILDKITE_AURIS_TEST_TOTAL_DEADLINE:-3600}"
 
 set +e
 xcodebuild test \
@@ -202,14 +211,44 @@ XCODEBUILD_PID=$!
 
 (
   waited=0
+  started=0
+  # Progress is measured by the log growing, not by a particular line: XCTest and
+  # Swift Testing write different formats, and a relaunch writes neither for as
+  # long as it is failing to connect.
+  last_size=0
+  stalled=0
   while kill -0 "$XCODEBUILD_PID" 2>/dev/null; do
-    if grep -q "Testing started" "$LOG_DIR/test.log" 2>/dev/null; then
-      exit 0
+    if [ "$started" -eq 0 ] && grep -q "Testing started\|Test Case '-\[\|◇ Test " "$LOG_DIR/test.log" 2>/dev/null; then
+      started=1
     fi
-    if [ "$waited" -ge "$TEST_START_DEADLINE" ]; then
+    if [ "$started" -eq 0 ] && [ "$waited" -ge "$TEST_START_DEADLINE" ]; then
       echo "runner never connected: no testing began within ${TEST_START_DEADLINE}s of xcodebuild starting" >&2
       kill "$XCODEBUILD_PID" 2>/dev/null
       exit 1
+    fi
+    if [ "$waited" -ge "$TEST_TOTAL_DEADLINE" ]; then
+      echo "testing exceeded ${TEST_TOTAL_DEADLINE}s in total." >&2
+      echo "Last test in flight: $(grep -E "Test Case .* started\.$|◇ Test .* started\.$" "$LOG_DIR/test.log" 2>/dev/null | tail -1)" >&2
+      echo "Last test to report a result: $(grep -E "Test Case .*(passed|failed) \(|✔ Test |✘ Test " "$LOG_DIR/test.log" 2>/dev/null | tail -1)" >&2
+      kill "$XCODEBUILD_PID" 2>/dev/null
+      exit 2
+    fi
+    if [ "$started" -eq 1 ]; then
+      size=$(wc -c < "$LOG_DIR/test.log" 2>/dev/null || echo 0)
+      if [ "$size" -gt "$last_size" ]; then
+        last_size=$size
+        stalled=0
+      else
+        stalled=$((stalled + 10))
+        if [ "$stalled" -ge "$TEST_PROGRESS_DEADLINE" ]; then
+          echo "no test output for ${TEST_PROGRESS_DEADLINE}s: the runner stopped making progress." >&2
+          # The last test to start without finishing is the one it stopped on.
+          echo "Last test in flight: $(grep -E "Test Case .* started\.$|◇ Test .* started\.$" "$LOG_DIR/test.log" 2>/dev/null | tail -1)" >&2
+      echo "Last test to report a result: $(grep -E "Test Case .*(passed|failed) \(|✔ Test |✘ Test " "$LOG_DIR/test.log" 2>/dev/null | tail -1)" >&2
+          kill "$XCODEBUILD_PID" 2>/dev/null
+          exit 3
+        fi
+      fi
     fi
     sleep 10
     waited=$((waited + 10))
@@ -230,11 +269,37 @@ wait "$WATCHDOG_PID" 2>/dev/null
 WATCHDOG_STATUS=$?
 set -e
 
-if [ "$WATCHDOG_STATUS" -ne 0 ]; then
-  echo "--- :warning: Runner never connected"
-  echo "The build completed but testing did not start within ${TEST_START_DEADLINE}s."
-  echo "This is a test-runner failure, not a test failure: no tests were run to completion."
-fi
+case "$WATCHDOG_STATUS" in
+  0) ;;
+  1)
+    echo "--- :warning: Runner never connected"
+    echo "Testing did not start within ${TEST_START_DEADLINE}s."
+    echo "This is a test-runner failure, not a test failure: no tests ran to completion."
+    ;;
+  2)
+    echo "--- :warning: Testing took too long overall"
+    echo "Testing was stopped after ${TEST_TOTAL_DEADLINE}s. A test killed at its"
+    echo "execution time allowance relaunches the runner, and the allowance applies"
+    echo "per launch, so repeated relaunches are not bounded by it."
+    ;;
+  3)
+    echo "--- :warning: Runner stopped making progress"
+    echo "No test output for ${TEST_PROGRESS_DEADLINE}s after testing had begun."
+    echo "A relaunch that cannot reconnect looks like this: the run is alive and"
+    echo "nothing is running."
+    ;;
+  *)
+    echo "--- :warning: Watchdog ended with status $WATCHDOG_STATUS"
+    ;;
+esac
+
+echo "--- :mag: Checking the watchdog itself"
+# Each way the watchdog can stop a run is proved against a stub, using the
+# watchdog body from this script rather than a copy of it.
+set +e
+bash .buildkite/lib/test-watchdog.sh
+WATCHDOG_SELFTEST_STATUS=$?
+set -e
 
 echo "--- :mag: Checking the coverage guard itself"
 # The guard is only worth trusting if it can fail. These cases remove coverage
@@ -272,7 +337,9 @@ echo "--- :result: Result"
 echo "xcodebuild exit: $TEST_STATUS"
 echo "coverage check exit: $COVERAGE_STATUS"
 echo "guard self-test exit: $SELFTEST_STATUS"
+echo "watchdog self-test exit: $WATCHDOG_SELFTEST_STATUS"
 [ "$TEST_STATUS" -eq 0 ] || { echo "tests failed"; exit "$TEST_STATUS"; }
 [ "$COVERAGE_STATUS" -eq 0 ] || { echo "the run did not cover the whole plan"; exit "$COVERAGE_STATUS"; }
 [ "$SELFTEST_STATUS" -eq 0 ] || { echo "the coverage guard did not prove it can fail"; exit "$SELFTEST_STATUS"; }
+[ "$WATCHDOG_SELFTEST_STATUS" -eq 0 ] || { echo "the watchdog did not prove it can stop a run"; exit "$WATCHDOG_SELFTEST_STATUS"; }
 echo "Build and full plan passed."
