@@ -216,16 +216,28 @@ def main():
     # An access-group skip is a property of the build, not a signing failure: an
     # ad-hoc signature gives the host its own entitlement and cannot declare a
     # group shared with another app. It must stay allowed on a signed run.
-    # The unmodified signed run above already contains the two access-group
-    # skips, so it is the proof they stay allowed; this asserts they are there,
-    # otherwise that case would be proving nothing about them.
+    # The unmodified signed run above is what proves an access-group skip stays
+    # allowed on a signed build — but only if the recording contains any. With
+    # none present that case passes without exercising the rule at all, so their
+    # presence is asserted rather than reported.
     group_ids = list(check.EXPECTED_RUNTIME_SKIPS["PocketCastsTests"])
     group_reasons = check.skip_reasons(sys.argv[1], group_ids)
-    present_groups = [
+    present_groups = sorted(
         name for name, reason in group_reasons.items()
         if check.ACCESS_GROUP_SKIP_MARKER in reason
-    ]
-    print(f"  access-group skips present in this recording: {len(present_groups)}")
+    )
+    # The tests that need a group another app shares: named by their suite, since
+    # the expectation list holds reasons only as they were recorded.
+    expected_groups = sorted(
+        name for name in check.EXPECTED_RUNTIME_SKIPS["PocketCastsTests"]
+        if name.startswith("SameAccessGroupPreservationTests/")
+    )
+    groups_ok = not signed or present_groups == expected_groups
+    print(f"{'PASS' if groups_ok else 'FAIL'}  the recording exercises the access-group rule")
+    if not groups_ok:
+        print(f"        -> expected {expected_groups}, found {present_groups}: without "
+              "them the signed-run case proves nothing about access-group skips")
+    results.append(groups_ok)
 
     # A test that never ran must not be reported as passing: absence from the
     # failures is also what a filtered or skipped test looks like.
