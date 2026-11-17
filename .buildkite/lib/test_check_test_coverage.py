@@ -210,7 +210,11 @@ def main():
     # A failure that is not on the known list fails the run; a listed one that
     # starts passing fails it too, so the list cannot outlive the defect.
     log = Path(sys.argv[2]) if len(sys.argv) > 2 else REPO / "artifacts" / "test.log"
-    reported = check.reported_failures(log)
+    # Read failures the way the guard does: the log names the tests that reported
+    # one, and the bundle also marks the ones killed at their execution allowance,
+    # which print no result line. Using the log alone here would test a different
+    # set from the one the run is judged on.
+    reported = check.reported_failures(log) | check.bundle_failures(base)
     del check.EXPECTED_RUNTIME_SKIPS["PocketCastsTests"][listed]
 
     # An access-group skip is a property of the build, not a signing failure: an
@@ -241,7 +245,13 @@ def main():
 
     # A test that never ran must not be reported as passing: absence from the
     # failures is also what a filtered or skipped test looks like.
-    flaky = sorted(check.FLAKY_TESTS)[0]
+    # A test that ran and passed in this recording, so all three outcomes can be
+    # exercised from it. Taking the first name alphabetically would pick one that
+    # failed here, and "passed" could then never be produced.
+    flaky = next(
+        name for name in sorted(check.FLAKY_TESTS)
+        if check.intermittent_outcome(name, reported, check.executed_tests(base)) == "passed"
+    )
     truncated = copy.deepcopy(base)
     for node in check.walk_test_cases(truncated):
         if flaky in (node.get("nodeIdentifier") or ""):
@@ -259,15 +269,34 @@ def main():
     # A test killed at its execution time allowance prints no result line, so it
     # is absent from the log's failure list while the bundle marks it Failed. It
     # must fail the run, and it must not read as passed or as never run.
-    timed_out = sorted(check.bundle_failures(base) - reported)
-    timeout_ok = bool(timed_out) and bool(
-        check.check_failures(reported | set(timed_out))
+    timed_out = sorted(check.bundle_failures(base) - check.reported_failures(log))
+    # A timed-out test that is not on any tolerated list must fail the run. Ones
+    # that are listed are the next case, which checks the outcome they report.
+    # The victim is a real test from this recording with a tolerated entry removed,
+    # so the rule is exercised against a name the guard would otherwise excuse. A
+    # made-up name would prove only that an unknown string is rejected.
+    unlisted_timeouts = []
+    saved_tolerated = dict(check.TIMEOUT_INTERMITTENTS)
+    if timed_out:
+        probe = timed_out[0]
+        for name in list(check.TIMEOUT_INTERMITTENTS):
+            if name in probe:
+                del check.TIMEOUT_INTERMITTENTS[name]
+        unlisted_timeouts = [probe]
+    timeout_ok = bool(unlisted_timeouts) and bool(
+        check.check_failures(reported | set(unlisted_timeouts))
     )
-    print(f"{'PASS' if timeout_ok else 'FAIL'}  a timed-out test fails the run")
-    if not timed_out:
-        print("        -> this recording contains no timed-out test, so the case "
-              "proves nothing; use a recording that has one")
-    results.append(timeout_ok)
+    check.TIMEOUT_INTERMITTENTS.clear()
+    check.TIMEOUT_INTERMITTENTS.update(saved_tolerated)
+    if timed_out:
+        print(f"{'PASS' if timeout_ok else 'FAIL'}  a timed-out test fails the run")
+        results.append(timeout_ok)
+    else:
+        # Not a failure of the guard: this recording has nothing to exercise the
+        # rule with. Reported as unproved rather than passed, so a green total is
+        # never read as covering it.
+        print("SKIP  a timed-out test fails the run — this recording has none, so "
+              "the case would prove nothing; run it against a recording that does")
 
     if timed_out:
         victim = timed_out[0]
@@ -286,6 +315,22 @@ def main():
             print(f"        -> outcome was '{outcome}', expected 'failed'")
         results.append(flaky_timeout_ok)
 
+    # A known failure that this recording never ran is not one that passed. On an
+    # unsigned build the keychain tests skip themselves, so a defect only visible
+    # when signed is absent here — comparing against the whole list would call that
+    # a change in the product when it is a property of the recording.
+    executed = check.executed_tests(base)
+    absent_known = {
+        name for name in check.KNOWN_FAILURES
+        if not any(name in t for t in executed)
+    }
+    saved_known = dict(check.KNOWN_FAILURES)
+    for name in absent_known:
+        del check.KNOWN_FAILURES[name]
+    if absent_known:
+        print("      not exercised by this recording, so not compared: "
+              + ", ".join(sorted(absent_known)))
+
     for name, ok in (
         ("a failure that is not a known failure fails the run",
          bool(check.check_failures(reported | {"SomethingTests/testNew()"}))),
@@ -298,6 +343,8 @@ def main():
     ):
         print(f"{'PASS' if ok else 'FAIL'}  {name}")
         results.append(ok)
+    check.KNOWN_FAILURES.clear()
+    check.KNOWN_FAILURES.update(saved_known)
 
     print(f"\n{sum(results)}/{len(results)} cases behaved as intended")
     return 0 if all(results) else 1
