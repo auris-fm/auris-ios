@@ -2,18 +2,22 @@ import Foundation
 
 /// Whether an early-opened cloud connection may still carry this turn.
 ///
-/// A connection opened before the request is ready is useful only while it is fresh: the server
-/// closes a connection that receives no first frame within 10 seconds, admitting and charging
-/// nothing. That close is not observable as a reason — the client cannot distinguish an idle
-/// timeout from any other close — so the deadline is enforced on the client's own clock, measured
-/// from when the upgrade request was sent. Waiting for a close handler would mean sending into a
-/// connection that is already gone and losing the turn.
+/// A connection opened before the request is ready is useful only while it is fresh. The server
+/// gives a connection a fixed window from its upgrade to receive the first frame, and closes it
+/// with nothing admitted or charged when that window expires; the client cannot distinguish that
+/// close from any other, so the deadline is enforced on its own clock, measured from when the
+/// upgrade request was sent. Waiting for a close handler would mean sending into a connection that
+/// is already gone and losing the turn.
 ///
-/// The 9 second limit leaves a margin under the server's 10 seconds for the send to arrive and be
-/// admitted. A connection at exactly the limit is not reused: the margin is what makes the reuse
-/// safe, so erring toward a fresh connection is the conservative choice.
+/// The two clocks measure the same silent period, so the client bound has to be the tighter one:
+/// a connection older than this limit is refused and a fresh one opened instead. The limit tracks
+/// the server's window rather than standing on its own — where the server's window is shorter than
+/// this figure the age rule cannot keep a socket alive by itself, and what actually makes reuse
+/// safe is the re-dial of a send that fails on one. The limit only decides how often that is needed.
 enum EarlyConnectionPolicy {
-    /// Age of an early connection at which it stops carrying its turn.
+    /// Age of an early connection at which it stops carrying its turn. One second inside the
+    /// server window the endpoint is specced for; see the type's doc for why that pairing, and not
+    /// the figure alone, is what this number means.
     static let maximumAgeSeconds: TimeInterval = 9
 
     /// Decides reuse from the connection's age. `age` is measured on the client clock from the
