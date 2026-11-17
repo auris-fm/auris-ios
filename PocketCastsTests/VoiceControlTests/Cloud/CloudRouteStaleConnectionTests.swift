@@ -206,8 +206,9 @@ final class CloudRouteStaleConnectionTests: XCTestCase {
     ///
     /// The break this catches: the inherited socket is used because it is fresh, its first send
     /// fails, and the turn ends in `connection_lost` — the answer is lost with no second attempt.
-    /// Age is knowable before the send; death is not, so a pre-send freshness check can never
-    /// cover this case however carefully it is placed.
+    /// Age alone cannot cover this case however carefully the check is placed, which is why the
+    /// take-time rule reads liveness as well. This socket is refused by that read; the sibling
+    /// tests below cover a death no pre-send read can see, where the send itself is what fails.
     func test_aDeadInheritedConnectionStillCompletesItsTurn() async {
         let dead = StubWebSocketTask(textFrames: [])
         // The socket is DEAD, which is what the take-time liveness read must notice. Its send also
