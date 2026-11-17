@@ -177,9 +177,12 @@ def main():
     # starts passing fails it too, so the list cannot outlive the defect.
     log = Path(sys.argv[2]) if len(sys.argv) > 2 else REPO / "artifacts" / "test.log"
     reported = check.reported_failures(log)
+    flaky = sorted(check.FLAKY_TESTS)[0]
     for name, ok in (
         ("a failure that is not a known failure fails the run",
          bool(check.check_failures(reported | {"SomethingTests/testNew()"}))),
+        ("an intermittent test failing does not fail the run",
+         check.check_failures(reported | {flaky}) == []),
         ("the recorded run's failures are all known",
          check.check_failures(reported) == []),
         ("a known failure that stops failing fails the run",

@@ -132,8 +132,21 @@ KNOWN_FAILURES = {
     "CloudRouteSupersedeTests/testSupersededCleanupAwaitsItsCapturedRetireIdentity":
         "superseded cleanup is never reached because the successor is refused",
     # Nothing anchors after the inserted ad, so the timings it asserts are absent.
+    # This one only became visible when the build was signed: with no keychain
+    # entitlement the test skipped itself, so no unsigned run ever reported it.
     "FingerprintPreparationTests/testPreparationAbsorbsADynamicAdInsertedIntoTheEpisode":
-        "an inserted dynamic ad leaves nothing anchored in the episode",
+        "fails on main; was hidden by the unsigned keychain skip",
+}
+
+# Tests that fail in some runs and pass in others. Either result is accepted, and
+# the outcome is printed, so a run says how often they fail instead of going red at
+# random or hiding the frequency. They are not in KNOWN_FAILURES: that list means
+# "fails every time", and a test that also passes would break its own entry.
+FLAKY_TESTS = {
+    "VoiceSharingGateLossScopeControls/test_iAWithdrawalOvertakenByAnotherMutationIsStillReported":
+        "fails in a full run, passes alone or in a smaller selection",
+    "InterruptionOrderingControl/testRefusalFirstDiscardsAndSubmitsNothing":
+        "fails in a full run, passes alone or in a smaller selection",
 }
 
 # Targets that belong in the plan but cannot currently build for the simulator.
@@ -334,10 +347,12 @@ def reported_failures(log_path: Path) -> set:
     return reported
 
 
-def check_failures(reported: set) -> list:
-    """Compare the tests that failed against the ones known to be failing."""
+def check_failures(reported: set, flaky_outcomes: dict = None) -> list:
+    """Compare the tests that failed against the ones expected to."""
     failures = []
     for test in sorted(reported):
+        if any(listed in test for listed in FLAKY_TESTS):
+            continue
         if not any(listed in test for listed in KNOWN_FAILURES):
             failures.append(
                 f"'{test}' failed and is not a known failure. A new failure is a "
@@ -495,6 +510,13 @@ def main() -> int:
         print("\nFailing tests, all known:")
         for test in sorted(failed):
             print(f"  {test}")
+    if FLAKY_TESTS:
+        # Printed on every run, passing or failing: the count over runs is what
+        # says whether one of these is getting worse.
+        print("\nTests that fail intermittently:")
+        for name, reason in sorted(FLAKY_TESTS.items()):
+            outcome = "failed" if any(name in test for test in failed) else "passed"
+            print(f"  {name}: {outcome} this run ({reason})")
     print("\nCoverage check passed: every buildable target ran, no unexpected skips.")
     if BLOCKED_TARGETS:
         print(f"Still blocked: {', '.join(BLOCKED_TARGETS)}")

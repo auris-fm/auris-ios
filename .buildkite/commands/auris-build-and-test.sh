@@ -100,6 +100,13 @@ print(runtime['identifier'], iphones[0]['identifier'])
   SIMULATOR_ID="$(xcrun simctl create "$CI_SIMULATOR_NAME" "$DEVICE_TYPE_ID" "$RUNTIME_ID")"
 fi
 echo "Using simulator $CI_SIMULATOR_NAME ($SIMULATOR_ID)"
+# The device is reused between runs, but it must not outlive the job: a booted
+# simulator holds a device slot and CPU, and the next job on this machine would
+# start with it already running. Shut down on every exit path, not only success.
+shutdown_simulator() {
+  xcrun simctl shutdown "$SIMULATOR_ID" 2>/dev/null || true
+}
+trap shutdown_simulator EXIT
 xcrun simctl bootstatus "$SIMULATOR_ID" -b
 
 echo "--- :closed_lock_with_key: Generating the credentials stub"
@@ -221,6 +228,11 @@ if [ -d "$RESULT_BUNDLE" ]; then
   # otherwise upload thousands of loose files.
   (cd "$LOG_DIR" && zip -qry "$(basename "$RESULT_BUNDLE").zip" "$(basename "$RESULT_BUNDLE")")
 fi
+
+echo "--- :package: Shutting the simulator down"
+# Run here as well as on exit so the step reports it rather than only doing it.
+shutdown_simulator
+echo "Simulator $CI_SIMULATOR_NAME shut down"
 
 echo "--- :result: Result"
 echo "xcodebuild exit: $TEST_STATUS"
