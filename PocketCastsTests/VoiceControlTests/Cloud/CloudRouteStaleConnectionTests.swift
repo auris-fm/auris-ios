@@ -214,8 +214,8 @@ final class CloudRouteStaleConnectionTests: XCTestCase {
         // fails, so a client that ignores liveness still cannot complete the turn on it.
         dead.reportsAlive = false
         dead.throwsBeforeRecording = true
-        // `connected` precedes the terminal on a real turn: codec negotiation happens before
-        // admission, so a script that starts at `done` is one no server produces.
+        // An ADMITTED turn gets `connected` before its terminal — it carries the reservation the
+        // server allocates on admission. A script starting at `done` is one no server produces.
         let fresh = StubWebSocketTask(textFrames: [
             #"{"type":"connected","codec":"pcm_s16le@24k"}"#,
             #"{"type":"done","outcome":"completed","usage":{"input_tokens":1,"output_tokens":0}}"#
@@ -296,8 +296,9 @@ final class CloudRouteStaleConnectionTests: XCTestCase {
 
         XCTAssertTrue(client.openEarlyConnection(), "premise: the turn must inherit a connection")
 
+        let turn = makeTurn()
         let events = await collect(client.route(
-            request: "skip forward", context: sampleContext, turn: makeTurn()
+            request: "skip forward", context: sampleContext, turn: turn
         ))
 
         XCTAssertEqual(issued.count, 2, "exactly one retry, not a loop")
@@ -305,7 +306,9 @@ final class CloudRouteStaleConnectionTests: XCTestCase {
         let firstId = first.sentAuthFrame?["request_id"] as? String
         let secondId = second.sentAuthFrame?["request_id"] as? String
         XCTAssertNil(firstId, "premise: the first frame never left, so it carries no id on the wire")
-        XCTAssertNotNil(secondId, "the retry must carry a request id")
+        // The SAME id, not merely an id: a retry that minted a fresh one would make the server run
+        // two turns for one utterance, which is the whole failure this test exists to prevent.
+        XCTAssertEqual(secondId, turn.requestId, "the retry must carry THIS turn's request id")
         let completed = events.contains { event in
             if case .done(_, let outcome) = event { return outcome == .completed }
             return false
@@ -341,8 +344,9 @@ final class CloudRouteStaleConnectionTests: XCTestCase {
 
         XCTAssertTrue(client.openEarlyConnection(), "premise: the turn must inherit a connection")
 
+        let turn = makeTurn()
         let events = await collect(client.route(
-            request: "skip forward", context: sampleContext, turn: makeTurn()
+            request: "skip forward", context: sampleContext, turn: turn
         ))
 
         XCTAssertEqual(first.sent.count, 1,
@@ -353,9 +357,10 @@ final class CloudRouteStaleConnectionTests: XCTestCase {
         // The retry must have sent, and the server's `duplicate_request` must have come back on it.
         XCTAssertFalse(second.sentTextFrames.isEmpty,
                        "premise: the retry must reach the server, or no duplicate was ever answered")
-        let log = await FileLog.shared.logFileAsString()
-        XCTAssertTrue(log.split(separator: "\n").contains { $0.contains("server error code=duplicate_request") },
-                      "premise: the duplicate must actually arrive, or the code below is the first failure's")
+        // Both frames carry THIS turn's id. That is what makes the server's answer a duplicate of
+        // this turn rather than of some other one, and it needs no shared-log reading.
+        XCTAssertEqual(first.sentAuthFrame?["request_id"] as? String, turn.requestId)
+        XCTAssertEqual(second.sentAuthFrame?["request_id"] as? String, turn.requestId)
         let codes = events.compactMap { event -> String? in
             if case .error(_, let code, _) = event { return code }
             return nil
