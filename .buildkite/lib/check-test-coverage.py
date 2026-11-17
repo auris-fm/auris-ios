@@ -336,6 +336,21 @@ def plan_skips(plan_path: Path) -> dict:
     }
 
 
+def plan_selections(plan_path: Path) -> dict:
+    """Targets narrowed to a chosen subset of their tests.
+
+    `selectedTests` is the other half of `skippedTests`: instead of naming what not
+    to run, it names the only things to run. A target can hold thousands of tests
+    and execute three, and every check that counts targets or skips passes.
+    """
+    plan = json.loads(plan_path.read_text())
+    return {
+        entry["target"]["name"]: set(entry["selectedTests"])
+        for entry in plan.get("testTargets", [])
+        if entry.get("selectedTests")
+    }
+
+
 def reported_failures(log_path: Path) -> set:
     """Test identifiers xcodebuild reported a failure for, from its own output.
 
@@ -400,6 +415,21 @@ def check_coverage(counts: dict, plan_path: Path, skips: dict = None,
     for target in REQUIRED_TARGETS:
         actual = (skips or {}).get(target, set())
         expected = set(EXPECTED_RUNTIME_SKIPS.get(target, {}))
+        # A keychain entitlement the signature does not carry is a signing failure
+        # on a signed build whether or not the test is listed: being on a list of
+        # tests that cannot run here must not excuse the signing being broken. So
+        # this is checked over every skip, not only the unlisted ones.
+        if signed:
+            for skip in sorted(actual):
+                reason = (reasons or {}).get(skip, "")
+                if KEYCHAIN_SKIP_MARKER in reason and ACCESS_GROUP_SKIP_MARKER not in reason:
+                    failures.append(
+                        f"{target}: '{skip}' skipped for a missing keychain "
+                        "entitlement. The host is signed so that it has one, which "
+                        "makes this a signing failure rather than a limit of the "
+                        "environment: fix the signing instead of listing the skip."
+                    )
+
         for skip in sorted(actual - expected):
             reason = (reasons or {}).get(skip, "")
             if ACCESS_GROUP_SKIP_MARKER in reason:
@@ -413,14 +443,7 @@ def check_coverage(counts: dict, plan_path: Path, skips: dict = None,
                 )
                 continue
             if KEYCHAIN_SKIP_MARKER in reason:
-                if signed:
-                    failures.append(
-                        f"{target}: '{skip}' skipped for a missing keychain "
-                        "entitlement. The host is signed so that it has one, which "
-                        "makes this a signing failure rather than a limit of the "
-                        "environment: fix the signing instead of listing the skip."
-                    )
-                elif skip in UNSIGNED_KEYCHAIN_SKIPS.get(target, set()):
+                if skip in UNSIGNED_KEYCHAIN_SKIPS.get(target, set()):
                     # Expected answer in an unsigned run, and not coverage.
                     continue
                 else:
@@ -454,6 +477,13 @@ def check_coverage(counts: dict, plan_path: Path, skips: dict = None,
     if not plan_path.is_file():
         failures.append(f"test plan not found at {plan_path}")
         return failures
+
+    for target, selected in sorted(plan_selections(plan_path).items()):
+        failures.append(
+            f"{target} is narrowed to {len(selected)} selected tests in the plan. "
+            "A selection runs only what it names, so the target's count says "
+            "nothing about the rest of it. Remove the selection."
+        )
 
     actual = plan_skips(plan_path)
     for target in REQUIRED_TARGETS:

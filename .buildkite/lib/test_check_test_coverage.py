@@ -50,12 +50,12 @@ def manifest_reason(test_id):
     try:
         manifest = json.loads((REPO / SKIP_MANIFEST).read_text())
     except (OSError, ValueError):
-        return None
+        return ""
     for reasons in manifest.values():
         for recorded, reason in reasons.items():
             if recorded == test_id:
                 return reason
-    return None
+    return ""
 
 
 def run_guard(report, plan_text, signed=True):
@@ -102,23 +102,24 @@ def case(name, report, plan_text, expect_failure, expected_text=None, reasons=No
 
 
 def main():
-    # The recordings available are of an unsigned run, so the proof reads them the
-    # way that run should be read: the keychain skips are its expected answer. The
-    # signed run is the one case below that contrasts the two readings.
+    # Read the bundle the way this run produced it. CI hands over a signed bundle;
+    # a recording of an unsigned run is read as unsigned, where the keychain skips
+    # are that run's expected answer rather than coverage it lost.
+    signed = check.SIGNED_HOST
     base = real_report(sys.argv[1] if len(sys.argv) > 1 else None)
     results = []
 
     # The baseline must itself be a complete run. A truncated bundle would make
     # every "removes coverage" case pass for the wrong reason, so say so plainly
     # rather than reporting four green checks that proved nothing.
-    baseline_failures = run_guard(base, PLAN, signed=False)
+    baseline_failures = run_guard(base, PLAN, signed=signed)
     if baseline_failures:
         print("FAIL  baseline run is not complete; the cases below prove nothing")
         for f in baseline_failures:
             print(f"        -> {f}")
         return 1
     results.append(case("unmodified run passes", base, PLAN, expect_failure=False,
-                        signed=False))
+                        signed=signed))
 
     # A required target runs nothing: the selection was narrowed, or the bundle
     # failed to load. xcodebuild still exits 0 for the tests it did run.
@@ -136,6 +137,14 @@ def main():
         "CloudRouteSupersedeTests/testACompletedDoneDrainsTheSameBufferedOutput()"
     )
     results.append(case("plan gains an unlisted skip", base, json.dumps(mutant), expect_failure=True))
+
+    # The plan narrows a target to a handful of its tests. Every count and skip
+    # check still passes, because the target ran and nothing was skipped.
+    narrowed = json.loads(PLAN)
+    narrowed["testTargets"][0]["selectedTests"] = ["FeatureFlagTests"]
+    results.append(case("plan narrows a target to selected tests", base,
+                        json.dumps(narrowed), expect_failure=True,
+                        expected_text="narrowed to", signed=signed))
 
     # A blocked target comes back to the plan without being made required.
     restored = json.loads(PLAN)
@@ -156,11 +165,36 @@ def main():
     # Listing the tests that legitimately skip must not let a broken build skip
     # quietly: a skip for a missing keychain entitlement means signing is not in
     # effect, so it fails even when the test that skipped is a listed one.
-    listed = sorted(check.EXPECTED_RUNTIME_SKIPS["PocketCastsTests"])[0]
+    # Take a test that ran and make it skip for a missing keychain entitlement.
+    # It has to be one that was not skipping already, or the case would only
+    # re-test what the run did rather than what the guard decides.
+    # A PocketCastsTests case: the guard reads expectations per bundle, so a test
+    # from another bundle would not be looked up at all.
+    pocket_cases = {
+        node.get("nodeIdentifier")
+        for node in check.walk_test_cases(base)
+        if node.get("result") != "Skipped"
+    }
+    suite_names = set()
+
+    def collect(node, bundle=None):
+        if node.get("nodeType") == "Unit test bundle":
+            bundle = node.get("name")
+        elif node.get("nodeType") == "Test Case" and bundle == "PocketCastsTests":
+            suite_names.add(node.get("nodeIdentifier"))
+        for child in node.get("children", []):
+            collect(child, bundle)
+
+    for node in base["testNodes"]:
+        collect(node)
+    listed = sorted(suite_names)[0]
     masked = copy.deepcopy(base)
     for node in check.walk_test_cases(masked):
         if node.get("nodeIdentifier") == listed:
             node["result"] = "Skipped"
+    # Restored afterwards: the cases below read the same expectations, and a test
+    # left listed here would make them prove something else.
+    check.EXPECTED_RUNTIME_SKIPS["PocketCastsTests"][listed] = "added by this case"
     listed_skips = check.runtime_skips(masked)
     results.append(case(
         "listed skip for a missing keychain entitlement still fails",
@@ -177,6 +211,8 @@ def main():
     # starts passing fails it too, so the list cannot outlive the defect.
     log = Path(sys.argv[2]) if len(sys.argv) > 2 else REPO / "artifacts" / "test.log"
     reported = check.reported_failures(log)
+    del check.EXPECTED_RUNTIME_SKIPS["PocketCastsTests"][listed]
+
     # A test that never ran must not be reported as passing: absence from the
     # failures is also what a filtered or skipped test looks like.
     flaky = sorted(check.FLAKY_TESTS)[0]

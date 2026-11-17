@@ -54,17 +54,31 @@ echo "--- :iphone: Choosing a simulator"
 # device per run would lose the installed app's state between builds. The name is
 # fixed so the same device is found on every run.
 CI_SIMULATOR_NAME="${BUILDKITE_AURIS_SIMULATOR:-auris-ci}"
-SIMULATOR_ID="$(xcrun simctl list devices --json | python3 -c '
-import json, sys
+# The name alone is not enough: a device left over from an uninstalled runtime
+# keeps its name and cannot boot, so matching on it would pick a device every run
+# then fails on. Only a device on an available iOS runtime is usable.
+SIMULATOR_ID="$(xcrun simctl list devices runtimes --json | python3 -c '
+import json, re, sys
 wanted = sys.argv[1]
-devices = json.load(sys.stdin)["devices"]
-for runtime, group in devices.items():
-    if "SimRuntime.iOS" not in runtime:
+data = json.load(sys.stdin)
+available = {
+    r["identifier"] for r in data["runtimes"]
+    if r.get("platform") == "iOS" and r.get("isAvailable")
+}
+def version_key(text):
+    return tuple(int(part) for part in re.findall(r"[0-9]+", text))
+matches = []
+for runtime, group in data["devices"].items():
+    if runtime not in available:
         continue
     for device in group:
-        if device["name"] == wanted:
-            print(device["udid"])
-            sys.exit(0)
+        if device["name"] == wanted and device.get("isAvailable", True):
+            matches.append((version_key(runtime), device["udid"]))
+if matches:
+    # Newest runtime wins when the name exists on more than one.
+    matches.sort(reverse=True)
+    print(matches[0][1])
+    sys.exit(0)
 sys.exit(1)
 ' "$CI_SIMULATOR_NAME" || true)"
 
@@ -211,7 +225,13 @@ fi
 echo "--- :mag: Checking the coverage guard itself"
 # The guard is only worth trusting if it can fail. These cases remove coverage
 # and assert it notices, against the result bundle this run just produced.
+# Its status is recorded rather than allowed to end the step: a broken self-test
+# would otherwise hide the coverage verdict and the artifacts, which are what say
+# what the run actually did.
+set +e
 python3 .buildkite/lib/test_check_test_coverage.py "$RESULT_BUNDLE" "$LOG_DIR/test.log"
+SELFTEST_STATUS=$?
+set -e
 
 echo "--- :mag: Checking that the whole plan ran"
 # Runs even when tests failed: "which targets ran" is the question that tells a
@@ -237,6 +257,8 @@ echo "Simulator $CI_SIMULATOR_NAME shut down"
 echo "--- :result: Result"
 echo "xcodebuild exit: $TEST_STATUS"
 echo "coverage check exit: $COVERAGE_STATUS"
+echo "guard self-test exit: $SELFTEST_STATUS"
 [ "$TEST_STATUS" -eq 0 ] || { echo "tests failed"; exit "$TEST_STATUS"; }
 [ "$COVERAGE_STATUS" -eq 0 ] || { echo "the run did not cover the whole plan"; exit "$COVERAGE_STATUS"; }
+[ "$SELFTEST_STATUS" -eq 0 ] || { echo "the coverage guard did not prove it can fail"; exit "$SELFTEST_STATUS"; }
 echo "Build and full plan passed."
