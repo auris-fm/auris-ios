@@ -21,7 +21,11 @@ extract_watchdog() {
   {
     echo 'LOG_DIR="$1"; XCODEBUILD_PID="$2"'
     echo 'TEST_START_DEADLINE="$3"; TEST_PROGRESS_DEADLINE="$4"; TEST_TOTAL_DEADLINE="$5"'
-    sed -n '/^($/,/^) &$/p' "$SCRIPT" | sed '1d;$d' | sed 's/sleep 10/sleep 5/; s/waited + 10/waited + 5/; s/stalled + 10/stalled + 5/'
+    # The watchdog is the subshell that reads TEST_START_DEADLINE. Selecting on
+    # that, rather than taking the first subshell in the script, keeps this reading
+    # the watchdog when other subshells are added around it.
+    awk '/^\($/{buf=""} {buf=buf $0 "\n"} /^\) &$/{if (buf ~ /TEST_START_DEADLINE/) printf "%s", buf}' "$SCRIPT" \
+      | sed '1d;$d' | sed 's/sleep 10/sleep 5/; s/waited + 10/waited + 5/; s/stalled + 10/stalled + 5/'
   } > "$out"
 }
 
