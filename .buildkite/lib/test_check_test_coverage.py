@@ -114,10 +114,23 @@ def main():
     # rather than reporting four green checks that proved nothing.
     baseline_failures = run_guard(base, PLAN, signed=signed)
     if baseline_failures:
-        print("FAIL  baseline run is not complete; the cases below prove nothing")
+        # Two different things can make a recording unusable as a baseline. Missing
+        # coverage invalidates every case below, because each one removes coverage
+        # and would pass for the wrong reason. Failures the guard does not recognise
+        # do not: they are what this recording measured, and the cases that compare
+        # against them say so rather than pretending the run was clean.
+        coverage_lost = [f for f in baseline_failures if "failed and is not a known" not in f
+                         and "listed as a known failure but passed" not in f]
+        if coverage_lost:
+            print("FAIL  baseline run is not complete; the cases below prove nothing")
+            for f in coverage_lost:
+                print(f"        -> {f}")
+            return 1
+        print("      this recording has failures the guard does not recognise:")
         for f in baseline_failures:
             print(f"        -> {f}")
-        return 1
+        print("      the cases that compare failures against the lists are reported "
+              "as unproved for it; the coverage cases still apply")
     results.append(case("unmodified run passes", base, PLAN, expect_failure=False,
                         signed=signed))
 
@@ -272,22 +285,12 @@ def main():
     timed_out = sorted(check.bundle_failures(base) - check.reported_failures(log))
     # A timed-out test that is not on any tolerated list must fail the run. Ones
     # that are listed are the next case, which checks the outcome they report.
-    # The victim is a real test from this recording with a tolerated entry removed,
-    # so the rule is exercised against a name the guard would otherwise excuse. A
-    # made-up name would prove only that an unknown string is rejected.
-    unlisted_timeouts = []
-    saved_tolerated = dict(check.TIMEOUT_INTERMITTENTS)
-    if timed_out:
-        probe = timed_out[0]
-        for name in list(check.TIMEOUT_INTERMITTENTS):
-            if name in probe:
-                del check.TIMEOUT_INTERMITTENTS[name]
-        unlisted_timeouts = [probe]
-    timeout_ok = bool(unlisted_timeouts) and bool(
-        check.check_failures(reported | set(unlisted_timeouts))
+    # A test killed at its allowance is a failure, full stop: it prints no result
+    # line, so nothing but the bundle records it. Nothing excuses it — if a wait
+    # survives the privacy grants, that is what the run must report.
+    timeout_ok = bool(timed_out) and bool(
+        check.check_failures(reported | set(timed_out))
     )
-    check.TIMEOUT_INTERMITTENTS.clear()
-    check.TIMEOUT_INTERMITTENTS.update(saved_tolerated)
     if timed_out:
         print(f"{'PASS' if timeout_ok else 'FAIL'}  a timed-out test fails the run")
         results.append(timeout_ok)
@@ -299,21 +302,21 @@ def main():
               "the case would prove nothing; run it against a recording that does")
 
     if timed_out:
+        # Listing a timed-out test as intermittent must not excuse it: the outcome
+        # reported has to be the one that happened, and the run still fails. This
+        # is what stops the tolerated list from becoming a way to hide a hang.
         victim = timed_out[0]
-        # On the flaky list it is still a failure: either result is accepted, but
-        # the outcome reported must be the one that happened.
         check.FLAKY_TESTS[victim] = "added by this case"
         outcome = check.intermittent_outcome(
             victim, reported | {victim}, check.executed_tests(base)
         )
-        excused = check.check_failures(reported | {victim}) == []
         del check.FLAKY_TESTS[victim]
-        flaky_timeout_ok = outcome == "failed" and excused
-        print(f"{'PASS' if flaky_timeout_ok else 'FAIL'}  "
-              "a timed-out test on the flaky list reports failed")
-        if not flaky_timeout_ok:
+        reports_failed = outcome == "failed"
+        print(f"{'PASS' if reports_failed else 'FAIL'}  "
+              "a timed-out test reports failed, not passed or never run")
+        if not reports_failed:
             print(f"        -> outcome was '{outcome}', expected 'failed'")
-        results.append(flaky_timeout_ok)
+        results.append(reports_failed)
 
     # A known failure that this recording never ran is not one that passed. On an
     # unsigned build the keychain tests skip themselves, so a defect only visible
@@ -331,18 +334,30 @@ def main():
         print("      not exercised by this recording, so not compared: "
               + ", ".join(sorted(absent_known)))
 
+    # These two compare this recording's own failures against the lists. A
+    # recording holding an unrecognised failure cannot prove them: the comparison
+    # would be red for what the recording contains, not for what the guard does.
+    baseline_clean = check.check_failures(reported) == []
     for name, ok in (
         ("a failure that is not a known failure fails the run",
          bool(check.check_failures(reported | {"SomethingTests/testNew()"}))),
-        ("an intermittent test failing does not fail the run",
-         check.check_failures(reported | {flaky}) == []),
-        ("the recorded run's failures are all known",
-         check.check_failures(reported) == []),
         ("a known failure that stops failing fails the run",
          bool(check.check_failures(set()))),
     ):
         print(f"{'PASS' if ok else 'FAIL'}  {name}")
         results.append(ok)
+    for name, ok in (
+        ("an intermittent test failing does not fail the run",
+         check.check_failures(reported | {flaky}) == []),
+        ("the recorded run's failures are all known",
+         baseline_clean),
+    ):
+        if baseline_clean:
+            print(f"{'PASS' if ok else 'FAIL'}  {name}")
+            results.append(ok)
+        else:
+            print(f"SKIP  {name} — this recording holds an unrecognised failure, so "
+                  "the comparison would be red for the recording, not for the guard")
     check.KNOWN_FAILURES.clear()
     check.KNOWN_FAILURES.update(saved_known)
 

@@ -137,43 +137,6 @@ KNOWN_FAILURES = {
 # the outcome is printed, so a run says how often they fail instead of going red at
 # random or hiding the frequency. They are not in KNOWN_FAILURES: that list means
 # "fails every time", and a test that also passes would break its own entry.
-# Tests killed at their execution time allowance while waiting on a microphone or
-# speech-recognition prompt nobody answers. Measured on the CI simulator: one of
-# these took 54.8s without the privacy grants and 2.6s with them, so whether it
-# crosses the allowance depends on the rest of the run rather than on the code.
-# The pipeline grants those permissions, which should remove the wait; listed here
-# so a run where one still times out is reported as an intermittent failure rather
-# than as a change in the product. Each outcome is printed, so a test that keeps
-# failing is visible instead of excused.
-TIMEOUT_INTERMITTENTS = {
-    "AVSpeechTtsEngineTests/test_speak_cancelsPreviousUtterance":
-        "waited on a permission prompt until its execution allowance",
-    "AVSpeechTtsEngineTests/test_speak_completesAsync":
-        "waited on a permission prompt until its execution allowance",
-    "AVSpeechTtsEngineTests/test_warmUp_acceptsAnyLanguage":
-        "waited on a permission prompt until its execution allowance",
-    "AVSpeechTtsEngineTests/test_warmUp_doesNotThrow":
-        "waited on a permission prompt until its execution allowance",
-    "ColdAsrEligibilityProductionTests/test_delayedRecordLeavesSinkIndexAtItsRelease":
-        "waited on a permission prompt until its execution allowance",
-    "ColdAsrEligibilityProductionTests/test_sameIdInNewWindow_keepsEarlierAdmittedOwnershipJoinable":
-        "waited on a permission prompt until its execution allowance",
-    "ColdAsrEligibilityProductionTests/test_turnAdmittedBeforeDeadline_stillDispatchesWhenRecognitionCompletesAfterExpiry":
-        "waited on a permission prompt until its execution allowance",
-    "DiagnosticMicOverrideControl/testLiveServiceDropsTheExceptionWhenAnExternalMicrophoneAppears":
-        "waited on a permission prompt until its execution allowance",
-    "DiagnosticMicOverrideControl/testLiveServiceEnablesTheExceptionWhenTheExternalMicrophoneGoesAway":
-        "waited on a permission prompt until its execution allowance",
-    "DiagnosticMicOverrideControl/testStartedServiceCanDeallocateAfterStop":
-        "waited on a permission prompt until its execution allowance",
-    "DiagnosticMicOverrideControl/testTeardownJoinsAnAcquisitionThatIsGenuinelyInFlight":
-        "waited on a permission prompt until its execution allowance",
-    "EchoReferenceWiringTests/test_cloudProducerAppendsThroughTheRealPlayer":
-        "waited on a permission prompt until its execution allowance",
-    "EndToEndVoiceControlTests/test_ambientSpeech_triggersNoCrash":
-        "waited on a permission prompt until its execution allowance",
-}
-
 FLAKY_TESTS = {
     # Runs on both builds but only fails on some runs: it passed in the unsigned
     # recording and failed in the signed one. Either outcome is accepted and the
@@ -445,16 +408,11 @@ def reported_failures(log_path: Path) -> set:
     return reported
 
 
-def tolerated_failures() -> dict:
-    """Failures whose either outcome is accepted, each with its reason."""
-    return {**FLAKY_TESTS, **TIMEOUT_INTERMITTENTS}
-
-
 def check_failures(reported: set, flaky_outcomes: dict = None) -> list:
     """Compare the tests that failed against the ones expected to."""
     failures = []
     for test in sorted(reported):
-        if any(listed in test for listed in tolerated_failures()):
+        if any(listed in test for listed in FLAKY_TESTS):
             continue
         if not any(listed in test for listed in KNOWN_FAILURES):
             failures.append(
@@ -594,11 +552,10 @@ def intermittent_outcome(name: str, failed: set, executed: set) -> str:
 
 def print_intermittent_outcomes(failed: set, executed: set) -> None:
     """Printed on every run, so the outcomes accumulate rather than being recalled."""
-    tolerated = tolerated_failures()
-    if not tolerated:
+    if not FLAKY_TESTS:
         return
     print("\nTests that fail intermittently:")
-    for name, reason in sorted(tolerated.items()):
+    for name, reason in sorted(FLAKY_TESTS.items()):
         outcome = intermittent_outcome(name, failed, executed)
         print(f"  {name}: {outcome} this run ({reason})")
 
