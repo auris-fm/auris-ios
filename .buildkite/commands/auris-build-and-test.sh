@@ -169,6 +169,7 @@ xcodebuild build-for-testing \
   CODE_SIGN_STYLE=Automatic \
   CODE_SIGN_IDENTITY="-" \
   SKIP_LINT=1 \
+  -quiet \
   2>&1 | tee "$LOG_DIR/build.log"
 grep -q "BUILD SUCCEEDED\|BUILD FOR TESTING SUCCEEDED" "$LOG_DIR/build.log" || {
   echo "building for testing failed; see $LOG_DIR/build.log"
@@ -203,6 +204,12 @@ rm -rf "$RESULT_BUNDLE"
 # Parallel testing is off explicitly rather than left at its default: clones of
 # the simulator would each run part of the plan, and a runner that dies in one
 # clone leaves the others reporting success.
+#
+# -quiet: xcodebuild's per-file progress is enormous, and this agent uploads its
+# live log chunk by chunk over a link that has been dropping connections all day.
+# A run has been lost to that alone: 107 chunks failed to upload, the retries
+# consumed the job, and the finish call failed too. The full output still goes to
+# artifacts/build.log, which is uploaded as a file rather than streamed.
 #
 # SKIP_LINT: the two SwiftLint build phases shell out to `make lint`, which needs
 # the BuildTools package built; linting is not this job's subject.
@@ -242,6 +249,7 @@ xcodebuild test-without-building \
   CODE_SIGN_STYLE=Automatic \
   CODE_SIGN_IDENTITY="-" \
   SKIP_LINT=1 \
+  -quiet \
   > "$LOG_DIR/test.log" 2>&1 &
 XCODEBUILD_PID=$!
 
