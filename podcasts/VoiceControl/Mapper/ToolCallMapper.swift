@@ -218,9 +218,11 @@ class ToolCallMapper {
         guard let request = args["request"] as? String else { return nil }
         let tierRaw = args["tier"] as? String ?? "unknown"
         let tier = CloudTier(rawValue: tierRaw) ?? .unknown
-        // The mapper builds an intent from a tool call with no audio behind it: there is no capture
-        // to time, so the handle carries no context. Stated rather than defaulted so every
-        // construction site is a decision the compiler asks for.
+        // A PLACEHOLDER handle, not the turn's timing: a tool call has no capture of its own to
+        // time. The service replaces this intent before dispatch, carrying the spoken input's
+        // latency context instead, so the turn is measured from when the user stopped speaking.
+        // Stated rather than defaulted so every construction site is a decision the compiler asks
+        // for.
         return CloudRouteIntent(request: request, tier: tier, latency: LatencyHandle())
     }
 }

@@ -131,8 +131,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// rather than following it. The turn that follows reuses this connection if it is still
     /// fresh, and replaces it silently if not.
     ///
-    /// Idempotent: a second call while a connection is held does nothing, because only one can be
-    /// handed to a turn and opening another would orphan the first.
+    /// A repeat open is decided by the TAG: the same tag keeps the held connection and returns it,
+    /// a different tag discards the held one and opens a new connection. Only one connection can be
+    /// handed to a turn, so a later utterance's open replaces rather than accumulates.
     /// Opens a connection and returns the tag identifying it, or nil when none opened.
     ///
     /// The tag is minted HERE rather than supplied by the caller: the connection opens while the
