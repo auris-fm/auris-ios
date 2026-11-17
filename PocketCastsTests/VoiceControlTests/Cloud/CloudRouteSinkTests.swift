@@ -3854,7 +3854,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // this case names.
         var retired = false
         for _ in 0..<600 {
-            let clears: Int = await MainActor.run { sink.audioPlayerForTesting?.bufferClearCountForTesting ?? 0 }
+            let clears: Int = await MainActor.run { sink.audioPlayerForTesting?.bufferClearCount ?? 0 }
             if clears >= 1 { retired = true; break }
             try await Task.sleep(nanoseconds: 5_000_000)
         }
@@ -5391,6 +5391,66 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             XCTAssertEqual(scheduledAfter, 7 * 3_200,
                            "a completed done drains its answer: every sample is scheduled")
         }
+    }
+
+    /// AN INTERRUPTED TURN STILL CONTRIBUTES ITS TIMING RECORD
+    /// (`cloud-assistant.md` → Conversational latency: "Measure every turn"; the record's
+    /// `outcome` row lists `interrupted` alongside `done` and `error`).
+    ///
+    /// The break this catches: emitting the record only on the paths that finish or fail. An
+    /// interrupted turn is a real turn — it sent a request and may have been heard — so omitting
+    /// its line makes the slowest, most confusing case invisible in exactly the data meant to
+    /// explain it. A missing line is indistinguishable from a turn that never ran.
+    ///
+    /// SCOPE, stated because the sibling control at `testAnInterruptedDoneDiscards…` measures
+    /// something else: that one proves the audio was SHED; this one proves the turn was MEASURED.
+    /// Neither implies the other — a sink can discard correctly and report nothing.
+    ///
+    /// The counters are the interrupted turn's own: seven frames arrived, and its own cancel is
+    /// the one clear. Nothing here depends on whether the host rendered audio, so the audible leg
+    /// is asserted as internally consistent rather than as a fixed duration.
+    @MainActor
+    func testAnInterruptedTurnEmitsItsOwnLatencyRecord() async throws {
+        let utteranceId = "u-\(UUID().uuidString.prefix(12))-int-record"
+        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        addTeardownBlock { CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil }
+        let release = DispatchSemaphore(value: 0)
+        blockProducerAfterFrames = (8, release)
+        nextTurnFixture = """
+        event: done
+        data: {"outcome":"interrupted","usage":{"input_tokens":1,"output_tokens":0}}
+
+        """
+        nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x11, count: 4_800 * 2) }
+        playback.setPlaying(true)
+        let sink = makeSink()
+        addTeardownBlock { release.signal() }
+        let turn = Task {
+            await sink.routeToCloud(request: "answer", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: .wakeWord, utteranceId: utteranceId)
+        }
+        // Barrier on the PRODUCER-side fact: all seven frames are in the player before the
+        // terminal is read. Without it the turn could end with no audio at all and the frame
+        // count below would be satisfied by a turn that never received any.
+        let player = try XCTUnwrap(sink.audioPlayerForTesting)
+        try await waitUntil("all seven frames reached the player", timeout: 5) {
+            player.framesEnqueuedForTesting == 7
+        }
+        release.signal()
+        _ = await turn.value
+
+        let log = await FileLog.shared.logFileAsString()
+        let mine = log.split(separator: "\n").map(String.init)
+            .filter { $0.contains("cloudTurnLatency") && $0.contains("request_id=\(utteranceId) ") }
+        XCTAssertEqual(mine.count, 1,
+                       "an interrupted turn contributes exactly one timing record: \(mine)")
+        let line = try XCTUnwrap(mine.first, "no timing record for the interrupted turn: \(log.suffix(2000))")
+        XCTAssertTrue(line.contains("outcome=interrupted"),
+                      "the record must name what happened, not label it a completion: \(line)")
+        XCTAssertTrue(line.contains("audio_frames=7"),
+                      "the seven frames this turn received are its own: \(line)")
+        XCTAssertTrue(line.contains("buffer_cleared=1"),
+                      "the interrupted turn's own cancel is the one clear: \(line)")
     }
 
     /// THE RACE THE CONTRACT NAMES (`cloud-assistant.md` → Interruption): "A terminal `done` for
