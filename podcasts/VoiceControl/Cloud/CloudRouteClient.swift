@@ -625,8 +625,9 @@ final class CloudRouteClient {
         // The freshness rule is applied here, BEFORE the socket is used, and a stale connection is
         // REPLACED rather than failed: the request is already built and the user has already
         // spoken, so ending the turn for an idle socket would charge them for a timeout they did
-        // not cause. Deciding it here is what makes replacement possible at all — a check after
-        // the first send could only report the failure.
+        // not cause. Deciding it here also avoids spending a send to discover what was already
+        // knowable: a socket found unusable AFTER its send failed is re-dialled further down, but
+        // that path costs a round trip and can meet `duplicate_request` if the frame did leave.
         let inheritedAge = heldConnectionAge() ?? inheritedConnectionAge?()
         var inheritedTask: WebSocketTasking?
         if let age = inheritedAge {
@@ -804,9 +805,12 @@ final class CloudRouteClient {
                 }
                 try await replacement.send(.string(authText))
             }
-            // CLOUD REQUEST SENT — the first instant the client can honestly say the turn is on
-            // the wire. Logged AFTER the send returns, so a failed send is never reported as sent,
-            // and before any response is awaited, so it marks our send rather than the reply.
+            // CLOUD REQUEST SENT — the instant a send of this turn RETURNED, which is the first
+            // instant the client can report one without guessing. Logged after the send returns, so
+            // a send that failed is never reported as sent, and before any response is awaited, so
+            // it marks our send rather than the reply. On the re-dial path this is the SECOND send:
+            // the first may have transmitted before it threw, so this is not necessarily when the
+            // frame first reached the wire — only when a send was confirmed to have returned.
             FileLog.shared.addMessage("[VoicePipeline] cloudRequestSent request_id=\(turn.requestId)")
             // The same instant, recorded for the turn's latency measurement: a latency record must
             // subtract THIS send, not the arrival of the server's first reply frame, which also

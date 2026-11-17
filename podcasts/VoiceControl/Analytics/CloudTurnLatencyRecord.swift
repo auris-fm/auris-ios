@@ -9,7 +9,9 @@ import Foundation
 ///
 /// - `endOfSpeech` — the VAD decided the utterance had ended, i.e. the user stopped talking. This is
 ///   the instant the user's wait begins, so it is the start of the number that matters.
-/// - `requestSent` — the authenticated request went out on the socket.
+/// - `requestSent` — a send of the authenticated request returned. When the turn re-dialled a dead
+///   inherited socket this is the second send, so the span from `endOfSpeech` includes the failed
+///   attempt and the new handshake: it measures what the user waited, not one socket's round trip.
 /// - `firstAudible` — the output node began rendering this turn's first sound, read from its own
 ///   render state (see `CloudAudioPlayer`). Deliberately not the instant the first buffer was
 ///   scheduled. A server lead-in clip arrives on the same stream unmarked, so this includes it:
