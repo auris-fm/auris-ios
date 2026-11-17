@@ -76,8 +76,8 @@ final class CloudAudioPlayerTests: XCTestCase {
 
     /// The scheduling boundary must fire once per TURN, not once per process. A flag set on the
     /// first turn and never reset logs one line forever, which in the log is indistinguishable from
-    /// every later turn playing nothing. That was the defect in the first version of this boundary:
-    /// the reset method existed but nothing in production called it.
+    /// every later turn playing nothing. A reset method that nothing in production calls leaves
+    /// exactly that state, so the re-arm has to be exercised, not merely present.
     ///
     /// Driven through the boundary's own function rather than through playback, and the reason is
     /// stated rather than hidden: a test host has no audio output, `startEngine` returns before
