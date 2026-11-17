@@ -9,11 +9,12 @@ import Foundation
 /// upgrade request was sent. Waiting for a close handler would mean sending into a connection that
 /// is already gone and losing the turn.
 ///
-/// The two clocks measure the same silent period, so the client bound has to be the tighter one:
-/// a connection older than this limit is refused and a fresh one opened instead. The limit tracks
-/// the server's window rather than standing on its own — where the server's window is shorter than
-/// this figure the age rule cannot keep a socket alive by itself, and what actually makes reuse
-/// safe is the re-dial of a send that fails on one. The limit only decides how often that is needed.
+/// The two clocks measure the same silent period, so this bound belongs on the tighter side of the
+/// server's window — and it is only that wherever the window is longer than it. A connection older
+/// than this limit is refused and a fresh one opened instead. The limit tracks the server's window
+/// rather than standing on its own: where the server's window is shorter than this figure the age
+/// rule cannot keep a socket alive by itself, and what actually makes reuse safe is the re-dial of
+/// a send that fails on one. The limit only decides how often that is needed.
 enum EarlyConnectionPolicy {
     /// Age of an early connection at which it stops carrying its turn. One second inside the
     /// server window the endpoint is specced for; see the type's doc for why that pairing, and not
