@@ -136,8 +136,15 @@ rm -rf "$RESULT_BUNDLE"
 #
 # SKIP_LINT: the two SwiftLint build phases shell out to `make lint`, which needs
 # the BuildTools package built; linting is not this job's subject.
-# CODE_SIGNING_ALLOWED=NO: a simulator test build needs no signature, and signing
-# would require credentials this machine does not hold.
+# Ad-hoc signing (`CODE_SIGN_IDENTITY=-`) needs no account or certificate, and the
+# signature is what carries entitlements: an unsigned build's keychain and
+# app-group calls fail with -34018, which reads as a product failure.
+# A runner that never connects leaves xcodebuild sitting indefinitely: the build
+# is finished, the simulator is booted, and nothing reports a problem. Watch the
+# log for the first sign of testing and stop the run if it never appears, so the
+# step says what happened instead of consuming the job's whole timeout.
+TEST_START_DEADLINE="${BUILDKITE_AURIS_TEST_START_DEADLINE:-900}"
+
 set +e
 xcodebuild test \
   -project podcasts.xcodeproj \
@@ -152,16 +159,52 @@ xcodebuild test \
   -default-test-execution-time-allowance 60 \
   -maximum-test-execution-time-allowance 120 \
   ARCHS=arm64 \
-  CODE_SIGNING_ALLOWED=NO \
+  CODE_SIGN_STYLE=Automatic \
+  CODE_SIGN_IDENTITY="-" \
   SKIP_LINT=1 \
-  2>&1 | tee "$LOG_DIR/test.log"
-TEST_STATUS=${PIPESTATUS[0]}
+  > "$LOG_DIR/test.log" 2>&1 &
+XCODEBUILD_PID=$!
+
+(
+  waited=0
+  while kill -0 "$XCODEBUILD_PID" 2>/dev/null; do
+    if grep -q "Testing started" "$LOG_DIR/test.log" 2>/dev/null; then
+      exit 0
+    fi
+    if [ "$waited" -ge "$TEST_START_DEADLINE" ]; then
+      echo "runner never connected: no testing began within ${TEST_START_DEADLINE}s of xcodebuild starting" >&2
+      kill "$XCODEBUILD_PID" 2>/dev/null
+      exit 1
+    fi
+    sleep 10
+    waited=$((waited + 10))
+  done
+) &
+WATCHDOG_PID=$!
+
+tail -f "$LOG_DIR/test.log" &
+TAIL_PID=$!
+
+wait "$XCODEBUILD_PID"
+TEST_STATUS=$?
+kill "$TAIL_PID" 2>/dev/null
+# The watchdog exits on its own once xcodebuild is gone. Waiting for it here
+# rather than killing it is what makes its verdict readable: killing it first
+# would report the kill as the watchdog's status and hide a real timeout.
+wait "$WATCHDOG_PID" 2>/dev/null
+WATCHDOG_STATUS=$?
 set -e
+
+if [ "$WATCHDOG_STATUS" -ne 0 ]; then
+  echo "--- :warning: Runner never connected"
+  echo "The build completed but testing did not start within ${TEST_START_DEADLINE}s."
+  echo "This is a test-runner failure, not a test failure: no tests were run to completion."
+fi
 
 echo "--- :mag: Checking the coverage guard itself"
 # The guard is only worth trusting if it can fail. These cases remove coverage
 # and assert it notices, against the result bundle this run just produced.
-python3 .buildkite/lib/test_check_test_coverage.py
+python3 .buildkite/lib/test_check_test_coverage.py "$RESULT_BUNDLE" "$LOG_DIR/test.log"
 
 echo "--- :mag: Checking that the whole plan ran"
 # Runs even when tests failed: "which targets ran" is the question that tells a
@@ -169,7 +212,7 @@ echo "--- :mag: Checking that the whole plan ran"
 # status is reported separately so a coverage gap is not hidden by a test failure
 # and a test failure is not excused by coverage being complete.
 set +e
-python3 .buildkite/lib/check-test-coverage.py "$RESULT_BUNDLE"
+python3 .buildkite/lib/check-test-coverage.py "$RESULT_BUNDLE" --log "$LOG_DIR/test.log"
 COVERAGE_STATUS=$?
 set -e
 
