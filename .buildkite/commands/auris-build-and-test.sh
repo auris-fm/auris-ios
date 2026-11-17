@@ -152,6 +152,42 @@ xcodebuild -resolvePackageDependencies \
   -clonedSourcePackagesDirPath "$DERIVED/SourcePackages" \
   2>&1 | tee "$LOG_DIR/resolve.log"
 
+echo "--- :hammer: Building for testing"
+# Built separately so the test host exists before testing starts: its bundle
+# identifier is what the privacy grants below are applied to, and a run that
+# granted them to a guessed id would keep the wait while looking like it had
+# removed it.
+xcodebuild build-for-testing \
+  -project podcasts.xcodeproj \
+  -scheme pocketcasts \
+  -testPlan UnitTests \
+  -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+  -derivedDataPath "$DERIVED" \
+  -clonedSourcePackagesDirPath "$DERIVED/SourcePackages" \
+  -disableAutomaticPackageResolution \
+  ARCHS=arm64 \
+  CODE_SIGN_STYLE=Automatic \
+  CODE_SIGN_IDENTITY="-" \
+  SKIP_LINT=1 \
+  2>&1 | tee "$LOG_DIR/build.log"
+grep -q "BUILD SUCCEEDED\|BUILD FOR TESTING SUCCEEDED" "$LOG_DIR/build.log" || {
+  echo "building for testing failed; see $LOG_DIR/build.log"
+  exit 1
+}
+
+echo "--- :lock: Granting the permissions the tests need"
+# An erased device has no privacy permissions, so the first microphone or speech
+# access waits on a prompt nobody answers. Measured on this device: one speech
+# test took 54.8s without the grant and 2.6s with it. That wait sits just under
+# the per-test execution allowance, and in a full run it crosses it — the test is
+# then killed and the runner relaunched, which is what a run dying partway through
+# looks like from outside. Granting them makes the run measure the code.
+TEST_HOST="$DERIVED/Build/Products/Debug-iphonesimulator/podcasts.app"
+HOST_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$TEST_HOST/Info.plist")"
+echo "Test host: $HOST_BUNDLE_ID"
+xcrun simctl privacy "$SIMULATOR_ID" grant microphone "$HOST_BUNDLE_ID"
+xcrun simctl privacy "$SIMULATOR_ID" grant speech-recognition "$HOST_BUNDLE_ID"
+
 echo "--- :test_tube: Running the full test plan"
 RESULT_BUNDLE="$LOG_DIR/auris-${BUILDKITE_BUILD_NUMBER:-local}-${BUILDKITE_JOB_ID:-job}.xcresult"
 rm -rf "$RESULT_BUNDLE"
@@ -179,9 +215,9 @@ rm -rf "$RESULT_BUNDLE"
 # step says what happened instead of consuming the job's whole timeout.
 TEST_START_DEADLINE="${BUILDKITE_AURIS_TEST_START_DEADLINE:-900}"
 # A test that reaches its execution time allowance is killed and the runner is
-# relaunched, and the relaunch starts the selection over. One hanging test can
-# therefore cost many minutes: a run has been seen making fourteen launches, most
-# of which executed nothing before dying again. Watching only for the first sign
+# relaunched. One hanging test can therefore cost many minutes: a run has been
+# seen making fourteen launches, most of which executed one test before dying
+# again. Watching only for the first sign
 # of testing leaves that loop unwatched, so progress is watched too — and the
 # whole testing phase is bounded, because the per-test allowance is per launch
 # and does not limit how many launches there are.
@@ -189,7 +225,7 @@ TEST_PROGRESS_DEADLINE="${BUILDKITE_AURIS_TEST_PROGRESS_DEADLINE:-300}"
 TEST_TOTAL_DEADLINE="${BUILDKITE_AURIS_TEST_TOTAL_DEADLINE:-3600}"
 
 set +e
-xcodebuild test \
+xcodebuild test-without-building \
   -project podcasts.xcodeproj \
   -scheme pocketcasts \
   -testPlan UnitTests \
