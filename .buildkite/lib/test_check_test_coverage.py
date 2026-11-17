@@ -213,6 +213,20 @@ def main():
     reported = check.reported_failures(log)
     del check.EXPECTED_RUNTIME_SKIPS["PocketCastsTests"][listed]
 
+    # An access-group skip is a property of the build, not a signing failure: an
+    # ad-hoc signature gives the host its own entitlement and cannot declare a
+    # group shared with another app. It must stay allowed on a signed run.
+    # The unmodified signed run above already contains the two access-group
+    # skips, so it is the proof they stay allowed; this asserts they are there,
+    # otherwise that case would be proving nothing about them.
+    group_ids = list(check.EXPECTED_RUNTIME_SKIPS["PocketCastsTests"])
+    group_reasons = check.skip_reasons(sys.argv[1], group_ids)
+    present_groups = [
+        name for name, reason in group_reasons.items()
+        if check.ACCESS_GROUP_SKIP_MARKER in reason
+    ]
+    print(f"  access-group skips present in this recording: {len(present_groups)}")
+
     # A test that never ran must not be reported as passing: absence from the
     # failures is also what a filtered or skipped test looks like.
     flaky = sorted(check.FLAKY_TESTS)[0]
