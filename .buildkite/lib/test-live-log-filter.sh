@@ -15,8 +15,7 @@ SCRIPT="$(cd "$(dirname "$0")/../commands" && pwd)/auris-build-and-test.sh"
 
 # The filter is the argument to the grep that follows `tail -f` of the test log.
 extract_filter() {
-  sed -n '/^tail -f "\$LOG_DIR\/test.log"/,/TAIL_PID=\$!/p' "$SCRIPT" \
-    | grep -o 'grep --line-buffered -E ".*"' \
+  grep -o 'grep --line-buffered -E ".*"' "$SCRIPT" \
     | sed 's/^grep --line-buffered -E "//; s/"$//'
 }
 

@@ -157,6 +157,10 @@ echo "--- :hammer: Building for testing"
 # identifier is what the privacy grants below are applied to, and a run that
 # granted them to a guessed id would keep the wait while looking like it had
 # removed it.
+# `|| BUILD_STATUS=$?` rather than reading $? on the next line: errexit is in force
+# here, so a failing build would end the script at this line and none of the report
+# below would print. The failure path is the one that most needs to say something.
+BUILD_STATUS=0
 xcodebuild build-for-testing \
   -project podcasts.xcodeproj \
   -scheme pocketcasts \
@@ -169,8 +173,7 @@ xcodebuild build-for-testing \
   CODE_SIGN_STYLE=Automatic \
   CODE_SIGN_IDENTITY="-" \
   SKIP_LINT=1 \
-  > "$LOG_DIR/build.log" 2>&1
-BUILD_STATUS=$?
+  > "$LOG_DIR/build.log" 2>&1 || BUILD_STATUS=$?
 # The live log gets the tail, not the whole build: this agent streams its log in
 # chunks over a link that drops them, and a run has been lost to upload retries
 # alone. The file keeps everything, so a failure's detail is never only in the
@@ -310,12 +313,20 @@ WATCHDOG_PID=$!
 # link that drops them; a run has been lost to upload retries alone. Filtering here
 # rather than at xcodebuild keeps every line in test.log, which is what the watchdog
 # and the failure reader read, and what a failure is diagnosed from afterwards.
-tail -f "$LOG_DIR/test.log" \
-  | grep --line-buffered -E "^--- |Test Suite .* (started|passed|failed)|Executed [0-9]+ test|error:|exceeded execution time allowance|Restarting after unexpected exit|Testing started|TEST (SUCCEEDED|FAILED)|◇ Suite|✘ Test |✔ Suite" &
+# In a subshell so $! is the pid of something that can be killed as a whole. After
+# a pipeline, $! is the last command in it — grep — and killing that leaves tail -f
+# running against a file that will never grow again, so it never gets a SIGPIPE.
+(
+  tail -f "$LOG_DIR/test.log" \
+    | grep --line-buffered -E "^--- |Test Suite .* (started|passed|failed)|Executed [0-9]+ test|error:|exceeded execution time allowance|Restarting after unexpected exit|Testing started|TEST (SUCCEEDED|FAILED)|◇ Suite|✘ Test |✔ Suite"
+) &
 TAIL_PID=$!
 
 wait "$XCODEBUILD_PID"
 TEST_STATUS=$?
+# The subshell and everything it started: killing only the subshell would leave
+# tail and grep behind.
+pkill -P "$TAIL_PID" 2>/dev/null
 kill "$TAIL_PID" 2>/dev/null
 # The watchdog exits on its own once xcodebuild is gone. Waiting for it here
 # rather than killing it is what makes its verdict readable: killing it first
