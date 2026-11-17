@@ -177,7 +177,23 @@ def main():
     # starts passing fails it too, so the list cannot outlive the defect.
     log = Path(sys.argv[2]) if len(sys.argv) > 2 else REPO / "artifacts" / "test.log"
     reported = check.reported_failures(log)
+    # A test that never ran must not be reported as passing: absence from the
+    # failures is also what a filtered or skipped test looks like.
     flaky = sorted(check.FLAKY_TESTS)[0]
+    truncated = copy.deepcopy(base)
+    for node in check.walk_test_cases(truncated):
+        if flaky in (node.get("nodeIdentifier") or ""):
+            node["result"] = "Skipped"
+    # The verdict itself, not just the set: this is the string the pass rate is
+    # read from, so it is what has to be right.
+    failed_set = check.reported_failures(log)
+    ok = (
+        check.intermittent_outcome(flaky, failed_set, check.executed_tests(truncated)) == "not run"
+        and check.intermittent_outcome(flaky, failed_set, check.executed_tests(base)) == "passed"
+        and check.intermittent_outcome(flaky, failed_set | {flaky}, check.executed_tests(base)) == "failed"
+    )
+    print(f"{'PASS' if ok else 'FAIL'}  an intermittent test reads passed, failed or not run")
+    results.append(ok)
     for name, ok in (
         ("a failure that is not a known failure fails the run",
          bool(check.check_failures(reported | {"SomethingTests/testNew()"}))),

@@ -281,6 +281,20 @@ def skip_reason(bundle: str, test_id: str) -> str:
     return " ".join(dict.fromkeys(messages))
 
 
+def executed_tests(report: dict) -> set:
+    """Test identifiers that actually ran, from the same tree as the counts.
+
+    Absence from a failure list is not evidence of passing: a test can be filtered
+    out, skip itself, or never start because the run stopped early. Only presence
+    here says it ran.
+    """
+    return {
+        node.get("nodeIdentifier") or node.get("name")
+        for node in walk_test_cases(report)
+        if node.get("result") != "Skipped"
+    }
+
+
 def walk_test_cases(report: dict):
     """Every test-case node in the report's tree, for callers that mutate them."""
 
@@ -460,6 +474,30 @@ def check_coverage(counts: dict, plan_path: Path, skips: dict = None,
     return failures
 
 
+def intermittent_outcome(name: str, failed: set, executed: set) -> str:
+    """What happened to an intermittent test this run.
+
+    Absence from the failures is not evidence of passing: a filtered test, a
+    self-skip and a run cut short all look the same there. Only presence in the
+    executed set says it ran.
+    """
+    if any(name in test for test in failed):
+        return "failed"
+    if any(name in test for test in executed):
+        return "passed"
+    return "not run"
+
+
+def print_intermittent_outcomes(failed: set, executed: set) -> None:
+    """Printed on every run, so the outcomes accumulate rather than being recalled."""
+    if not FLAKY_TESTS:
+        return
+    print("\nTests that fail intermittently:")
+    for name, reason in sorted(FLAKY_TESTS.items()):
+        outcome = intermittent_outcome(name, failed, executed)
+        print(f"  {name}: {outcome} this run ({reason})")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("bundle")
@@ -471,6 +509,7 @@ def main() -> int:
         report = read_report(args.bundle)
         counts = count_tests(report)
         skips = runtime_skips(report)
+        executed = executed_tests(report)
     except subprocess.CalledProcessError as error:
         print(f"cannot read the result bundle: {error.stderr.strip()}", file=sys.stderr)
         return 1
@@ -510,13 +549,7 @@ def main() -> int:
         print("\nFailing tests, all known:")
         for test in sorted(failed):
             print(f"  {test}")
-    if FLAKY_TESTS:
-        # Printed on every run, passing or failing: the count over runs is what
-        # says whether one of these is getting worse.
-        print("\nTests that fail intermittently:")
-        for name, reason in sorted(FLAKY_TESTS.items()):
-            outcome = "failed" if any(name in test for test in failed) else "passed"
-            print(f"  {name}: {outcome} this run ({reason})")
+    print_intermittent_outcomes(failed, executed)
     print("\nCoverage check passed: every buildable target ran, no unexpected skips.")
     if BLOCKED_TARGETS:
         print(f"Still blocked: {', '.join(BLOCKED_TARGETS)}")
