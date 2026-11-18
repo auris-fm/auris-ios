@@ -430,9 +430,9 @@ fi
 # the per-test execution allowance, and in a full run it crosses it — the test is
 # then killed and the runner relaunched, which is what a run dying partway through
 # looks like from outside. Granting them makes the run measure the code.
-# Measured in build 24: a grant issued immediately after a fresh erase and boot
-# fails with EPERM — the privacy service is not ready yet — and the same grant
-# succeeds seconds later. So each grant is retried on a bound instead of
+# Measured on this machine: a grant issued immediately after a fresh erase and
+# boot fails with EPERM — the privacy service is not ready yet — and the same
+# grant succeeds seconds later. So each grant is retried on a bound instead of
 # tripping errexit on the first try.
 grant_test_permissions() {
   local host_bundle="$1" service tries="$2" per_try="$3" i rc
@@ -527,7 +527,7 @@ XCODEBUILD_PID=$!
 (
   # errexit and pipefail off: a process vanishing between the listing and its
   # status read must shorten the record, not kill the watchdog — a dead
-  # watchdog means the build runs unwatched.
+  # watchdog means the tests run unwatched.
   # Every loop statement below is written to be safe without errexit.
   set +e
   waited=0

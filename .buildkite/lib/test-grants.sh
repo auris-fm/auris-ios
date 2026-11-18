@@ -1,9 +1,9 @@
 #!/bin/bash
 # The grants step is the difference between a speech test that takes 2.6s and
 # one that takes 54.8s, and in a full run that difference kills the test at its
-# execution allowance. Build 24 failed here: a grant issued immediately after a
-# fresh erase and boot fails with EPERM — the privacy service is not ready —
-# and the same grant succeeds seconds later. This runs the REAL
+# execution allowance. Measured on this machine: a grant issued immediately
+# after a fresh erase and boot fails with EPERM — the privacy service is not
+# ready — and the same grant succeeds seconds later. This runs the REAL
 # grant_test_permissions function against a stub xcrun that is not ready at
 # first and recovers, plus one that never recovers.
 set -u
