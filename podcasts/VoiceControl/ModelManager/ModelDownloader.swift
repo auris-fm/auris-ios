@@ -1,14 +1,13 @@
 import Foundation
 import CryptoKit
+import PocketCastsUtils
 
 /// Downloads model assets with the spec's download contract: resumable HTTP (Range header
 /// against an existing `.tmp`, appending partial bytes), SHA-256 verification **when a hash is
 /// pinned**, and an atomic `.tmp` → final rename.
 ///
-/// SHA-256 is only enforced when `sha256` is non-empty. Several assets (notably the
-/// hf-mirror.com SenseVoice/Canary models) do not yet carry a pinned hash, so those
-/// downloads still get resumable + atomic semantics but no integrity check. **TODO(ASR-debt):
-/// pin the SHA-256 for every remote model asset so integrity is enforced on all downloads.**
+/// SHA-256 is enforced whenever `sha256` is non-empty; every remote model asset carries a
+/// pin. An empty pin keeps resumable + atomic semantics without an integrity check.
 final class ModelDownloader {
 
     /// A single session shared by every `ModelDownloader` instance. Model downloads happen
@@ -22,7 +21,13 @@ final class ModelDownloader {
         return URLSession(configuration: config)
     }()
 
-    private var session: URLSession { Self.session }
+    private let sessionOverride: URLSession?
+
+    init(session: URLSession? = nil) {
+        self.sessionOverride = session
+    }
+
+    private var session: URLSession { sessionOverride ?? Self.session }
 
     /// Downloads every file in `files` into `directory` (creating it if needed), applying the
     /// per-file download contract above. Short-circuits on the first failure.
@@ -39,16 +44,140 @@ final class ModelDownloader {
         return .success(())
     }
 
+    /// One in-flight download per final path: concurrent callers for the same asset await the
+    /// running task instead of starting a second writer on the same `.tmp`. Different assets
+    /// download in parallel. An actor (not a lock) because the work spans `await`s.
+    private actor PathDownloads {
+        static let shared = PathDownloads()
+        private var running: [String: Task<Result<Void, Error>, Never>] = [:]
+
+        func run(path: String, _ work: @escaping @Sendable () async -> Result<Void, Error>) async -> Result<Void, Error> {
+            // Chain onto whatever is running for this path. Each caller registers ITS OWN
+            // task (which first awaits the predecessor, then does the work), so a later
+            // arrival always sees a registered task and never starts a parallel writer —
+            // even when the predecessor failed. The earlier while-loop-await version hung
+            // both concurrency tests: a livelock — a waiter could resume on the actor before
+            // the predecessor's run() cleared running[path], then spin awaiting an already
+            // finished task without suspending, never yielding the actor for that cleanup.
+            // Chaining never waits in a loop on the actor, so it cannot spin that way.
+            let previous = running[path]
+            let task = Task { () -> Result<Void, Error> in
+                if let previous { _ = await previous.value }
+                return await work()
+            }
+            running[path] = task
+            let result = await task.value
+            // Remove only our own entry: a later caller may already have chained theirs.
+            if running[path] == task { running[path] = nil }
+            return result
+        }
+    }
+
+    /// Streams the file's SHA-256 in 1 MiB chunks so a 239 MB model is never read into RAM
+    /// whole. Returns nil when the file cannot be read.
+    private func streamedSHA256(of url: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while true {
+            let chunk: Data?
+            do {
+                chunk = try handle.read(upToCount: 1 << 20)
+            } catch {
+                // A read error is NOT end of file: hashing a partial read would report a
+                // mismatch and delete a good model. Report "couldn't read" instead.
+                return nil
+            }
+            guard let chunk, !chunk.isEmpty else { break }
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().compactMap { String(format: "%02x", $0) }.joined()
+    }
+
+    /// A verified-file marker: the pin, size and modification date at the moment the file
+    /// passed its hash check. On later starts a matching marker skips the full hash — hashing
+    /// 239 MB on every launch would add seconds to the first voice start. Any difference (or a
+    /// missing marker) falls back to the full streamed hash.
+    private struct VerifiedMarker: Codable {
+        let sha256: String
+        let size: Int
+        let mtime: TimeInterval
+    }
+
+    private func markerURL(for finalURL: URL) -> URL {
+        finalURL.appendingPathExtension("verified")
+    }
+
+    private func markerMatches(_ finalURL: URL, sha256: String) -> Bool {
+        guard let data = try? Data(contentsOf: markerURL(for: finalURL)),
+              let marker = try? JSONDecoder().decode(VerifiedMarker.self, from: data),
+              marker.sha256 == sha256,
+              let attrs = try? FileManager.default.attributesOfItem(atPath: finalURL.path),
+              let size = attrs[.size] as? Int, size == marker.size,
+              let mtime = attrs[.modificationDate] as? Date,
+              abs(mtime.timeIntervalSince1970 - marker.mtime) < 1 else { return false }
+        return true
+    }
+
+    private func writeMarker(_ finalURL: URL, sha256: String) {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: finalURL.path),
+              let size = attrs[.size] as? Int,
+              let mtime = attrs[.modificationDate] as? Date else { return }
+        let marker = VerifiedMarker(sha256: sha256, size: size, mtime: mtime.timeIntervalSince1970)
+        if let data = try? JSONEncoder().encode(marker) {
+            try? data.write(to: markerURL(for: finalURL), options: .atomic)
+        }
+    }
+
+    /// Reads `finalURL` and checks it against `sha256` when a hash is pinned. An un-pinned
+    /// asset cannot be verified, so it reports valid. A matching verified-marker skips the
+    /// hash; otherwise the file is hashed in full and a fresh marker written on success.
+    /// Three outcomes: verified (skip), mismatch (delete + re-download), unreadable (fail
+    /// this start WITHOUT deleting — a read error is not evidence the file is bad).
+    private enum ExistingCheck { case verified, mismatch, unreadable }
+
+    private func checkExistingFile(_ finalURL: URL, sha256: String) -> ExistingCheck {
+        if sha256.isEmpty { return .verified }
+        if markerMatches(finalURL, sha256: sha256) { return .verified }
+        let start = Date()
+        let computed = streamedSHA256(of: finalURL)
+        let elapsed = Date().timeIntervalSince(start)
+        FileLog.shared.addMessage(String(format: "[ModelDownloader] hashed existing %@ in %.2f s",
+                                         finalURL.lastPathComponent, elapsed))
+        guard let computed else { return .unreadable }
+        guard computed == sha256 else {
+            FileLog.shared.addMessage("[ModelDownloader] pin mismatch for \(finalURL.lastPathComponent): expected \(sha256), computed \(computed)")
+            return .mismatch
+        }
+        writeMarker(finalURL, sha256: sha256)
+        return .verified
+    }
+
     func download(url: URL, sha256: String, to directory: URL) async -> Result<Void, Error> {
         let tmpURL = directory.appendingPathComponent(url.lastPathComponent + ".tmp")
         let finalURL = directory.appendingPathComponent(url.lastPathComponent)
+        return await PathDownloads.shared.run(path: finalURL.path) { [weak self] in
+            guard let self else { return .failure(ModelError.hashMismatch) }
+            return await self.downloadOne(url: url, sha256: sha256, tmpURL: tmpURL, finalURL: finalURL, directory: directory)
+        }
+    }
 
-        // Skip when the final file is already present. Mirrors the Android `downloadFile`:
-        // an existing asset is not re-fetched (when a hash is pinned and mismatches, the
-        // caller should delete and re-request; for un-pinned assets an existing file is
-        // treated as good).
+    private func downloadOne(url: URL, sha256: String, tmpURL: URL, finalURL: URL, directory: URL) async -> Result<Void, Error> {
+        // Skip when the final file is already present AND good. A pinned asset is verified
+        // against its hash; a corrupt or truncated file is deleted and re-downloaded instead
+        // of being trusted forever. Un-pinned assets keep the old trust behaviour.
         if FileManager.default.fileExists(atPath: finalURL.path) {
-            return .success(())
+            switch checkExistingFile(finalURL, sha256: sha256) {
+            case .verified:
+                return .success(())
+            case .unreadable:
+                // Could not read the file to verify it: fail this start, keep the file.
+                return .failure(ModelError.downloadFailed)
+            case .mismatch:
+                // The marker describes the OLD file; it must not sit next to its replacement.
+                try? FileManager.default.removeItem(at: markerURL(for: finalURL))
+                try? FileManager.default.removeItem(at: finalURL)
+            }
         }
 
         do {
@@ -65,26 +194,53 @@ final class ModelDownloader {
         }
 
         do {
-            try await downloadResumable(url: url, tmpURL: tmpURL, resumeOffset: resumeOffset)
+            do {
+                try await downloadResumable(url: url, tmpURL: tmpURL, resumeOffset: resumeOffset)
+            } catch ModelError.rangeNotSatisfiable {
+                // The `.tmp` is already at (or past) the full length — a kill between the
+                // download and the rename leaves exactly this state. The bytes on disk are
+                // the whole asset; fall through to the hash check instead of retrying a
+                // Range request the server will keep answering with 416. Without a pin there
+                // is no check to fall through to: delete the unverifiable `.tmp` and download
+                // from scratch, so it installs as a normal unpinned download — keeping it
+                // would fail identically on every start (the stuck-forever case).
+                if sha256.isEmpty {
+                    try? FileManager.default.removeItem(at: tmpURL)
+                    try await downloadResumable(url: url, tmpURL: tmpURL, resumeOffset: 0)
+                }
+            }
 
             // SHA-256 verify. An empty pin (no hash yet) is intentionally allowed so the
             // download still proceeds with resumable + atomic semantics; pin hashes for
             // assets that have one so integrity is enforced.
             if !sha256.isEmpty {
-                let data = try Data(contentsOf: tmpURL)
-                let digest = SHA256.hash(data: data)
-                let computedHash = digest.compactMap { String(format: "%02x", $0) }.joined()
-                guard computedHash == sha256 else {
+                let computed = streamedSHA256(of: tmpURL)
+                if computed != sha256 {
+                    FileLog.shared.addMessage("[ModelDownloader] download hash mismatch for \(tmpURL.lastPathComponent): expected \(sha256), computed \(computed ?? "unreadable")")
                     try? FileManager.default.removeItem(at: tmpURL)
-                    throw ModelError.hashMismatch
+                    // A full-size but corrupt `.tmp` (the 416 fall-through) is re-downloaded
+                    // from scratch once, not kept and failed forever.
+                    if resumeOffset > 0 {
+                        try await downloadResumable(url: url, tmpURL: tmpURL, resumeOffset: 0)
+                        guard streamedSHA256(of: tmpURL) == sha256 else {
+                            try? FileManager.default.removeItem(at: tmpURL)
+                            throw ModelError.hashMismatch
+                        }
+                    } else {
+                        throw ModelError.hashMismatch
+                    }
                 }
             }
 
-            // Atomic rename
+            // Atomic rename. Any stale marker goes first so it never describes the new file.
+            try? FileManager.default.removeItem(at: markerURL(for: finalURL))
             if FileManager.default.fileExists(atPath: finalURL.path) {
                 try FileManager.default.removeItem(at: finalURL)
             }
             try FileManager.default.moveItem(at: tmpURL, to: finalURL)
+            // The bytes were just hashed above, so the marker is written right here — the
+            // first start after install adds no extra hash.
+            if !sha256.isEmpty { writeMarker(finalURL, sha256: sha256) }
             return .success(())
         } catch {
             return .failure(error)
@@ -101,6 +257,8 @@ final class ModelDownloader {
             do {
                 try await streamOnce(url: url, tmpURL: tmpURL, offset: offset)
                 return
+            } catch ModelError.rangeNotSatisfiable {
+                throw ModelError.rangeNotSatisfiable
             } catch {
                 if attempts >= 5 {
                     throw error
@@ -126,6 +284,7 @@ final class ModelDownloader {
         let (bytes, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse else { throw ModelError.downloadFailed }
         let code = http.statusCode
+        if code == 416 { throw ModelError.rangeNotSatisfiable }
         guard code == 200 || code == 206 else { throw ModelError.downloadFailed }
         let isRange = code == 206
 
@@ -155,4 +314,5 @@ final class ModelDownloader {
 enum ModelError: Error {
     case hashMismatch
     case downloadFailed
+    case rangeNotSatisfiable
 }
