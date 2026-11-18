@@ -27,7 +27,13 @@ agents:
 steps:
   - label: ":xcode: Build and test"
     key: build-and-test
-    timeout_in_minutes: 90
+    # The last line of defence, above the sum of the phase limits inside the
+    # script (build 45 min + test 60 min) plus the steps between them — erase,
+    # readiness wait, grants, self-tests — so no phase can fall outside every
+    # limit. Buildkite's cancel sends SIGTERM to the job, which runs the script's
+    # exit trap: simulator shutdown first (releasing any wedged helper), then the
+    # recorded Interface Builder processes, with untied ones named not killed.
+    timeout_in_minutes: 120
     command: .buildkite/commands/auris-build-and-test.sh
     artifact_paths:
       - "artifacts/*.log"
