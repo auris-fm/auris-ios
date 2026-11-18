@@ -19,6 +19,9 @@ final class ModelDownloaderPinTests: XCTestCase {
         static var honorRange: Bool = false
         /// When > 0, the first N requests fail with a network error.
         static var failFirst: Int = 0
+        /// When > 0, the first N requests serve these WRONG bytes (hash mismatch, no retry).
+        static var wrongFirst: Int = 0
+        static var wrongBytes: Data = Data()
         /// Overlap tracking: how many requests were in flight at once, and the max seen.
         static var inFlight: Int = 0
         static var maxInFlight: Int = 0
@@ -30,6 +33,8 @@ final class ModelDownloaderPinTests: XCTestCase {
             self.startDelayMs = startDelayMs
             self.honorRange = honorRange
             self.failFirst = failFirst
+            self.wrongFirst = 0
+            self.wrongBytes = Data()
             self.inFlight = 0
             self.maxInFlight = 0
         }
@@ -62,6 +67,8 @@ final class ModelDownloaderPinTests: XCTestCase {
             let delay = Self.startDelayMs
             let honorRange = Self.honorRange
             let shouldFail = n <= Self.failFirst
+            let serveWrong = n <= Self.wrongFirst
+            let wrong = Self.wrongBytes
             Self.lock.unlock()
             defer {
                 Self.lock.lock()
@@ -77,6 +84,7 @@ final class ModelDownloaderPinTests: XCTestCase {
                 client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
                 return
             }
+            let served = serveWrong ? wrong : data
             // A real server answers 416 when the Range offset is at/past the full length.
             if honorRange, let range = request.value(forHTTPHeaderField: "Range"),
                let offset = UInt64(range.replacingOccurrences(of: "bytes=", with: "").replacingOccurrences(of: "-", with: "")),
@@ -88,9 +96,9 @@ final class ModelDownloaderPinTests: XCTestCase {
                 return
             }
             let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
-                                           headerFields: ["Content-Length": String(data.count)])!
+                                           headerFields: ["Content-Length": String(served.count)])!
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocol(self, didLoad: served)
             client?.urlProtocolDidFinishLoading(self)
         }
 
@@ -244,13 +252,16 @@ final class ModelDownloaderPinTests: XCTestCase {
                        "one Range request answered 416, then the hash check — no retry loop")
     }
 
-    /// Three concurrent callers with the FIRST download failing: the waiters must still
-    /// serialize — one request in flight at a time, never two writers on the same `.tmp`.
+    /// Three concurrent callers where A's WHOLE download fails (wrong bytes → hash mismatch,
+    /// no retry): B and C must then download ONE AT A TIME. On the old unregistered-waiter
+    /// code B and C overlap (maxInFlight == 2); the chained tasks keep it at 1.
     func testThreeConcurrentCallersWithFirstFailureStillSerialize() async throws {
         let dir = try makeDir()
-        // The first request fails; the retry inside downloadResumable succeeds. A long delay
-        // widens the window in which an unregistered waiter could start a parallel request.
-        StubURLProtocol.reset(payloads: [path: goodBytes], startDelayMs: 200, failFirst: 1)
+        StubURLProtocol.reset(payloads: [path: goodBytes], startDelayMs: 200)
+        StubURLProtocol.lock.lock()
+        StubURLProtocol.wrongFirst = 1
+        StubURLProtocol.wrongBytes = corruptBytes
+        StubURLProtocol.lock.unlock()
         let downloader = makeDownloader()
 
         async let a: Result<Void, Error> = downloader.download(url: url, sha256: sha(goodBytes), to: dir)
@@ -258,11 +269,32 @@ final class ModelDownloaderPinTests: XCTestCase {
         async let c: Result<Void, Error> = downloader.download(url: url, sha256: sha(goodBytes), to: dir)
         let (ra, rb, rc) = await (a, b, c)
 
-        guard case .success = ra else { return XCTFail("a failed: \(ra)") }
+        guard case .failure = ra else { return XCTFail("a must fail on the wrong bytes: \(ra)") }
         guard case .success = rb else { return XCTFail("b failed: \(rb)") }
         guard case .success = rc else { return XCTFail("c failed: \(rc)") }
         XCTAssertEqual(try Data(contentsOf: dir.appendingPathComponent("model.int8.onnx")), goodBytes)
         XCTAssertEqual(StubURLProtocol.maxInFlight, 1,
                        "never two requests in flight on the same asset, even after a failure")
+    }
+
+    /// An UNREADABLE existing file must fail this start WITHOUT being deleted: a read error
+    /// is not evidence the bytes are bad, and deleting a 239 MB model over a transient read
+    /// failure is exactly the loss this check must avoid.
+    func testUnreadableExistingFileFailsWithoutDeleting() async throws {
+        let dir = try makeDir()
+        let finalURL = dir.appendingPathComponent("model.int8.onnx")
+        try goodBytes.write(to: finalURL)
+        // Make the file unreadable: no read permission for anyone.
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: finalURL.path)
+        addTeardownBlock { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: finalURL.path) }
+        StubURLProtocol.reset(payloads: [path: goodBytes])
+        let downloader = makeDownloader()
+
+        let result = await downloader.download(url: url, sha256: sha(goodBytes), to: dir)
+
+        guard case .failure = result else { return XCTFail("an unreadable file must fail this start: \(result)") }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: finalURL.path),
+                      "the unreadable file is KEPT, not deleted")
+        XCTAssertEqual(StubURLProtocol.count(for: path), 0, "no re-download over a read error")
     }
 }

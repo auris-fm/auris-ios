@@ -55,8 +55,11 @@ final class ModelDownloader {
             // Chain onto whatever is running for this path. Each caller registers ITS OWN
             // task (which first awaits the predecessor, then does the work), so a later
             // arrival always sees a registered task and never starts a parallel writer —
-            // even when the predecessor failed. Awaiting inside the actor would deadlock:
-            // the predecessor's cleanup needs the actor, which this call would be holding.
+            // even when the predecessor failed. The earlier while-loop-await version hung
+            // both concurrency tests: a livelock — a waiter could resume on the actor before
+            // the predecessor's run() cleared running[path], then spin awaiting an already
+            // finished task without suspending, never yielding the actor for that cleanup.
+            // Chaining never waits in a loop on the actor, so it cannot spin that way.
             let previous = running[path]
             let task = Task { () -> Result<Void, Error> in
                 if let previous { _ = await previous.value }
