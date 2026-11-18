@@ -125,18 +125,13 @@ SIGNED_HOST = os.environ.get("AURIS_SIGNED_HOST", "1") == "1"
 # here fails the run, and a named test that starts passing fails it too, so the
 # list cannot outlive the defects it describes. Empty is the intended state.
 KNOWN_FAILURES = {
-    # The successor is refused where the test expects it to be admitted, so the
-    # stop and cleanup it then asserts never happen.
-    "CloudRouteSupersedeTests/testSuccessorAdmissionAwaitsPredecessorQuiescence":
-        "successor admission is refused instead of waiting for the predecessor",
-    "CloudRouteSupersedeTests/testSupersededCleanupAwaitsItsCapturedRetireIdentity":
-        "superseded cleanup is never reached because the successor is refused",
 }
 
-# Tests that fail in some runs and pass in others. Either result is accepted, and
-# the outcome is printed, so a run says how often they fail instead of going red at
-# random or hiding the frequency. They are not in KNOWN_FAILURES: that list means
-# "fails every time", and a test that also passes would break its own entry.
+# Tests that fail in some runs and pass in others. Reported, not excused: any
+# failure fails the job — the outcome is printed so a run says how often they
+# fail instead of hiding the frequency. They are not in KNOWN_FAILURES: that
+# list means "fails every time", and a test that also passes would break its
+# own entry.
 FLAKY_TESTS = {
     # Runs on both builds but only fails on some runs: it passed in the unsigned
     # recording and failed in the signed one. Either outcome is accepted and the
