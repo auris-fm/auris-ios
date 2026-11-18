@@ -3547,18 +3547,27 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertEqual(successor.outcome, .completed, "N+1 completes")
         XCTAssertEqual(player.framesEnqueuedForTesting - enqueuedBefore, 7,
                        "every audio frame N+1 receives must reach the player")
-        try await waitUntil("N+1's audio is scheduled", timeout: 3) {
+        // Offline manual rendering can stall well past a few seconds under load on a shared
+        // Mac; the budget is deliberately generous and the condition is the event itself,
+        // never an elapsed wait.
+        try await waitUntil("N+1's audio is scheduled", timeout: 20) {
             player.schedulingBoundaryCount > boundariesBefore
         }
         // The record says the same thing the player does: a normal turn reports its frames and no clear.
+        // BARRIER on the line itself, not a fixed poll that falls through to a count assertion:
+        // under load on a shared Mac the record can take longer than any chosen interval to be
+        // written, and an empty line must fail as "never written", not as wrong counts.
         var line = ""
-        for _ in 0..<40 {
+        let logStart = Date()
+        for _ in 0..<400 {
             line = (await FileLog.shared.logFileAsString()).split(separator: "\n")
                 .first { $0.contains("cloudTurnLatency") && $0.contains("request_id=\(successorId) ") }
                 .map(String.init) ?? ""
             if !line.isEmpty { break }
             try await Task.sleep(nanoseconds: 50_000_000)
         }
+        XCTAssertFalse(line.isEmpty,
+                       "log line never written after \(String(format: "%.1f", Date().timeIntervalSince(logStart))) s: cloudTurnLatency request_id=\(successorId)")
         XCTAssertTrue(line.contains("audio_frames=7 buffer_cleared=0"), "normal turn counts: \(line)")
     }
 
@@ -3683,7 +3692,10 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                              "N's stop was confirmed")
         XCTAssertEqual(player.framesEnqueuedForTesting - enqueuedBefore, 7,
                        "every audio frame N+1 receives must reach the player")
-        try await waitUntil("N+1's audio is scheduled", timeout: 3) {
+        // Offline manual rendering can stall well past a few seconds under load on a shared
+        // Mac; the budget is deliberately generous and the condition is the event itself,
+        // never an elapsed wait.
+        try await waitUntil("N+1's audio is scheduled", timeout: 20) {
             player.schedulingBoundaryCount > boundariesBefore
         }
         player.claimRelease = nil
@@ -5220,6 +5232,25 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// is deliberately not an interruption: it completes, drains and restores.
     static let completedDoneTextFrame = #"{"type":"done","outcome":"completed","usage":{"input_tokens":1,"output_tokens":0}}"#
 
+    /// The barrier's failure must carry its own evidence: label, elapsed time, budget and
+    /// poll count — not a label alone. A label-only throw leaves a timeout undiagnosable
+    /// until the log lines are hand-traced.
+    func testBarrierTimeoutReportCarriesElapsedBudgetAndPolls() async throws {
+        let start = Date()
+        do {
+            try await waitUntil("a condition that never becomes true", timeout: 0.05) { false }
+            XCTFail("the barrier must throw when the condition never holds")
+        } catch {
+            let message = String(describing: error)
+            XCTAssertTrue(message.contains("a condition that never becomes true"), "label present: \(message)")
+            XCTAssertTrue(message.contains("timed out after"), "elapsed present: \(message)")
+            XCTAssertTrue(message.contains("budget 0.1 s") || message.contains("budget 0.0"),
+                         "budget present: \(message)")
+            XCTAssertTrue(message.contains("polls, condition stayed false"), "poll count present: \(message)")
+            XCTAssertTrue(Date().timeIntervalSince(start) < 2, "the tiny budget is respected")
+        }
+    }
+
     /// Polls the harness's held-turn state rather than sleeping a fixed interval.
     private func waitForHeldTurn(timeout: TimeInterval = 2) async -> (task: StubWebSocketTask, gate: Gate)? {
         let deadline = Date(timeIntervalSinceNow: timeout)
@@ -5232,17 +5263,27 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
     /// Polls `condition` until it holds: an EXPLICIT BARRIER, not an elapsed sleep.
     private func waitUntil(_ description: String, timeout: TimeInterval = 2, _ condition: () -> Bool) async throws {
-        let deadline = Date(timeIntervalSinceNow: timeout)
+        let start = Date()
+        let deadline = start.addingTimeInterval(timeout)
+        var polls = 0
         while Date() < deadline {
+            polls += 1
             if condition() { return }
             try? await Task.sleep(nanoseconds: 2_000_000)
         }
         if condition() { return }
         struct BarrierNotReached: Error, CustomStringConvertible {
             let label: String
-            var description: String { "barrier never satisfied: \(label)" }
+            let timeout: TimeInterval
+            let elapsed: TimeInterval
+            let polls: Int
+            var description: String {
+                "barrier never satisfied: \(label) — timed out after \(String(format: "%.3f", elapsed)) s "
+                + "(budget \(String(format: "%.1f", timeout)) s, \(polls) polls, condition stayed false)"
+            }
         }
-        throw BarrierNotReached(label: description)
+        throw BarrierNotReached(label: description, timeout: timeout,
+                                elapsed: Date().timeIntervalSince(start), polls: polls)
     }
 
     /// POSITIVE CONTROL for the audio path: a turn carrying binary audio must actually put
