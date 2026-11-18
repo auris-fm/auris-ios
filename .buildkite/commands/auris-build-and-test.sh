@@ -173,6 +173,47 @@ make external_contributor
 # only cleared when the simulator was shut down. Building against the runtime as
 # it stands keeps Interface Builder off a runtime that cannot run its helpers
 # yet; the erase and a bounded readiness wait follow the build, before testing.
+# The runtime must be able to launch processes before Interface Builder asks it
+# to. Checked before the build as well as after the erase: a device left in a bad
+# state by an earlier run would otherwise hang the build's storyboard compiles.
+# Each bootstatus call is itself bounded — the call can block without limit, and
+# one stuck call would stop the retry loop from ever repeating.
+wait_simulator_ready() {
+  local tries="$1" per_call="$2" i pid waited status
+  # errexit off: a killed or failing bootstatus returns non-zero from `wait`,
+  # which under `set -e` would end the script instead of retrying.
+  set +e
+  for i in $(seq 1 "$tries"); do
+    xcrun simctl bootstatus "$SIMULATOR_ID" -b >/dev/null 2>&1 &
+    pid=$!
+    waited=0
+    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$per_call" ]; do
+      sleep 1
+      waited=$((waited + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+    else
+      wait "$pid" 2>/dev/null
+      status=$?
+      if [ "$status" -eq 0 ]; then
+        set -e
+        return 0
+      fi
+    fi
+    sleep 5
+  done
+  set -e
+  return 1
+}
+
+echo "--- :iphone: Checking the simulator runtime is ready before building"
+if ! wait_simulator_ready 12 30; then
+  echo "simulator runtime did not become ready within 6 minutes before the build"
+  exit 1
+fi
+
 echo "--- :hammer: Building for testing"
 # The build is watched too. A run has hung in Interface Builder for nine minutes
 # with the log frozen and every process idle — the test watchdog below never
@@ -187,6 +228,10 @@ BUILD_TOTAL_DEADLINE="${BUILDKITE_AURIS_BUILD_TOTAL_DEADLINE:-2700}"
 # `|| BUILD_STATUS=$?` rather than reading $? on the next line: errexit is in force
 # here, so a failing build would end the script at this line and none of the report
 # below would print. The failure path is the one that most needs to say something.
+# The whole build step is a function so a self-test can run exactly this code
+# with a stub xcodebuild earlier in PATH — a test of the extracted watchdog body
+# alone cannot catch how the step starts it or how errexit treats its waits.
+run_build_step() {
 BUILD_STATUS=0
 xcodebuild build-for-testing \
   -project podcasts.xcodeproj \
@@ -200,7 +245,7 @@ xcodebuild build-for-testing \
   CODE_SIGN_STYLE=Automatic \
   CODE_SIGN_IDENTITY="-" \
   SKIP_LINT=1 \
-  > "$LOG_DIR/build.log" 2>&1 || BUILD_STATUS=$?
+  > "$LOG_DIR/build.log" 2>&1 &
 BUILD_PID=$!
 
 # Watch the build: kill it on no progress or total time, record Interface Builder
@@ -237,12 +282,26 @@ BUILD_PID=$!
   done
 ) &
 BUILD_WATCHDOG_PID=$!
+# errexit is off around the waits and kills: `wait` on a killed process returns
+# 143 and `kill`/`pkill` return non-zero when the target has already exited, and
+# under `set -e` each of those would end the script before the report — the very
+# report that says what happened. Statuses are captured, not allowed to exit.
+set +e
 wait "$BUILD_PID"
 BUILD_STATUS=$?
 pkill -P "$BUILD_WATCHDOG_PID" 2>/dev/null
 kill "$BUILD_WATCHDOG_PID" 2>/dev/null
 wait "$BUILD_WATCHDOG_PID" 2>/dev/null
 BUILD_WATCHDOG_STATUS=$?
+# errexit stays OFF through the end of this function: a non-zero `return` while
+# errexit is on ends the whole script with that status instead of coming back to
+# the call site, which re-enables errexit after capturing the status.
+# A watchdog we killed after the build finished on its own reports 143; that is
+# our kill, not a verdict. Only its own exits (4, 5) are verdicts.
+case "$BUILD_WATCHDOG_STATUS" in
+  0|4|5) ;;
+  *) BUILD_WATCHDOG_STATUS=0 ;;
+esac
 # The live log gets the tail, not the whole build: this agent streams its log in
 # chunks over a link that drops them, and a run has been lost to upload retries
 # alone. The file keeps everything, so a failure's detail is never only in the
@@ -265,11 +324,24 @@ case "$BUILD_WATCHDOG_STATUS" in
     ;;
 esac
 echo "xcodebuild exited $BUILD_STATUS"
+# The watchdog's verdict comes first: a build it killed has no success marker,
+# and reporting that as "building failed" would hide the reason it was stopped.
+[ "$BUILD_WATCHDOG_STATUS" -eq 0 ] || return "$BUILD_WATCHDOG_STATUS"
 grep -q "BUILD SUCCEEDED\|BUILD FOR TESTING SUCCEEDED" "$LOG_DIR/build.log" || {
   echo "building for testing failed; see $LOG_DIR/build.log"
-  exit 1
+  return 1
 }
-[ "$BUILD_WATCHDOG_STATUS" -eq 0 ] || exit "$BUILD_WATCHDOG_STATUS"
+return 0
+}
+
+# errexit off around the call: the function returns the watchdog's verdict or a
+# build failure as its status, and that status is reported by the gates below,
+# not allowed to end the script silently.
+set +e
+run_build_step
+BUILD_STEP_STATUS=$?
+set -e
+[ "$BUILD_STEP_STATUS" -eq 0 ] || exit "$BUILD_STEP_STATUS"
 
 echo "--- :iphone: Erasing the simulator for a clean test container"
 # State left by an earlier run — a database, a keychain item, a file in the app's
@@ -286,18 +358,10 @@ xcrun simctl erase "$SIMULATOR_ID"
 # every Interface Builder helper wedged in the runtime's dyld cache mapping on a
 # freshly erased device. This wait is bounded so a runtime that never becomes
 # ready fails the job with a reason instead of hanging it.
-SIM_READY=0
-for _ in $(seq 1 60); do
-  if xcrun simctl bootstatus "$SIMULATOR_ID" -b >/dev/null 2>&1; then
-    SIM_READY=1
-    break
-  fi
-  sleep 5
-done
-[ "$SIM_READY" -eq 1 ] || {
-  echo "simulator did not become bootable within 300s of erasing"
+if ! wait_simulator_ready 60 30; then
+  echo "simulator did not become bootable within 10 minutes of erasing"
   exit 1
-}
+fi
 
 echo "--- :lock: Granting the permissions the tests need"
 # An erased device has no privacy permissions, so the first microphone or speech

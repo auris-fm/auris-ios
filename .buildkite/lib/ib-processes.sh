@@ -73,6 +73,30 @@ ib_record_snapshot() {
     grep -q "^$p	" "$record" 2>/dev/null && continue
     printf '%s\t%s\n' "$p" "$start" >> "$record"
   done
+  # A daemon that has already reparented to launchd takes its helpers out of the
+  # job's tree with it. Walking down from every recorded daemon that is still the
+  # same process keeps those helpers recorded too — they are this build's, even
+  # though nothing in the tree can reach them any more.
+  # Read from a snapshot of the record, not the file being appended to: reading
+  # and writing the same file in one loop is undefined.
+  local snapshot
+  snapshot="$(cat "$record")"
+  while IFS=$'\t' read -r p start; do
+    [ -n "${p:-}" ] || continue
+    case "$(ps -o comm= -p "$p" 2>/dev/null)" in
+      */ibtoold) ;;
+      *) continue ;;
+    esac
+    [ "$(ib_start_time "$p")" = "$start" ] || continue
+    local h hstart
+    for h in $(ib_descendants "$p"); do
+      ib_is_ib_process "$h" || continue
+      hstart="$(ib_start_time "$h")"
+      [ -n "$hstart" ] || continue
+      grep -q "^$h	" "$record" 2>/dev/null && continue
+      printf '%s\t%s\n' "$h" "$hstart" >> "$record"
+    done
+  done <<< "$snapshot"
 }
 
 # Stop the recorded processes and report what survived.
