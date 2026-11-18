@@ -33,11 +33,14 @@ def real_report(bundle_path=None):
     """
     if bundle_path:
         return check.read_report(bundle_path)
-    bundles = list((REPO / "artifacts").glob("*.xcresult"))
-    if not bundles:
-        sys.exit("no result bundle in artifacts/; run the pipeline first")
-    newest = max(bundles, key=lambda b: b.stat().st_mtime)
-    return check.read_report(str(newest))
+    # No guessing: artifacts/ holds probe and red-proof bundles too, so picking
+    # the newest by mtime once selected a one-test recording and the suite
+    # proved nothing. The CI step passes the bundle it just produced; locally,
+    # pass the recording explicitly.
+    sys.exit(
+        "pass the result bundle to test: "
+        "test_check_test_coverage.py <path/to/run.xcresult>"
+    )
 
 
 def manifest_reason(test_id):

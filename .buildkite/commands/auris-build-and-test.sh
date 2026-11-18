@@ -143,7 +143,10 @@ on_exit() {
     >> "$LOG_DIR/ib-leftovers.txt" 2>/dev/null || true
   shutdown_simulator
 }
-trap on_exit EXIT
+# The trap install lives in a function so the cancel self-test can run the
+# pipeline's own trap line and handler, not a re-typed copy that could drift.
+install_exit_trap() { trap on_exit EXIT; }
+install_exit_trap
 
 echo "--- :llama: Building the pinned llama.cpp archives"
 ./scripts/build-llama-ios.sh 2>&1 | tee "$LOG_DIR/llama.log"
@@ -252,6 +255,11 @@ BUILD_PID=$!
 # processes while the tree is intact either way. The watchdog is a subshell so its
 # verdict can be waited on without confusing it with xcodebuild's exit status.
 (
+  # errexit and pipefail off: a process vanishing between the listing and its
+  # status read must shorten the record, not kill the watchdog — a dead
+  # watchdog means the build runs unwatched, which is how #23 went unreported.
+  # Every loop statement below is written to be safe without errexit.
+  set +e
   waited=0
   last_size=0
   stalled=0
@@ -289,24 +297,49 @@ BUILD_WATCHDOG_PID=$!
 set +e
 wait "$BUILD_PID"
 BUILD_STATUS=$?
-pkill -P "$BUILD_WATCHDOG_PID" 2>/dev/null
-kill "$BUILD_WATCHDOG_PID" 2>/dev/null
-wait "$BUILD_WATCHDOG_PID" 2>/dev/null
+# 143 only means "our kill, not a verdict" if we did the killing: the watchdog
+# must still be alive right now. A watchdog that died on its own leaves the
+# build unwatched and reports nothing — that silence is the failure, so a
+# non-verdict status with no kill of ours is fatal below.
+if kill -0 "$BUILD_WATCHDOG_PID" 2>/dev/null; then
+  WE_KILLED_THE_WATCHDOG=1
+  pkill -P "$BUILD_WATCHDOG_PID" 2>/dev/null
+  kill "$BUILD_WATCHDOG_PID" 2>/dev/null
+  wait "$BUILD_WATCHDOG_PID" 2>/dev/null
+else
+  WE_KILLED_THE_WATCHDOG=0
+  wait "$BUILD_WATCHDOG_PID" 2>/dev/null
+fi
 BUILD_WATCHDOG_STATUS=$?
 # errexit stays OFF through the end of this function: a non-zero `return` while
 # errexit is on ends the whole script with that status instead of coming back to
 # the call site, which re-enables errexit after capturing the status.
 # A watchdog we killed after the build finished on its own reports 143; that is
-# our kill, not a verdict. Only its own exits (4, 5) are verdicts.
-case "$BUILD_WATCHDOG_STATUS" in
-  0|4|5) ;;
-  *) BUILD_WATCHDOG_STATUS=0 ;;
-esac
+# our kill, not a verdict. Only its own exits (4, 5) count as verdicts, and only
+# when the death was ours: a watchdog that died on its own never normalises.
+if [ "$WE_KILLED_THE_WATCHDOG" -eq 1 ]; then
+  [ "$BUILD_WATCHDOG_STATUS" = 143 ] && BUILD_WATCHDOG_STATUS=0
+  case "$BUILD_WATCHDOG_STATUS" in
+    0|4|5) ;;
+    *) BUILD_WATCHDOG_STATUS=0 ;;
+  esac
+fi
 # The live log gets the tail, not the whole build: this agent streams its log in
 # chunks over a link that drops them, and a run has been lost to upload retries
 # alone. The file keeps everything, so a failure's detail is never only in the
 # stream. On success the tail is the summary; on failure it is where to look.
 tail -n 60 "$LOG_DIR/build.log"
+if [ "$WE_KILLED_THE_WATCHDOG" -eq 0 ]; then
+  case "$BUILD_WATCHDOG_STATUS" in
+    0|4|5) ;;
+    *)
+      echo "--- :warning: The build watchdog died with status $BUILD_WATCHDOG_STATUS"
+      echo "The build ran with no watchdog from that point on. Failing the run:"
+      echo "a watchdog that dies quietly is how a hang goes unreported."
+      return 1
+      ;;
+  esac
+fi
 case "$BUILD_WATCHDOG_STATUS" in
   0) ;;
   4)
@@ -440,6 +473,11 @@ xcodebuild test-without-building \
 XCODEBUILD_PID=$!
 
 (
+  # errexit and pipefail off: a process vanishing between the listing and its
+  # status read must shorten the record, not kill the watchdog — a dead
+  # watchdog means the build runs unwatched, which is how #23 went unreported.
+  # Every loop statement below is written to be safe without errexit.
+  set +e
   waited=0
   started=0
   # Progress is measured by the log growing, not by a particular line: XCTest and

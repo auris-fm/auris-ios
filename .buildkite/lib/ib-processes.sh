@@ -31,7 +31,9 @@ ib_descendants() {
     local next=""
     local p k kids
     for p in $frontier; do
-      kids=$(pgrep -P "$p" 2>/dev/null | tr '\n' ' ')
+      # pgrep exits non-zero when the pid is gone; `|| true` keeps the walk
+      # alive under pipefail. An empty list just ends that branch.
+      kids=$( (pgrep -P "$p" 2>/dev/null | tr '\n' ' ') || true )
       for k in $kids; do
         case "$all" in
           *" $k "*) ;;
@@ -47,7 +49,11 @@ ib_descendants() {
 # The start time of a pid, empty if it no longer exists. Used as the second half
 # of its identity, so a reused pid is never mistaken for the recorded process.
 ib_start_time() {
-  ps -o lstart= -p "$1" 2>/dev/null | sed 's/^ *//;s/ *$//'
+  # `|| true` twice, deliberately: the process can exit between being listed and
+  # this call, and under `set -euo pipefail` either failing pipe leg would end
+  # the caller — in the build watchdog that means a build left running with no
+  # watchdog. An empty start time simply never matches, so the pid is skipped.
+  (ps -o lstart= -p "$1" 2>/dev/null | sed 's/^ *//;s/ *$//') || true
 }
 
 ib_is_ib_process() {
