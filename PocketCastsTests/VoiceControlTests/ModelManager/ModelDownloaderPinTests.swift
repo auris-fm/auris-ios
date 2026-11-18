@@ -267,11 +267,14 @@ final class ModelDownloaderPinTests: XCTestCase {
         async let a: Result<Void, Error> = downloader.download(url: url, sha256: sha(goodBytes), to: dir)
         async let b: Result<Void, Error> = downloader.download(url: url, sha256: sha(goodBytes), to: dir)
         async let c: Result<Void, Error> = downloader.download(url: url, sha256: sha(goodBytes), to: dir)
-        let (ra, rb, rc) = await (a, b, c)
+        let results = await [a, b, c]
 
-        guard case .failure = ra else { return XCTFail("a must fail on the wrong bytes: \(ra)") }
-        guard case .success = rb else { return XCTFail("b failed: \(rb)") }
-        guard case .success = rc else { return XCTFail("c failed: \(rc)") }
+        // Which caller reaches the actor first is not deterministic, so assert the OUTCOME
+        // COUNTS: exactly one failure (the wrong-bytes download) and two successes.
+        let failures = results.filter { if case .failure = $0 { return true }; return false }.count
+        let successes = results.count - failures
+        XCTAssertEqual(failures, 1, "exactly one caller gets the wrong bytes: \(results)")
+        XCTAssertEqual(successes, 2, "the other two callers succeed: \(results)")
         XCTAssertEqual(try Data(contentsOf: dir.appendingPathComponent("model.int8.onnx")), goodBytes)
         XCTAssertEqual(StubURLProtocol.maxInFlight, 1,
                        "never two requests in flight on the same asset, even after a failure")
