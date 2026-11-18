@@ -621,7 +621,22 @@ def main() -> int:
     print("\nCoverage check passed: every buildable target ran, no unexpected skips.")
     if BLOCKED_TARGETS:
         print(f"Still blocked: {', '.join(BLOCKED_TARGETS)}")
-    return 0
+    return exit_code(failures, failed)
+
+
+def exit_code(failures: list, failed: set) -> int:
+    """Three outcomes the step's verdict can tell apart.
+
+    0 — no test failures at all. 10 — failures, but every one is on the
+    known-failures list and the whole plan ran, so the run is accepted.
+    Anything failing the check is 1. A caller that tolerates a red xcodebuild
+    only when real, listed failures exist needs 0 and 10 to be distinct: a
+    red xcodebuild beside a 0 is an infrastructure failure, beside a 10 it is
+    the known-failures case.
+    """
+    if failures:
+        return 1
+    return 10 if failed else 0
 
 
 if __name__ == "__main__":

@@ -764,6 +764,15 @@ run_bg bash .buildkite/lib/test-live-log-filter.sh
 FILTER_SELFTEST_STATUS=$?
 set -e
 
+echo "--- :mag: Checking the step's verdict itself"
+# The step must trust the coverage guard over xcodebuild's raw status, or a run
+# whose only failures are the listed known ones could never be green. These
+# cases drive the same decision the result block below calls.
+set +e
+run_bg bash .buildkite/lib/test-step-verdict.sh
+VERDICT_SELFTEST_STATUS=$?
+set -e
+
 echo "--- :mag: Checking the coverage guard itself"
 # The guard is only worth trusting if it can fail. These cases remove coverage
 # and assert it notices, against the result bundle this run just produced.
@@ -826,25 +835,8 @@ if [ -n "$LEFTOVERS" ]; then
 fi
 
 echo "--- :result: Result"
-echo "xcodebuild exit: $TEST_STATUS"
-echo "coverage check exit: $COVERAGE_STATUS"
-echo "guard self-test exit: $SELFTEST_STATUS"
-echo "build-step self-test exit: $BUILD_STEP_SELFTEST_STATUS"
-echo "watchdog self-test exit: $WATCHDOG_SELFTEST_STATUS"
-echo "build-watchdog self-test exit: $BUILD_WATCHDOG_SELFTEST_STATUS"
-echo "Interface Builder cleanup self-test exit: $IB_SELFTEST_STATUS"
-echo "cancel-cleanup self-test exit: $CANCEL_SELFTEST_STATUS"
-echo "grants self-test exit: $GRANTS_SELFTEST_STATUS"
-echo "live-log filter self-test exit: $FILTER_SELFTEST_STATUS"
-[ "$TEST_STATUS" -eq 0 ] || { echo "tests failed"; exit "$TEST_STATUS"; }
-[ "$COVERAGE_STATUS" -eq 0 ] || { echo "the run did not cover the whole plan"; exit "$COVERAGE_STATUS"; }
-[ "$SELFTEST_STATUS" -eq 0 ] || { echo "the coverage guard did not prove it can fail"; exit "$SELFTEST_STATUS"; }
-[ "$BUILD_STEP_SELFTEST_STATUS" -eq 0 ] || { echo "the build step did not prove it can be killed and still report why"; exit "$BUILD_STEP_SELFTEST_STATUS"; }
-[ "$WATCHDOG_SELFTEST_STATUS" -eq 0 ] || { echo "the watchdog did not prove it can stop a run"; exit "$WATCHDOG_SELFTEST_STATUS"; }
-[ "$BUILD_WATCHDOG_SELFTEST_STATUS" -eq 0 ] || { echo "the build watchdog did not prove it can stop a build"; exit "$BUILD_WATCHDOG_SELFTEST_STATUS"; }
-[ "$IB_SELFTEST_STATUS" -eq 0 ] || { echo "the Interface Builder cleanup did not prove it kills only what it recorded"; exit "$IB_SELFTEST_STATUS"; }
-[ "$CANCEL_SELFTEST_STATUS" -eq 0 ] || { echo "a cancelled job would skip the exit cleanup"; exit "$CANCEL_SELFTEST_STATUS"; }
-[ "$GRANTS_SELFTEST_STATUS" -eq 0 ] || { echo "the grants step did not prove it retries a not-ready privacy service"; exit "$GRANTS_SELFTEST_STATUS"; }
-[ "$FILTER_SELFTEST_STATUS" -eq 0 ] || { echo "the live log would lose a failure's detail"; exit "$FILTER_SELFTEST_STATUS"; }
-[ "$IB_CLEANUP_STATUS" -eq 0 ] || { echo "this build's Interface Builder processes could not all be stopped"; exit "$IB_CLEANUP_STATUS"; }
-echo "Build and full plan passed."
+# The whole Result block — the echoes, the gates and the step's exit — lives in
+# step_result, shared with the verdict self-test, so the tested code is the
+# code that runs and no ordering mistake can slip in between.
+source "$(dirname "$0")/../lib/step-verdict.sh"
+step_result

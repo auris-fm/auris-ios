@@ -344,10 +344,39 @@ def main():
     for name, ok in (
         ("a failure that is not a known failure fails the run",
          bool(check.check_failures(reported | {"SomethingTests/testNew()"}))),
-        ("a known failure that stops failing fails the run",
-         bool(check.check_failures(set()))),
     ):
         print(f"{'PASS' if ok else 'FAIL'}  {name}")
+        results.append(ok)
+    # "Stops failing fails the run" and "listed cannot excuse unlisted" must
+    # not depend on what the real list holds: after the post-83 push the list
+    # is empty for good, and cases that skip while it is empty would never run
+    # again. So both run against a name the test itself puts on the list,
+    # restoring the list afterwards.
+    synthetic = "SomethingTests/testSyntheticallyListed()"
+    saved_known_full = dict(check.KNOWN_FAILURES)
+    check.KNOWN_FAILURES.clear()
+    check.KNOWN_FAILURES.update({synthetic: "listed by this self-test, not a product defect"})
+    ok = bool(check.check_failures(set()))
+    print(f"{'PASS' if ok else 'FAIL'}  a listed failure that stops failing fails the run")
+    results.append(ok)
+    alone_accepted = check.check_failures({synthetic}) == []
+    excused = check.check_failures({synthetic, "SomethingTests/testUnlisted()"}) == []
+    check.KNOWN_FAILURES.clear()
+    check.KNOWN_FAILURES.update(saved_known_full)
+    ok = alone_accepted and not excused
+    print(f"{'PASS' if ok else 'FAIL'}  a listed failure alone is accepted, and cannot excuse an unlisted one beside it")
+    results.append(ok)
+    # The acceptance codes are list-independent: exit_code takes the failure
+    # sets it is given and does not consult KNOWN_FAILURES.
+    for name, got, want in (
+        ("the guard's acceptance code says no failures", check.exit_code([], set()), 0),
+        ("the guard's acceptance code says failures, all listed",
+         check.exit_code([], {synthetic}), 10),
+        ("the guard's rejection code covers any unaccepted failure",
+         check.exit_code(["x"], {synthetic}), 1),
+    ):
+        ok = got == want
+        print(f"{'PASS' if ok else 'FAIL'}  {name} (got {got}, want {want})")
         results.append(ok)
     for name, ok in (
         ("an intermittent test failing does not fail the run",
