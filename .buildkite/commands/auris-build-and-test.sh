@@ -461,19 +461,12 @@ fi
 # the per-test execution allowance, and in a full run it crosses it — the test is
 # then killed and the runner relaunched, which is what a run dying partway through
 # looks like from outside. Granting them makes the run measure the code.
-# Measured on this machine: a grant issued immediately after a fresh erase and
-# boot fails with EPERM — the privacy service is not ready yet — and the same
-# grant succeeds seconds later. So each grant is retried on a bound instead of
-# tripping errexit on the first try.
-# The fallback for a service simctl cannot grant: write the same row the
-# grant command would write, then verify it. Two findings drive this. On this
-# Xcode, simctl does not list speech-recognition at all, so no amount of
-# retrying can grant it there. And a row under the bare simctl name grants
-# nothing — the database keys rows under the kTCCService… spellings — so the
-# service name is mapped, and the insert is verified by reading it back.
-# simctl names and TCC database service names differ: the database keys rows
-# under the kTCCService… spellings (read off this machine's own device), so
-# the fallback maps before writing and verifying.
+# The two services take different paths, because they behave differently here:
+# a microphone grant issued immediately after a fresh erase and boot fails with
+# EPERM until the privacy service is ready, then succeeds — so it is retried on
+# a bound instead of tripping errexit on the first try. Speech-recognition is
+# not in simctl's list at all on this Xcode, so no retry can ever grant it:
+# it goes straight to the device's TCC database.
 tcc_service_name() {
   case "$1" in
     microphone) echo kTCCServiceMicrophone ;;
@@ -538,7 +531,7 @@ TEST_HOST="$DERIVED/Build/Products/Debug-iphonesimulator/podcasts.app"
 HOST_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$TEST_HOST/Info.plist")"
 echo "Test host: $HOST_BUNDLE_ID"
 if ! grant_test_permissions "$HOST_BUNDLE_ID" 12 10; then
-  echo "simulator privacy service never accepted the grants"
+  echo "the grants did not land — see the per-service reasons above"
   exit 1
 fi
 
@@ -743,10 +736,12 @@ IB_SELFTEST_STATUS=$?
 set -e
 
 echo "--- :mag: Checking the grants step itself"
-# A grant issued right after an erase fails with EPERM until the privacy
-# service is ready, so the step retries on a bound. These cases run the real
-# grant function against a stub xcrun: a service that recovers must be granted,
-# one that never recovers must give up with a reason.
+# A microphone grant issued right after an erase fails with EPERM until the
+# privacy service is ready, so it is retried on a bound; speech-recognition
+# is not offered by simctl at all and goes straight to the TCC database. These
+# cases run the real grant functions against a stub xcrun and a real TCC
+# database: a recovering service must be granted, one that never lands must
+# fall back, and a fallback that cannot write must give up with a reason.
 set +e
 run_bg bash .buildkite/lib/test-grants.sh
 GRANTS_SELFTEST_STATUS=$?
