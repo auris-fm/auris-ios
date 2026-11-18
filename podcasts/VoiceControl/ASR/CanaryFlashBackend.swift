@@ -23,9 +23,10 @@ final class CanaryFlashBackend: AsrBackend {
         ModelSpec(
             id: "canary-flash",
             files: [
-                ModelFile(url: URL(string: "\(Self.baseURL)/\(Self.encoderFilename)")!, filename: Self.encoderFilename, sha256: nil),
-                ModelFile(url: URL(string: "\(Self.baseURL)/\(Self.decoderFilename)")!, filename: Self.decoderFilename, sha256: nil),
-                ModelFile(url: URL(string: "\(Self.baseURL)/\(Self.tokensFilename)")!, filename: Self.tokensFilename, sha256: nil),
+                // Pinned from the published assets (hf-mirror resolve/main, 2026-11-18); see SenseVoiceBackend.
+                ModelFile(url: URL(string: "\(Self.baseURL)/\(Self.encoderFilename)")!, filename: Self.encoderFilename, sha256: "7a75b4e2a5857a6dcc0819503bbe3fad66943db4a3ccf21d3f27c633667d303f"),
+                ModelFile(url: URL(string: "\(Self.baseURL)/\(Self.decoderFilename)")!, filename: Self.decoderFilename, sha256: "fc28221d2dc3b76170fce11530e9b6f4df6454d2a94f51090d0cff60c443603a"),
+                ModelFile(url: URL(string: "\(Self.baseURL)/\(Self.tokensFilename)")!, filename: Self.tokensFilename, sha256: "2dae6fc7815f9640645e0c765522b278ee0cef49b482d91f6913e334628d3e77"),
             ],
             targetDir: "canary-flash-model"
         )

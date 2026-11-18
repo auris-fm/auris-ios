@@ -24,12 +24,16 @@ final class SenseVoiceBackend: AsrBackend {
                 ModelFile(
                     url: URL(string: "\(Self.baseURL)/\(Self.modelFilename)")!,
                     filename: Self.modelFilename,
-                    sha256: nil
+                    // Pinned from the published asset (hf-mirror resolve/main, 2026-11-18):
+                    // an un-pinned file was trusted on existence alone, so a truncated or
+                    // corrupt download survived every later launch ("ModelProto does not
+                    // have a graph", builds #27/#29).
+                    sha256: "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51"
                 ),
                 ModelFile(
                     url: URL(string: "\(Self.baseURL)/\(Self.tokensFilename)")!,
                     filename: Self.tokensFilename,
-                    sha256: nil
+                    sha256: "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc"
                 ),
             ],
             targetDir: "sensevoice-model"
