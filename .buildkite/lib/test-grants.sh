@@ -12,7 +12,9 @@ PASS=0; FAIL=0
 report() { if [ "$1" -eq 0 ]; then echo "PASS  $2"; PASS=$((PASS+1)); else echo "FAIL  $2"; FAIL=$((FAIL+1)); fi; }
 
 extract_grants() {
-  awk '/^grant_test_permissions\(\) \{/{f=1} f{print} f && /^\}$/{exit}' "$SCRIPT"
+  for fn in tcc_service_name tcc_grant grant_via_simctl grant_via_tcc grant_test_permissions; do
+    awk '/^'"$fn"'\(\) \{/{f=1} f{print} f && /^\}$/{exit}' "$SCRIPT"
+  done
 }
 
 # A real TCC database with the columns the fallback writes, so the fallback
@@ -77,9 +79,7 @@ run_case() {
     echo 'HOME='"\"$dir\""'/home'
     # The real functions verbatim; their xcrun calls are unqualified, so the
     # stub earlier in PATH replaces them.
-    awk '/^tcc_service_name\(\) \{/{f=1} f{print} f && /^\}$/{exit}' "$SCRIPT"
-    awk '/^tcc_grant\(\) \{/{f=1} f{print} f && /^\}$/{exit}' "$SCRIPT"
-    awk '/^grant_test_permissions\(\) \{/{f=1} f{print} f && /^\}$/{exit}' "$SCRIPT"
+    extract_grants
     echo 'set +e'
     echo 'grant_test_permissions fm.auris 6 1'
     echo 'echo "GRANTS_RC=$?"'
@@ -88,30 +88,32 @@ run_case() {
   local ok=0
   grep -q "GRANTS_RC=$want" "$dir/out.txt" || ok=1
   if [ "$want" = 0 ]; then
-    grep -q "speech-recognition granted on try\|granted via the TCC database" "$dir/out.txt" || ok=1
+    grep -q "GRANTS_RC=0" "$dir/out.txt" || ok=1
   else
-    grep -q "never accepted the grants\|was not granted within" "$dir/out.txt" || ok=1
+    grep -q "could not be granted" "$dir/out.txt" || ok=1
   fi
   report "$ok" "$name"
   sed 's/^/        /' "$dir/out.txt" | tail -3
   rm -rf "$dir"
 }
 
-# Privacy service not ready for the first two tries, then it recovers: the
-# function must retry, succeed, and return 0.
-run_case "transient EPERM right after erase is retried and passes" 2 0
-# Privacy service never recovers within the bound: the function must fall back
-# to the TCC database and still return granted.
-run_case "grants that never land fall back to the TCC database" 99 0
+# Microphone: privacy service not ready for the first two tries, then it
+# recovers — retry, succeed. Speech never touches simctl: the stub counts one
+# grant call per success, so two successes would mean speech asked simctl.
+run_case "microphone retries transient EPERM; speech skips simctl entirely" 2 0
+# Microphone never lands within the bound: it falls back to the TCC database
+# and the step still ends granted.
+run_case "a microphone grant that never lands falls back to the TCC database" 99 0
 
-# The TCC fallback: when simctl refuses a grant for good (measured: microphone
-# lands after erase, speech-recognition keeps returning EPERM), the step writes
-# the row itself and verifies it. The xcrun stub always refuses; the sqlite3
-# stub records inserts and answers the verification query.
+# Speech goes through the TCC database with simctl never consulted, and the
+# row it writes must match, field for field, the microphone row simctl itself
+# wrote on this machine (format check in check_fallback_row_format, including
+# that no row exists under the bare simctl spelling).
 run_fallback_case() {
   local name="$1" sqlite_ok="$2" want="$3" want_text="$4"
   local dir; dir=$(mktemp -d)
-  make_stub_xcrun "$dir" 999
+  # simctl works for microphone here; speech must not call it at all.
+  make_stub_xcrun "$dir" 0
   make_fake_tcc_db "$dir/home"
   if [ "$sqlite_ok" != 1 ]; then
     # Break writes, keep the file present: the insert must fail visibly.
@@ -128,9 +130,7 @@ STUB
     echo 'set -euo pipefail'
     echo 'SIMULATOR_ID=fake-sim'
     echo 'HOME='""$dir""'/home'
-    awk '/^tcc_service_name\(\) \{/{f=1} f{print} f && /^\}$/{exit}' "$SCRIPT"
-    awk '/^tcc_grant\(\) \{/{f=1} f{print} f && /^\}$/{exit}' "$SCRIPT"
-    awk '/^grant_test_permissions\(\) \{/{f=1} f{print} f && /^\}$/{exit}' "$SCRIPT"
+    extract_grants
     echo 'set +e'
     echo 'grant_test_permissions fm.auris 3 1'
     echo 'echo "GRANTS_RC=$?"'
@@ -139,9 +139,11 @@ STUB
   local ok=0
   grep -q "GRANTS_RC=$want" "$dir/out.txt" || ok=1
   grep -q "$want_text" "$dir/out.txt" || ok=1
-  if [ "$want" = 0 ] && ! check_fallback_row_format "$dir/home"; then
-    echo "        the inserted row does not match the row simctl writes"
-    ok=1
+  if [ "$want" = 0 ]; then
+    check_fallback_row_format "$dir/home" \
+      || { echo "        the inserted row does not match the row simctl writes"; ok=1; }
+    n=$(cat "$dir/count" 2>/dev/null || echo 0)
+    [ "$n" = 1 ] || { echo "        simctl saw $n grant calls; speech must make none"; ok=1; }
   fi
   report "$ok" "$name"
   sed 's/^/        /' "$dir/out.txt" | tail -3
@@ -149,7 +151,7 @@ STUB
 }
 
 run_fallback_case "a service simctl never grants is granted via the TCC database" 1 0 "granted via the TCC database"
-run_fallback_case "a grant that even the fallback cannot write fails with a reason" 0 1 "could not be granted at all"
+run_fallback_case "a grant that even the fallback cannot write fails with a reason" 0 1 "could not be granted via the TCC database"
 
 echo "grants self-test: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

@@ -137,16 +137,52 @@ IB_CLEANUP_STATUS=0
 # On any exit path: stop the recorded Interface Builder processes (the simulator
 # first, since a wedged helper is released by the runtime going away), then shut
 # the simulator down. Processes never tied to this job are named, never killed.
-on_exit() {
-  ib_cleanup "$IB_RECORD" "$SIMULATOR_ID" 10 >/dev/null 2>&1 || true
+cleanup_everything() {
+  # The untied-process report is written first: the cleanup below waits out a
+  # grace period, and the report must survive even when the cleanup is cut
+  # short by a second signal or the job ending.
   ib_unrecorded "$IB_RECORD" | sed 's/^/untied Interface Builder process left running: /' \
     >> "$LOG_DIR/ib-leftovers.txt" 2>/dev/null || true
+  ib_cleanup "$IB_RECORD" "$SIMULATOR_ID" 10 >/dev/null 2>&1 || true
   shutdown_simulator
+}
+
+on_exit() {
+  cleanup_everything
 }
 # The trap install lives in a function so the cancel self-test can run the
 # pipeline's own trap line and handler, not a re-typed copy that could drift.
 install_exit_trap() { trap on_exit EXIT; }
+
+# A bash trap does not run while a foreground command is executing — it waits
+# for the command to finish. A cancelled job is SIGTERMed mid-command and
+# SIGKILLed after the agent's grace period, so the EXIT trap alone lost the
+# cleanup race: the cancelled run left no ib-leftovers.txt at all. This
+# sentinel is a separate process in the same process group; a group-wide
+# SIGTERM reaches it immediately even while the main script is blocked, and it
+# runs the same cleanup. The main script kills it on every normal exit, so the
+# two never both run to completion.
+install_cleanup_sentinel() {
+  (
+    trap 'cleanup_everything; exit 0' TERM INT HUP
+    # The sleep runs in the background so the trap is not deferred: a signal
+    # interrupts wait immediately, while it would wait out a foreground sleep.
+    while :; do sleep 3600 & wait $!; done
+  ) &
+  CLEANUP_SENTINEL_PID=$!
+}
+stop_cleanup_sentinel() {
+  [ -n "${CLEANUP_SENTINEL_PID:-}" ] && kill "$CLEANUP_SENTINEL_PID" 2>/dev/null
+  wait "${CLEANUP_SENTINEL_PID:-0}" 2>/dev/null || true
+  CLEANUP_SENTINEL_PID=""
+}
+
+on_exit() {
+  stop_cleanup_sentinel
+  cleanup_everything
+}
 install_exit_trap
+install_cleanup_sentinel
 
 echo "--- :llama: Building the pinned llama.cpp archives"
 ./scripts/build-llama-ios.sh 2>&1 | tee "$LOG_DIR/llama.log"
@@ -434,11 +470,12 @@ fi
 # boot fails with EPERM — the privacy service is not ready yet — and the same
 # grant succeeds seconds later. So each grant is retried on a bound instead of
 # tripping errexit on the first try.
-# The fallback for a service simctl refuses to grant: write the same row the
-# grant command would write, then verify it. Measured on this machine: after a
-# fresh erase, the microphone grant lands but speech-recognition keeps failing
-# with EPERM even minutes later, on a booted device with the app installed —
-# the row inserted directly is identical in shape to the one simctl writes.
+# The fallback for a service simctl cannot grant: write the same row the
+# grant command would write, then verify it. Two findings drive this. On this
+# Xcode, simctl does not list speech-recognition at all, so no amount of
+# retrying can grant it there. And a row under the bare simctl name grants
+# nothing — the database keys rows under the kTCCService… spellings — so the
+# service name is mapped, and the insert is verified by reading it back.
 # simctl names and TCC database service names differ: the database keys rows
 # under the kTCCService… spellings (read off this machine's own device), so
 # the fallback maps before writing and verifying.
@@ -461,30 +498,43 @@ tcc_grant() {
   return 0
 }
 
-grant_test_permissions() {
-  local host_bundle="$1" service tries="$2" per_try="$3" i rc
-  for service in microphone speech-recognition; do
-    rc=1
-    for i in $(seq 1 "$tries"); do
-      if xcrun simctl privacy "$SIMULATOR_ID" grant "$service" "$host_bundle"; then
-        echo "$service granted on try $i"
-        rc=0
-        break
-      fi
-      echo "$service grant failed (try $i/$tries), retrying in ${per_try}s"
-      sleep "$per_try"
-    done
-    if [ "$rc" -ne 0 ]; then
-      echo "$service was not granted by simctl within $((tries * per_try))s; falling back to the TCC database"
-      if tcc_grant "$service" "$host_bundle"; then
-        echo "$service granted via the TCC database"
-        rc=0
-      else
-        echo "$service could not be granted at all"
-        return 1
-      fi
+# Microphone goes through simctl, retried: it is in simctl's list and lands,
+# usually on the first try. Speech-recognition does not — this Xcode's simctl
+# does not offer it at all — so asking simctl for it is two minutes of known
+# pointless retries; it goes straight to the TCC database.
+grant_via_simctl() {
+  local service="$1" host_bundle="$2" tries="$3" per_try="$4" i
+  for i in $(seq 1 "$tries"); do
+    if xcrun simctl privacy "$SIMULATOR_ID" grant "$service" "$host_bundle"; then
+      echo "$service granted on try $i"
+      return 0
     fi
+    echo "$service grant failed (try $i/$tries), retrying in ${per_try}s"
+    sleep "$per_try"
   done
+  echo "$service was not granted by simctl within $((tries * per_try))s; falling back to the TCC database"
+  if tcc_grant "$service" "$host_bundle"; then
+    echo "$service granted via the TCC database"
+    return 0
+  fi
+  echo "$service could not be granted at all"
+  return 1
+}
+
+grant_via_tcc() {
+  local service="$1" host_bundle="$2"
+  if tcc_grant "$service" "$host_bundle"; then
+    echo "$service granted via the TCC database"
+    return 0
+  fi
+  echo "$service could not be granted via the TCC database"
+  return 1
+}
+
+grant_test_permissions() {
+  local host_bundle="$1" tries="$2" per_try="$3"
+  grant_via_simctl microphone "$host_bundle" "$tries" "$per_try" || return 1
+  grant_via_tcc speech-recognition "$host_bundle" || return 1
   return 0
 }
 
