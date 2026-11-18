@@ -16,12 +16,31 @@ extract_grants() {
 }
 
 # A real TCC database with the columns the fallback writes, so the fallback
-# cases exercise real sqlite3 against the real schema shape.
+# cases exercise real sqlite3 against the real schema shape. Seeded with a
+# microphone row copied verbatim from a device where simctl wrote it itself,
+# so the fallback's output can be compared against what simctl produces.
+#   kTCCServiceMicrophone|fm.auris|0|2|4|1|UNUSED|0
 make_fake_tcc_db() {
   local home="$1"
   mkdir -p "$home/Library/Developer/CoreSimulator/Devices/fake-sim/data/Library/TCC"
   sqlite3 "$home/Library/Developer/CoreSimulator/Devices/fake-sim/data/Library/TCC/TCC.db" \
-    "CREATE TABLE access (service TEXT NOT NULL, client TEXT NOT NULL, client_type INTEGER NOT NULL, auth_value INTEGER NOT NULL, auth_reason INTEGER NOT NULL, auth_version INTEGER NOT NULL, csreq BLOB, policy_id INTEGER, indirect_object_identifier_type INTEGER, indirect_object_identifier TEXT NOT NULL DEFAULT 'UNUSED', indirect_object_code_identity BLOB, flags INTEGER, last_modified INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)), pid INTEGER, pid_version INTEGER, boot_uuid TEXT NOT NULL DEFAULT 'UNUSED', last_reminded INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)), PRIMARY KEY (service, client, client_type, indirect_object_identifier));"
+    "CREATE TABLE access (service TEXT NOT NULL, client TEXT NOT NULL, client_type INTEGER NOT NULL, auth_value INTEGER NOT NULL, auth_reason INTEGER NOT NULL, auth_version INTEGER NOT NULL, csreq BLOB, policy_id INTEGER, indirect_object_identifier_type INTEGER, indirect_object_identifier TEXT NOT NULL DEFAULT 'UNUSED', indirect_object_code_identity BLOB, flags INTEGER, last_modified INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)), pid INTEGER, pid_version INTEGER, boot_uuid TEXT NOT NULL DEFAULT 'UNUSED', last_reminded INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)), PRIMARY KEY (service, client, client_type, indirect_object_identifier));
+     INSERT INTO access (service,client,client_type,auth_value,auth_reason,auth_version,indirect_object_identifier,flags,last_modified) VALUES ('kTCCServiceMicrophone','fm.auris',0,2,4,1,'UNUSED',0,1794985249);"
+}
+
+# The row the fallback wrote must look like the row simctl wrote: same
+# kTCCService… spelling, client, client_type, auth_value, auth_reason,
+# auth_version, indirect_object_identifier and flags. A row under a name the
+# database does not key (the bare simctl name) fails here, as it would on a
+# device: the column layout can be right while the grant is meaningless.
+check_fallback_row_format() {
+  local home="$1" db
+  db="$home/Library/Developer/CoreSimulator/Devices/fake-sim/data/Library/TCC/TCC.db"
+  local row
+  row=$(sqlite3 "$db" "SELECT service,client,client_type,auth_value,auth_reason,auth_version,indirect_object_identifier,flags FROM access WHERE client='fm.auris' AND service='kTCCServiceSpeechRecognition';")
+  [ "$row" = "kTCCServiceSpeechRecognition|fm.auris|0|2|4|1|UNUSED|0" ] || return 1
+  [ -z "$(sqlite3 "$db" "SELECT client FROM access WHERE service='speech-recognition';")" ] || return 1
+  return 0
 }
 
 make_stub_xcrun() {
@@ -58,6 +77,7 @@ run_case() {
     echo 'HOME='"\"$dir\""'/home'
     # The real functions verbatim; their xcrun calls are unqualified, so the
     # stub earlier in PATH replaces them.
+    awk '/^tcc_service_name\(\) \{/{f=1} f{print} f && /^\}$/{exit}' "$SCRIPT"
     awk '/^tcc_grant\(\) \{/{f=1} f{print} f && /^\}$/{exit}' "$SCRIPT"
     awk '/^grant_test_permissions\(\) \{/{f=1} f{print} f && /^\}$/{exit}' "$SCRIPT"
     echo 'set +e'
@@ -108,6 +128,7 @@ STUB
     echo 'set -euo pipefail'
     echo 'SIMULATOR_ID=fake-sim'
     echo 'HOME='""$dir""'/home'
+    awk '/^tcc_service_name\(\) \{/{f=1} f{print} f && /^\}$/{exit}' "$SCRIPT"
     awk '/^tcc_grant\(\) \{/{f=1} f{print} f && /^\}$/{exit}' "$SCRIPT"
     awk '/^grant_test_permissions\(\) \{/{f=1} f{print} f && /^\}$/{exit}' "$SCRIPT"
     echo 'set +e'
@@ -118,6 +139,10 @@ STUB
   local ok=0
   grep -q "GRANTS_RC=$want" "$dir/out.txt" || ok=1
   grep -q "$want_text" "$dir/out.txt" || ok=1
+  if [ "$want" = 0 ] && ! check_fallback_row_format "$dir/home"; then
+    echo "        the inserted row does not match the row simctl writes"
+    ok=1
+  fi
   report "$ok" "$name"
   sed 's/^/        /' "$dir/out.txt" | tail -3
   rm -rf "$dir"

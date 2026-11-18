@@ -439,13 +439,25 @@ fi
 # fresh erase, the microphone grant lands but speech-recognition keeps failing
 # with EPERM even minutes later, on a booted device with the app installed —
 # the row inserted directly is identical in shape to the one simctl writes.
+# simctl names and TCC database service names differ: the database keys rows
+# under the kTCCService… spellings (read off this machine's own device), so
+# the fallback maps before writing and verifying.
+tcc_service_name() {
+  case "$1" in
+    microphone) echo kTCCServiceMicrophone ;;
+    speech-recognition) echo kTCCServiceSpeechRecognition ;;
+    *) return 1 ;;
+  esac
+}
+
 tcc_grant() {
-  local service="$1" bundle="$2" db
+  local service="$1" bundle="$2" db tcc_service
+  tcc_service=$(tcc_service_name "$service") || { echo "no TCC name known for $service"; return 1; }
   db="$HOME/Library/Developer/CoreSimulator/Devices/$SIMULATOR_ID/data/Library/TCC/TCC.db"
   [ -f "$db" ] || { echo "no TCC database at $db"; return 1; }
-  sqlite3 "$db" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version,indirect_object_identifier,flags,last_modified) VALUES ('$service','$bundle',0,2,4,1,'UNUSED',0,CAST(strftime('%s','now') AS INTEGER));" || return 1
-  [ "$(sqlite3 "$db" "SELECT auth_value FROM access WHERE service='$service' AND client='$bundle';")" = 2 ] \
-    || { echo "TCC row for $service did not verify"; return 1; }
+  sqlite3 "$db" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version,indirect_object_identifier,flags,last_modified) VALUES ('$tcc_service','$bundle',0,2,4,1,'UNUSED',0,CAST(strftime('%s','now') AS INTEGER));" || return 1
+  [ "$(sqlite3 "$db" "SELECT auth_value FROM access WHERE service='$tcc_service' AND client='$bundle';")" = 2 ] \
+    || { echo "TCC row for $tcc_service did not verify"; return 1; }
   return 0
 }
 
