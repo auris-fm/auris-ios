@@ -45,17 +45,45 @@ final class ModelDownloader {
         return .success(())
     }
 
+    /// One lock per final path: concurrent callers for the same asset serialize, so only one
+    /// writer ever owns the `.tmp` and the rename. Different assets download in parallel.
+    private static let pathLocksRoot = NSLock()
+    private static var pathLocks: [String: NSLock] = [:]
+
+    private static func lock(for path: String) -> NSLock {
+        pathLocksRoot.lock()
+        defer { pathLocksRoot.unlock() }
+        if let existing = pathLocks[path] { return existing }
+        let created = NSLock()
+        pathLocks[path] = created
+        return created
+    }
+
+    /// Reads `finalURL` and checks it against `sha256` when a hash is pinned. An un-pinned
+    /// asset cannot be verified, so it reports valid.
+    private func existingFileMatchesPin(_ finalURL: URL, sha256: String) -> Bool {
+        if sha256.isEmpty { return true }
+        guard let data = try? Data(contentsOf: finalURL) else { return false }
+        let digest = SHA256.hash(data: data)
+        let computed = digest.compactMap { String(format: "%02x", $0) }.joined()
+        return computed == sha256
+    }
+
     func download(url: URL, sha256: String, to directory: URL) async -> Result<Void, Error> {
         let tmpURL = directory.appendingPathComponent(url.lastPathComponent + ".tmp")
         let finalURL = directory.appendingPathComponent(url.lastPathComponent)
+        let pathLock = Self.lock(for: finalURL.path)
+        pathLock.lock()
+        defer { pathLock.unlock() }
 
-        // Skip when the final file is already present. Mirrors the Android `downloadFile`:
-        // an existing asset is not re-fetched (when a hash is pinned and mismatches, the
-        // caller should delete and re-request; for un-pinned assets an existing file is
-        // treated as good).
+        // Skip when the final file is already present AND good. A pinned asset is verified
+        // against its hash; a corrupt or truncated file is deleted and re-downloaded instead
+        // of being trusted forever. Un-pinned assets keep the old trust behaviour.
         if FileManager.default.fileExists(atPath: finalURL.path) {
-            return .success(())
-        }
+            if existingFileMatchesPin(finalURL, sha256: sha256) {
+                return .success(())
+            }
+            try? FileManager.default.removeItem(at: finalURL)
         }
 
         do {
