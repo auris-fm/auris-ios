@@ -22,7 +22,13 @@ final class ModelDownloader {
         return URLSession(configuration: config)
     }()
 
-    private var session: URLSession { Self.session }
+    private let sessionOverride: URLSession?
+
+    init(session: URLSession? = nil) {
+        self.sessionOverride = session
+    }
+
+    private var session: URLSession { sessionOverride ?? Self.session }
 
     /// Downloads every file in `files` into `directory` (creating it if needed), applying the
     /// per-file download contract above. Short-circuits on the first failure.
@@ -49,6 +55,7 @@ final class ModelDownloader {
         // treated as good).
         if FileManager.default.fileExists(atPath: finalURL.path) {
             return .success(())
+        }
         }
 
         do {
