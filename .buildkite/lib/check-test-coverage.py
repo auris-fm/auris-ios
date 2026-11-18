@@ -125,12 +125,6 @@ SIGNED_HOST = os.environ.get("AURIS_SIGNED_HOST", "1") == "1"
 # here fails the run, and a named test that starts passing fails it too, so the
 # list cannot outlive the defects it describes. Empty is the intended state.
 KNOWN_FAILURES = {
-    # The successor is refused where the test expects it to be admitted, so the
-    # stop and cleanup it then asserts never happen.
-    "CloudRouteSupersedeTests/testSuccessorAdmissionAwaitsPredecessorQuiescence":
-        "successor admission is refused instead of waiting for the predecessor",
-    "CloudRouteSupersedeTests/testSupersededCleanupAwaitsItsCapturedRetireIdentity":
-        "superseded cleanup is never reached because the successor is refused",
 }
 
 # Tests that fail in some runs and pass in others. Either result is accepted, and
