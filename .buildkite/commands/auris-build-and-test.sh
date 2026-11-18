@@ -169,6 +169,13 @@ install_exit_trap() {
 }
 install_exit_trap
 
+# Long steps run in the background under wait so a cancelling signal
+# interrupts wait and the trap runs at once; this includes the self-tests,
+# some of which sleep for tens of seconds. The caller keeps its own
+# status capture ("& wait" inherits nothing — wait returns the step's
+# status, and the surrounding set +e/-e pair records it as before).
+run_bg() { "$@" & wait $!; }
+
 echo "--- :llama: Building the pinned llama.cpp archives"
 # The whole pipeline runs in the background so a cancelling SIGTERM
 # interrupts wait and runs the trap at once; in the foreground the trap would
@@ -706,7 +713,7 @@ echo "--- :mag: Checking the build watchdog itself"
 # one must be left alone. Uses the watchdog body from this script, like the test
 # watchdog self-test below.
 set +e
-bash .buildkite/lib/test-build-watchdog.sh
+run_bg bash .buildkite/lib/test-build-watchdog.sh
 BUILD_WATCHDOG_SELFTEST_STATUS=$?
 set -e
 
@@ -714,7 +721,7 @@ echo "--- :mag: Checking that a cancel still cleans up"
 # Buildkite's job-wide timeout cancels by signalling the job. The exit cleanup
 # must run on that path too, not only on a normal exit.
 set +e
-bash .buildkite/lib/test-cancel-cleanup.sh
+run_bg bash .buildkite/lib/test-cancel-cleanup.sh
 CANCEL_SELFTEST_STATUS=$?
 set -e
 
@@ -722,7 +729,7 @@ echo "--- :mag: Checking the Interface Builder cleanup itself"
 # A recorded process must be stopped, an unrecorded same-named process must
 # survive, a reused pid must not be killed, and survivors must fail the run.
 set +e
-bash .buildkite/lib/test-ib-processes.sh
+run_bg bash .buildkite/lib/test-ib-processes.sh
 IB_SELFTEST_STATUS=$?
 set -e
 
@@ -732,7 +739,7 @@ echo "--- :mag: Checking the grants step itself"
 # grant function against a stub xcrun: a service that recovers must be granted,
 # one that never recovers must give up with a reason.
 set +e
-bash .buildkite/lib/test-grants.sh
+run_bg bash .buildkite/lib/test-grants.sh
 GRANTS_SELFTEST_STATUS=$?
 set -e
 
@@ -740,7 +747,7 @@ echo "--- :mag: Checking the watchdog itself"
 # Each way the watchdog can stop a run is proved against a stub, using the
 # watchdog body from this script rather than a copy of it.
 set +e
-bash .buildkite/lib/test-watchdog.sh
+run_bg bash .buildkite/lib/test-watchdog.sh
 WATCHDOG_SELFTEST_STATUS=$?
 set -e
 
@@ -749,7 +756,7 @@ echo "--- :mag: Checking what reaches the live log"
 # is only safe if it keeps every line a verdict or a diagnosis is read from, which
 # these cases assert against the expression this script actually uses.
 set +e
-bash .buildkite/lib/test-live-log-filter.sh
+run_bg bash .buildkite/lib/test-live-log-filter.sh
 FILTER_SELFTEST_STATUS=$?
 set -e
 
@@ -760,7 +767,7 @@ echo "--- :mag: Checking the coverage guard itself"
 # would otherwise hide the coverage verdict and the artifacts, which are what say
 # what the run actually did.
 set +e
-python3 .buildkite/lib/test_check_test_coverage.py "$RESULT_BUNDLE" "$LOG_DIR/test.log"
+run_bg python3 .buildkite/lib/test_check_test_coverage.py "$RESULT_BUNDLE" "$LOG_DIR/test.log"
 SELFTEST_STATUS=$?
 set -e
 
@@ -770,7 +777,7 @@ echo "--- :mag: Checking that the whole plan ran"
 # status is reported separately so a coverage gap is not hidden by a test failure
 # and a test failure is not excused by coverage being complete.
 set +e
-python3 .buildkite/lib/check-test-coverage.py "$RESULT_BUNDLE" --log "$LOG_DIR/test.log"
+run_bg python3 .buildkite/lib/check-test-coverage.py "$RESULT_BUNDLE" --log "$LOG_DIR/test.log"
 COVERAGE_STATUS=$?
 set -e
 
