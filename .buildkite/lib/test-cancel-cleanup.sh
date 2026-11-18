@@ -11,11 +11,11 @@ LIB="$(cd "$(dirname "$0")" && pwd)/ib-processes.sh"
 source "$LIB"
 
 extract_traps() {
-  # on_exit, the install function and the sentinel, verbatim.
+  # on_exit and the install function, verbatim.
   # shutdown_simulator is not extracted: the test overrides it below with an
   # observable stub, and sourcing the pipeline's own definition would
   # overwrite the stub.
-  for fn in cleanup_everything on_exit install_exit_trap install_cleanup_sentinel stop_cleanup_sentinel; do
+  for fn in cleanup_everything on_exit install_exit_trap; do
     # The closing brace check covers single-line functions too (a lone "}"
     # or a "; }" ending) — without that, extracting a one-liner would dump
     # the rest of the pipeline, call lines included, into traps.sh.
@@ -28,7 +28,7 @@ extract_traps() {
   done
 }
 
-if [ "${1:-}" = "--child-sentinel" ]; then
+if [ "${1:-}" = "--child-cancel" ]; then
   dir_child="$2"
   record="$dir_child/rec.tsv"
   LOG_DIR="$dir_child"
@@ -39,12 +39,11 @@ if [ "${1:-}" = "--child-sentinel" ]; then
   extract_traps > "$dir_child/traps.sh"
   # shellcheck disable=SC1090
   source "$dir_child/traps.sh"
-  install_cleanup_sentinel
-  # Block on a FOREGROUND command: bash defers the shell's own traps until it
-  # returns, so only the sentinel can react to a group signal here. This is
-  # the state the cancelled job was really in.
-  sleep 300
-  stop_cleanup_sentinel
+  install_exit_trap
+  # Block in a LONG STEP the way the pipeline does: a backgrounded command
+  # under wait, interruptible by a signal, with the trap running at once.
+  sleep 300 &
+  wait $!
   exit 0
 fi
 
@@ -61,19 +60,20 @@ if [ "${1:-}" = "--child" ]; then
   # shellcheck disable=SC1090
   source "$dir_child/traps.sh"
   install_exit_trap
-  # Wait to be signalled, like a job mid-run. The backgrounded sleep plus wait
-  # is a state where bash does run its own trap on SIGTERM.
+  # Wait to be signalled, like a job mid-run. Same long-step shape as the
+  # cancel case; the same single-shell path as the first case.
   sleep 300 &
   wait $!
   exit 0
 fi
 
-# The sentinel must clean up when the signal hits while the main script is
-# blocked inside a foreground command — where bash will not run its own traps.
+# The trap must run when the signal hits while the script is blocked in a
+# long step — a background command under wait, the shape every long step in
+# the pipeline uses.
 # The child here blocks on a foreground sleep the way the real pipeline blocks
 # on xcodebuild, and the signal goes to the whole process group, the way
 # Buildkite cancels a job.
-run_sentinel_case() {
+run_cancel_case() {
   local name="$1"
   local dir; dir=$(mktemp -d)
   mkdir -p "$dir/bin"
@@ -87,15 +87,15 @@ run_sentinel_case() {
   # no setsid), so the kill below reaches the child's group only — the same
   # shape as Buildkite signalling a job group.
   python3 -c 'import os, sys; os.setpgid(0, 0); os.execvp(sys.argv[1], sys.argv[1:])' \
-    bash "$0" --child-sentinel "$dir" >/dev/null 2>&1 &
+    bash "$0" --child-cancel "$dir" >/dev/null 2>&1 &
   local job=$!
   sleep 2
   # Signal the group, not the shell: the shell is inside a foreground command
   # and would defer its own trap.
   kill -TERM -- "-$job" 2>/dev/null
-  # The main shell has no TERM trap, so it dies at once; the sentinel then
-  # cleans up, which includes ib_cleanup's grace period. Wait on the effect,
-  # not on a pid.
+  # The main shell dies on the signal; the trap's cleanup, which includes
+  # ib_cleanup's grace period, finishes while the parent watches the effect.
+  # Wait on the effect, not on a pid.
   local waited=0
   while [ "$waited" -lt 40 ]; do
     [ -f "$dir/shutdown-called" ] && break
@@ -157,10 +157,10 @@ else
 fi
 rm -rf "$dir"
 
-run_sentinel_case "a group-wide SIGTERM mid-command still cleans up (the sentinel)"
-sentinel_rc=$?
+run_cancel_case "a group-wide SIGTERM mid-step cleans up: trap runs, no deferral"
+cancel_rc=$?
 
-if [ "$ok" -eq 0 ] && [ "$sentinel_rc" -eq 0 ]; then
+if [ "$ok" -eq 0 ] && [ "$cancel_rc" -eq 0 ]; then
   echo "cancel-cleanup self-test: 2 passed, 0 failed"
   exit 0
 fi

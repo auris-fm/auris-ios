@@ -147,56 +147,44 @@ cleanup_everything() {
   shutdown_simulator
 }
 
+# on_exit guards itself: the TERM trap runs it and then exits, which would
+# fire the EXIT trap again. Cleanup is idempotent in effect but its report
+# must not be written twice.
 on_exit() {
+  [ "${CLEANUP_DONE:-}" = 1 ] && return 0
+  CLEANUP_DONE=1
   cleanup_everything
 }
 # The trap install lives in a function so the cancel self-test can run the
 # pipeline's own trap line and handler, not a re-typed copy that could drift.
-install_exit_trap() { trap on_exit EXIT; }
-
-# A bash trap does not run while a foreground command is executing — it waits
-# for the command to finish. A cancelled job is SIGTERMed mid-command and
-# SIGKILLed after the agent's grace period, so the EXIT trap alone lost the
-# cleanup race: the cancelled run left no ib-leftovers.txt at all. This
-# sentinel is a separate process in the same process group; a group-wide
-# SIGTERM reaches it immediately even while the main script is blocked, and it
-# runs the same cleanup. The main script kills it on every normal exit, so the
-# two never both run to completion.
-install_cleanup_sentinel() {
-  (
-    trap 'cleanup_everything; exit 0' TERM INT HUP
-    # The sleep runs in the background so the trap is not deferred: a signal
-    # interrupts wait immediately, while it would wait out a foreground sleep.
-    while :; do sleep 3600 & wait $!; done
-  ) &
-  CLEANUP_SENTINEL_PID=$!
-}
-stop_cleanup_sentinel() {
-  [ -n "${CLEANUP_SENTINEL_PID:-}" ] && kill "$CLEANUP_SENTINEL_PID" 2>/dev/null
-  wait "${CLEANUP_SENTINEL_PID:-0}" 2>/dev/null || true
-  CLEANUP_SENTINEL_PID=""
-}
-
-on_exit() {
-  stop_cleanup_sentinel
-  cleanup_everything
+# The TERM/INT traps matter as much as the EXIT one: a bash trap does not run
+# while a foreground command executes, so a cancelled job — SIGTERMed
+# mid-command, SIGKILLed after the agent's grace period — would otherwise die
+# without any cleanup. Every long step below runs as `cmd & wait $!`, and a
+# signal interrupts wait immediately, so the TERM trap runs at once and the
+# EXIT trap is skipped by the guard.
+install_exit_trap() {
+  trap on_exit EXIT
+  trap 'on_exit; exit 143' TERM INT
 }
 install_exit_trap
-install_cleanup_sentinel
 
 echo "--- :llama: Building the pinned llama.cpp archives"
-./scripts/build-llama-ios.sh 2>&1 | tee "$LOG_DIR/llama.log"
+# The whole pipeline runs in the background so a cancelling SIGTERM
+# interrupts wait and runs the trap at once; in the foreground the trap would
+# be deferred until the step ended, past Buildkite's kill grace.
+{ ./scripts/build-llama-ios.sh 2>&1 | tee "$LOG_DIR/llama.log"; } & wait $!
 
 echo "--- :swift: Resolving packages"
 # Resolution is a separate step so a network or pin failure is reported as
 # itself. The test invocation below disables automatic resolution: re-resolving
 # on every invocation costs minutes and can change versions mid-run.
-xcodebuild -resolvePackageDependencies \
+{ xcodebuild -resolvePackageDependencies \
   -project podcasts.xcodeproj \
   -scheme pocketcasts \
   -derivedDataPath "$DERIVED" \
   -clonedSourcePackagesDirPath "$DERIVED/SourcePackages" \
-  2>&1 | tee "$LOG_DIR/resolve.log"
+  2>&1 | tee "$LOG_DIR/resolve.log"; } & wait $!
 
 echo "--- :closed_lock_with_key: Generating the credentials stub"
 # The app's credential build phase requires either shared secrets (which this
