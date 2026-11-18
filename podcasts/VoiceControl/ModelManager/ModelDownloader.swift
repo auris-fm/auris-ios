@@ -1,14 +1,13 @@
 import Foundation
 import CryptoKit
+import os.log
 
 /// Downloads model assets with the spec's download contract: resumable HTTP (Range header
 /// against an existing `.tmp`, appending partial bytes), SHA-256 verification **when a hash is
 /// pinned**, and an atomic `.tmp` → final rename.
 ///
-/// SHA-256 is only enforced when `sha256` is non-empty. Several assets (notably the
-/// hf-mirror.com SenseVoice/Canary models) do not yet carry a pinned hash, so those
-/// downloads still get resumable + atomic semantics but no integrity check. **TODO(ASR-debt):
-/// pin the SHA-256 for every remote model asset so integrity is enforced on all downloads.**
+/// SHA-256 is enforced whenever `sha256` is non-empty; every remote model asset carries a
+/// pin. An empty pin keeps resumable + atomic semantics without an integrity check.
 final class ModelDownloader {
 
     /// A single session shared by every `ModelDownloader` instance. Model downloads happen
@@ -45,37 +44,100 @@ final class ModelDownloader {
         return .success(())
     }
 
-    /// One lock per final path: concurrent callers for the same asset serialize, so only one
-    /// writer ever owns the `.tmp` and the rename. Different assets download in parallel.
-    private static let pathLocksRoot = NSLock()
-    private static var pathLocks: [String: NSLock] = [:]
+    /// One in-flight download per final path: concurrent callers for the same asset await the
+    /// running task instead of starting a second writer on the same `.tmp`. Different assets
+    /// download in parallel. An actor (not a lock) because the work spans `await`s.
+    private actor PathDownloads {
+        static let shared = PathDownloads()
+        private var running: [String: Task<Result<Void, Error>, Never>] = [:]
 
-    private static func lock(for path: String) -> NSLock {
-        pathLocksRoot.lock()
-        defer { pathLocksRoot.unlock() }
-        if let existing = pathLocks[path] { return existing }
-        let created = NSLock()
-        pathLocks[path] = created
-        return created
+        func run(path: String, _ work: @escaping @Sendable () async -> Result<Void, Error>) async -> Result<Void, Error> {
+            if let existing = running[path] {
+                // A second caller waits for the first download, then re-checks the file itself.
+                _ = await existing.value
+                return await work()
+            }
+            let task = Task { await work() }
+            running[path] = task
+            let result = await task.value
+            running[path] = nil
+            return result
+        }
+    }
+
+    /// Streams the file's SHA-256 in 1 MiB chunks so a 239 MB model is never read into RAM
+    /// whole. Returns nil when the file cannot be read.
+    private func streamedSHA256(of url: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while true {
+            guard let chunk = try? handle.read(upToCount: 1 << 20), !chunk.isEmpty else { break }
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().compactMap { String(format: "%02x", $0) }.joined()
+    }
+
+    /// A verified-file marker: the pin, size and modification date at the moment the file
+    /// passed its hash check. On later starts a matching marker skips the full hash — hashing
+    /// 239 MB on every launch would add seconds to the first voice start. Any difference (or a
+    /// missing marker) falls back to the full streamed hash.
+    private struct VerifiedMarker: Codable {
+        let sha256: String
+        let size: Int
+        let mtime: TimeInterval
+    }
+
+    private func markerURL(for finalURL: URL) -> URL {
+        finalURL.appendingPathExtension("verified")
+    }
+
+    private func markerMatches(_ finalURL: URL, sha256: String) -> Bool {
+        guard let data = try? Data(contentsOf: markerURL(for: finalURL)),
+              let marker = try? JSONDecoder().decode(VerifiedMarker.self, from: data),
+              marker.sha256 == sha256,
+              let attrs = try? FileManager.default.attributesOfItem(atPath: finalURL.path),
+              let size = attrs[.size] as? Int, size == marker.size,
+              let mtime = attrs[.modificationDate] as? Date,
+              abs(mtime.timeIntervalSince1970 - marker.mtime) < 1 else { return false }
+        return true
+    }
+
+    private func writeMarker(_ finalURL: URL, sha256: String) {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: finalURL.path),
+              let size = attrs[.size] as? Int,
+              let mtime = attrs[.modificationDate] as? Date else { return }
+        let marker = VerifiedMarker(sha256: sha256, size: size, mtime: mtime.timeIntervalSince1970)
+        if let data = try? JSONEncoder().encode(marker) {
+            try? data.write(to: markerURL(for: finalURL))
+        }
     }
 
     /// Reads `finalURL` and checks it against `sha256` when a hash is pinned. An un-pinned
-    /// asset cannot be verified, so it reports valid.
+    /// asset cannot be verified, so it reports valid. A matching verified-marker skips the
+    /// hash; otherwise the file is hashed in full and a fresh marker written on success.
     private func existingFileMatchesPin(_ finalURL: URL, sha256: String) -> Bool {
         if sha256.isEmpty { return true }
-        guard let data = try? Data(contentsOf: finalURL) else { return false }
-        let digest = SHA256.hash(data: data)
-        let computed = digest.compactMap { String(format: "%02x", $0) }.joined()
-        return computed == sha256
+        if markerMatches(finalURL, sha256: sha256) { return true }
+        let start = Date()
+        let computed = streamedSHA256(of: finalURL)
+        let elapsed = Date().timeIntervalSince(start)
+        os_log(.info, "ModelDownloader: hashed existing %{public}@ in %.2f s", finalURL.lastPathComponent, elapsed)
+        guard computed == sha256 else { return false }
+        writeMarker(finalURL, sha256: sha256)
+        return true
     }
 
     func download(url: URL, sha256: String, to directory: URL) async -> Result<Void, Error> {
         let tmpURL = directory.appendingPathComponent(url.lastPathComponent + ".tmp")
         let finalURL = directory.appendingPathComponent(url.lastPathComponent)
-        let pathLock = Self.lock(for: finalURL.path)
-        pathLock.lock()
-        defer { pathLock.unlock() }
+        return await PathDownloads.shared.run(path: finalURL.path) { [weak self] in
+            guard let self else { return .failure(ModelError.hashMismatch) }
+            return await self.downloadOne(url: url, sha256: sha256, tmpURL: tmpURL, finalURL: finalURL, directory: directory)
+        }
+    }
 
+    private func downloadOne(url: URL, sha256: String, tmpURL: URL, finalURL: URL, directory: URL) async -> Result<Void, Error> {
         // Skip when the final file is already present AND good. A pinned asset is verified
         // against its hash; a corrupt or truncated file is deleted and re-downloaded instead
         // of being trusted forever. Un-pinned assets keep the old trust behaviour.
@@ -106,10 +168,7 @@ final class ModelDownloader {
             // download still proceeds with resumable + atomic semantics; pin hashes for
             // assets that have one so integrity is enforced.
             if !sha256.isEmpty {
-                let data = try Data(contentsOf: tmpURL)
-                let digest = SHA256.hash(data: data)
-                let computedHash = digest.compactMap { String(format: "%02x", $0) }.joined()
-                guard computedHash == sha256 else {
+                guard streamedSHA256(of: tmpURL) == sha256 else {
                     try? FileManager.default.removeItem(at: tmpURL)
                     throw ModelError.hashMismatch
                 }
@@ -120,6 +179,7 @@ final class ModelDownloader {
                 try FileManager.default.removeItem(at: finalURL)
             }
             try FileManager.default.moveItem(at: tmpURL, to: finalURL)
+            if !sha256.isEmpty { writeMarker(finalURL, sha256: sha256) }
             return .success(())
         } catch {
             return .failure(error)

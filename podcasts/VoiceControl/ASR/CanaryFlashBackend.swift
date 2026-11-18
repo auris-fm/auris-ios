@@ -25,7 +25,7 @@ final class CanaryFlashBackend: AsrBackend {
             files: [
                 // Pinned from the published assets (hf-mirror resolve/main, 2026-11-18); see SenseVoiceBackend.
                 ModelFile(url: URL(string: "\(Self.baseURL)/\(Self.encoderFilename)")!, filename: Self.encoderFilename, sha256: "7a75b4e2a5857a6dcc0819503bbe3fad66943db4a3ccf21d3f27c633667d303f"),
-                ModelFile(url: URL(string: "\(Self.baseURL)/\(Self.decoderFilename)")!, filename: Self.decoderFilename, sha256: "fc28221d2dc3b76170fce11530e9b6f4df6454d2a94f51090d0cff60c443603a"),
+                ModelFile(url: URL(string: "\(Self.baseURL)/\(Self.decoderFilename)")!, filename: Self.decoderFilename, sha256: "e41a2ab9c0c2fe81a1e8ade5a45fb02a74bc4db7d1f91b89a54a25e2cf79cba2"),
                 ModelFile(url: URL(string: "\(Self.baseURL)/\(Self.tokensFilename)")!, filename: Self.tokensFilename, sha256: "2dae6fc7815f9640645e0c765522b278ee0cef49b482d91f6913e334628d3e77"),
             ],
             targetDir: "canary-flash-model"
@@ -158,8 +158,7 @@ final class CanaryFlashBackend: AsrBackend {
 
     /// Downloads each ModelFile into the model dir if not already present. Routed through
     /// `ModelDownloader` so the spec's download contract applies (resumable + atomic rename,
-    /// SHA-256 verification when a hash is pinned). TODO(ASR-debt): pin SHA-256 for the
-    /// Canary Flash assets (currently unset) so integrity is enforced on download.
+    /// SHA-256 verification against each file's pin).
     private func downloadModels() async throws {
         // `download(files:to:)` short-circuits on first failure and creates the directory.
         let result = await ModelDownloader().download(files: requiredModel.files, to: URL(fileURLWithPath: modelDir))

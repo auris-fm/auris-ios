@@ -4,8 +4,8 @@ import XCTest
 
 /// The download contract for a PINNED asset: an existing final file is checked against its
 /// pin, a corrupt file is replaced, and one final file is produced by one download even when
-/// two callers race. These tests pin the holes that let a corrupt sensevoice model reach
-/// onnxruntime (`ModelProto does not have a graph` in build #29).
+/// two callers race. These tests pin the holes that let a corrupt model file reach
+/// onnxruntime, which then fails to load its graph.
 final class ModelDownloaderPinTests: XCTestCase {
 
     /// Serves registered byte payloads on `http://model-pin.test/...`. Counts requests so a
@@ -117,5 +117,50 @@ final class ModelDownloaderPinTests: XCTestCase {
         XCTAssertEqual(final, goodBytes, "the final file carries the pinned bytes")
         XCTAssertEqual(StubURLProtocol.count(for: path), 1,
                        "one final file comes from one download, not two interleaved writers")
+    }
+
+    /// An existing GOOD pinned file must be trusted with ZERO requests — otherwise a check
+    /// that always re-downloads would pass the corrupt-replacement test too.
+    func testExistingGoodPinnedFileMakesZeroRequests() async throws {
+        let dir = try makeDir()
+        try goodBytes.write(to: dir.appendingPathComponent("model.int8.onnx"))
+        StubURLProtocol.reset(payloads: [path: goodBytes])
+        let downloader = makeDownloader()
+
+        let result = await downloader.download(url: url, sha256: sha(goodBytes), to: dir)
+
+        guard case .success = result else { return XCTFail("download failed: \(result)") }
+        XCTAssertEqual(StubURLProtocol.count(for: path), 0, "a good pinned file is not re-downloaded")
+        let final = try Data(contentsOf: dir.appendingPathComponent("model.int8.onnx"))
+        XCTAssertEqual(final, goodBytes, "the good file is left untouched")
+    }
+
+    /// A verified-marker lets later starts skip the full hash — but a file CHANGED after the
+    /// marker was written must still be caught: the marker's size/mtime no longer match, so
+    /// the file is hashed in full, fails its pin, and is replaced.
+    func testChangedFileWithStaleMarkerIsCaughtAndReplaced() async throws {
+        let dir = try makeDir()
+        let finalURL = dir.appendingPathComponent("model.int8.onnx")
+        try goodBytes.write(to: finalURL)
+        StubURLProtocol.reset(payloads: [path: goodBytes])
+        let downloader = makeDownloader()
+
+        // First call verifies the good file and writes the marker.
+        let first = await downloader.download(url: url, sha256: sha(goodBytes), to: dir)
+        guard case .success = first else { return XCTFail("first failed: \(first)") }
+        XCTAssertEqual(StubURLProtocol.count(for: path), 0, "premise: the good file was trusted")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dir.appendingPathComponent("model.int8.onnx.verified").path),
+                      "premise: a verified marker was written")
+
+        // Corrupt the file behind the marker's back (same length would still change mtime;
+        // here the content changes too, so both the marker check and the hash must catch it).
+        try corruptBytes.write(to: finalURL)
+        StubURLProtocol.reset(payloads: [path: goodBytes])
+
+        let second = await downloader.download(url: url, sha256: sha(goodBytes), to: dir)
+        guard case .success = second else { return XCTFail("second failed: \(second)") }
+        let final = try Data(contentsOf: finalURL)
+        XCTAssertEqual(final, goodBytes, "the changed file is replaced despite the stale marker")
+        XCTAssertEqual(StubURLProtocol.count(for: path), 1, "the stale marker forced a real re-download")
     }
 }
