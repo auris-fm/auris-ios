@@ -17,13 +17,21 @@ final class ModelDownloaderPinTests: XCTestCase {
         static var startDelayMs: Int = 0
         /// When true, a Range request whose offset is at/past the payload length gets 416.
         static var honorRange: Bool = false
+        /// When > 0, the first N requests fail with a network error.
+        static var failFirst: Int = 0
+        /// Overlap tracking: how many requests were in flight at once, and the max seen.
+        static var inFlight: Int = 0
+        static var maxInFlight: Int = 0
 
-        static func reset(payloads: [String: Data], startDelayMs: Int = 0, honorRange: Bool = false) {
+        static func reset(payloads: [String: Data], startDelayMs: Int = 0, honorRange: Bool = false, failFirst: Int = 0) {
             lock.lock(); defer { lock.unlock() }
             self.payloads = payloads
             self.requestCount = [:]
             self.startDelayMs = startDelayMs
             self.honorRange = honorRange
+            self.failFirst = failFirst
+            self.inFlight = 0
+            self.maxInFlight = 0
         }
 
         static func count(for path: String) -> Int {
@@ -45,11 +53,26 @@ final class ModelDownloaderPinTests: XCTestCase {
                 return
             }
             let path = url.path
-            let (payload, delay, honorRange) = Self.lock.withLock { (Self.payloads[path], Self.startDelayMs, Self.honorRange) }
             Self.lock.lock()
             Self.requestCount[path, default: 0] += 1
+            let n = Self.requestCount[path]!
+            Self.inFlight += 1
+            Self.maxInFlight = max(Self.maxInFlight, Self.inFlight)
+            let payload = Self.payloads[path]
+            let delay = Self.startDelayMs
+            let honorRange = Self.honorRange
+            let shouldFail = n <= Self.failFirst
             Self.lock.unlock()
+            defer {
+                Self.lock.lock()
+                Self.inFlight -= 1
+                Self.lock.unlock()
+            }
             if delay > 0 { Thread.sleep(forTimeInterval: Double(delay) / 1000.0) }
+            if shouldFail {
+                client?.urlProtocol(self, didFailWithError: URLError(.networkConnectionLost))
+                return
+            }
             guard let data = payload else {
                 client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
                 return
@@ -219,5 +242,27 @@ final class ModelDownloaderPinTests: XCTestCase {
                        "the full-size tmp is verified and renamed, not re-downloaded")
         XCTAssertEqual(StubURLProtocol.count(for: path), 1,
                        "one Range request answered 416, then the hash check — no retry loop")
+    }
+
+    /// Three concurrent callers with the FIRST download failing: the waiters must still
+    /// serialize — one request in flight at a time, never two writers on the same `.tmp`.
+    func testThreeConcurrentCallersWithFirstFailureStillSerialize() async throws {
+        let dir = try makeDir()
+        // The first request fails; the retry inside downloadResumable succeeds. A long delay
+        // widens the window in which an unregistered waiter could start a parallel request.
+        StubURLProtocol.reset(payloads: [path: goodBytes], startDelayMs: 200, failFirst: 1)
+        let downloader = makeDownloader()
+
+        async let a: Result<Void, Error> = downloader.download(url: url, sha256: sha(goodBytes), to: dir)
+        async let b: Result<Void, Error> = downloader.download(url: url, sha256: sha(goodBytes), to: dir)
+        async let c: Result<Void, Error> = downloader.download(url: url, sha256: sha(goodBytes), to: dir)
+        let (ra, rb, rc) = await (a, b, c)
+
+        guard case .success = ra else { return XCTFail("a failed: \(ra)") }
+        guard case .success = rb else { return XCTFail("b failed: \(rb)") }
+        guard case .success = rc else { return XCTFail("c failed: \(rc)") }
+        XCTAssertEqual(try Data(contentsOf: dir.appendingPathComponent("model.int8.onnx")), goodBytes)
+        XCTAssertEqual(StubURLProtocol.maxInFlight, 1,
+                       "never two requests in flight on the same asset, even after a failure")
     }
 }

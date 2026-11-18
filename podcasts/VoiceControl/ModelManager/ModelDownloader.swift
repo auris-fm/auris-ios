@@ -1,6 +1,6 @@
 import Foundation
 import CryptoKit
-import os.log
+import PocketCastsUtils
 
 /// Downloads model assets with the spec's download contract: resumable HTTP (Range header
 /// against an existing `.tmp`, appending partial bytes), SHA-256 verification **when a hash is
@@ -52,15 +52,20 @@ final class ModelDownloader {
         private var running: [String: Task<Result<Void, Error>, Never>] = [:]
 
         func run(path: String, _ work: @escaping @Sendable () async -> Result<Void, Error>) async -> Result<Void, Error> {
-            if let existing = running[path] {
-                // A second caller waits for the first download, then re-checks the file itself.
-                _ = await existing.value
+            // Chain onto whatever is running for this path. Each caller registers ITS OWN
+            // task (which first awaits the predecessor, then does the work), so a later
+            // arrival always sees a registered task and never starts a parallel writer —
+            // even when the predecessor failed. Awaiting inside the actor would deadlock:
+            // the predecessor's cleanup needs the actor, which this call would be holding.
+            let previous = running[path]
+            let task = Task { () -> Result<Void, Error> in
+                if let previous { _ = await previous.value }
                 return await work()
             }
-            let task = Task { await work() }
             running[path] = task
             let result = await task.value
-            running[path] = nil
+            // Remove only our own entry: a later caller may already have chained theirs.
+            if running[path] == task { running[path] = nil }
             return result
         }
     }
@@ -72,7 +77,15 @@ final class ModelDownloader {
         defer { try? handle.close() }
         var hasher = SHA256()
         while true {
-            guard let chunk = try? handle.read(upToCount: 1 << 20), !chunk.isEmpty else { break }
+            let chunk: Data?
+            do {
+                chunk = try handle.read(upToCount: 1 << 20)
+            } catch {
+                // A read error is NOT end of file: hashing a partial read would report a
+                // mismatch and delete a good model. Report "couldn't read" instead.
+                return nil
+            }
+            guard let chunk, !chunk.isEmpty else { break }
             hasher.update(data: chunk)
         }
         return hasher.finalize().compactMap { String(format: "%02x", $0) }.joined()
@@ -116,16 +129,22 @@ final class ModelDownloader {
     /// Reads `finalURL` and checks it against `sha256` when a hash is pinned. An un-pinned
     /// asset cannot be verified, so it reports valid. A matching verified-marker skips the
     /// hash; otherwise the file is hashed in full and a fresh marker written on success.
-    private func existingFileMatchesPin(_ finalURL: URL, sha256: String) -> Bool {
-        if sha256.isEmpty { return true }
-        if markerMatches(finalURL, sha256: sha256) { return true }
+    /// Three outcomes: verified (skip), mismatch (delete + re-download), unreadable (fail
+    /// this start WITHOUT deleting — a read error is not evidence the file is bad).
+    private enum ExistingCheck { case verified, mismatch, unreadable }
+
+    private func checkExistingFile(_ finalURL: URL, sha256: String) -> ExistingCheck {
+        if sha256.isEmpty { return .verified }
+        if markerMatches(finalURL, sha256: sha256) { return .verified }
         let start = Date()
         let computed = streamedSHA256(of: finalURL)
         let elapsed = Date().timeIntervalSince(start)
-        os_log(.info, "ModelDownloader: hashed existing %{public}@ in %.2f s", finalURL.lastPathComponent, elapsed)
-        guard computed == sha256 else { return false }
+        FileLog.shared.addMessage(String(format: "[ModelDownloader] hashed existing %@ in %.2f s",
+                                         finalURL.lastPathComponent, elapsed))
+        guard let computed else { return .unreadable }
+        guard computed == sha256 else { return .mismatch }
         writeMarker(finalURL, sha256: sha256)
-        return true
+        return .verified
     }
 
     func download(url: URL, sha256: String, to directory: URL) async -> Result<Void, Error> {
@@ -142,12 +161,17 @@ final class ModelDownloader {
         // against its hash; a corrupt or truncated file is deleted and re-downloaded instead
         // of being trusted forever. Un-pinned assets keep the old trust behaviour.
         if FileManager.default.fileExists(atPath: finalURL.path) {
-            if existingFileMatchesPin(finalURL, sha256: sha256) {
+            switch checkExistingFile(finalURL, sha256: sha256) {
+            case .verified:
                 return .success(())
+            case .unreadable:
+                // Could not read the file to verify it: fail this start, keep the file.
+                return .failure(ModelError.downloadFailed)
+            case .mismatch:
+                // The marker describes the OLD file; it must not sit next to its replacement.
+                try? FileManager.default.removeItem(at: markerURL(for: finalURL))
+                try? FileManager.default.removeItem(at: finalURL)
             }
-            // The marker describes the OLD file; it must not sit next to its replacement.
-            try? FileManager.default.removeItem(at: markerURL(for: finalURL))
-            try? FileManager.default.removeItem(at: finalURL)
         }
 
         do {
