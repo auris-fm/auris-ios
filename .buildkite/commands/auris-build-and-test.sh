@@ -120,23 +120,30 @@ echo "Using simulator $CI_SIMULATOR_NAME ($SIMULATOR_ID)"
 shutdown_simulator() {
   xcrun simctl shutdown "$SIMULATOR_ID" 2>/dev/null || true
 }
-trap shutdown_simulator EXIT
 
-# Start from a clean container. State left by an earlier run — a database, a
-# keychain item, a file in the app's documents — is one way a test passes or fails
-# depending on what ran before it, and the runner has hung after connecting on
-# several runs. Erasing keeps the device (same name and identifier, so nothing
-# else has to change) while removing everything the last run left behind.
-echo "Erasing $CI_SIMULATOR_NAME so no state carries over from the previous run"
-xcrun simctl shutdown "$SIMULATOR_ID" 2>/dev/null || true
-xcrun simctl erase "$SIMULATOR_ID"
-xcrun simctl bootstatus "$SIMULATOR_ID" -b
+# Interface Builder compiles storyboards through helper processes that detach
+# from the build's tree: `ibtoold` reparents to launchd and its `IBAgent-iOS`
+# helpers are its children. On a shared Mac they cannot be found by name, and
+# `ibtoold` ignores TMPDIR (it uses confstr's per-user temp directory, measured),
+# so what identifies them is the tree while it is still intact. Every few seconds
+# while the build runs, every Interface Builder process reachable from this script
+# is recorded with its start time; the cleanup stops exactly that record, leaves
+# anything never tied to this job alive, and names it in the report.
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/ib-processes.sh"
+IB_RECORD="$LOG_DIR/ib-processes.tsv"
+: > "$IB_RECORD"
+IB_CLEANUP_STATUS=0
 
-echo "--- :closed_lock_with_key: Generating the credentials stub"
-# The app's credential build phase requires either shared secrets (which this
-# repository does not have) or this stub. Without it the build fails at that
-# phase, which reads as a code failure rather than a missing input.
-make external_contributor
+# On any exit path: stop the recorded Interface Builder processes (the simulator
+# first, since a wedged helper is released by the runtime going away), then shut
+# the simulator down. Processes never tied to this job are named, never killed.
+on_exit() {
+  ib_cleanup "$IB_RECORD" "$SIMULATOR_ID" 10 >/dev/null 2>&1 || true
+  ib_unrecorded "$IB_RECORD" | sed 's/^/untied Interface Builder process left running: /' \
+    >> "$LOG_DIR/ib-leftovers.txt" 2>/dev/null || true
+  shutdown_simulator
+}
+trap on_exit EXIT
 
 echo "--- :llama: Building the pinned llama.cpp archives"
 ./scripts/build-llama-ios.sh 2>&1 | tee "$LOG_DIR/llama.log"
@@ -152,11 +159,31 @@ xcodebuild -resolvePackageDependencies \
   -clonedSourcePackagesDirPath "$DERIVED/SourcePackages" \
   2>&1 | tee "$LOG_DIR/resolve.log"
 
+echo "--- :closed_lock_with_key: Generating the credentials stub"
+# The app's credential build phase requires either shared secrets (which this
+# repository does not have) or this stub. Without it the build fails at that
+# phase, which reads as a code failure rather than a missing input.
+make external_contributor
+
+# Build BEFORE erasing and booting the simulator. Storyboards are compiled by
+# helpers launched inside the simulator runtime, and a runtime that was just
+# erased may not be ready to launch them: a run hung for nine minutes with every
+# Interface Builder helper wedged in dyld's cache mapping before its own main()
+# ran, invisible to any log reader and unkillable by any signal — the helpers
+# only cleared when the simulator was shut down. Building against the runtime as
+# it stands keeps Interface Builder off a runtime that cannot run its helpers
+# yet; the erase and a bounded readiness wait follow the build, before testing.
 echo "--- :hammer: Building for testing"
-# Built separately so the test host exists before testing starts: its bundle
-# identifier is what the privacy grants below are applied to, and a run that
-# granted them to a guessed id would keep the wait while looking like it had
-# removed it.
+# The build is watched too. A run has hung in Interface Builder for nine minutes
+# with the log frozen and every process idle — the test watchdog below never
+# started, because testing never started. While the build runs, a watchdog subshell
+# watches the log for growth and records which Interface Builder processes appear
+# in this job's tree; the same no-progress rule as the test watchdog applies, with
+# a window well above any single slow compile, and a whole-build cap because the
+# per-test allowances do not cover this phase at all.
+BUILD_PROGRESS_DEADLINE="${BUILDKITE_AURIS_BUILD_PROGRESS_DEADLINE:-300}"
+BUILD_TOTAL_DEADLINE="${BUILDKITE_AURIS_BUILD_TOTAL_DEADLINE:-2700}"
+
 # `|| BUILD_STATUS=$?` rather than reading $? on the next line: errexit is in force
 # here, so a failing build would end the script at this line and none of the report
 # below would print. The failure path is the one that most needs to say something.
@@ -174,14 +201,101 @@ xcodebuild build-for-testing \
   CODE_SIGN_IDENTITY="-" \
   SKIP_LINT=1 \
   > "$LOG_DIR/build.log" 2>&1 || BUILD_STATUS=$?
+BUILD_PID=$!
+
+# Watch the build: kill it on no progress or total time, record Interface Builder
+# processes while the tree is intact either way. The watchdog is a subshell so its
+# verdict can be waited on without confusing it with xcodebuild's exit status.
+(
+  waited=0
+  last_size=0
+  stalled=0
+  while kill -0 "$BUILD_PID" 2>/dev/null; do
+    # Interface Builder daemons detach from the tree as soon as they are spawned,
+    # so the record must be taken while the build is running, repeatedly.
+    ib_record_snapshot "$IB_RECORD" "$$"
+    size=$(wc -c < "$LOG_DIR/build.log" 2>/dev/null || echo 0)
+    if [ "$size" -gt "$last_size" ]; then
+      last_size=$size
+      stalled=0
+    else
+      stalled=$((stalled + 10))
+      if [ "$stalled" -ge "$BUILD_PROGRESS_DEADLINE" ]; then
+        echo "no build output for ${BUILD_PROGRESS_DEADLINE}s: the build stopped making progress." >&2
+        echo "Last build line: $(tail -1 "$LOG_DIR/build.log" 2>/dev/null)" >&2
+        kill "$BUILD_PID" 2>/dev/null
+        exit 4
+      fi
+    fi
+    if [ "$waited" -ge "$BUILD_TOTAL_DEADLINE" ]; then
+      echo "building exceeded ${BUILD_TOTAL_DEADLINE}s in total." >&2
+      kill "$BUILD_PID" 2>/dev/null
+      exit 5
+    fi
+    sleep 10
+    waited=$((waited + 10))
+  done
+) &
+BUILD_WATCHDOG_PID=$!
+wait "$BUILD_PID"
+BUILD_STATUS=$?
+pkill -P "$BUILD_WATCHDOG_PID" 2>/dev/null
+kill "$BUILD_WATCHDOG_PID" 2>/dev/null
+wait "$BUILD_WATCHDOG_PID" 2>/dev/null
+BUILD_WATCHDOG_STATUS=$?
 # The live log gets the tail, not the whole build: this agent streams its log in
 # chunks over a link that drops them, and a run has been lost to upload retries
 # alone. The file keeps everything, so a failure's detail is never only in the
 # stream. On success the tail is the summary; on failure it is where to look.
 tail -n 60 "$LOG_DIR/build.log"
-[ "$BUILD_STATUS" -eq 0 ] || echo "xcodebuild exited $BUILD_STATUS"
+case "$BUILD_WATCHDOG_STATUS" in
+  0) ;;
+  4)
+    echo "--- :warning: Build stopped making progress"
+    echo "No build output for ${BUILD_PROGRESS_DEADLINE}s. Interface Builder helpers from"
+    echo "this build are stopped; any process it started that could not be tied to this"
+    echo "job is left running and named below."
+    ;;
+  5)
+    echo "--- :warning: Building took too long overall"
+    echo "Building was stopped after ${BUILD_TOTAL_DEADLINE}s."
+    ;;
+  *)
+    echo "--- :warning: Build watchdog ended with status $BUILD_WATCHDOG_STATUS"
+    ;;
+esac
+echo "xcodebuild exited $BUILD_STATUS"
 grep -q "BUILD SUCCEEDED\|BUILD FOR TESTING SUCCEEDED" "$LOG_DIR/build.log" || {
   echo "building for testing failed; see $LOG_DIR/build.log"
+  exit 1
+}
+[ "$BUILD_WATCHDOG_STATUS" -eq 0 ] || exit "$BUILD_WATCHDOG_STATUS"
+
+echo "--- :iphone: Erasing the simulator for a clean test container"
+# State left by an earlier run — a database, a keychain item, a file in the app's
+# documents — is one way a test passes or fails depending on what ran before it,
+# and the runner has hung after connecting on several runs. Erasing keeps the
+# device (same name and identifier, so nothing else has to change) while removing
+# everything the last run left behind. This happens after the build (see the
+# comment above the build step), but before anything runs on the device.
+echo "Erasing $CI_SIMULATOR_NAME so no state carries over from the previous run"
+xcrun simctl shutdown "$SIMULATOR_ID" 2>/dev/null || true
+xcrun simctl erase "$SIMULATOR_ID"
+
+# Bootstatus alone does not prove helpers can launch: a previous run hung with
+# every Interface Builder helper wedged in the runtime's dyld cache mapping on a
+# freshly erased device. This wait is bounded so a runtime that never becomes
+# ready fails the job with a reason instead of hanging it.
+SIM_READY=0
+for _ in $(seq 1 60); do
+  if xcrun simctl bootstatus "$SIMULATOR_ID" -b >/dev/null 2>&1; then
+    SIM_READY=1
+    break
+  fi
+  sleep 5
+done
+[ "$SIM_READY" -eq 1 ] || {
+  echo "simulator did not become bootable within 300s of erasing"
   exit 1
 }
 
@@ -359,6 +473,23 @@ case "$WATCHDOG_STATUS" in
     ;;
 esac
 
+echo "--- :mag: Checking the build watchdog itself"
+# A build that stops logging must be killed with a verdict naming why; a healthy
+# one must be left alone. Uses the watchdog body from this script, like the test
+# watchdog self-test below.
+set +e
+bash .buildkite/lib/test-build-watchdog.sh
+BUILD_WATCHDOG_SELFTEST_STATUS=$?
+set -e
+
+echo "--- :mag: Checking the Interface Builder cleanup itself"
+# A recorded process must be stopped, an unrecorded same-named process must
+# survive, a reused pid must not be killed, and survivors must fail the run.
+set +e
+bash .buildkite/lib/test-ib-processes.sh
+IB_SELFTEST_STATUS=$?
+set -e
+
 echo "--- :mag: Checking the watchdog itself"
 # Each way the watchdog can stop a run is proved against a stub, using the
 # watchdog body from this script rather than a copy of it.
@@ -418,15 +549,39 @@ echo "--- :package: Shutting the simulator down"
 shutdown_simulator
 echo "Simulator $CI_SIMULATOR_NAME shut down"
 
+echo "--- :broom: Stopping this build's Interface Builder processes"
+# The record was taken while the build ran. Only recorded processes are stopped,
+# and only if their start time still matches: a reused pid is a different process.
+# The simulator is shut down inside the cleanup first, since a helper wedged in
+# an uninterruptible wait is released by the runtime going away and would
+# otherwise be reported as a survivor that was about to clear on its own.
+if ib_cleanup "$IB_RECORD" "$SIMULATOR_ID" 10; then
+  echo "all recorded Interface Builder processes stopped"
+else
+  echo "some recorded Interface Builder processes survived; see the list above"
+  IB_CLEANUP_STATUS=1
+fi
+# Processes never tied to this job are named, never killed.
+LEFTOVERS="$(ib_unrecorded "$IB_RECORD")"
+if [ -n "$LEFTOVERS" ]; then
+  echo "Interface Builder processes not tied to this job, left running:"
+  echo "$LEFTOVERS" | sed 's/^/  /'
+fi
+
 echo "--- :result: Result"
 echo "xcodebuild exit: $TEST_STATUS"
 echo "coverage check exit: $COVERAGE_STATUS"
 echo "guard self-test exit: $SELFTEST_STATUS"
 echo "watchdog self-test exit: $WATCHDOG_SELFTEST_STATUS"
+echo "build-watchdog self-test exit: $BUILD_WATCHDOG_SELFTEST_STATUS"
+echo "Interface Builder cleanup self-test exit: $IB_SELFTEST_STATUS"
 echo "live-log filter self-test exit: $FILTER_SELFTEST_STATUS"
 [ "$TEST_STATUS" -eq 0 ] || { echo "tests failed"; exit "$TEST_STATUS"; }
 [ "$COVERAGE_STATUS" -eq 0 ] || { echo "the run did not cover the whole plan"; exit "$COVERAGE_STATUS"; }
 [ "$SELFTEST_STATUS" -eq 0 ] || { echo "the coverage guard did not prove it can fail"; exit "$SELFTEST_STATUS"; }
 [ "$WATCHDOG_SELFTEST_STATUS" -eq 0 ] || { echo "the watchdog did not prove it can stop a run"; exit "$WATCHDOG_SELFTEST_STATUS"; }
+[ "$BUILD_WATCHDOG_SELFTEST_STATUS" -eq 0 ] || { echo "the build watchdog did not prove it can stop a build"; exit "$BUILD_WATCHDOG_SELFTEST_STATUS"; }
+[ "$IB_SELFTEST_STATUS" -eq 0 ] || { echo "the Interface Builder cleanup did not prove it kills only what it recorded"; exit "$IB_SELFTEST_STATUS"; }
 [ "$FILTER_SELFTEST_STATUS" -eq 0 ] || { echo "the live log would lose a failure's detail"; exit "$FILTER_SELFTEST_STATUS"; }
+[ "$IB_CLEANUP_STATUS" -eq 0 ] || { echo "this build's Interface Builder processes could not all be stopped"; exit "$IB_CLEANUP_STATUS"; }
 echo "Build and full plan passed."
