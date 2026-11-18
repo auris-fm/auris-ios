@@ -201,9 +201,13 @@ final class ModelDownloader {
                 // download and the rename leaves exactly this state. The bytes on disk are
                 // the whole asset; fall through to the hash check instead of retrying a
                 // Range request the server will keep answering with 416. Without a pin there
-                // is no check to fall through to, so an unverified `.tmp` must not be renamed
-                // into place as a success.
-                if sha256.isEmpty { throw ModelError.rangeNotSatisfiable }
+                // is no check to fall through to: delete the unverifiable `.tmp` and download
+                // from scratch, so it installs as a normal unpinned download — keeping it
+                // would fail identically on every start (the stuck-forever case).
+                if sha256.isEmpty {
+                    try? FileManager.default.removeItem(at: tmpURL)
+                    try await downloadResumable(url: url, tmpURL: tmpURL, resumeOffset: 0)
+                }
             }
 
             // SHA-256 verify. An empty pin (no hash yet) is intentionally allowed so the

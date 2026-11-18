@@ -230,9 +230,10 @@ final class ModelDownloaderPinTests: XCTestCase {
         XCTAssertEqual(StubURLProtocol.count(for: path), 1, "no second download")
     }
 
-    /// A 416 with an EMPTY pin must NOT rename an unverified `.tmp` into place as a success:
-    /// there is no hash check to fall through to, so the start fails instead.
-    func testFullSizeTmpWith416AndEmptyPinFails() async throws {
+    /// A 416 with an EMPTY pin: the `.tmp` can't be verified, so it is deleted and downloaded
+    /// from scratch — one fresh full download, then a normal unpinned install. Keeping the
+    /// `.tmp` (or throwing) would fail identically on every start: the stuck-forever case.
+    func testFullSizeTmpWith416AndEmptyPinRedownloadsFromScratch() async throws {
         let dir = try makeDir()
         try goodBytes.write(to: dir.appendingPathComponent("model.int8.onnx.tmp"))
         StubURLProtocol.reset(payloads: [path: goodBytes], honorRange: true)
@@ -240,9 +241,11 @@ final class ModelDownloaderPinTests: XCTestCase {
 
         let result = await downloader.download(url: url, sha256: "", to: dir)
 
-        guard case .failure = result else { return XCTFail("an unverified tmp must not install: \(result)") }
-        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("model.int8.onnx").path),
-                       "no final file is created from an unverified tmp")
+        guard case .success = result else { return XCTFail("the unpinned asset must install after a fresh download: \(result)") }
+        XCTAssertEqual(try Data(contentsOf: dir.appendingPathComponent("model.int8.onnx")), goodBytes,
+                       "the final file comes from the fresh download, not the unverifiable tmp")
+        XCTAssertEqual(StubURLProtocol.count(for: path), 2,
+                       "one Range request answered 416, then one full download from offset 0")
     }
 
     /// A CHANGED PIN with an UNCHANGED file must force a full hash: the marker records the
