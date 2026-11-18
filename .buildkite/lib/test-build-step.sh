@@ -188,5 +188,59 @@ SHIM
 
 run_watchdog_kill_case
 
+# The timing race itself cannot be forced from outside — the real interleaving
+# (watchdog between kill and exit while the parent kills it) has no external
+# hook — so this case forces it through the interface instead: the verdict file
+# is pre-written and the watchdog is killed externally, which is exactly the
+# ambiguous state the verdict file exists to resolve. The parent must report the
+# recorded verdict ("stopped making progress", status 4), not a watchdog death.
+run_verdict_race_case() {
+  local dir; dir=$(mktemp -d)
+  local shim="$dir/shim"
+  mkdir -p "$dir/bin" "$dir/artifacts" "$shim"
+  make_stub "$dir" healthy
+  cp /bin/sleep "$dir/bin/ibtoold"
+  codesign -f -s - --identifier com.apple.ibtoold "$dir/bin/ibtoold" >/dev/null 2>&1
+  # Kill the watchdog on the recorder's first start-time read, like the
+  # watchdog-kill case, but with a verdict already on file.
+  cat > "$shim/ps" <<SHIM
+#!/bin/bash
+if [ "\$1" = "-o" ] && [ "\$2" = "lstart=" ] && [ ! -f "$dir/killed" ]; then
+  : > "$dir/killed"
+  printf '4\n' > "$dir/artifacts/build-watchdog-verdict"
+  gp="\$(ps -o ppid= -p "\$PPID" | tr -d ' ')"
+  gp="\$(ps -o ppid= -p "\$gp" | tr -d ' ')"
+  kill -TERM "\$gp" 2>/dev/null
+fi
+exec /bin/ps "\$@"
+SHIM
+  chmod +x "$shim/ps"
+  {
+    echo 'set -euo pipefail'
+    echo "source \"$LIBDIR/ib-processes.sh\""
+    echo "LOG_DIR=\"$dir/artifacts\""
+    echo "IB_RECORD=\"$dir/artifacts/ib-processes.tsv\""
+    echo ': > "$IB_RECORD"'
+    echo "SIMULATOR_ID=\"stub-sim\"; DERIVED=\"$dir/dd\""
+    echo 'BUILD_PROGRESS_DEADLINE=25; BUILD_TOTAL_DEADLINE=60'
+    echo "\"$dir/bin/ibtoold\" 120 >/dev/null 2>&1 & echo \$! > /dev/null"
+    echo "trap 'echo \"STEP_STATUS=\$BUILD_STEP_STATUS\"' EXIT"
+    extract_step
+    extract_call_site
+  } > "$dir/step.sh"
+  PATH="$shim:$dir/bin:$PATH" timeout 90 bash "$dir/step.sh" > "$dir/out.txt" 2>&1
+  local ok=0
+  grep -q "STEP_STATUS=4" "$dir/out.txt" || ok=1
+  grep -q "Build stopped making progress" "$dir/out.txt" || ok=1
+  grep -q "watchdog died" "$dir/out.txt" && ok=1
+  report "$ok" "a recorded verdict beats the ambiguous cleanup kill"
+  sed 's/^/        /' "$dir/out.txt" | tail -4
+  pkill -KILL -f "$dir/bin/xcodebuild" 2>/dev/null
+  pkill -KILL -f "$dir/bin/ibtoold" 2>/dev/null
+  rm -rf "$dir"
+}
+
+run_verdict_race_case
+
 echo "real-step self-test: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

@@ -236,6 +236,8 @@ BUILD_TOTAL_DEADLINE="${BUILDKITE_AURIS_BUILD_TOTAL_DEADLINE:-2700}"
 # alone cannot catch how the step starts it or how errexit treats its waits.
 run_build_step() {
 BUILD_STATUS=0
+# A verdict from an earlier attempt must never be mistaken for this one's.
+rm -f "$LOG_DIR/build-watchdog-verdict"
 xcodebuild build-for-testing \
   -project podcasts.xcodeproj \
   -scheme pocketcasts \
@@ -257,7 +259,7 @@ BUILD_PID=$!
 (
   # errexit and pipefail off: a process vanishing between the listing and its
   # status read must shorten the record, not kill the watchdog — a dead
-  # watchdog means the build runs unwatched, which is how #23 went unreported.
+  # watchdog means the build runs unwatched.
   # Every loop statement below is written to be safe without errexit.
   set +e
   waited=0
@@ -276,12 +278,18 @@ BUILD_PID=$!
       if [ "$stalled" -ge "$BUILD_PROGRESS_DEADLINE" ]; then
         echo "no build output for ${BUILD_PROGRESS_DEADLINE}s: the build stopped making progress." >&2
         echo "Last build line: $(tail -1 "$LOG_DIR/build.log" 2>/dev/null)" >&2
+        # The verdict is written before the kill: the parent can then tell the
+        # watchdog's decision apart from its own cleanup kill, even when the
+        # parent reaches the watchdog between the kill and the exit and the
+        # status comes back an ambiguous 143.
+        printf '%s\n' 4 > "$LOG_DIR/build-watchdog-verdict" 2>/dev/null
         kill "$BUILD_PID" 2>/dev/null
         exit 4
       fi
     fi
     if [ "$waited" -ge "$BUILD_TOTAL_DEADLINE" ]; then
       echo "building exceeded ${BUILD_TOTAL_DEADLINE}s in total." >&2
+      printf '%s\n' 5 > "$LOG_DIR/build-watchdog-verdict" 2>/dev/null
       kill "$BUILD_PID" 2>/dev/null
       exit 5
     fi
@@ -297,20 +305,34 @@ BUILD_WATCHDOG_PID=$!
 set +e
 wait "$BUILD_PID"
 BUILD_STATUS=$?
-# 143 only means "our kill, not a verdict" if we did the killing: the watchdog
-# must still be alive right now. A watchdog that died on its own leaves the
-# build unwatched and reports nothing — that silence is the failure, so a
-# non-verdict status with no kill of ours is fatal below.
-if kill -0 "$BUILD_WATCHDOG_PID" 2>/dev/null; then
-  WE_KILLED_THE_WATCHDOG=1
-  pkill -P "$BUILD_WATCHDOG_PID" 2>/dev/null
-  kill "$BUILD_WATCHDOG_PID" 2>/dev/null
-  wait "$BUILD_WATCHDOG_PID" 2>/dev/null
-else
-  WE_KILLED_THE_WATCHDOG=0
-  wait "$BUILD_WATCHDOG_PID" 2>/dev/null
-fi
-BUILD_WATCHDOG_STATUS=$?
+# A recorded verdict outranks every exit status: the watchdog writes it before
+# killing the build, so it exists exactly when the watchdog made the decision,
+# even if the parent's cleanup kill of the watchdog lands between the kill and
+# the exit and the status comes back an ambiguous 143.
+WATCHDOG_VERDICT=""
+# Default: no kill of ours. The verdict branch never reaches the kill.
+WE_KILLED_THE_WATCHDOG=0
+[ -f "$LOG_DIR/build-watchdog-verdict" ] \
+  && WATCHDOG_VERDICT="$(cat "$LOG_DIR/build-watchdog-verdict" 2>/dev/null || true)"
+case "$WATCHDOG_VERDICT" in
+  4|5) BUILD_WATCHDOG_STATUS="$WATCHDOG_VERDICT" ;;
+  *)
+    # 143 only means "our kill, not a verdict" if we did the killing: the
+    # watchdog must still be alive right now. A watchdog that died on its own
+    # leaves the build unwatched and reports nothing — that silence is the
+    # failure, so a non-verdict status with no kill of ours is fatal below.
+    if kill -0 "$BUILD_WATCHDOG_PID" 2>/dev/null; then
+      WE_KILLED_THE_WATCHDOG=1
+      pkill -P "$BUILD_WATCHDOG_PID" 2>/dev/null
+      kill "$BUILD_WATCHDOG_PID" 2>/dev/null
+      wait "$BUILD_WATCHDOG_PID" 2>/dev/null
+    else
+      WE_KILLED_THE_WATCHDOG=0
+      wait "$BUILD_WATCHDOG_PID" 2>/dev/null
+    fi
+    BUILD_WATCHDOG_STATUS=$?
+    ;;
+esac
 # errexit stays OFF through the end of this function: a non-zero `return` while
 # errexit is on ends the whole script with that status instead of coming back to
 # the call site, which re-enables errexit after capturing the status.
@@ -475,7 +497,7 @@ XCODEBUILD_PID=$!
 (
   # errexit and pipefail off: a process vanishing between the listing and its
   # status read must shorten the record, not kill the watchdog — a dead
-  # watchdog means the build runs unwatched, which is how #23 went unreported.
+  # watchdog means the build runs unwatched.
   # Every loop statement below is written to be safe without errexit.
   set +e
   waited=0
