@@ -147,6 +147,13 @@ struct CloudRouteIntent: VoiceIntent, Equatable {
     /// not of whatever the window looks like after routing.
     let selection: CloudConversationSelection?
 
+    /// The turn's latency bookkeeping, carried from admission so the cloud request can report when
+    /// the user stopped talking. Held by reference: it dies with the turn, so there is no side
+    /// table to clean up on every exit. NON-optional, so an intent with a context and one without
+    /// still compare equal: an optional field would be compared by case first and reintroduce the
+    /// inequality the wrapper exists to remove.
+    var latency = LatencyHandle()
+
     init(
         request: String,
         tier: CloudTier,
@@ -155,7 +162,8 @@ struct CloudRouteIntent: VoiceIntent, Equatable {
         utteranceId: String? = nil,
         origin: CloudRouteOrigin = .modelCall,
         generation: Int? = nil,
-        selection: CloudConversationSelection? = nil
+        selection: CloudConversationSelection? = nil,
+        latency: LatencyHandle
     ) {
         self.request = request
         self.tier = tier
@@ -165,7 +173,9 @@ struct CloudRouteIntent: VoiceIntent, Equatable {
         self.origin = origin
         self.generation = generation
         self.selection = selection
+        self.latency = latency
     }
+
 }
 
 enum CloudRouteOrigin: Equatable {

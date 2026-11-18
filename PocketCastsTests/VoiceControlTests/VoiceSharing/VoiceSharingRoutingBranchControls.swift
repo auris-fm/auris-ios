@@ -796,7 +796,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
             StatsQueryIntent.subscriptionCount, StatsQueryIntent.unplayedTotal,
             StatsQueryIntent.downloadStats, StatsQueryIntent.newEpisodes(timeframe: nil),
             StatsQueryIntent.timeSinceLastListen,
-            CloudRouteIntent(request: "anything", tier: .unknown),
+            CloudRouteIntent(request: "anything", tier: .unknown, latency: LatencyHandle()),
         ]
         for intent in intents {
             guard let name = VoiceAnalytics.predictedIntentName(from: intent) else {
@@ -865,7 +865,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         }
         let utterance = "queue three episodes about otters for my sister in law"
         service.enterListeningStateForTesting()
-        router.result = .intent(CloudRouteIntent(request: utterance, tier: .unknown))
+        router.result = .intent(CloudRouteIntent(request: utterance, tier: .unknown, latency: LatencyHandle()))
         executor.response = .spoken("ok")
         await service.handleRoutingInput(
             IntentRoutingInput.english(transcript: utterance, utteranceId: UUID().uuidString),
@@ -901,7 +901,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
             (PlaybackQueryIntent.timeRemaining, "playback_query", "time_remaining"),
             (StatsQueryIntent.listeningTime(period: "this week"), "stats_query", "listening_time"),
             // A cloud route is the whole value ALONE — never `<tool>.<action>`, never request text.
-            (CloudRouteIntent(request: "anything at all", tier: .unknown), "cloud_route", ""),
+            (CloudRouteIntent(request: "anything at all", tier: .unknown, latency: LatencyHandle()), "cloud_route", ""),
         ]
         var seen = Set<String>()
         for (intent, tool, action) in cases {
@@ -921,7 +921,7 @@ final class VoiceSharingRoutingBranchControls: XCTestCase {
         // A routed name is derived from the TYPE and ACTION only. The data-carrying cases above
         // already prove the name ignores their arguments; this pins the one member that is free-form
         // request text.
-        let named = VoiceAnalytics.predictedIntentName(from: CloudRouteIntent(request: "anything", tier: .unknown))
+        let named = VoiceAnalytics.predictedIntentName(from: CloudRouteIntent(request: "anything", tier: .unknown, latency: LatencyHandle()))
         XCTAssertEqual(named, "cloud_route")
         // A turn that was not routed names nothing: absence is the contract, not a placeholder.
         XCTAssertNil(VoiceAnalytics.predictedIntentName(from: UnroutableProbe()),

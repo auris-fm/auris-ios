@@ -209,6 +209,19 @@ final class CloudConversationManager {
         liveOrigin = origin
     }
 
+    /// Leaves ONE conversation: the client stops naming it and the server's history expires by
+    /// TTL. Scoped by id because the turn asking to leave may belong to an EARLIER window while a
+    /// newer window is already in its own conversation — releasing everything there would drop
+    /// the conversation the user is actually in, and their next follow-up would silently start
+    /// over. An id this client never opened releases nothing.
+    func forget(conversationId: String) {
+        if current?.id == conversationId { current = nil }
+        byOrigin = byOrigin.filter { $0.value.id != conversationId }
+        // A retained preparation naming the released conversation would hand the same dead id
+        // back to a repeated callback for that utterance.
+        preparedByUtteranceId = preparedByUtteranceId.filter { $0.value.conversationId != conversationId }
+    }
+
     /// The client stops naming a conversation to leave it; the retained history expires by
     /// TTL.
     func forget() {

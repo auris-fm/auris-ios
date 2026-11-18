@@ -346,7 +346,9 @@ final class Promise<Value>: @unchecked Sendable {
 final class HoldLatch: @unchecked Sendable {
     private let lock = NSLock()
     private var open = false
-    private var resume: (() -> Void)?
+    // Every parked waiter, not one. A single stored continuation would let a second `wait` on the
+    // same latch displace the first's, leaking it and leaving its task suspended forever.
+    private var resumes: [() -> Void] = []
 
     /// True once `release()` has run — the still-held probe for controls.
     var released: Bool {
@@ -363,7 +365,7 @@ final class HoldLatch: @unchecked Sendable {
                 lock.unlock()
                 cont.resume()
             } else {
-                resume = cont.resume
+                resumes.append(cont.resume)
                 lock.unlock()
             }
         }
@@ -390,7 +392,7 @@ final class HoldLatch: @unchecked Sendable {
                 lock.unlock()
                 cont.resume()
             } else {
-                resume = cont.resume
+                resumes.append(cont.resume)
                 lock.unlock()
             }
         }
@@ -403,10 +405,10 @@ final class HoldLatch: @unchecked Sendable {
         guard !open else { lock.unlock(); return }
         open = true
         openedByRetirement = true
-        let r = resume
-        resume = nil
+        let r = resumes
+        resumes = []
         lock.unlock()
-        r?()
+        r.forEach { $0() }
     }
 
     private var retiredCheck: (@Sendable () -> Bool)?
@@ -423,10 +425,10 @@ final class HoldLatch: @unchecked Sendable {
     func release() {
         lock.lock()
         open = true
-        let r = resume
-        resume = nil
+        let r = resumes
+        resumes = []
         lock.unlock()
-        r?()
+        r.forEach { $0() }
     }
 }
 
@@ -697,6 +699,16 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
     /// the pre-entry failure that proves it was never submitted and is therefore the one case
     /// automatic recovery may re-drive.
     var throwsBeforeRecording = false
+
+    /// What the control says about this socket's liveness, reported verbatim rather than inferred
+    /// from the script: a stub that guessed would let a test pass on the guess instead of on the
+    /// condition it set. Defaults to open, which is what a freshly issued socket is.
+    var reportsAlive = true
+
+    var isAlive: Bool {
+        snapshotLock.lock(); defer { snapshotLock.unlock() }
+        return reportsAlive && cancelled == nil
+    }
 
     func send(_ message: URLSessionWebSocketTask.Message) async throws {
         if throwsBeforeRecording { throw URLError(.notConnectedToInternet) }

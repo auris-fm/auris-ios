@@ -37,6 +37,9 @@ class WakeWordDetector: WakeWordDetectorProtocol {
         fflush(stderr)
     }
 
+    /// See `WakeWordDetectorProtocol.activeModelIdentity`.
+    var activeModelIdentity: VoiceSharingContributionEncoder.ModelRef? { loadedIdentity }
+
     /// Scores the utterance and returns the tagged result. An initialization or
     /// scoring failure is never converted into a zero-confidence `notDetected`.
     func detect(samples: [Float], sampleRate: Int) -> WakeWordResult {

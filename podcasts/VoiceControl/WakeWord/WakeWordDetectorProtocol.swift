@@ -16,7 +16,15 @@ protocol WakeWordDetectorProtocol: AnyObject {
     func detect(samples: [Float], sampleRate: Int) -> WakeWordResult
     func detect(samples: [Float], sampleRate: Int,
                 modelUsed: (VoiceSharingContributionEncoder.ModelRef?) -> Void) -> WakeWordResult
+    /// The identity of the model this detector would report as used — exposed so a caller that
+    /// consumes a result produced EARLIER (the early-wake path) can still record which model made
+    /// the decision. Nil when no model is loaded.
+    var activeModelIdentity: VoiceSharingContributionEncoder.ModelRef? { get }
     func release()
+}
+
+extension WakeWordDetectorProtocol {
+    var activeModelIdentity: VoiceSharingContributionEncoder.ModelRef? { nil }
 }
 
 extension WakeWordDetectorProtocol {
