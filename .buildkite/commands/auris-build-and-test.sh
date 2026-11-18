@@ -200,9 +200,15 @@ wait_simulator_ready() {
     else
       wait "$pid" 2>/dev/null
       status=$?
+      # A zero exit alone has lied: bootstatus reported success while the
+      # device stayed Shutdown. Success requires the device to actually be
+      # Booted.
       if [ "$status" -eq 0 ]; then
-        set -e
-        return 0
+        if xcrun simctl list devices 2>/dev/null | grep -q "$SIMULATOR_ID.*Booted"; then
+          set -e
+          return 0
+        fi
+        status=1
       fi
     fi
     sleep 5
@@ -418,18 +424,42 @@ if ! wait_simulator_ready 60 30; then
   exit 1
 fi
 
-echo "--- :lock: Granting the permissions the tests need"
 # An erased device has no privacy permissions, so the first microphone or speech
 # access waits on a prompt nobody answers. Measured on this device: one speech
 # test took 54.8s without the grant and 2.6s with it. That wait sits just under
 # the per-test execution allowance, and in a full run it crosses it — the test is
 # then killed and the runner relaunched, which is what a run dying partway through
 # looks like from outside. Granting them makes the run measure the code.
+# Measured in build 24: a grant issued immediately after a fresh erase and boot
+# fails with EPERM — the privacy service is not ready yet — and the same grant
+# succeeds seconds later. So each grant is retried on a bound instead of
+# tripping errexit on the first try.
+grant_test_permissions() {
+  local host_bundle="$1" service tries="$2" per_try="$3" i rc
+  for service in microphone speech-recognition; do
+    rc=1
+    for i in $(seq 1 "$tries"); do
+      if xcrun simctl privacy "$SIMULATOR_ID" grant "$service" "$host_bundle"; then
+        echo "$service granted on try $i"
+        rc=0
+        break
+      fi
+      echo "$service grant failed (try $i/$tries), retrying in ${per_try}s"
+      sleep "$per_try"
+    done
+    [ "$rc" -eq 0 ] || { echo "$service was not granted within $((tries * per_try))s"; return 1; }
+  done
+  return 0
+}
+
+echo "--- :lock: Granting the permissions the tests need"
 TEST_HOST="$DERIVED/Build/Products/Debug-iphonesimulator/podcasts.app"
 HOST_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$TEST_HOST/Info.plist")"
 echo "Test host: $HOST_BUNDLE_ID"
-xcrun simctl privacy "$SIMULATOR_ID" grant microphone "$HOST_BUNDLE_ID"
-xcrun simctl privacy "$SIMULATOR_ID" grant speech-recognition "$HOST_BUNDLE_ID"
+if ! grant_test_permissions "$HOST_BUNDLE_ID" 12 10; then
+  echo "simulator privacy service never accepted the grants"
+  exit 1
+fi
 
 echo "--- :test_tube: Running the full test plan"
 RESULT_BUNDLE="$LOG_DIR/auris-${BUILDKITE_BUILD_NUMBER:-local}-${BUILDKITE_JOB_ID:-job}.xcresult"
@@ -622,6 +652,16 @@ bash .buildkite/lib/test-ib-processes.sh
 IB_SELFTEST_STATUS=$?
 set -e
 
+echo "--- :mag: Checking the grants step itself"
+# A grant issued right after an erase fails with EPERM until the privacy
+# service is ready, so the step retries on a bound. These cases run the real
+# grant function against a stub xcrun: a service that recovers must be granted,
+# one that never recovers must give up with a reason.
+set +e
+bash .buildkite/lib/test-grants.sh
+GRANTS_SELFTEST_STATUS=$?
+set -e
+
 echo "--- :mag: Checking the watchdog itself"
 # Each way the watchdog can stop a run is proved against a stub, using the
 # watchdog body from this script rather than a copy of it.
@@ -708,6 +748,7 @@ echo "watchdog self-test exit: $WATCHDOG_SELFTEST_STATUS"
 echo "build-watchdog self-test exit: $BUILD_WATCHDOG_SELFTEST_STATUS"
 echo "Interface Builder cleanup self-test exit: $IB_SELFTEST_STATUS"
 echo "cancel-cleanup self-test exit: $CANCEL_SELFTEST_STATUS"
+echo "grants self-test exit: $GRANTS_SELFTEST_STATUS"
 echo "live-log filter self-test exit: $FILTER_SELFTEST_STATUS"
 [ "$TEST_STATUS" -eq 0 ] || { echo "tests failed"; exit "$TEST_STATUS"; }
 [ "$COVERAGE_STATUS" -eq 0 ] || { echo "the run did not cover the whole plan"; exit "$COVERAGE_STATUS"; }
@@ -716,6 +757,7 @@ echo "live-log filter self-test exit: $FILTER_SELFTEST_STATUS"
 [ "$BUILD_WATCHDOG_SELFTEST_STATUS" -eq 0 ] || { echo "the build watchdog did not prove it can stop a build"; exit "$BUILD_WATCHDOG_SELFTEST_STATUS"; }
 [ "$IB_SELFTEST_STATUS" -eq 0 ] || { echo "the Interface Builder cleanup did not prove it kills only what it recorded"; exit "$IB_SELFTEST_STATUS"; }
 [ "$CANCEL_SELFTEST_STATUS" -eq 0 ] || { echo "a cancelled job would skip the exit cleanup"; exit "$CANCEL_SELFTEST_STATUS"; }
+[ "$GRANTS_SELFTEST_STATUS" -eq 0 ] || { echo "the grants step did not prove it retries a not-ready privacy service"; exit "$GRANTS_SELFTEST_STATUS"; }
 [ "$FILTER_SELFTEST_STATUS" -eq 0 ] || { echo "the live log would lose a failure's detail"; exit "$FILTER_SELFTEST_STATUS"; }
 [ "$IB_CLEANUP_STATUS" -eq 0 ] || { echo "this build's Interface Builder processes could not all be stopped"; exit "$IB_CLEANUP_STATUS"; }
 echo "Build and full plan passed."
