@@ -15,12 +15,15 @@ final class ModelDownloaderPinTests: XCTestCase {
         static var payloads: [String: Data] = [:]
         static var requestCount: [String: Int] = [:]
         static var startDelayMs: Int = 0
+        /// When true, a Range request whose offset is at/past the payload length gets 416.
+        static var honorRange: Bool = false
 
-        static func reset(payloads: [String: Data], startDelayMs: Int = 0) {
+        static func reset(payloads: [String: Data], startDelayMs: Int = 0, honorRange: Bool = false) {
             lock.lock(); defer { lock.unlock() }
             self.payloads = payloads
             self.requestCount = [:]
             self.startDelayMs = startDelayMs
+            self.honorRange = honorRange
         }
 
         static func count(for path: String) -> Int {
@@ -42,13 +45,23 @@ final class ModelDownloaderPinTests: XCTestCase {
                 return
             }
             let path = url.path
-            let (payload, delay) = Self.lock.withLock { (Self.payloads[path], Self.startDelayMs) }
+            let (payload, delay, honorRange) = Self.lock.withLock { (Self.payloads[path], Self.startDelayMs, Self.honorRange) }
             Self.lock.lock()
             Self.requestCount[path, default: 0] += 1
             Self.lock.unlock()
             if delay > 0 { Thread.sleep(forTimeInterval: Double(delay) / 1000.0) }
             guard let data = payload else {
                 client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+                return
+            }
+            // A real server answers 416 when the Range offset is at/past the full length.
+            if honorRange, let range = request.value(forHTTPHeaderField: "Range"),
+               let offset = UInt64(range.replacingOccurrences(of: "bytes=", with: "").replacingOccurrences(of: "-", with: "")),
+               offset >= UInt64(data.count) {
+                let response = HTTPURLResponse(url: url, statusCode: 416, httpVersion: "HTTP/1.1",
+                                               headerFields: ["Content-Range": "bytes */\(data.count)"])!
+                client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                client?.urlProtocolDidFinishLoading(self)
                 return
             }
             let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
@@ -162,5 +175,49 @@ final class ModelDownloaderPinTests: XCTestCase {
         let final = try Data(contentsOf: finalURL)
         XCTAssertEqual(final, goodBytes, "the changed file is replaced despite the stale marker")
         XCTAssertEqual(StubURLProtocol.count(for: path), 1, "the stale marker forced a real re-download")
+    }
+
+    /// A CHANGED PIN with an UNCHANGED file must force a full hash: the marker records the
+    /// old pin, so it no longer matches, the file is hashed against the new pin, fails, and
+    /// is replaced by a download.
+    func testChangedPinWithUnchangedFileForcesFullHashAndReplace() async throws {
+        let dir = try makeDir()
+        let finalURL = dir.appendingPathComponent("model.int8.onnx")
+        try goodBytes.write(to: finalURL)
+        StubURLProtocol.reset(payloads: [path: goodBytes])
+        let downloader = makeDownloader()
+
+        // Serve the corrupt bytes and pin THEIR hash, so the first call succeeds and writes
+        // a marker under the old pin.
+        StubURLProtocol.reset(payloads: [path: corruptBytes])
+        let setup = await downloader.download(url: url, sha256: sha(corruptBytes), to: dir)
+        guard case .success = setup else { return XCTFail("setup failed: \(setup)") }
+        XCTAssertEqual(try Data(contentsOf: finalURL), corruptBytes, "premise: file matches the old pin")
+
+        // Now the pin changes to the good bytes' hash; the file is unchanged.
+        StubURLProtocol.reset(payloads: [path: goodBytes])
+        let second = await downloader.download(url: url, sha256: sha(goodBytes), to: dir)
+        guard case .success = second else { return XCTFail("second failed: \(second)") }
+        XCTAssertEqual(try Data(contentsOf: finalURL), goodBytes, "the new pin replaces the old-pinned file")
+        XCTAssertEqual(StubURLProtocol.count(for: path), 1, "the changed pin forced a real download")
+    }
+
+    /// A full-size `.tmp` left by a kill between download and rename: the next start's Range
+    /// request gets 416. That must go STRAIGHT to the hash check — not five retries that keep
+    /// the tmp and fail identically on every start.
+    func testFullSizeTmpWith416GoesStraightToHashCheck() async throws {
+        let dir = try makeDir()
+        // The tmp holds the complete, correct bytes; no final file exists.
+        try goodBytes.write(to: dir.appendingPathComponent("model.int8.onnx.tmp"))
+        StubURLProtocol.reset(payloads: [path: goodBytes], honorRange: true)
+        let downloader = makeDownloader()
+
+        let result = await downloader.download(url: url, sha256: sha(goodBytes), to: dir)
+
+        guard case .success = result else { return XCTFail("download failed: \(result)") }
+        XCTAssertEqual(try Data(contentsOf: dir.appendingPathComponent("model.int8.onnx")), goodBytes,
+                       "the full-size tmp is verified and renamed, not re-downloaded")
+        XCTAssertEqual(StubURLProtocol.count(for: path), 1,
+                       "one Range request answered 416, then the hash check — no retry loop")
     }
 }

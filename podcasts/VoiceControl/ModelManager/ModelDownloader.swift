@@ -109,7 +109,7 @@ final class ModelDownloader {
               let mtime = attrs[.modificationDate] as? Date else { return }
         let marker = VerifiedMarker(sha256: sha256, size: size, mtime: mtime.timeIntervalSince1970)
         if let data = try? JSONEncoder().encode(marker) {
-            try? data.write(to: markerURL(for: finalURL))
+            try? data.write(to: markerURL(for: finalURL), options: .atomic)
         }
     }
 
@@ -145,6 +145,8 @@ final class ModelDownloader {
             if existingFileMatchesPin(finalURL, sha256: sha256) {
                 return .success(())
             }
+            // The marker describes the OLD file; it must not sit next to its replacement.
+            try? FileManager.default.removeItem(at: markerURL(for: finalURL))
             try? FileManager.default.removeItem(at: finalURL)
         }
 
@@ -162,23 +164,43 @@ final class ModelDownloader {
         }
 
         do {
-            try await downloadResumable(url: url, tmpURL: tmpURL, resumeOffset: resumeOffset)
+            do {
+                try await downloadResumable(url: url, tmpURL: tmpURL, resumeOffset: resumeOffset)
+            } catch ModelError.rangeNotSatisfiable {
+                // The `.tmp` is already at (or past) the full length — a kill between the
+                // download and the rename leaves exactly this state. The bytes on disk are
+                // the whole asset; fall through to the hash check instead of retrying a
+                // Range request the server will keep answering with 416.
+            }
 
             // SHA-256 verify. An empty pin (no hash yet) is intentionally allowed so the
             // download still proceeds with resumable + atomic semantics; pin hashes for
             // assets that have one so integrity is enforced.
             if !sha256.isEmpty {
-                guard streamedSHA256(of: tmpURL) == sha256 else {
+                if streamedSHA256(of: tmpURL) != sha256 {
                     try? FileManager.default.removeItem(at: tmpURL)
-                    throw ModelError.hashMismatch
+                    // A full-size but corrupt `.tmp` (the 416 fall-through) is re-downloaded
+                    // from scratch once, not kept and failed forever.
+                    if resumeOffset > 0 {
+                        try await downloadResumable(url: url, tmpURL: tmpURL, resumeOffset: 0)
+                        guard streamedSHA256(of: tmpURL) == sha256 else {
+                            try? FileManager.default.removeItem(at: tmpURL)
+                            throw ModelError.hashMismatch
+                        }
+                    } else {
+                        throw ModelError.hashMismatch
+                    }
                 }
             }
 
-            // Atomic rename
+            // Atomic rename. Any stale marker goes first so it never describes the new file.
+            try? FileManager.default.removeItem(at: markerURL(for: finalURL))
             if FileManager.default.fileExists(atPath: finalURL.path) {
                 try FileManager.default.removeItem(at: finalURL)
             }
             try FileManager.default.moveItem(at: tmpURL, to: finalURL)
+            // The bytes were just hashed above, so the marker is written right here — the
+            // first start after install adds no extra hash.
             if !sha256.isEmpty { writeMarker(finalURL, sha256: sha256) }
             return .success(())
         } catch {
@@ -196,6 +218,8 @@ final class ModelDownloader {
             do {
                 try await streamOnce(url: url, tmpURL: tmpURL, offset: offset)
                 return
+            } catch ModelError.rangeNotSatisfiable {
+                throw ModelError.rangeNotSatisfiable
             } catch {
                 if attempts >= 5 {
                     throw error
@@ -221,6 +245,7 @@ final class ModelDownloader {
         let (bytes, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse else { throw ModelError.downloadFailed }
         let code = http.statusCode
+        if code == 416 { throw ModelError.rangeNotSatisfiable }
         guard code == 200 || code == 206 else { throw ModelError.downloadFailed }
         let isRange = code == 206
 
@@ -250,4 +275,5 @@ final class ModelDownloader {
 enum ModelError: Error {
     case hashMismatch
     case downloadFailed
+    case rangeNotSatisfiable
 }
