@@ -14,13 +14,21 @@ struct IntentRoutingInput: Equatable {
     /// has its own id and dispatches its own request, even inside one grace window.
     let utteranceId: String
 
+    /// The turn's own latency bookkeeping, created when the capture was admitted. Carried here
+    /// because this envelope is the one object that spans admission → routing → dispatch, so the
+    /// instants recorded at admission reach the cloud request without a side table keyed by
+    /// utterance id — and die with the turn when it ends, whatever path it takes. NON-optional so
+    /// a turn with a context and one without compare equal; see `LatencyHandle`.
+    let latency: LatencyHandle
+
     init(
         sourceTranscript: String?,
         sourceLanguage: String?,
         routerTranscript: String,
         translationKind: TranslationKind,
         selection: CloudConversationSelection?,
-        utteranceId: String
+        utteranceId: String,
+        latency: LatencyHandle = LatencyHandle()
     ) {
         self.sourceTranscript = sourceTranscript
         self.sourceLanguage = sourceLanguage
@@ -28,7 +36,9 @@ struct IntentRoutingInput: Equatable {
         self.translationKind = translationKind
         self.selection = selection
         self.utteranceId = utteranceId
+        self.latency = latency
     }
+
 
     /// What SELECTED this utterance, carried from the gate decision that produced it.
     ///
@@ -43,7 +53,8 @@ struct IntentRoutingInput: Equatable {
         transcript: String,
         language: String? = nil,
         selection: CloudConversationSelection? = nil,
-        utteranceId: String
+        utteranceId: String,
+        latency: LatencyHandle = LatencyHandle()
     ) -> IntentRoutingInput {
         IntentRoutingInput(
             sourceTranscript: transcript,
@@ -51,7 +62,8 @@ struct IntentRoutingInput: Equatable {
             routerTranscript: transcript,
             translationKind: .none,
             selection: selection,
-            utteranceId: utteranceId
+            utteranceId: utteranceId,
+            latency: latency
         )
     }
 }

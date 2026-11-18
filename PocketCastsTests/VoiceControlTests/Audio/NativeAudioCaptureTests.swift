@@ -18,7 +18,7 @@ final class NativeAudioCaptureTests: XCTestCase {
     func test_vadSegmenter_energyBasedDetection() {
         let segmenter = NativeVadSegmenter()
         var utteranceReceived = false
-        segmenter.onUtterance = { _, _ in utteranceReceived = true }
+        segmenter.onUtterance = { _, _, _, _, _ in utteranceReceived = true }
 
         // Send speech-like samples (high energy)
         let speech: [Float] = (0..<320).map { sin(Float($0) * 0.1) }
@@ -48,7 +48,7 @@ final class NativeAudioCaptureTests: XCTestCase {
             minSpeechFrames: 2
         )
         var utterances: [[Float]] = []
-        segmenter.onUtterance = { utterance, _ in utterances.append(utterance) }
+        segmenter.onUtterance = { utterance, _, _, _, _ in utterances.append(utterance) }
 
         segmenter.process([1, 1])
         segmenter.process([0, 0])
@@ -88,7 +88,7 @@ final class NativeAudioCaptureTests: XCTestCase {
     func test_continuousSpeechPastAnyDurationBound_isNotEmittedAsAFragment() {
         let segmenter = NativeVadSegmenter()
         var utterances: [[Float]] = []
-        segmenter.onUtterance = { utterance, _ in utterances.append(utterance) }
+        segmenter.onUtterance = { utterance, _, _, _, _ in utterances.append(utterance) }
 
         // 16 kHz * 30 s = 480_000 samples, fed in 320-sample frames (20 ms).
         // Constant amplitude 1.0 => RMS 1.0, well above the default 0.002 threshold.
@@ -109,7 +109,7 @@ final class NativeAudioCaptureTests: XCTestCase {
     func test_continuousSpeech_isRetainedAndDeliveredWholeAtTheNaturalEndpoint() {
         let segmenter = NativeVadSegmenter(silenceTimeoutMs: -1)
         var utterances: [[Float]] = []
-        segmenter.onUtterance = { utterance, _ in utterances.append(utterance) }
+        segmenter.onUtterance = { utterance, _, _, _, _ in utterances.append(utterance) }
 
         let frames = 480_000 / 320
         let speech = [Float](repeating: 1.0, count: 320)
@@ -132,7 +132,7 @@ final class NativeAudioCaptureTests: XCTestCase {
         // than an endpoint: the utterance stays open across it.
         let segmenter = NativeVadSegmenter(silenceTimeoutMs: 10_000)
         var utterances: [[Float]] = []
-        segmenter.onUtterance = { utterance, _ in utterances.append(utterance) }
+        segmenter.onUtterance = { utterance, _, _, _, _ in utterances.append(utterance) }
 
         // Two bursts separated by a single non-energetic frame: a framing boundary,
         // not an endpoint. Retention requires the two be delivered together.
@@ -163,7 +163,7 @@ final class NativeAudioCaptureTests: XCTestCase {
     func test_wordsBeforeAFramingBoundaryAreNotDiscarded() {
         let segmenter = NativeVadSegmenter(silenceTimeoutMs: -1)
         var utterances: [[Float]] = []
-        segmenter.onUtterance = { utterance, _ in utterances.append(utterance) }
+        segmenter.onUtterance = { utterance, _, _, _, _ in utterances.append(utterance) }
 
         let speech = [Float](repeating: 1.0, count: 320)
         let silence = [Float](repeating: 0, count: 320)
@@ -182,7 +182,7 @@ final class NativeAudioCaptureTests: XCTestCase {
     func test_productionSegmenterWiresNoDurationBound() {
         let segmenter = NativeVadSegmenter(threshold: 0.020)  // exactly VoiceControlAssembly's construction
         var utterances: [[Float]] = []
-        segmenter.onUtterance = { utterance, _ in utterances.append(utterance) }
+        segmenter.onUtterance = { utterance, _, _, _, _ in utterances.append(utterance) }
 
         // 60 s of unbroken speech: far beyond any plausible bound.
         let speech = [Float](repeating: 1.0, count: 320)
@@ -210,7 +210,7 @@ final class NativeAudioCaptureTests: XCTestCase {
     func test_interruptionBeforeConfirmation_keepsPendingFramesWithinThePreRollBound() {
         let segmenter = NativeVadSegmenter(silenceTimeoutMs: -1)
         var utterances: [[Float]] = []
-        segmenter.onUtterance = { utterance, _ in utterances.append(utterance) }
+        segmenter.onUtterance = { utterance, _, _, _, _ in utterances.append(utterance) }
 
         // Four energetic frames — one below the default minSpeechFrames of 5 — then an
         // interruption, then a confirmed utterance.

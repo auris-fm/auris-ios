@@ -49,6 +49,90 @@ final class RenderLifecycleControlTests: XCTestCase {
         }
     }
 
+    /// AUDIO SCHEDULED BEFORE THE NODE RENDERS MUST STILL BE MARKED.
+    ///
+    /// The position read is PURE, so it cannot be what takes the mark: the mark comes from the
+    /// per-block render observation. Taking it from the read instead leaves audio scheduled
+    /// entirely before the first render — the ordinary case, and what this fixture does — unmarked,
+    /// reporting `first_audible=absent` for a turn the user heard.
+    @MainActor
+    func testAudioScheduledBeforeRenderingIsStillMarkedAudible() throws {
+        try withPendingOfflineAudio { player, engine, node, output, scheduledSamples in
+            // Premise: everything was scheduled before anything rendered, which is the case that
+            // went unmarked. If this ever stops holding the test proves nothing.
+            XCTAssertEqual(player.firstAudibleHostSeconds, nil,
+                           "premise: nothing is audible before the node renders")
+
+            // Render real PCM through the production node so its counter advances, and let the
+            // player's own runner run: the mark is taken by an observation the PLAYER makes, not
+            // by anything this test does. Asserting straight after rendering measured only that
+            // the test had not given the player a chance to look, and failed for that reason.
+            let deadline = Date().addingTimeInterval(3)
+            while player.firstAudibleHostSeconds == nil && Date() < deadline {
+                if (player.renderPosition(of: node)?.renderedFrames ?? 0) < 4_096 {
+                    XCTAssertEqual(try engine.renderOffline(1_024, to: output), .success)
+                }
+                RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+            }
+
+            let marked = player.firstAudibleHostSeconds
+            XCTAssertNotNil(
+                marked,
+                "audio that rendered after being scheduled was never marked audible, so the turn"
+                + " reports first_audible=absent although the user heard it"
+            )
+            if let marked {
+                XCTAssertGreaterThan(marked, 0, "the mark must be a real monotonic instant")
+                XCTAssertLessThanOrEqual(
+                    marked, CACurrentMediaTime(),
+                    "the mark cannot be in the future"
+                )
+            }
+            _ = scheduledSamples
+        }
+    }
+
+    /// A reply's audio that renders while the DRAIN waits must be marked by the drain.
+    ///
+    /// A short reply is finished before its audio is heard: the runner leaves its playback loop for
+    /// the drain, which waits for the node to render what was scheduled and then stops, and the stop
+    /// clears the mark. The per-block observation lives in the playback loop, so while the runner
+    /// sits in the drain only the drain's own wait loop can take the mark. The stop gate holds the
+    /// stop open so the mark can be read before it is cleared, and the node renders only when this
+    /// test renders it, so the order is fixed rather than a race.
+    @MainActor
+    func testTheDrainMarksAudioThatRendersWhileItWaits() throws {
+        // No initial render: a render before the finish would let the playback loop mark first.
+        try withPendingOfflineAudio(rendersInitialQuantum: false) { player, engine, node, output, scheduledSamples in
+            XCTAssertNil(player.firstAudibleHostSeconds,
+                         "premise: nothing is marked before the turn is finished")
+            player.armPhysicalStopGateForTesting(allow: 0)
+            let drainClaimed = DispatchSemaphore(value: 0)
+            player.claimReached = drainClaimed
+            player.finish()
+            XCTAssertEqual(drainClaimed.wait(timeout: .now() + 2), .success,
+                           "premise: the runner left its playback loop for the drain")
+            XCTAssertNil(player.firstAudibleHostSeconds,
+                         "premise: nothing has rendered while the drain waits")
+
+            let deadline = Date().addingTimeInterval(1.5)
+            while player.firstAudibleHostSeconds == nil && Date() < deadline {
+                if (player.renderPosition(of: node)?.renderedFrames ?? 0) < Double(scheduledSamples / 2) {
+                    XCTAssertEqual(try engine.renderOffline(1_024, to: output), .success)
+                }
+                RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+            }
+
+            XCTAssertEqual(player.physicalStopGateArrivalsForTesting, 0,
+                           "premise: the stop is still held, so the mark was not read after it")
+            XCTAssertNotNil(
+                player.firstAudibleHostSeconds,
+                "audio rendered while the drain waited was never marked, and the stop that follows"
+                + " clears the mark, so the turn would report first_audible=absent")
+            player.openPhysicalStopGateForTesting()
+        }
+    }
+
     @MainActor
     func testCancelPreemptsFinishWhileScheduledAudioHasNotRendered() throws {
         try withPendingOfflineAudio { player, _, _, _, _ in
@@ -120,6 +204,7 @@ final class RenderLifecycleControlTests: XCTestCase {
     @MainActor
     private func withPendingOfflineAudio(
         timing: CloudPlaybackTiming? = nil,
+        rendersInitialQuantum: Bool = true,
         _ body: (CloudAudioPlayer, AVAudioEngine, AVAudioPlayerNode, AVAudioPCMBuffer, Int) throws -> Void
     ) throws {
         CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
@@ -163,11 +248,42 @@ final class RenderLifecycleControlTests: XCTestCase {
         let node = try XCTUnwrap(player.playerNodeForTesting)
         XCTAssertEqual(engine.manualRenderingMode, .offline)
         let output = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: 4_096))
-        XCTAssertEqual(try engine.renderOffline(128, to: output), .success)
-        let initial = try XCTUnwrap(player.renderPosition(of: node), "premise: the real node rendered the initial quantum")
-        XCTAssertLessThan(initial.renderedFrames, Double(scheduledSamples - 8_000),
-                          "premise: scheduled audio remains at done")
+        if rendersInitialQuantum {
+            XCTAssertEqual(try engine.renderOffline(128, to: output), .success)
+            let initial = try XCTUnwrap(player.renderPosition(of: node), "premise: the real node rendered the initial quantum")
+            XCTAssertLessThan(initial.renderedFrames, Double(scheduledSamples - 8_000),
+                              "premise: scheduled audio remains at done")
+        }
         try body(player, engine, node, output, scheduledSamples)
+    }
+
+    /// Reading the render position must not re-enter the first-audible mark.
+    ///
+    /// If the read took the mark, it would call `noteFirstAudibleIfRendering()`, which reads the
+    /// position again through that same function. While the node has rendered but the mark is still
+    /// unset, the two recurse until the stack overflows — crashing EVERY cloud answer that plays
+    /// audio. Reaching it needs a control that both renders audio and then reads the position with
+    /// the mark unset; this one does both, through the player's real API.
+    ///
+    /// The property is structural, not an ordering tweak: the read is pure and the mark has one
+    /// writer, so there is no path from the read back into it. A reordered version still recurses.
+    @MainActor
+    func testReadingTheRenderPositionDoesNotReenterTheFirstAudibleMark() throws {
+        try withPendingOfflineAudio { player, engine, node, _, _ in
+            XCTAssertNil(
+                player.firstAudibleHostSeconds,
+                "premise: the mark must still be unset, or the re-entrancy cannot happen")
+
+            // The precondition of the crash, stated rather than assumed: the node HAS rendered, so
+            // the read returns an anchor, and the mark is still unset — the state in which a read
+            // that took the mark would call back into itself.
+            _ = try engine.renderOffline(1_024, to: try XCTUnwrap(
+                AVAudioPCMBuffer(pcmFormat: AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!,
+                                 frameCapacity: 4_096)))
+
+            let anchor = player.renderPosition(of: node)
+            XCTAssertNotNil(anchor, "premise: the real node has rendered, so the read returns a position")
+        }
     }
 
     /// Queue emptiness must preserve the current clock while measured scheduled audio remains.

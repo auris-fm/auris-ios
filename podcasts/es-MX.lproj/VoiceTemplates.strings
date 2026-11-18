@@ -2,3 +2,15 @@
    Regional variant of the same key: real locale discovery selects fr-CA/es-MX for
    fr_CA/es_MX users, so the key must exist HERE too, not only in the base bundle. */
 "cloud_error_limit_exceeded" = "Has alcanzado tu límite diario gratuito de Auris. Vuelve a intentarlo mañana.";
+
+/* The conversation ended on the server, which is an ordinary end rather than a
+   malfunction: say so plainly, and let the next request open a new conversation.
+   Wording is shared with the other app so both say the same thing. */
+"cloud_error_conversation_expired" = "Esa conversación ha terminado.";
+
+/* The answer did not come — the voice could not be produced, or the turn failed inside
+   the assistant. To the listener these are one situation, so both codes speak this one
+   sentence: an apology and a retry, with no system terms. Keep the two keys identical
+   in every language; they are one line by decision, not two that may drift. */
+"cloud_error_speech_unavailable" = "Lo siento, no he podido responder a eso ahora mismo. Inténtalo de nuevo.";
+"cloud_error_internal_error" = "Lo siento, no he podido responder a eso ahora mismo. Inténtalo de nuevo.";

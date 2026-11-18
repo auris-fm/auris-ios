@@ -98,3 +98,15 @@
    (the wire text stays diagnostic-only). No "resets at" time: the client is not
    told when the allowance resets, and inventing one would be a false statement. */
 "cloud_error_limit_exceeded" = "You have reached your Auris free daily limit. Please try again tomorrow.";
+
+/* The conversation ended on the server, which is an ordinary end rather than a
+   malfunction: say so plainly, and let the next request open a new conversation.
+   Wording is shared with the other app so both say the same thing. */
+"cloud_error_conversation_expired" = "That conversation has ended.";
+
+/* The answer did not come — the voice could not be produced, or the turn failed inside
+   the assistant. To the listener these are one situation, so both codes speak this one
+   sentence: an apology and a retry, with no system terms. Keep the two keys identical
+   in every language; they are one line by decision, not two that may drift. */
+"cloud_error_speech_unavailable" = "Sorry, I couldn't answer that just now. Please try again.";
+"cloud_error_internal_error" = "Sorry, I couldn't answer that just now. Please try again.";

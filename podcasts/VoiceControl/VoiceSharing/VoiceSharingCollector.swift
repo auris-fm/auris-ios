@@ -1211,6 +1211,16 @@ return }
         return current?.id
     }
 
+    /// Test seam: the model references recorded for one capture, from the open capture or the
+    /// terminal ring. Nil when no capture with that id exists.
+    func modelReferencesForTesting(captureID: UUID) -> [String: VoiceSharingContributionEncoder.ModelRef]? {
+        lock.lock()
+        defer { lock.unlock() }
+        if let c = current, c.id == captureID { return c.modelReferences }
+        if let rec = terminalRing[captureID] { return rec.capture.modelReferences }
+        return nil
+    }
+
     /// Total identity state: open capture, queued events, refusal sets. The aggregate the ceiling applies to.
     var aggregateIdentityStateForTesting: (openCaptures: Int, queuedEvents: Int, terminalHistory: Int) {
         lock.lock(); defer { lock.unlock() }

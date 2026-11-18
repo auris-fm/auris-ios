@@ -7,9 +7,9 @@ import os.log
 /// shared audio output path with buffering, pause-and-resume on underrun,
 /// and duck/restore of existing playback.
 ///
-/// The player owns one continuous playback session per turn.  Frames are
+/// The player owns one continuous playback session per turn. Frames are
 /// buffered in-order; when the buffer drains below a threshold playback is
-/// paused and resumed once new frames arrive.  The first frame ducks
+/// paused and resumed once new frames arrive. The first frame ducks
 /// existing playback; `done`/`error` restores it.
 final class CloudAudioPlayer: @unchecked Sendable {
 
@@ -27,6 +27,11 @@ final class CloudAudioPlayer: @unchecked Sendable {
         /// drain was SCHEDULED. Delivery is asynchronous, so an identity taken at delivery time
         /// would belong to whichever drain is current then.
         func audioPlayerDidStop(drainEpoch: Int)
+        /// Called once per turn, when the first audible instant is taken (`at` is on the same
+        /// monotonic clock as `firstAudibleHostSeconds`). The value is passed rather than re-read
+        /// because the player clears its mark when the turn's audio ends, which can happen before
+        /// a delivery hopped to the main queue runs.
+        func audioPlayerDidTakeFirstAudible(at instant: Double)
     }
 
     /// Codecs this player can actually decode and play.
@@ -53,7 +58,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     /// Start (or resume) playback with new frames.
     ///
-    /// Call for each frame received on the WebSocket.  If the player was
+    /// Call for each frame received on the WebSocket. If the player was
     /// stopped, the first frame restarts it; if it was already playing the
     /// frame is enqueued.
     func enqueue(_ frame: CloudAudioFrame) {
@@ -164,7 +169,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         bufferLock.lock()
         buffer.removeAll()
         if timingEnabled { timingQueuedBytes = 0 }
-        bufferClearCountForTesting += 1
+        bufferClearCount += 1
         bufferLock.unlock()
         runnerLock.lock()
         // COALESCED ACCOUNTING (review 4fc59e2c): cancel/finish coalesce through the runner's
@@ -759,6 +764,11 @@ final class CloudAudioPlayer: @unchecked Sendable {
             let deadline = renderStopDeadline ?? Date().addingTimeInterval(
                 scheduled / negotiatedSampleRate * 2.0 + 1.0
             )
+            // The drain probe is a genuine periodic render observation: it runs on the runner while
+            // audio is still scheduled, which is the only other moment after scheduling when the
+            // node's rendered state is available. This is where audio scheduled entirely before
+            // the node started rendering finally gets marked audible.
+            noteFirstAudibleIfRendering()
             if let position = renderPosition(of: playerNode!)?.renderedFrames,
                position >= scheduled {
                 isPlaying = false
@@ -823,8 +833,9 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// (review 8eb9fb44). Incremented at request time in the same critical section that
     /// signals the runner; decremented when the stop notification is issued.
     private var pendingStopNotifications = 0
-    /// Test-only: how many times cancel() cleared the buffer (each retire shed buffered audio).
-    private(set) var bufferClearCountForTesting = 0
+    /// How many times cancel() cleared the buffer (each retire shed buffered audio). Read by the
+    /// turn latency record and by tests.
+    private(set) var bufferClearCount = 0
     var hasQueuedStop: Bool {
         runnerLock.lock()
         defer { runnerLock.unlock() }
@@ -944,6 +955,22 @@ final class CloudAudioPlayer: @unchecked Sendable {
         }
     }
 
+    /// Whether this teardown reason ends a turn, as opposed to rebuilding the node inside one.
+    ///
+    /// The distinction is the whole point of the per-turn scheduling boundary: `underrun`,
+    /// `render_caught_up`, `render_timeout` and `restart` are mid-turn node rebuilds, and treating
+    /// them as turn boundaries reported more first-buffer events than there were turns. Named
+    /// reasons rather than a `terminal` flag, because `finish` and `cancel` are terminal while
+    /// `shutdown` is terminal too but ends no turn that could follow.
+    static func reasonEndsTurn(_ reason: String) -> Bool {
+        switch reason {
+        case "finish", "cancel", "cancel_during_finish", "shutdown":
+            return true
+        default:
+            return false
+        }
+    }
+
     private func stopEngine(reason: String, terminal: Bool = false) {
         // Either natural branch can observe catch-up: the early underrun check can win
         // before the later render_caught_up check. Capture the actual position before either
@@ -982,6 +1009,18 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // count returns to zero with it.
         nodeIncarnation &+= 1
         nodeIncarnationFrames = 0
+        // NOT every teardown ends a turn. `stopEngine` also runs for underrun, render catch-up,
+        // render timeout and restart, all of which happen WITHIN one turn while the node is
+        // rebuilt. Re-arming there would log several "first buffer" events for a single turn, so
+        // the boundary is limited to the reasons that actually end one.
+        if Self.reasonEndsTurn(reason) {
+            cloudSchedulingLogged = false
+            // A new turn starts with nothing audible: carrying the previous turn's instant would
+            // report a turn that played nothing as having played immediately.
+            firstAudibleLock.lock()
+            firstAudibleInstant = nil
+            firstAudibleLock.unlock()
+        }
         echoReferenceHandoff?.rotateIncarnation(for: .cloud, to: nodeIncarnation)
     }
 
@@ -1052,6 +1091,12 @@ final class CloudAudioPlayer: @unchecked Sendable {
             // nil — the position is unknown, and the handoff clears the anchor instead of
             // guessing one.
             handoff.submitRenderPosition(renderPosition(of: node), producer: producerIdentityForTesting)
+            // The render observation is where the mark is taken for audio scheduled before the
+            // node started rendering: the scheduling path ran while the node had no render time
+            // yet, so nothing was marked there. Taking it on EVERY observation (not only the
+            // first) is what makes this the trigger rather than a one-shot: the read is pure and
+            // the mark refuses to move once set, so repeating it costs a lock and cannot re-enter.
+            noteFirstAudibleIfRendering()
             return
         }
 
@@ -1088,6 +1133,40 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// (`stopEngine` rotates the incarnation), which is precisely the reset the incarnation
     /// boundary exists to catch.
     private var nodeIncarnationFrames: Double = 0
+
+    /// Whether this incarnation has already logged its first scheduled buffer. Reset when the
+    /// incarnation rotates (`stopEngine` rebuilds the node), which is the boundary between turns.
+    private var cloudSchedulingLogged = false
+
+    /// How many first-scheduled-buffer boundaries this player has logged. Exposed so a control can
+    /// assert the boundary is re-armed per turn: a flag that is never reset would log exactly once
+    /// for the whole process, which is the defect this replaced.
+    private(set) var schedulingBoundaryCount = 0
+
+    /// Re-arms the scheduling boundary. Called from `stopEngine`, which rebuilds the node — the
+    /// real boundary between turns. Exposed so the re-arm can be controlled directly, because a
+    /// test host has no audio output and therefore never schedules a buffer at all.
+    func rearmSchedulingBoundaryForTesting() {
+        cloudSchedulingLogged = false
+    }
+
+    /// Whether the next scheduled buffer would start a new turn's boundary.
+    var isSchedulingBoundaryArmedForTesting: Bool { !cloudSchedulingLogged }
+
+    /// Simulates the boundary firing, without needing an output device. It calls the SAME function
+    /// the production path calls, so the control cannot pass against counting logic that has
+    /// drifted from the real one.
+    func markSchedulingBoundaryForTesting() {
+        noteSchedulingBoundary()
+    }
+
+    /// The boundary's single implementation: log once per turn and count it.
+    private func noteSchedulingBoundary() {
+        guard !cloudSchedulingLogged else { return }
+        cloudSchedulingLogged = true
+        schedulingBoundaryCount += 1
+        FileLog.shared.addMessage("[VoicePipeline] cloudAudioScheduled first buffer scheduled (audible latency not observed)")
+    }
 
     private func playFrame(_ frame: CloudAudioFrame) {
         if timingEnabled { timingActive = frame.timingReceipt?.trace }
@@ -1136,8 +1215,77 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // audible.
         node.play()
         node.scheduleBuffer(pcmBuffer)
+        // SCHEDULING, not audibility. This is the instant the first buffer is handed to the output
+        // node, and naming it "first audible sound" would claim rendered audio that has not
+        // happened yet — `scheduleBuffer` only enqueues, and the node may still be rendering
+        // earlier audio. The true first-render instant needs the node's render position and is not
+        // observed here, so audible latency stays unavailable rather than estimated.
+        noteSchedulingBoundary()
         if timingEnabled { timingScheduledFrames += Double(pcmBuffer.frameLength) }
         observeTiming("schedule")
+        // The node has audio to render now, so this is the first instant it can be audible. The
+        // read is refused until the node has actually rendered, which is why it is re-attempted at
+        // the per-block render observation and in the drain's wait loop rather than only here.
+        noteFirstAudibleIfRendering()
+    }
+
+    /// The first instant this turn's answer was actually AUDIBLE, on the same monotonic clock as
+    /// everything else the pipeline measures.
+    ///
+    /// Read from the output node's own render state: `lastRenderTime.hostTime` is when the node last
+    /// rendered, and `playerTime.sampleTime` says how long ago that rendered block began, so the
+    /// instant the FIRST rendered block began is `hostTime - sampleTime / sampleRate`. Measured
+    /// against the node's start, that block is the beginning of the audio the user hears.
+    ///
+    /// Deliberately not the instant the first buffer was scheduled: `scheduleBuffer` only enqueues,
+    /// and the node may still be rendering audio queued before it, so scheduling can precede the
+    /// first audible sound by an arbitrary amount. That earlier reading is still logged, named for
+    /// what it is (`cloudAudioScheduled`), and this is the number the latency work reports.
+    /// Written only by `noteFirstAudibleIfRendering` and read from the terminal, which runs on a
+    /// different queue from the scheduling/rendering callbacks, so it is guarded by `firstAudibleLock`.
+    private var firstAudibleInstant: Double?
+    private let firstAudibleLock = NSLock()
+
+    /// Records first audible audio if this turn has not already. Called from the scheduling path,
+    /// the per-block render observation, the runner's `processFrames` probe while audio is still
+    /// scheduled, and the drain's wait loop (and once before its stop), so the mark is taken even
+    /// when the node had not started rendering at schedule time — audio scheduled entirely before the
+    /// first render is the ordinary case, and reading the position is NOT what triggers this: the
+    /// read is pure. Once set it never moves: later renders, later schedules and a mid-turn node
+    /// rebuild leave it alone.
+    private func noteFirstAudibleIfRendering() {
+        // Takes the mark in the ONE place, from a PURE read.
+        //
+        // `renderPosition(of:)` is a PURE read and this is the only writer of the mark, so there is
+        // no path from the read back into here. A read that took the mark itself would recurse with
+        // this method whenever it returned an anchor while the mark was still unset, until the
+        // stack overflowed — on every cloud answer that played audio.
+        guard let node = playerNode else { return }
+        firstAudibleLock.lock()
+        guard firstAudibleInstant == nil,
+              let position = readRenderPosition(of: node), position.hostTime > 0 else {
+            firstAudibleLock.unlock()
+            return
+        }
+        let instant = position.hostTime - position.renderedFrames / max(position.sourceSampleRate, 1)
+        firstAudibleInstant = instant
+        firstAudibleLock.unlock()
+        // Outside the lock. Queued on the main queue here, ahead of the stop notification's own
+        // hop (the stop can only come later), so a record held for this mark is written with it
+        // before the stop that would otherwise find the mark already cleared.
+        DispatchQueue.main.async { [weak self] in self?.delegate?.audioPlayerDidTakeFirstAudible(at: instant) }
+    }
+
+    /// The instant this turn's first sound became audible, lead-in clip included, or nil when
+    /// nothing has been heard yet. The server sends its lead-in as ordinary audio frames on the
+    /// same stream and codec as the answer, with no marker distinguishing them, so this mark
+    /// cannot separate the two: it measures when sound started, not when the answer started.
+    /// Read by the turn's latency record at its terminal; on the same monotonic clock the rest of
+    /// the pipeline measures with (`CACurrentMediaTime`).
+    var firstAudibleHostSeconds: Double? {
+        firstAudibleLock.lock()
+        defer { firstAudibleLock.unlock() }
+        return firstAudibleInstant
     }
 
     /// The output node's rendered position, or nil when the node is not rendering.
@@ -1160,6 +1308,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// Internal but test-visible: the deterministic queue-lead control drives a real node whose
     /// counter advances without hardware, and asserts THIS function's reading of it.
     func renderPosition(of node: AVAudioPlayerNode) -> PlaybackRenderAnchor? {
+        readRenderPosition(of: node)
+    }
+
+    private func readRenderPosition(of node: AVAudioPlayerNode) -> PlaybackRenderAnchor? {
         guard let lastRender = node.lastRenderTime,
               lastRender.isSampleTimeValid || lastRender.isHostTimeValid else { return nil }
         // The precondition above is what keeps the conversion safe: `playerTime(forNodeTime:)`
@@ -1335,6 +1487,16 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     private var framesEnqueued = 0
 
+    /// Cumulative audio frames handed to this player and cumulative buffer clears (each `cancel()`
+    /// sheds whatever is buffered). Read by the turn's latency record as before/after counts, so a
+    /// turn with `first_audible=absent` says whether its audio arrived and was cleared or never
+    /// arrived.
+    var audioCountersSnapshot: (framesEnqueued: Int, bufferClears: Int) {
+        bufferLock.lock()
+        defer { bufferLock.unlock() }
+        return (framesEnqueued, bufferClearCount)
+    }
+
     /// Whether this player holds nothing left to play. A turn that produced no
     /// audio can restore immediately; one that is still draining restores when
     /// the drain completes.
@@ -1367,6 +1529,11 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // bounded, and cancel/shutdown can wake this wait and take ownership of the stop.
         let renderDeadline = Date().addingTimeInterval(nodeIncarnationFrames / negotiatedSampleRate * 2 + 1)
         while pendingAudibleOrUnverified && Date() < renderDeadline {
+            // A short reply's audio is scheduled here, after `done`, and the node renders it while
+            // this loop waits: this is the only place that can take the mark for such a turn, and
+            // the stop below clears it. The mark is the first rendered block's start, so taking it
+            // a poll late reports the same instant.
+            noteFirstAudibleIfRendering()
             runnerLock.lock()
             if stopRequested || shutdownRequested {
                 runnerLock.unlock()
@@ -1377,6 +1544,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
             runnerLock.unlock()
             if interrupted { break }
         }
+        noteFirstAudibleIfRendering()
         // OWNED-STOP (spec a9e27935): the stop's identity is the CURRENT OWNER published at
         // request time — the drain claim when nothing displaced it, the cancel that landed
         // mid-window otherwise. Never a fresh re-read of `drainEpoch` (that let a successor's
@@ -1576,4 +1744,9 @@ final class CloudAudioPlayer: @unchecked Sendable {
         capturedStopNotification = capture
         bufferLock.unlock()
     }
+}
+
+extension CloudAudioPlayer.Delegate {
+    /// Optional: only a delegate that holds something for the first audible instant needs it.
+    func audioPlayerDidTakeFirstAudible(at instant: Double) {}
 }

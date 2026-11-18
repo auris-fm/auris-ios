@@ -24,12 +24,16 @@ final class SenseVoiceBackend: AsrBackend {
                 ModelFile(
                     url: URL(string: "\(Self.baseURL)/\(Self.modelFilename)")!,
                     filename: Self.modelFilename,
-                    sha256: nil
+                    // Pinned from the published asset (hf-mirror resolve/main, 2026-11-18):
+                    // an un-pinned file was trusted on existence alone, so a truncated or
+                    // corrupt download survived every later launch and the recognizer failed
+                    // to load its graph.
+                    sha256: "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51"
                 ),
                 ModelFile(
                     url: URL(string: "\(Self.baseURL)/\(Self.tokensFilename)")!,
                     filename: Self.tokensFilename,
-                    sha256: nil
+                    sha256: "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc"
                 ),
             ],
             targetDir: "sensevoice-model"
@@ -147,8 +151,7 @@ final class SenseVoiceBackend: AsrBackend {
 
     /// Downloads each ModelFile into the model dir if not already present. Routed through
     /// `ModelDownloader` so the spec's download contract applies (resumable + atomic rename,
-    /// SHA-256 verification when a hash is pinned). TODO(ASR-debt): pin SHA-256 for the
-    /// SenseVoice assets (currently unset) so integrity is enforced on download.
+    /// SHA-256 verification against each file's pin).
     private func downloadModels() async throws {
         // `download(files:to:)` short-circuits on first failure and creates the directory.
         let result = await ModelDownloader().download(files: requiredModel.files, to: URL(fileURLWithPath: modelDir))

@@ -2,3 +2,15 @@
    Names the assistant (Auris) and the free daily allowance; no invented reset
    time. "try again tomorrow" is the approved template wording. */
 "cloud_error_limit_exceeded" = "Auris 무료 일일 한도에 도달했습니다. 내일 다시 시도해 주세요.";
+
+/* The conversation ended on the server, which is an ordinary end rather than a
+   malfunction: say so plainly, and let the next request open a new conversation.
+   Wording is shared with the other app so both say the same thing. */
+"cloud_error_conversation_expired" = "그 대화는 종료되었습니다.";
+
+/* The answer did not come — the voice could not be produced, or the turn failed inside
+   the assistant. To the listener these are one situation, so both codes speak this one
+   sentence: an apology and a retry, with no system terms. Keep the two keys identical
+   in every language; they are one line by decision, not two that may drift. */
+"cloud_error_speech_unavailable" = "죄송합니다. 지금은 답변드리지 못했습니다. 다시 시도해 주세요.";
+"cloud_error_internal_error" = "죄송합니다. 지금은 답변드리지 못했습니다. 다시 시도해 주세요.";
