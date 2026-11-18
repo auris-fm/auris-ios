@@ -208,6 +208,43 @@ final class ModelDownloaderPinTests: XCTestCase {
         XCTAssertEqual(StubURLProtocol.count(for: path), 1, "the stale marker forced a real re-download")
     }
 
+    /// The marker must actually SKIP the hash, not just exist: after a verified download,
+    /// make the file unreadable. A second call succeeds only via the marker (a hash attempt
+    /// would hit the unreadable path and fail). An always-hash regression fails this test.
+    func testVerifiedMarkerSkipsTheHashOnLaterStarts() async throws {
+        let dir = try makeDir()
+        let finalURL = dir.appendingPathComponent("model.int8.onnx")
+        StubURLProtocol.reset(payloads: [path: goodBytes])
+        let downloader = makeDownloader()
+
+        let first = await downloader.download(url: url, sha256: sha(goodBytes), to: dir)
+        guard case .success = first else { return XCTFail("first failed: \(first)") }
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: finalURL.path)
+        addTeardownBlock { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: finalURL.path) }
+
+        let second = await downloader.download(url: url, sha256: sha(goodBytes), to: dir)
+        guard case .success = second else {
+            return XCTFail("the marker must skip the hash of an unreadable-but-verified file: \(second)")
+        }
+        XCTAssertEqual(StubURLProtocol.count(for: path), 1, "no second download")
+    }
+
+    /// A 416 with an EMPTY pin must NOT rename an unverified `.tmp` into place as a success:
+    /// there is no hash check to fall through to, so the start fails instead.
+    func testFullSizeTmpWith416AndEmptyPinFails() async throws {
+        let dir = try makeDir()
+        try goodBytes.write(to: dir.appendingPathComponent("model.int8.onnx.tmp"))
+        StubURLProtocol.reset(payloads: [path: goodBytes], honorRange: true)
+        let downloader = makeDownloader()
+
+        let result = await downloader.download(url: url, sha256: "", to: dir)
+
+        guard case .failure = result else { return XCTFail("an unverified tmp must not install: \(result)") }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("model.int8.onnx").path),
+                       "no final file is created from an unverified tmp")
+    }
+
     /// A CHANGED PIN with an UNCHANGED file must force a full hash: the marker records the
     /// old pin, so it no longer matches, the file is hashed against the new pin, fails, and
     /// is replaced by a download.

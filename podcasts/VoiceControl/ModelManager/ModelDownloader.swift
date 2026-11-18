@@ -145,7 +145,10 @@ final class ModelDownloader {
         FileLog.shared.addMessage(String(format: "[ModelDownloader] hashed existing %@ in %.2f s",
                                          finalURL.lastPathComponent, elapsed))
         guard let computed else { return .unreadable }
-        guard computed == sha256 else { return .mismatch }
+        guard computed == sha256 else {
+            FileLog.shared.addMessage("[ModelDownloader] pin mismatch for \(finalURL.lastPathComponent): expected \(sha256), computed \(computed)")
+            return .mismatch
+        }
         writeMarker(finalURL, sha256: sha256)
         return .verified
     }
@@ -197,14 +200,19 @@ final class ModelDownloader {
                 // The `.tmp` is already at (or past) the full length — a kill between the
                 // download and the rename leaves exactly this state. The bytes on disk are
                 // the whole asset; fall through to the hash check instead of retrying a
-                // Range request the server will keep answering with 416.
+                // Range request the server will keep answering with 416. Without a pin there
+                // is no check to fall through to, so an unverified `.tmp` must not be renamed
+                // into place as a success.
+                if sha256.isEmpty { throw ModelError.rangeNotSatisfiable }
             }
 
             // SHA-256 verify. An empty pin (no hash yet) is intentionally allowed so the
             // download still proceeds with resumable + atomic semantics; pin hashes for
             // assets that have one so integrity is enforced.
             if !sha256.isEmpty {
-                if streamedSHA256(of: tmpURL) != sha256 {
+                let computed = streamedSHA256(of: tmpURL)
+                if computed != sha256 {
+                    FileLog.shared.addMessage("[ModelDownloader] download hash mismatch for \(tmpURL.lastPathComponent): expected \(sha256), computed \(computed ?? "unreadable")")
                     try? FileManager.default.removeItem(at: tmpURL)
                     // A full-size but corrupt `.tmp` (the 416 fall-through) is re-downloaded
                     // from scratch once, not kept and failed forever.
