@@ -27,10 +27,27 @@ EXPORTS=(
   _lfm_release
 )
 
-if [[ ! -d "${SRC_DIR}/.git" ]]; then
+# The cache is shared by every worktree on this machine, so a partial checkout
+# stops all of them. A usable checkout means the pinned commit is checked out and
+# CMakeLists.txt is present; `.git` existing says neither. Without both, cmake
+# reports the missing CMakeLists.txt as if the source were wrong, and the LFM
+# compile fails on a missing llama.h even when every archive is already built.
+cache_is_usable() {
+  [[ -f "${SRC_DIR}/CMakeLists.txt" ]] || return 1
+  [[ "$(git -C "${SRC_DIR}" rev-parse HEAD 2>/dev/null)" == "${LLAMA_GIT_TAG}" ]]
+}
+
+if ! cache_is_usable; then
+  echo "[llama-ios] source cache missing or unusable at ${SRC_DIR}; cloning"
   mkdir -p "$(dirname "${CACHE_ROOT}")"
+  # git refuses a non-empty target, so the unusable directory has to go first.
   rm -rf "${SRC_DIR}"
-  git clone --depth 1 "https://github.com/ggerganov/llama.cpp.git" "${SRC_DIR}"
+  # Blobless and without a checkout: a full shallow clone transfers every blob at
+  # the tip, which fails on a busy link. This fetches only the pinned commit's
+  # trees, then the blobs that commit needs. The checkout below is what puts
+  # CMakeLists.txt in place for the guard above.
+  git clone --depth 1 --filter=blob:none --no-checkout \
+    "https://github.com/ggerganov/llama.cpp.git" "${SRC_DIR}"
   git -C "${SRC_DIR}" fetch --depth 1 origin "${LLAMA_GIT_TAG}"
   git -C "${SRC_DIR}" checkout "${LLAMA_GIT_TAG}"
 fi

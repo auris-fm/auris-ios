@@ -1,0 +1,40 @@
+# CI for this repository, on a Mac we control.
+#
+# Upstream's `.buildkite/pipeline.yml` is left untouched: it targets Automattic's
+# own build machines (the `a8c-ci-toolkit` plugin, an `IMAGE_ID` virtual-machine
+# image, and the `mac`/`linter` queues) and decrypts Pocket Casts' secrets through
+# `fastlane configure_apply`. None of that exists here. This file is the pipeline
+# the `auris-ios` queue runs.
+#
+# What it guarantees, beyond "the tests passed":
+#   - every target in the test plan actually executed tests, and
+#   - the plan's skip list has not grown.
+# Both are invisible in xcodebuild's exit status, so both are checked explicitly
+# from the result bundle rather than inferred from a green run.
+#
+# Coverage today is PocketCastsTests and PocketCastsUtilsTests. Three groups are
+# not covered yet, for one shared reason: their code cannot be linked into an
+# iOS-simulator test bundle while host-only macro code is in the same package.
+#   - PocketCastsDataModelTests and PocketCastsServerTests, and
+#   - the 22 SwiftPM tests (GRDBMacrosTests, ModulesTests), which no Xcode scheme
+#     runs at all.
+# Separating host from simulator code is the next change in this work. Until then
+# the guard names them as blocked rather than passing silently without them.
+
+agents:
+  queue: auris-ios
+
+steps:
+  - label: ":xcode: Build and test"
+    key: build-and-test
+    # The last line of defence, above the sum of the phase limits inside the
+    # script (build 45 min + test 60 min) plus the steps between them — erase,
+    # readiness wait, grants, self-tests — so no phase can fall outside every
+    # limit. Buildkite's cancel sends SIGTERM to the job, which runs the script's
+    # exit trap: simulator shutdown first (releasing any wedged helper), then the
+    # recorded Interface Builder processes, with untied ones named not killed.
+    timeout_in_minutes: 120
+    command: .buildkite/commands/auris-build-and-test.sh
+    artifact_paths:
+      - "artifacts/*.log"
+      - "artifacts/*.xcresult.zip"
