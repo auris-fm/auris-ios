@@ -16,7 +16,6 @@ import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-SKIP_MANIFEST = Path("artifacts/skip-reasons.json")
 REPO = HERE.parent.parent
 
 spec = importlib.util.spec_from_file_location("check", HERE / "check-test-coverage.py")
@@ -43,33 +42,17 @@ def real_report(bundle_path=None):
     )
 
 
-def manifest_reason(test_id):
-    """Why the recording says this test skipped, for the tests it recorded.
+def run_guard(report, plan_text, signed=True, bundle=None):
+    """The same decision the CI step makes, with reasons read from the same run.
 
-    The recording is the authority on what skipped; the manifest is only here for
-    `test_check_test_coverage.py`, which the trust perimeter may run without the
-    recording in reach.
+    A skipped case's detail record carries the message it skipped with, so the
+    reasons are read from the bundle under test — the same reader the CI step
+    uses. An unsigned recording then proves its own expected skips instead of
+    depending on a manifest file that nothing writes.
     """
-    try:
-        manifest = json.loads((REPO / SKIP_MANIFEST).read_text())
-    except (OSError, ValueError):
-        return ""
-    for reasons in manifest.values():
-        for recorded, reason in reasons.items():
-            if recorded == test_id:
-                return reason
-    return ""
-
-
-def run_guard(report, plan_text, signed=True):
-    """The same decision the CI step makes, with reasons read from the same run."""
     skips = check.runtime_skips(report)
     identifiers = [test_id for ids in skips.values() for test_id in ids]
-    # The recording does not carry why a test skipped, so the reasons come from
-    # the manifest generated alongside it. What is being proved is the
-    # bookkeeping — which skips and failures the guard accepts — not the reading of
-    # any particular bundle.
-    reasons = {test_id: manifest_reason(test_id) for test_id in identifiers}
+    reasons = check.skip_reasons(bundle, identifiers) if bundle else {}
     with tempfile.TemporaryDirectory() as tmp:
         plan = Path(tmp) / "plan.xctestplan"
         plan.write_text(plan_text)
@@ -82,7 +65,7 @@ PLAN = (REPO / "PocketCastsTests" / "UnitTests.xctestplan").read_text()
 
 
 def case(name, report, plan_text, expect_failure, expected_text=None, reasons=None,
-         signed=True):
+         signed=True, bundle=None):
     with tempfile.TemporaryDirectory() as tmp:
         plan = Path(tmp) / "plan.xctestplan"
         plan.write_text(plan_text)
@@ -90,7 +73,9 @@ def case(name, report, plan_text, expect_failure, expected_text=None, reasons=No
         # The cases run against one recorded run, so the reasons are read from it
         # once rather than re-querying the bundle per skipped test.
         if reasons is None:
-            reasons = {t: manifest_reason(t) for ids in skips.values() for t in ids}
+            reasons = check.skip_reasons(
+                bundle, [t for ids in skips.values() for t in ids]
+            ) if bundle else {}
         failures = check.check_coverage(
             check.count_tests(report), plan, skips, reasons, signed
         )
@@ -109,13 +94,14 @@ def main():
     # a recording of an unsigned run is read as unsigned, where the keychain skips
     # are that run's expected answer rather than coverage it lost.
     signed = check.SIGNED_HOST
-    base = real_report(sys.argv[1] if len(sys.argv) > 1 else None)
+    bundle = sys.argv[1] if len(sys.argv) > 1 else None
+    base = real_report(bundle)
     results = []
 
     # The baseline must itself be a complete run. A truncated bundle would make
     # every "removes coverage" case pass for the wrong reason, so say so plainly
     # rather than reporting four green checks that proved nothing.
-    baseline_failures = run_guard(base, PLAN, signed=signed)
+    baseline_failures = run_guard(base, PLAN, signed=signed, bundle=bundle)
     if baseline_failures:
         # Two different things can make a recording unusable as a baseline. Missing
         # coverage invalidates every case below, because each one removes coverage
@@ -135,7 +121,7 @@ def main():
         print("      the cases that compare failures against the lists are reported "
               "as unproved for it; the coverage cases still apply")
     results.append(case("unmodified run passes", base, PLAN, expect_failure=False,
-                        signed=signed))
+                        signed=signed, bundle=bundle))
 
     # A required target runs nothing: the selection was narrowed, or the bundle
     # failed to load. xcodebuild still exits 0 for the tests it did run.
@@ -145,14 +131,16 @@ def main():
     plan_node["children"] = [
         b for b in plan_node["children"] if b["name"] != "PocketCastsUtilsTests"
     ]
-    results.append(case("required target removed from the run", dropped, PLAN, expect_failure=True))
+    results.append(case("required target removed from the run", dropped, PLAN,
+                        expect_failure=True, bundle=bundle))
 
     # The plan grows a skip. Nothing in a green run reports it.
     mutant = json.loads(PLAN)
     mutant["testTargets"][0].setdefault("skippedTests", []).append(
         "CloudRouteSupersedeTests/testACompletedDoneDrainsTheSameBufferedOutput()"
     )
-    results.append(case("plan gains an unlisted skip", base, json.dumps(mutant), expect_failure=True))
+    results.append(case("plan gains an unlisted skip", base, json.dumps(mutant),
+                        expect_failure=True, bundle=bundle))
 
     # The plan narrows a target to a handful of its tests. Every count and skip
     # check still passes, because the target ran and nothing was skipped.
@@ -160,7 +148,7 @@ def main():
     narrowed["testTargets"][0]["selectedTests"] = ["FeatureFlagTests"]
     results.append(case("plan narrows a target to selected tests", base,
                         json.dumps(narrowed), expect_failure=True,
-                        expected_text="narrowed to", signed=signed))
+                        expected_text="narrowed to", signed=signed, bundle=bundle))
 
     # A blocked target comes back to the plan without being made required.
     restored = json.loads(PLAN)
@@ -171,7 +159,7 @@ def main():
             "name": "PocketCastsDataModelTests",
         }
     })
-    failures = run_guard(base, json.dumps(restored))
+    failures = run_guard(base, json.dumps(restored), bundle=bundle)
     ok = any("still listed as blocked" in f for f in failures)
     for f in failures:
         print(f"        -> {f}")
@@ -265,23 +253,34 @@ def main():
     # exercised from it. Taking the first name alphabetically would pick one that
     # failed here, and "passed" could then never be produced.
     flaky = next(
-        name for name in sorted(check.FLAKY_TESTS)
-        if check.intermittent_outcome(name, reported, check.executed_tests(base)) == "passed"
+        (name for name in sorted(check.FLAKY_TESTS)
+         if check.intermittent_outcome(name, reported, check.executed_tests(base)) == "passed"),
+        None,
     )
-    truncated = copy.deepcopy(base)
-    for node in check.walk_test_cases(truncated):
-        if flaky in (node.get("nodeIdentifier") or ""):
-            node["result"] = "Skipped"
-    # The verdict itself, not just the set: this is the string the pass rate is
-    # read from, so it is what has to be right.
-    failed_set = check.reported_failures(log)
-    ok = (
-        check.intermittent_outcome(flaky, failed_set, check.executed_tests(truncated)) == "not run"
-        and check.intermittent_outcome(flaky, failed_set, check.executed_tests(base)) == "passed"
-        and check.intermittent_outcome(flaky, failed_set | {flaky}, check.executed_tests(base)) == "failed"
-    )
-    print(f"{'PASS' if ok else 'FAIL'}  an intermittent test reads passed, failed or not run")
-    results.append(ok)
+    if flaky is None:
+        # Every listed intermittent failed in this recording. The tolerated set
+        # is then exercised by the recording itself, not by this case, which can
+        # only prove the three-outcome read from a test that passed. Reported as
+        # unproved rather than passed, so a green total is never read as
+        # covering it.
+        print("SKIP  an intermittent test reads passed, failed or not run — no "
+              "listed intermittent passed in this recording, so the case would "
+              "prove nothing")
+    else:
+        truncated = copy.deepcopy(base)
+        for node in check.walk_test_cases(truncated):
+            if flaky in (node.get("nodeIdentifier") or ""):
+                node["result"] = "Skipped"
+        # The verdict itself, not just the set: this is the string the pass rate is
+        # read from, so it is what has to be right.
+        failed_set = check.reported_failures(log)
+        ok = (
+            check.intermittent_outcome(flaky, failed_set, check.executed_tests(truncated)) == "not run"
+            and check.intermittent_outcome(flaky, failed_set, check.executed_tests(base)) == "passed"
+            and check.intermittent_outcome(flaky, failed_set | {flaky}, check.executed_tests(base)) == "failed"
+        )
+        print(f"{'PASS' if ok else 'FAIL'}  an intermittent test reads passed, failed or not run")
+        results.append(ok)
     # A test killed at its execution time allowance prints no result line, so it
     # is absent from the log's failure list while the bundle marks it Failed. It
     # must fail the run, and it must not read as passed or as never run.
@@ -292,7 +291,7 @@ def main():
     # line, so nothing but the bundle records it. Nothing excuses it — if a wait
     # survives the privacy grants, that is what the run must report.
     timeout_ok = bool(timed_out) and bool(
-        check.check_failures(reported | set(timed_out))
+        check.check_failures(reported | set(timed_out), timed_out=set(timed_out))
     )
     if timed_out:
         print(f"{'PASS' if timeout_ok else 'FAIL'}  a timed-out test fails the run")
@@ -313,12 +312,16 @@ def main():
         outcome = check.intermittent_outcome(
             victim, reported | {victim}, check.executed_tests(base)
         )
+        still_fails = bool(
+            check.check_failures(reported | {victim}, timed_out={victim})
+        )
         del check.FLAKY_TESTS[victim]
-        reports_failed = outcome == "failed"
+        reports_failed = outcome == "failed" and still_fails
         print(f"{'PASS' if reports_failed else 'FAIL'}  "
-              "a timed-out test reports failed, not passed or never run")
+              "a timed-out test reports failed, not passed or never run, and the "
+              "intermittent list does not excuse it")
         if not reports_failed:
-            print(f"        -> outcome was '{outcome}', expected 'failed'")
+            print(f"        -> outcome was '{outcome}', still_fails was {still_fails}")
         results.append(reports_failed)
 
     # A known failure that this recording never ran is not one that passed. On an
@@ -378,9 +381,18 @@ def main():
         ok = got == want
         print(f"{'PASS' if ok else 'FAIL'}  {name} (got {got}, want {want})")
         results.append(ok)
+    # This case only calls check_failures on a set, so it needs no recorded pass:
+    # a synthetic entry added to the list (saved and restored, as for
+    # KNOWN_FAILURES) exercises the tolerance whatever the recording holds.
+    synthetic_flaky = "SelfTestSyntheticSuite/testIntermittentTolerance"
+    saved_flaky = dict(check.FLAKY_TESTS)
+    check.FLAKY_TESTS[synthetic_flaky] = "added by this case"
+    flaky_tolerated = check.check_failures(reported | {synthetic_flaky}) == []
+    check.FLAKY_TESTS.clear()
+    check.FLAKY_TESTS.update(saved_flaky)
     for name, ok in (
         ("an intermittent test failing does not fail the run",
-         check.check_failures(reported | {flaky}) == []),
+         flaky_tolerated),
         ("the recorded run's failures are all known",
          baseline_clean),
     ):

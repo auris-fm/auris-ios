@@ -27,13 +27,16 @@ agents:
 steps:
   - label: ":xcode: Build and test"
     key: build-and-test
-    # The last line of defence, above the sum of the phase limits inside the
-    # script (build 45 min + test 60 min) plus the steps between them — erase,
-    # readiness wait, grants, self-tests — so no phase can fall outside every
-    # limit. Buildkite's cancel sends SIGTERM to the job, which runs the script's
-    # exit trap: simulator shutdown first (releasing any wedged helper), then the
-    # recorded Interface Builder processes, with untied ones named not killed.
-    timeout_in_minutes: 120
+    # The last line of defence, above the sum of the internal caps so a
+    # pathological run reaches its own verdict and artifacts instead of being
+    # cancelled before either is printed: build 45 min + post-erase readiness up
+    # to 35 min + test start-up 15 min + test 60 min + self-tests ~10 min leaves
+    # 15 min for llama.cpp and package resolution on a cold cache, which are the
+    # only unbounded phases. Buildkite's cancel sends SIGTERM to the job, which
+    # runs the script's exit trap: simulator shutdown first (releasing any wedged
+    # helper), then the recorded Interface Builder processes, with untied ones
+    # named not killed.
+    timeout_in_minutes: 180
     command: .buildkite/commands/auris-build-and-test.sh
     artifact_paths:
       - "artifacts/*.log"

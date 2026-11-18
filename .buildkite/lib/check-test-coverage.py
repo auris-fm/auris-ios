@@ -403,10 +403,23 @@ def reported_failures(log_path: Path) -> set:
     return reported
 
 
-def check_failures(reported: set, flaky_outcomes: dict = None) -> list:
-    """Compare the tests that failed against the ones expected to."""
+def check_failures(reported: set, timed_out: set = frozenset()) -> list:
+    """Compare the tests that failed against the ones expected to.
+
+    A test killed at its execution time allowance fails the run even when it is
+    on the intermittent list: the tolerated list exists for a test whose outcome
+    varies run to run, and a hang is an outcome that happened — excusing it
+    would make the list a way to hide a hang.
+    """
     failures = []
     for test in sorted(reported):
+        if any(t in test for t in timed_out):
+            failures.append(
+                f"'{test}' was killed at its execution time allowance. A hang is "
+                "an outcome that happened, and the intermittent list does not "
+                "excuse it."
+            )
+            continue
         if any(listed in test for listed in FLAKY_TESTS):
             continue
         if not any(listed in test for listed in KNOWN_FAILURES):
@@ -606,7 +619,7 @@ def main() -> int:
               "that does not reconnect ends the run partway through:")
         for name in sorted(timeouts):
             print(f"  {name}")
-    failures += check_failures(failed)
+    failures += check_failures(failed, timed_out=timeouts)
     if failures:
         print("\nCoverage check FAILED:", file=sys.stderr)
         for failure in failures:
