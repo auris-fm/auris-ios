@@ -708,6 +708,15 @@ case "$WATCHDOG_STATUS" in
     ;;
 esac
 
+echo "--- :mag: Checking the build step itself"
+# The whole build step — backgrounded xcodebuild, watchdog verdicts, the
+# errexit path around the call — against a stub xcodebuild. This is the test
+# that caught the build running unwatched and the verdict lost to the kill.
+set +e
+run_bg bash .buildkite/lib/test-build-step.sh
+BUILD_STEP_SELFTEST_STATUS=$?
+set -e
+
 echo "--- :mag: Checking the build watchdog itself"
 # A build that stops logging must be killed with a verdict naming why; a healthy
 # one must be left alone. Uses the watchdog body from this script, like the test
@@ -825,6 +834,7 @@ echo "--- :result: Result"
 echo "xcodebuild exit: $TEST_STATUS"
 echo "coverage check exit: $COVERAGE_STATUS"
 echo "guard self-test exit: $SELFTEST_STATUS"
+echo "build-step self-test exit: $BUILD_STEP_SELFTEST_STATUS"
 echo "watchdog self-test exit: $WATCHDOG_SELFTEST_STATUS"
 echo "build-watchdog self-test exit: $BUILD_WATCHDOG_SELFTEST_STATUS"
 echo "Interface Builder cleanup self-test exit: $IB_SELFTEST_STATUS"
@@ -834,6 +844,7 @@ echo "live-log filter self-test exit: $FILTER_SELFTEST_STATUS"
 [ "$TEST_STATUS" -eq 0 ] || { echo "tests failed"; exit "$TEST_STATUS"; }
 [ "$COVERAGE_STATUS" -eq 0 ] || { echo "the run did not cover the whole plan"; exit "$COVERAGE_STATUS"; }
 [ "$SELFTEST_STATUS" -eq 0 ] || { echo "the coverage guard did not prove it can fail"; exit "$SELFTEST_STATUS"; }
+[ "$BUILD_STEP_SELFTEST_STATUS" -eq 0 ] || { echo "the build step did not prove it can be killed and still report why"; exit "$BUILD_STEP_SELFTEST_STATUS"; }
 [ "$WATCHDOG_SELFTEST_STATUS" -eq 0 ] || { echo "the watchdog did not prove it can stop a run"; exit "$WATCHDOG_SELFTEST_STATUS"; }
 [ "$BUILD_WATCHDOG_SELFTEST_STATUS" -eq 0 ] || { echo "the build watchdog did not prove it can stop a build"; exit "$BUILD_WATCHDOG_SELFTEST_STATUS"; }
 [ "$IB_SELFTEST_STATUS" -eq 0 ] || { echo "the Interface Builder cleanup did not prove it kills only what it recorded"; exit "$IB_SELFTEST_STATUS"; }
