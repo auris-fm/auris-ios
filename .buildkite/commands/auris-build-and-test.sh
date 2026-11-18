@@ -434,6 +434,21 @@ fi
 # boot fails with EPERM — the privacy service is not ready yet — and the same
 # grant succeeds seconds later. So each grant is retried on a bound instead of
 # tripping errexit on the first try.
+# The fallback for a service simctl refuses to grant: write the same row the
+# grant command would write, then verify it. Measured on this machine: after a
+# fresh erase, the microphone grant lands but speech-recognition keeps failing
+# with EPERM even minutes later, on a booted device with the app installed —
+# the row inserted directly is identical in shape to the one simctl writes.
+tcc_grant() {
+  local service="$1" bundle="$2" db
+  db="$HOME/Library/Developer/CoreSimulator/Devices/$SIMULATOR_ID/data/Library/TCC/TCC.db"
+  [ -f "$db" ] || { echo "no TCC database at $db"; return 1; }
+  sqlite3 "$db" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version,indirect_object_identifier,flags,last_modified) VALUES ('$service','$bundle',0,2,4,1,'UNUSED',0,CAST(strftime('%s','now') AS INTEGER));" || return 1
+  [ "$(sqlite3 "$db" "SELECT auth_value FROM access WHERE service='$service' AND client='$bundle';")" = 2 ] \
+    || { echo "TCC row for $service did not verify"; return 1; }
+  return 0
+}
+
 grant_test_permissions() {
   local host_bundle="$1" service tries="$2" per_try="$3" i rc
   for service in microphone speech-recognition; do
@@ -447,7 +462,16 @@ grant_test_permissions() {
       echo "$service grant failed (try $i/$tries), retrying in ${per_try}s"
       sleep "$per_try"
     done
-    [ "$rc" -eq 0 ] || { echo "$service was not granted within $((tries * per_try))s"; return 1; }
+    if [ "$rc" -ne 0 ]; then
+      echo "$service was not granted by simctl within $((tries * per_try))s; falling back to the TCC database"
+      if tcc_grant "$service" "$host_bundle"; then
+        echo "$service granted via the TCC database"
+        rc=0
+      else
+        echo "$service could not be granted at all"
+        return 1
+      fi
+    fi
   done
   return 0
 }
