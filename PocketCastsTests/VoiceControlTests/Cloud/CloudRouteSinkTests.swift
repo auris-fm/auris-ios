@@ -3926,6 +3926,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             private let lock = NSLock()
             private var deliveries: [() -> Void] = []
             func store(_ d: @escaping () -> Void) { lock.lock(); deliveries.append(d); lock.unlock() }
+            var count: Int { lock.lock(); defer { lock.unlock() }; return deliveries.count }
             func deliverAll() { lock.lock(); let all = deliveries; deliveries = []; lock.unlock(); all.forEach { $0() } }
         }
         let box = Box()
@@ -3964,7 +3965,16 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // process the retire stop, then the withheld notification is delivered.
         try await Task.sleep(nanoseconds: 120_000_000)
         await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(false) }
-        try await Task.sleep(nanoseconds: 150_000_000)
+        // BARRIER on the retire stop's notification being captured — not a fixed sleep. Under
+        // load on a shared Mac the runner can take longer than any chosen interval to reach the
+        // stop, and a premature deliverAll() would leave the retire stop undelivered: B then
+        // waits out its quiescence bounds and rolls back instead of completing.
+        var retireCaptured = false
+        for _ in 0..<600 {
+            if box.count > 0 { retireCaptured = true; break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(retireCaptured, "the retire stop's notification was captured before delivery")
         await MainActor.run {
             sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting(nil)
             box.deliverAll()
