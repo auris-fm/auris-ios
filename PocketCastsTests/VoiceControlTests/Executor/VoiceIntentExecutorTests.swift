@@ -89,7 +89,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
             request: "what is this",
             tier: .unknown,
             context: PlaybackContext.absent,
-            origin: .routingFailure
+            origin: .routingFailure, latency: LatencyHandle()
         ))
 
         XCTAssertTrue(mockCloudRouteSink.routeToCloudCalled)
@@ -127,7 +127,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
             request: "what did they say",
             tier: .unknown,
             context: snapshot,
-            origin: .routingFailure
+            origin: .routingFailure, latency: LatencyHandle()
         ))
 
         XCTAssertTrue(mockCloudRouteSink.routeToCloudCalled, "the turn still dispatches")
