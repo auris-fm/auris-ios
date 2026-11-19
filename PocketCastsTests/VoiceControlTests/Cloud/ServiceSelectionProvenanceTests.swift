@@ -35,7 +35,7 @@ final class TranscribingAsrBackend: AsrBackend {
     init(text: String) { self.text = text }
     var requiredModel: ModelSpec { ModelSpec(id: "fake-transcribing", files: [], targetDir: "fake") }
     var capabilities: AsrCapabilities {
-        AsrCapabilities(languages: ["en"], canTranslateToEnglish: false, requiresHardwareAccel: false)
+        AsrCapabilities(canTranslateToEnglish: false)
     }
     func ensureReady() async -> Result<Void, Error> {
         ensureReadyCount += 1

@@ -22,22 +22,6 @@ extension CarPlaySceneDelegate {
                 }
             }
 
-            // On iOS 26.4 and later, CarPlay uses `playbackConfiguration` to display
-            // elapsed time and duration, which lets it show playback progress correctly.
-            if #available(iOS 26.4, *) {
-                let duration = episode.duration
-                var elapsedTime = min(episode.playedUpTo, episode.duration)
-                if episode.unplayed() {
-                    elapsedTime = 0
-                } else if episode.played() {
-                    elapsedTime = episode.duration
-                }
-                // CPPlaybackConfiguration removed in newer CarPlay SDK
-                if duration > 0, #available(iOS 17.0, *) {
-                    // Use CPListItem playbackProgress on iOS 17+
-                }
-            }
-
             if episode.episodeStatus != DownloadStatus.downloaded.rawValue {
                 item.accessoryType = .cloud
             }

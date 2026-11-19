@@ -28,6 +28,27 @@ struct PipelineStageTiming {
     let backend: String
 }
 
+extension PipelineStageTiming {
+    /// The persisted-log form of these durations. Milliseconds are printed with one decimal so
+    /// sub-10ms stages stay distinguishable instead of all rounding to `0` or `1`; a whole
+    /// millisecond of reportable resolution is lost otherwise, and this log exists to be measured
+    /// from. Every field is named, so a reader does not have to know the builder's order.
+    var logField: String {
+        let ms: (Double) -> String = { String(format: "%.1f", $0) }
+        var parts = [
+            "seg->wake=\(ms(segmentToWakeMs))ms",
+            "wake->asrStart=\(ms(wakeToAsrStartMs))ms",
+            "asr=\(ms(asrMs))ms",
+            "seg->asrResult=\(ms(segmentToAsrResultMs))ms"
+        ]
+        if let wakeToAsrResultMs {
+            parts.append("wake->asrResult=\(ms(wakeToAsrResultMs))ms")
+        }
+        parts.append("wake=\(wakeResult)")
+        return parts.joined(separator: " ")
+    }
+}
+
 /// Records monotonic boundary marks for one utterance and derives the stage
 /// durations. The four marks are: segment ready, wake result, ASR start, ASR
 /// result. Timing measures the actual operations the fields name — it never

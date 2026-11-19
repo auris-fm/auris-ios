@@ -326,7 +326,7 @@ final class SinglePredecessorInterruptionControl: XCTestCase {
         XCTAssertTrue(admittedB)
         let discarded = await waitUntil(timeout: 15) { failureFinished.isSet }
         XCTAssertTrue(discarded, "failure transition must finish before A’s done")
-        XCTAssertTrue(sink.isSuppressedForTesting("u-barge"))
+        XCTAssertTrue(sink.isSuppressed("u-barge"))
         XCTAssertNil(sink.interruptionStateForTesting.heldFollowUpForTesting)
         predecessorPark.release()
         let settled = await waitUntil(timeout: 20) {
@@ -424,7 +424,7 @@ final class SinglePredecessorInterruptionControl: XCTestCase {
                 && !self.terminals.outcomes(for: "u-barge").isEmpty
         }
         XCTAssertTrue(finished)
-        XCTAssertTrue(sink.isSuppressedForTesting("u-barge"))
+        XCTAssertTrue(sink.isSuppressed("u-barge"))
         XCTAssertNil(sink.interruptionStateForTesting.heldFollowUpForTesting)
         XCTAssertEqual(sink.interruptionStateForTesting.pendingReportForTesting?.requestId, "u-prior")
         XCTAssertEqual(authFrames(for: "u-barge").count, 0)

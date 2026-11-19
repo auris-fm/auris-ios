@@ -6,8 +6,8 @@ import Foundation
 /// not safe: a redactor that misses one form (for example `Authorization: Bearer <token>`) leaks a
 /// credential. Nothing outside these four fields is ever recorded, so there is no secret to redact.
 ///
-/// Direction matters: `CloudTurnEnvelope.recentConversation` is OUTGOING request context built by
-/// `CloudTurnEnvelope.make`, not a server response. Acceptance recall must be judged on the INCOMING
+/// Direction matters: the envelope the client builds for submission (`CloudTurnEnvelope.make`) is
+/// OUTGOING request context, not a server response. Acceptance recall must be judged on the INCOMING
 /// response, so this record is produced at the transport boundary where `CloudRouteEvent`s are parsed.
 struct CloudAcceptanceRecord: Equatable {
     /// The REQUEST identity of the submitted turn, carried from the turn the route loop actually

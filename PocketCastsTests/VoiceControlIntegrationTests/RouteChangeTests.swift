@@ -555,9 +555,16 @@ final class RouteChangeTests: XCTestCase {
 
         let result = await monitor.acquireExternalInput()
 
-        XCTAssertEqual(result, .notApplicable)
-        XCTAssertEqual(session.configureCount, 0, "no acquisition is attempted for a built-in route")
-        XCTAssertEqual(session.activateCount, 0)
+        if DiagnosticMicOverride.isActive {
+            // Debug simulator only: the owner-approved built-in-mic diagnostic admits the
+            // built-in route, so acquisition IS attempted and opens the session input-capable.
+            XCTAssertEqual(result, .acquired)
+            XCTAssertEqual(session.configureCount, 1)
+        } else {
+            XCTAssertEqual(result, .notApplicable)
+            XCTAssertEqual(session.configureCount, 0, "no acquisition is attempted for a built-in route")
+            XCTAssertEqual(session.activateCount, 0)
+        }
     }
 
     func test_builtInReceiverRoute_noAcquisitionAttempted() async {
@@ -568,8 +575,15 @@ final class RouteChangeTests: XCTestCase {
 
         let result = await monitor.acquireExternalInput()
 
-        XCTAssertEqual(result, .notApplicable)
-        XCTAssertEqual(session.configureCount, 0)
+        if DiagnosticMicOverride.isActive {
+            // Debug simulator only: the owner-approved built-in-mic diagnostic admits the
+            // built-in route, so acquisition IS attempted.
+            XCTAssertEqual(result, .acquired)
+            XCTAssertEqual(session.configureCount, 1)
+        } else {
+            XCTAssertEqual(result, .notApplicable)
+            XCTAssertEqual(session.configureCount, 0)
+        }
     }
 
     // MARK: - Gate matrix

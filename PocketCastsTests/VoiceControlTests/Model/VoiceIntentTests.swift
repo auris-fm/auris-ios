@@ -118,7 +118,7 @@ final class VoiceIntentTests: XCTestCase {
     }
 
     func test_cloudRouteIntent_equality() {
-        let intent = CloudRouteIntent(request: "find similar", tier: .premium)
+        let intent = CloudRouteIntent(request: "find similar", tier: .premium, latency: LatencyHandle())
         XCTAssertEqual(intent.request, "find similar")
         XCTAssertEqual(intent.tier, .premium)
     }

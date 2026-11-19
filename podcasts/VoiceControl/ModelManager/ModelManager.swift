@@ -86,14 +86,9 @@ class ModelManager: ObservableObject {
     private static let lfmManifestFilename = "manifest.json"
     private static let lfmLatestURL = URL(string: "https://download.auris.fm/function-call/latest.json")!
 
-    @Published var isReady = false
-
     private let downloader: ModelDownloader
     private let storageDir: URL
     private let session: URLSession
-
-    /// Application Support/.../Auris/Models root (injectable via init for tests).
-    var filesDir: URL { storageDir }
 
     var lfmDir: URL { storageDir.appendingPathComponent("function-call") }
     var lfmModelFile: URL { lfmDir.appendingPathComponent(Self.lfmModelFilename) }
@@ -115,23 +110,6 @@ class ModelManager: ObservableObject {
                 .first!.appendingPathComponent("Auris/Models")
         }
         try? FileManager.default.createDirectory(at: self.storageDir, withIntermediateDirectories: true)
-    }
-
-    func ensureSelectedModels() async {
-        let whisperSpec = ModelSpec(
-            id: "whisper",
-            files: [
-                ModelFile(
-                    url: URL(string: "https://download.auris.fm/whisper/ggml-small-q5_1.bin")!,
-                    filename: "ggml-small-q5_1.bin",
-                    sha256: nil
-                ),
-            ],
-            targetDir: "whisper-model"
-        )
-        _ = await downloadModel(spec: whisperSpec)
-        _ = await ensureLfmModel()
-        isReady = isLfmModelReady()
     }
 
     func isLfmModelReady() -> Bool {
@@ -176,7 +154,6 @@ class ModelManager: ObservableObject {
             let url = lfmDir.appendingPathComponent(name)
             try? FileManager.default.removeItem(at: url)
         }
-        isReady = false
     }
 
     func lfmReleaseVersion() -> String? {
@@ -245,12 +222,5 @@ class ModelManager: ObservableObject {
         default:
             return true
         }
-    }
-
-    private func downloadModel(spec: ModelSpec) async -> Result<Void, Error> {
-        let targetDir = storageDir.appendingPathComponent(spec.targetDir)
-        // download(files:to:) creates the directory and applies the per-file contract
-        // (resumable + SHA-verify-when-pinned + atomic rename) for each asset in the spec.
-        return await downloader.download(files: spec.files, to: targetDir)
     }
 }

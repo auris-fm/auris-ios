@@ -2,7 +2,6 @@ import XCTest
 @testable import podcasts
 
 final class CloudRouteClientTests: XCTestCase {
-    private let userId = "user_79424ba0-f09b-013b-249c-566ad7a4dc9d"
     private let sampleContext = CloudRouteContext(
         episodeId: "79424ba0-f09b-013b-249c-566ad7a4dc9d",
         podcastId: "da7aba5e-f11e-f11e-f11e-da7aba5ef11e",
@@ -72,11 +71,10 @@ final class CloudRouteClientTests: XCTestCase {
         liveTask.holdUntilReleased(heldGate)
         let client = CloudRouteClient(
             baseURL: "https://cloud.test",
-            userId: userId,
             tokenProvider: StubTokenProvider(token: "t"),
             webSocketTaskFactory: { _ in liveTask }
         )
-        let turn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation())
+        let turn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, conversation: testPreparedConversation())
         let routed = client.routeWithResultSocket(request: "x", context: sampleContext, turn: turn)
         let stream = routed.stream
         let resultSocket = routed.resultSocket
@@ -139,7 +137,6 @@ final class CloudRouteClientTests: XCTestCase {
         let lock = NSLock()
         let client = CloudRouteClient(
             baseURL: "https://cloud.test",
-            userId: userId,
             tokenProvider: StubTokenProvider(token: "t"),
             webSocketTaskFactory: { _ in
                 lock.lock(); defer { lock.unlock() }
@@ -149,7 +146,7 @@ final class CloudRouteClientTests: XCTestCase {
             }
         )
         // BOTH turns deliberately share one request_id (the reuse the rules guard).
-        let sharedTurn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation())
+        let sharedTurn = CloudTurnEnvelope.make(capabilities: [], routeHint: nil, conversation: testPreparedConversation())
         // SERIALIZE the turn starts (the factory hands out sockets in call order, so concurrent
         // starts could swap A/B): start A, wait for its submission, then start B.
         let routedA = client.routeWithResultSocket(request: "a", context: sampleContext, turn: sharedTurn)
@@ -337,7 +334,7 @@ final class CloudRouteClientTests: XCTestCase {
 
 
     func testRequestTimeoutExceedsServerBudget() {
-        let client = CloudRouteClient(baseURL: "https://example.com", userId: userId)
+        let client = CloudRouteClient(baseURL: "https://example.com")
         XCTAssertGreaterThanOrEqual(client.requestTimeoutSeconds, 15)
     }
 
@@ -370,7 +367,7 @@ final class CloudRouteClientTests: XCTestCase {
     private var capturedTask: StubWebSocketTask?
 
     private func client() -> CloudRouteClient {
-        let built = CloudRouteClient.stubbed(userId: userId, fixture: nextFixture())
+        let built = CloudRouteClient.stubbed(fixture: nextFixture())
         capturedTask = built.task
         return built.client
     }
@@ -485,7 +482,7 @@ final class CloudRouteWebSocketPathTests: XCTestCase {
     private func client(task: StubWebSocketTask, token: String?) -> CloudRouteClient {
         CloudRouteClient(
             baseURL: "https://cloud.test",
-            userId: "user_test",
+
             requestTimeoutSeconds: 15,
             tokenProvider: StubTokenProvider(token: token),
             webSocketTaskFactory: { _ in task }
@@ -547,7 +544,7 @@ final class CloudRouteWebSocketPathTests: XCTestCase {
             .string(#"{"type":"connected","codec":"pcm_s16le@24k"}"#),
             .data(Data([1, 0, 2, 0]))
         ]) // Exhaustion throws: no done and no player terminal exists.
-        let transport = CloudRouteClient(baseURL: "https://cloud.test", userId: "user_test",
+        let transport = CloudRouteClient(baseURL: "https://cloud.test",
             tokenProvider: StubTokenProvider(token: "tok"), webSocketTaskFactory: { _ in task },
             playbackTimingFactory: { _ in trace })
         let events = await collect(transport.route(request: "synthetic", context: context(), turn: testTurnEnvelope()))
@@ -637,11 +634,10 @@ extension CloudRouteClientTests {
         let task = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: fixture))
         let client = CloudRouteClient(
             baseURL: "https://cloud.test",
-            userId: userId,
             tokenProvider: StubTokenProvider(token: "t"),
             webSocketTaskFactory: { _ in task }
         )
-        return (client, CloudTurnEnvelope.make(capabilities: [], routeHint: nil, recentConversation: [], conversation: testPreparedConversation()), task)
+        return (client, CloudTurnEnvelope.make(capabilities: [], routeHint: nil, conversation: testPreparedConversation()), task)
     }
 
     private func resultFrame(operationId: String) -> AppOperationResultFrame {

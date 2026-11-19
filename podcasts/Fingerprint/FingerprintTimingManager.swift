@@ -1357,7 +1357,6 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         if !tail.isEmpty {
             dispatchProcessMatches(windows: tail, startOffset: startSeconds, context: ctx)
         }
-        flushCloudFingerprinter(&cloudFingerprinter, startOffset: startSeconds, context: ctx)
     }
 
     /// Bounded, one-shot variant of `streamFingerprint` used by the chapter
@@ -1587,7 +1586,6 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
                 dispatchProcessMatches(windows: tail, startOffset: startSeconds, context: ctx)
             }
         }
-        flushCloudFingerprinter(&cloudFingerprinter, startOffset: startSeconds, context: ctx)
 
         let readSeconds = (format.map { Double(totalFramesRead) / $0.sampleRate }) ?? 0
         FileLog.shared.addMessage(

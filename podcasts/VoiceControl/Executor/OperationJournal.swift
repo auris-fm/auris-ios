@@ -55,14 +55,6 @@ enum OperationOutcome: String, Equatable, CaseIterable {
             return false
         }
     }
-
-    /// Whether recording this outcome must stop the operation from ever being executed again.
-    ///
-    /// True for every case, `unknown` included — and `unknown` is the case that matters, since
-    /// it is the one that says the mutation *may have happened* and must therefore not be
-    /// repeated. This deliberately does not mean "the effect is known": `unknown` is recorded
-    /// and final for the journal while telling the server nothing about what occurred.
-    var preventsReExecution: Bool { true }
 }
 
 /// A recorded result: the outcome and, for every non-success, the machine-readable reason
@@ -223,17 +215,6 @@ enum StoredRecord: Equatable {
 /// Maps `operation_id` to the state of the operation it names, so a redelivered operation is
 /// answered from the record instead of being executed a second time — including across a
 /// process restart, which is the case the durable store exists for.
-///
-/// PHASE STATUS (PR #49 review 4305981658): this type has NO production constructor, and that
-/// is deliberate, not a gap. Its records are keyed on `operation_id`, which the normative
-/// cloud-multiturn wire contract (core-app-tools `app-operation-wire-contract.md`, rev
-/// da327e624) does not put on today's actions — no cloud-multiturn action carries an
-/// operation identity, so any wiring here would have to fabricate keys, and a fabricated key
-/// defeats exactly-once: the same logical action redelivered would claim a fresh id and run
-/// again. The journal becomes wireable when actions carry server-assigned identities (the
-/// `app_operation_result` frame's contract already names the shape); until then it stays a
-/// fully tested building block and no reading of existing guarantees should cite it.
-///
 final class OperationJournal {
     private let store: OperationRecordStore
     private var records: [String: StoredRecord]

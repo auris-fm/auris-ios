@@ -177,3 +177,32 @@ class AccountViewController: UIViewController, ChangeEmailDelegate {
         }
     }
 }
+
+extension AccountViewController {
+    /// Row selection rechecks permission before constructing account dependencies; never builds voice/queue.
+    @MainActor
+    static func makeVoiceSharingController(
+        surfaceEnabled: @escaping () -> Bool = { VoiceSharingSettingsModel.surfaceEnabled },
+        signedIn: () -> Bool = { SyncManager.isUserLoggedIn() },
+        accountModel: (() -> VoiceSharingAccountModel)? = nil,
+        localModel: () -> VoiceSharingSettingsModel? = { VoiceControlService.shared?.voiceSharingLifetime?.settingsModel }
+    ) -> VoiceSharingAccountController? {
+        guard surfaceEnabled(), signedIn() else { return nil }
+        let local = localModel()
+        // SPEC ruling: Voice Sharing uses the Auris provider on every build where sharing
+        // is enabled, independent of the assistant's routing flag and the cutover gate. Missing
+        // configuration means sharing is unavailable, never a static-identity fallback.
+        guard let tokenProvider = CloudTokenProviderRouter.voiceSharingProvider() else {
+            FileLog.shared.addMessage("[VoiceSharing] surface hidden: no Auris origin configured")
+            return nil
+        }
+        let account = accountModel?() ?? VoiceSharingAccountModel(
+            client: VoiceSharingAccountClient(tokenProvider: tokenProvider),
+            // Activation slice (): the production disclosure token. Before this line
+            // the init default was nil and the surface rendered `disclosureUnavailable` —
+            // enrollment could never start. The token is the exact server-supported string.
+            disclosureVersion: VoiceSharingDisclosure.productionVersion,
+            purgeLocal: local.map { model in { await model.deletePendingRecordingsOnThisDevice() } })
+        return VoiceSharingAccountController(accountModel: account, localModel: local, surfaceEnabled: surfaceEnabled)
+    }
+}

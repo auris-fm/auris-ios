@@ -36,17 +36,11 @@ struct LfmRuntime {
     std::string classify(const std::vector<int>& promptTokenIds, int poolStart, int poolEnd);
 
     std::string generate(const std::string& prefill, int nPredict);
-
-    std::string classifyEmbedding(const std::vector<float>& embedding) const;
 };
 
 class LfmRuntimeHolder {
 public:
     static LfmRuntimeHolder& instance();
-
-    bool loadClassifierOnly(const std::string& classifierPath, const std::string& labelMapPath, int expectedHiddenSize);
-    std::string classifyEmbedding(const std::vector<float>& embedding);
-    void releaseClassifierOnly();
 
     bool load(
         const std::string& modelPath,
@@ -64,6 +58,4 @@ private:
 
     std::mutex mutex_;
     std::unique_ptr<LfmRuntime> runtime_;
-    std::unique_ptr<ClassifierHead> classifierOnly_;
-    std::vector<std::string> classifierOnlyLabels_;
 };

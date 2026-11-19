@@ -12,7 +12,16 @@ enum WakeWordThresholdLoader {
         var errorDescription: String? { reason }
     }
 
+    struct Deployment {
+        let threshold: Float
+        let identity: VoiceSharingContributionEncoder.ModelRef?
+    }
+
     static func load(manifestURL: URL, modelDirectory: URL) -> Result<Float, Error> {
+        loadDeployment(manifestURL: manifestURL, modelDirectory: modelDirectory).map { $0.threshold }
+    }
+
+    static func loadDeployment(manifestURL: URL, modelDirectory: URL) -> Result<Deployment, Error> {
         guard let data = try? Data(contentsOf: manifestURL) else {
             return .failure(LoadError(reason: "eval manifest missing at \(manifestURL.path)"))
         }
@@ -39,6 +48,8 @@ enum WakeWordThresholdLoader {
             }
         }
 
-        return .success(thresholdNumber.floatValue)
+        return .success(Deployment(
+            threshold: thresholdNumber.floatValue,
+            identity: LoadedModelAssets.reference(id: "auris", digests: assetHashes.mapValues { $0.lowercased() })))
     }
 }

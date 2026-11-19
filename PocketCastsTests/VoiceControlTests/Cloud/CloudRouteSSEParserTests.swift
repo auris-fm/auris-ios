@@ -117,7 +117,7 @@ final class CloudRouteEventTests: XCTestCase {
     func testDoneEventWithUsage() {
         let usage = CloudTurnUsage(inputTokens: 100, outputTokens: 200)
         let event = CloudRouteEvent.done(usage: usage)
-        if case .done(let u) = event {
+        if case .done(let u, _) = event {
             XCTAssertEqual(u.inputTokens, 100)
             XCTAssertEqual(u.outputTokens, 200)
         } else {
@@ -246,7 +246,7 @@ final class CloudRouteClientTextParserTests: XCTestCase {
             #"{"type":"done","usage":{"input_tokens":100,"output_tokens":200,"speech":{"amount":5000,"unit":"ms"}}}"#
         )
         XCTAssertEqual(events.count, 1)
-        if case .done(let usage) = events.first {
+        if case .done(let usage, _) = events.first {
             XCTAssertEqual(usage.inputTokens, 100)
             XCTAssertEqual(usage.outputTokens, 200)
             XCTAssertEqual(usage.speech?.amount, 5000)
@@ -261,7 +261,7 @@ final class CloudRouteClientTextParserTests: XCTestCase {
             #"{"type":"done","usage":{"input_tokens":null,"output_tokens":null,"speech":null}}"#
         )
         XCTAssertEqual(events.count, 1)
-        if case .done(let usage) = events.first {
+        if case .done(let usage, _) = events.first {
             XCTAssertNil(usage.inputTokens)
             XCTAssertNil(usage.outputTokens)
             XCTAssertNil(usage.speech)
@@ -288,7 +288,7 @@ final class CloudRouteClientTextParserTests: XCTestCase {
             #"{"type":"done"}"#
         )
         XCTAssertEqual(events.count, 1)
-        if case .done(let usage) = events.first {
+        if case .done(let usage, _) = events.first {
             XCTAssertNil(usage.inputTokens)
             XCTAssertNil(usage.outputTokens)
         } else {
@@ -314,7 +314,7 @@ final class CloudRouteClientTextParserTests: XCTestCase {
             #"{"type":"done","usage":{"input_tokens":42,"speech":{"amount":1000,"unit":"ms"}}}"#
         )
         XCTAssertEqual(events.count, 1)
-        if case .done(let usage) = events.first {
+        if case .done(let usage, _) = events.first {
             XCTAssertEqual(usage.inputTokens, 42)
             XCTAssertNil(usage.outputTokens)
             XCTAssertEqual(usage.speech?.amount, 1000)
@@ -328,7 +328,7 @@ final class CloudRouteClientTextParserTests: XCTestCase {
             #"{"type":"done","usage":{}}"#
         )
         XCTAssertEqual(events.count, 1)
-        if case .done(let usage) = events.first {
+        if case .done(let usage, _) = events.first {
             XCTAssertNil(usage.inputTokens)
             XCTAssertNil(usage.outputTokens)
         } else {

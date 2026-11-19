@@ -18,6 +18,30 @@ class NativeVadSegmenter {
     private var buffer: [Float] = []
     private var speechActive = false
     private var silenceStart: Date?
+    /// The number of retained samples at the instant the current silence run opened — the
+    /// capture-domain twin of `silenceStart`.
+    ///
+    /// The retained buffer INCLUDES the hangover (every silent frame is appended), so its total
+    /// length marks the end of the hangover, not the end of speech. The sample count at the first
+    /// silent frame is the acoustic end of speech; without it a latency figure measured from the
+    /// buffer's end would be short by the whole `silenceTimeoutMs`.
+    private var silenceStartSampleCount: Int?
+
+    /// Whether the early wake-scoring prefix has already been emitted for this utterance.
+    private var wakeScorablePrefixEmitted = false
+
+    /// The wake result computed from the CURRENT utterance's early-scored prefix, if any.
+    ///
+    /// Owned here because this is where the utterance lifecycle is known: it is cleared when the
+    /// utterance is delivered, abandoned, or the session resets. The engine's capture callback
+    /// launches an asynchronous task, so an engine-side slot could be overwritten by the next
+    /// utterance before that task read it — one command's score addressing another's audio.
+    var earlyWakeResultForCurrentUtterance: WakeWordResult?
+
+    /// The tag of the connection opened for the utterance now being spoken, minted at its trailing
+    /// silence and delivered with it. Cleared on delivery and on every reset, so abandonment cannot
+    /// leave a tag behind for the next utterance to inherit.
+    private var earlyConnectionTagForCurrentUtterance: String?
     private var speechFrameCount = 0
     /// Audio that arrived while the classifier had not yet reported speech.
     ///
@@ -59,14 +83,58 @@ class NativeVadSegmenter {
     private var utteranceCapturedAt: MonotonicTime?
 
     /// Delivers the completed utterance with the instant its **first retained sample** was
-    /// captured.
+    /// captured, and the wake result computed from that same utterance's prefix while it was still
+    /// being spoken (nil when the utterance was too short to score early).
+    ///
+    /// The result travels WITH the utterance rather than through a slot the engine shares with
+    /// these callbacks. The engine launches an asynchronous task from this callback, so a shared
+    /// slot could be overwritten by the next utterance's prefix before that task read it — an
+    /// utterance addressed by another utterance's audio. Carrying it here makes the pairing
+    /// structural instead of a timing assumption.
     ///
     /// Preserved through buffering: the segmenter appends several tap buffers before it
     /// emits, so the utterance's start is not the start of the buffer that completed it.
     /// Carrying the first buffer's instant is what lets the echo filter place the segment
     /// against the emitted reference; using the completing buffer's time would shift it by
     /// the segment's own length.
-    var onUtterance: (([Float], MonotonicTime?) -> Void)?
+    /// `speechEndedAt` is the instant the utterance's last SPEECH frame was captured, derived from
+    /// the retained audio's own sample instants rather than from the processing clock: the
+    /// endpoint fires a hangover later, and the user stopped talking at the end of speech, not
+    /// when the client noticed. It is what a latency record must subtract from.
+    var onUtterance: (([Float], MonotonicTime?, WakeWordResult?, String?, MonotonicTime) -> Void)?
+
+    /// Delivers the audio of an in-progress utterance once enough exists to score the wake word
+    /// definitively, so detection can run while the user is still speaking.
+    ///
+    /// The detector only scores classifier windows that end within the eligible span after onset —
+    /// about 1.96s. Once that much speech has been captured, every window that could contribute
+    /// exists, so scoring this prefix yields exactly the maximum the finished segment would. This
+    /// callback carries exactly that prefix: onset through the eligible span, including the
+    /// retained pre-speech context that `onUtterance` would have carried.
+    ///
+    /// It fires at most once per utterance. A shorter utterance never reaches the threshold and is
+    /// scored at end of speech, as before.
+    var onWakeScorablePrefix: (([Float]) -> Void)?
+
+    /// Called once when trailing silence begins on an utterance that has active speech — the
+    /// moment the user appears to have finished talking, before the hangover elapses and before the
+    /// utterance closes.
+    ///
+    /// Deliberately carries no wake information: the segmenter does not know whether an utterance
+    /// is addressed, and giving it that judgement would put routing semantics inside audio
+    /// segmentation. The consumer decides using its own state.
+    /// Returns the tag of the connection opened for this utterance, if one was opened.
+    ///
+    /// Runs on the audio thread, so it must not block or assume a main actor.
+    var onTrailingSilenceBegan: (() -> String?)?
+
+    /// True while an utterance is open and its trailing silence has begun but not yet ended.
+    ///
+    /// Exposed so a consumer that only becomes able to open a connection LATER in the silence — a
+    /// short utterance whose wake result is not final at onset — can tell whether it is already
+    /// too late to wait for another onset. Without this it would wait for an event that has
+    /// already happened and never open at all.
+    var isInTrailingSilence: Bool { speechActive && silenceStart != nil }
     /// TASK 90 SNAPSHOT (review bcb42c49 #1): fired at the SPEECH-START boundary — the frame
     /// that confirms speech, after the pre-roll merge settles the true utterance start — NOT
     /// at `emitUtterance`. Consumers that must describe the moment the utterance BEGAN (e.g.
@@ -80,11 +148,11 @@ class NativeVadSegmenter {
     /// ordinary long speech." The fault is a **persistent** state, not an event:
     ///
     /// - The utterance is never dispatched. A fragment must not reach ASR.
-    /// - The segmenter does NOT rearm on its own. Rearming immediately would treat the tail of
-    ///   the *same* still-spoken request as a brand-new command, which is the very failure this
-    ///   state exists to prevent.
+    /// - The segmenter does not rearm on its own. Rearming immediately would treat the tail of
+    /// the *same* still-spoken request as a brand-new command, which is the very failure this
+    /// state exists to prevent.
     /// - It leaves the faulty state only on genuine silence (`process` sees enough
-    ///   non-speech to establish the utterance ended) or an explicit `clearStuckActiveFault()`.
+    /// non-speech to establish the utterance ended) or an explicit `clearStuckActiveFault`.
     var onStuckActiveFault: ((StuckActiveFault) -> Void)?
 
     /// True while the segmenter is in the surfaced stuck-active state. Nothing is dispatched and
@@ -100,7 +168,7 @@ class NativeVadSegmenter {
 
     /// Set when no speech classifier is available at all.
     ///
-    /// This is NOT a fallback condition. The energy rule is what made a noisy room's ambient
+    /// This is not a fallback condition. The energy rule is what made a noisy room's ambient
     /// noise look like unending speech, so silently running it would restore the exact defect
     /// while reporting normal listening. Unavailability is surfaced instead, and the segmenter
     /// dispatches nothing: with no classifier there is no trustworthy endpoint.
@@ -151,22 +219,56 @@ class NativeVadSegmenter {
         reset()
     }
 
-    /// Resets ALL segmentation state at a real session boundary (stop/restart).
+    /// Resets all segmentation state at a real session boundary (stop/restart).
     ///
-    /// Unlike `clearStuckActiveFault()` this is not guarded on `isStuckActive`: an ordinary
+    /// Unlike `clearStuckActiveFault` this is not guarded on `isStuckActive`: an ordinary
     /// partially buffered utterance would otherwise survive a restart, letting PCM from the old
     /// session concatenate with the new one and be dispatched as a single command. Classifier
-    /// unavailability is deliberately NOT reset — it describes the assembled pipeline, not a
+    /// unavailability is deliberately not reset — it describes the assembled pipeline, not a
     /// session, and clearing it would let listening resume with no classifier to segment it.
     func resetForNewSession() {
         reset()
     }
 
+    // MARK: - Contribution observation hooks (observe-only)
+    //
+    // The Voice Sharing collector needs three signals that `onUtterance` cannot provide, because completion
+    // arrives after wake/bleed rejection and only for segments that reach an endpoint:
+    //
+    // * `capture_id` must be minted at confirmed speech start, before any rejection decision exists — a
+    // bleed- or wake-rejected segment is still collectable audio (spec), and rejections are silent
+    // `return`s downstream, so a completion-only view never sees them at all.
+    // * Long in-progress speech must be admitted against clip ceilings before completion, otherwise a
+    // segment whose completion never arrives (permission closes mid-speech) has already exceeded its
+    // memory/disk bound.
+    // * A reset while speech is active is a CANCELLATION, not a completion: the partial contribution is
+    // discarded rather than finalized.
+    //
+    // These fire alongside the existing logic and read state only. Nothing here appends to, trims, or
+    // reorders `buffer`, and no hook return value influences recognition. Retention behaviour stays pinned by
+    // NativeAudioCaptureTests.
+
+    /// Fires once when speech is CONFIRMED (the frame that reaches `minSpeechFrames`), not on pending energy:
+    /// an unconfirmed burst is discarded by design and must not open a contribution.
+    var onSpeechStarted: ((_ confirmationFrameSamples: Int) -> Void)?
+
+    /// Fires per retained frame while a segment is active, reporting the total samples retained so far. Lets a
+    /// consumer enforce a ceiling during the utterance instead of discovering overshoot after it ends.
+    /// Carries the REAL new PCM since the previous call (not a copy of the whole buffer, not a count).
+    /// The contribution consumer appends exactly these bytes to its own bounded copy, so what it claims to
+    /// hold is what actually arrived. Kept separate from `onUtterance` so in-progress bounds hold even if
+    /// the utterance is never emitted.
+    var onSpeechAccumulated: ((_ newSamples: ArraySlice<Float>, _ bufferCount: Int) -> Void)?
+
+    /// Fires when `reset` interrupts ACTIVE speech. Not fired on a natural end or on a reset with nothing
+    /// open, so a cancelled partial is never confused with a completed utterance.
+    var onSpeechCancelled: (() -> Void)?
+
     /// - Parameters:
-    ///   - threshold: RMS energy threshold above which audio is considered speech (energy
-    ///     classifier only; the injected classifier decides when one is supplied)
-    ///   - silenceTimeoutMs: milliseconds of silence before ending an utterance
-    ///   - minSpeechFrames: minimum consecutive speech frames before triggering
+    /// - threshold: RMS energy threshold above which audio is considered speech (energy
+    /// classifier only; the injected classifier decides when one is supplied)
+    /// - silenceTimeoutMs: milliseconds of silence before ending an utterance
+    /// - minSpeechFrames: minimum consecutive speech frames before triggering
     static let defaultThreshold: Float = 0.002
 
     /// How long the segmenter waits after the last speech before emitting.
@@ -175,6 +277,11 @@ class NativeVadSegmenter {
     /// discount the hangover, because the hangover cannot be separated from a
     /// quietly spoken word by a consumer that only has the buffer.
     static let defaultSilenceTimeoutMs = 500
+
+    /// The span after onset within which a classifier window's final embedding must fall for the
+    /// window to be eligible. Every window that can affect the wake maximum ends inside it, so
+    /// audio past this point cannot change the result. 2 seconds at the capture rate.
+    static let wakeEligibleSpanSamples = 32_000
 
     /// The supported utterance-duration ceiling, in milliseconds.
     ///
@@ -198,7 +305,7 @@ class NativeVadSegmenter {
 
     func process(_ samples: [Float], capturedAt: MonotonicTime? = nil, session: Int? = nil) {
         // Recorded so a fault raised by THESE samples can be attributed to the capture session
-        // that produced them. `capture.stop()` does not drain already-queued callbacks, so the
+        // that produced them. `capture.stop` does not drain already-queued callbacks, so the
         // session that ends can differ from the one delivering the notification.
         currentSession = session
         if isClassifierUnavailable {
@@ -218,12 +325,14 @@ class NativeVadSegmenter {
                 // one elapsed time and clear the fault from inside a still-speaking request —
                 // rearm through the back door, which is what this state exists to prevent.
                 silenceStart = nil
+                silenceStartSampleCount = nil
                 return
             }
             if buffer.isEmpty { utteranceCapturedAt = capturedAt }
             if !speechActive { activeSamples = 0 }
             buffer.append(contentsOf: samples)
             speechFrameCount += 1
+            let wasActive = speechActive
             if !speechActive && speechFrameCount >= minSpeechFrames {
                 speechActive = true
                 if !preRoll.isEmpty {
@@ -244,19 +353,50 @@ class NativeVadSegmenter {
                 appendPreRoll(samples, capturedAt: capturedAt)
                 return
             }
+            if speechActive {
+                if !wasActive {
+                    onSpeechStarted?(samples.count)
+                    onSpeechAccumulated?(buffer[...], buffer.count)
+                } else {
+                    onSpeechAccumulated?(buffer.suffix(samples.count), buffer.count)
+                }
+            }
             silenceStart = nil
+            silenceStartSampleCount = nil
             if checkRetainedCeiling() { return }
+            emitWakeScorablePrefixIfReady()
         } else if speechActive || isStuckActive {
             if silenceStart == nil {
                 silenceStart = Date()
+                // Fires once per silence run, not once per silent frame: the flag above is what
+                // makes the consumer see the BEGINNING of the silence rather than a steady stream
+                // of "still silent" notifications.
+                // The tag identifies the connection this speech's turn will use. Minted HERE, on
+                // the audio thread, and stored with the utterance: the consumer hands it to a
+                // different thread, so anything read later from a shared slot could already
+                // belong to the next utterance.
+                //
+                // Only the FIRST pause of an utterance opens. Speech that resumes and pauses
+                // again is the same utterance still being spoken, and its connection is already
+                // in flight: opening again would replace a handshake the turn is about to use and
+                // pay for it twice. The tag is cleared when the utterance is delivered, so the
+                // next utterance starts without one.
+                if earlyConnectionTagForCurrentUtterance == nil {
+                    earlyConnectionTagForCurrentUtterance = onTrailingSilenceBegan?()
+                }
             }
             // While stuck-active nothing accumulates: the audio is discarded, not dispatched.
             if !isStuckActive {
+                // Taken BEFORE this frame joins the buffer: the first silent frame marks where the
+                // speech run ended, and that index is what the acoustic end of speech is read from.
+                // The retained buffer keeps growing past it with the rest of the hangover.
+                if silenceStartSampleCount == nil { silenceStartSampleCount = buffer.count }
                 buffer.append(contentsOf: samples)
                 // Hangover frames are retained audio and count toward the ceiling. Checking only
                 // on positive classification would let a long hangover cross the bound and then
                 // be emitted by the endpoint without any interruption.
                 if checkRetainedCeiling() { return }
+                onSpeechAccumulated?(buffer.suffix(samples.count), buffer.count)
             }
             if let start = silenceStart,
                Date().timeIntervalSince(start) * 1000 > Double(silenceTimeoutMs) {
@@ -269,7 +409,11 @@ class NativeVadSegmenter {
                     reset()
                     onRecoveredFromFault?()
                 } else {
-                    emitUtterance()
+                    // The first silent frame is the acoustic end of speech; the emission happens a
+                    // whole hangover later. They are different instants and the log must not merge
+                    // them, or the endpoint decision looks instantaneous and the configured wait
+                    // disappears into the segment length.
+                    emitUtterance(silenceObserved: start)
                 }
             }
         } else if !speechActive {
@@ -278,6 +422,7 @@ class NativeVadSegmenter {
             // command, so it is held as pre-roll and prepended on confirmation.
             speechFrameCount = 0
             silenceStart = nil
+            silenceStartSampleCount = nil
             appendPreRoll(samples, capturedAt: capturedAt)
         } else {
             // Active utterance: a sub-threshold frame is part of the utterance (silence inside
@@ -306,6 +451,13 @@ class NativeVadSegmenter {
         let elapsedMs = activeSamples / 16
         FileLog.shared.addMessage("[VoicePipeline] vad duration-limit interruption: \(elapsedMs)ms retained; discarded \(discarded) samples without dispatching; staying in the fault state until silence")
         isStuckActive = true
+        // The utterance is abandoned, so a prefix score already computed for it must go with it.
+        // Keeping it would let a long positive utterance that is never dispatched lend its score to
+        // the next short utterance — a command addressed by audio that was discarded.
+        earlyWakeResultForCurrentUtterance = nil
+        // The connection opened for this utterance goes with it too: the next utterance must open
+        // its own rather than pin a tag belonging to audio that was thrown away.
+        earlyConnectionTagForCurrentUtterance = nil
         // Discard the captured audio and refuse to dispatch any of it.
         buffer.removeAll(keepingCapacity: true)
         preRoll.removeAll(keepingCapacity: true)
@@ -314,6 +466,7 @@ class NativeVadSegmenter {
         utteranceCapturedAt = nil
         speechFrameCount = 0
         silenceStart = nil
+        silenceStartSampleCount = nil
         onStuckActiveFault?(StuckActiveFault(discardedSamples: discarded, elapsedMs: elapsedMs))
         return true
     }
@@ -345,10 +498,44 @@ class NativeVadSegmenter {
         preRollCapturedAt = preRollInstants.first.flatMap { $0 }
     }
 
-    private func emitUtterance() {
-        let utterance = buffer
+    /// Emits the preamble for early wake scoring, once, when the prefix that can affect the result
+    /// is complete.
+    ///
+    /// The threshold is the eligible span itself, expressed in samples at the capture rate. Using
+    /// samples rather than elapsed wall-clock time is deliberate: the comparison must be exact, and
+    /// a clock-based test could fire a frame early or late depending on scheduling, which would
+    /// make the early score differ from the finished-segment score for a reason unrelated to the
+    /// detector.
+    private func emitWakeScorablePrefixIfReady() {
+        guard !wakeScorablePrefixEmitted, let onWakeScorablePrefix else { return }
+        guard buffer.count >= Self.wakeEligibleSpanSamples else { return }
+        wakeScorablePrefixEmitted = true
+        // The prefix, not the whole buffer: only the eligible span can affect the maximum, and
+        // handing over the full in-progress buffer would make the early run depend on how long the
+        // user happened to keep talking.
+        onWakeScorablePrefix(Array(buffer.prefix(Self.wakeEligibleSpanSamples)))
+    }
+
+    private func emitUtterance(silenceObserved: Date?) {
+        let utterance = Array(buffer)
         let durationMs = Int(Float(utterance.count) / 16.0)
-        FileLog.shared.addMessage("[VoicePipeline] vad ~\(durationMs)ms (\(utterance.count) samples)")
+        // Two distinct events, reported as two, and named for what they actually measure rather
+        // than for the nearest capture concept.
+        //
+        // `silenceObserved` is the instant VAD first PROCESSED a frame as silence. It is not the
+        // instant of the last captured speech sample: the two differ by the capture-to-process
+        // latency, which this file does not measure. The interval below is therefore the
+        // process-side dwell in silence, which is what the endpoint logic actually waits on.
+        // Calling it the acoustic end of speech would claim a capture-domain measurement that does
+        // not exist here — the per-sample capture instants are monotonic and are not mixed into
+        // this wall-clock interval.
+        let dwellMs = silenceObserved.map { Int((Date().timeIntervalSince($0) * 1000).rounded()) }
+        FileLog.shared.addMessage(
+            "[VoicePipeline] vad ~\(durationMs)ms (\(utterance.count) samples) silenceDwell=\(dwellMs.map { "\($0)" } ?? "?")ms hangoverLimit=\(silenceTimeoutMs)ms endpointDecision"
+        )
+        // Read BEFORE the clears below, which drop the silence run this utterance ended on. The
+        // acoustic end of speech is only recoverable from that run's opening sample count.
+        let endedAt = speechEndedAt(sampleCount: utterance.count)
         // A windowed classifier carries state across frames; clearing it here keeps the next
         // utterance from being biased by the one that just closed.
         speechClassifier.reset()
@@ -358,14 +545,54 @@ class NativeVadSegmenter {
         buffer.removeAll()
         speechActive = false
         silenceStart = nil
+        silenceStartSampleCount = nil
         speechFrameCount = 0
-        onUtterance?(utterance, utteranceCapturedAt)
+        // The next utterance scores early again. Without this only the first command in a session
+        // would ever get an early wake result, and every later one would silently fall back to
+        // end-of-speech scoring — the regression the whole item exists to avoid, and invisible
+        // because the fallback still works.
+        wakeScorablePrefixEmitted = false
+        // Delivered with its own result, then cleared: the value leaves with the utterance it
+        // describes, so nothing can be inherited by the next one.
+        let carriedWakeResult = earlyWakeResultForCurrentUtterance
+        earlyWakeResultForCurrentUtterance = nil
+        // Same rule as the wake result: the tag leaves with the utterance it describes, so nothing
+        // can be inherited by the next one.
+        let carriedEarlyConnectionTag = earlyConnectionTagForCurrentUtterance
+        earlyConnectionTagForCurrentUtterance = nil
+        onUtterance?(
+            utterance,
+            utteranceCapturedAt,
+            carriedWakeResult,
+            carriedEarlyConnectionTag,
+            endedAt
+        )
+    }
+
+    /// The instant the last SPEECH sample of the utterance was captured.
+    ///
+    /// The retained buffer includes the trailing hangover — every silent frame is appended so the
+    /// endpoint can decide on it — so its TOTAL length would place this instant `silenceTimeoutMs`
+    /// after the user actually stopped. The speech sub-run is what precedes the final silence run,
+    /// whose opening sample count is recorded with `silenceStart`; speech samples end there. That
+    /// difference is the acoustic end of speech, and it is what a latency figure must subtract from.
+    ///
+    /// Falls back to the processing clock only when the capture instants are unknown (a caller that
+    /// supplied none), the one case where no capture-domain instant exists to report.
+    private func speechEndedAt(sampleCount: Int) -> MonotonicTime {
+        guard let start = utteranceCapturedAt else { return CACurrentMediaTime() }
+        let speechSamples = silenceStartSampleCount.map { min($0, sampleCount) } ?? sampleCount
+        return start + Double(speechSamples) / Double(Self.captureSampleRate)
     }
 
     func reset() {
+        let wasActive = speechActive
         speechClassifier.reset()
         activeSamples = 0
         isStuckActive = false
+        wakeScorablePrefixEmitted = false
+        earlyWakeResultForCurrentUtterance = nil
+        earlyConnectionTagForCurrentUtterance = nil
         preRoll.removeAll()
         preRollInstants.removeAll()
         preRollCapturedAt = nil
@@ -373,7 +600,9 @@ class NativeVadSegmenter {
         utteranceCapturedAt = nil
         speechActive = false
         silenceStart = nil
+        silenceStartSampleCount = nil
         speechFrameCount = 0
+        if wasActive { onSpeechCancelled?() }
     }
 
     /// Root-mean-square energy of the signal.

@@ -23,7 +23,6 @@ final class CloudRouteClient {
     static let defaultTimeoutSeconds: TimeInterval = 15
 
     private let baseURL: String
-    private let userId: String
     private let tokenProvider: CloudTokenProviding
     private let session: URLSession
     let requestTimeoutSeconds: TimeInterval
@@ -32,6 +31,19 @@ final class CloudRouteClient {
     /// uses the session's real web socket.
     private let playbackTimingFactory: (String) -> CloudPlaybackTiming?
     private let webSocketTaskFactory: ((URLRequest) -> WebSocketTasking)?
+
+    /// Reports the age of a connection this turn inherited from an early open, or nil when the
+    /// connection is opened here. The freshness rule is decided from it before any socket is
+    /// created, so a stale connection is replaced rather than sent on.
+    private let inheritedConnectionAge: (() -> TimeInterval)?
+
+    /// Seam for the clock that times the early-connection age. The limit is nine seconds, so a real
+    /// clock makes the guard untestable except by a nine-second sleep — which is why the age rule
+    /// needs an injectable clock rather than a test that simply takes a long time.
+    private let now: () -> Date
+
+    /// A connection opened before its turn existed, waiting to be used or replaced.
+    private var earlyConnection: (task: WebSocketTasking, requestedAt: Date)?
 
     /// The state of the most recent PRODUCTION-created task, readable by a test. Exists because the
     /// injected-factory tests bypass the default path entirely.
@@ -60,19 +72,25 @@ final class CloudRouteClient {
         func send(_ message: URLSessionWebSocketTask.Message) async throws
         func receive() async throws -> URLSessionWebSocketTask.Message
         func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?)
+        /// Whether the socket can still carry a frame. Read when a turn TAKES an early connection:
+        /// age says how long it has been idle, not whether it is still open, and a socket that died
+        /// inside the age limit would otherwise be handed a turn whose first send cannot succeed.
+        var isAlive: Bool { get }
     }
 
     init(
         baseURL: String,
-        userId: String,
         session: URLSession? = nil,
         requestTimeoutSeconds: TimeInterval = CloudRouteClient.defaultTimeoutSeconds,
         tokenProvider: CloudTokenProviding? = nil,
         webSocketTaskFactory: ((URLRequest) -> WebSocketTasking)? = nil,
-        playbackTimingFactory: @escaping (String) -> CloudPlaybackTiming? = CloudPlaybackTiming.make
+        playbackTimingFactory: @escaping (String) -> CloudPlaybackTiming? = CloudPlaybackTiming.make,
+        now: @escaping () -> Date = Date.init,
+        inheritedConnectionAge: (() -> TimeInterval)? = nil
     ) {
+        self.now = now
+        self.inheritedConnectionAge = inheritedConnectionAge
         self.baseURL = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        self.userId = userId
         // Seam (slice 5, design-only): the credential comes from one place so the
         // trusted-issuer swap (task #26) is a provider change. Default preserves
         // today's trust-on-first-use bearer exactly.
@@ -119,6 +137,61 @@ final class CloudRouteClient {
     /// Routes a turn AND hands back the handle its `app_operation_result` sends must travel by:
     /// the handle binds to the ORIGINAL socket registration, so late results from a retired turn
     /// are undelivered rather than routed onto a successor that reused the request id.
+    /// Opens a connection now, before a turn exists, so the handshake overlaps the tail of the
+    /// utterance instead of following it.
+    ///
+    /// Called when trailing silence begins on addressed speech: the user has finished talking, the
+    /// endpoint has not yet fired, and the connection will be needed either way. The socket is held
+    /// with the instant it was requested, and the turn that follows either uses it or replaces it.
+    ///
+    /// Returns nil when an early connection is already held. Opening a second would leak the first,
+    /// since only one can be handed to a turn.
+    @discardableResult
+    func openEarlyConnection() -> Bool {
+        guard earlyConnection == nil else {
+            FileLog.shared.addMessage("[CloudRoute] early open skipped — one is already held")
+            return false
+        }
+        guard let url = Self.webSocketURL(baseURL: baseURL, path: Self.routePath) else {
+            FileLog.shared.addMessage("[CloudRoute] early open skipped — websocket URL could not be built")
+            return false
+        }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = requestTimeoutSeconds
+
+        let requestedAt = now()
+        let task: WebSocketTasking
+        if let injected = webSocketTaskFactory?(req) {
+            task = injected
+        } else {
+            let production = session.webSocketTask(with: req)
+            production.resume()
+            task = production
+        }
+        earlyConnection = (task: task, requestedAt: requestedAt)
+        FileLog.shared.addMessage(
+            "[VoicePipeline] early connection opened (age limit \(Int(EarlyConnectionPolicy.maximumAgeSeconds))s)"
+        )
+        return true
+    }
+
+    /// Discards a held early connection.
+    ///
+    /// Called when the utterance that motivated it turns out not to need a turn — empty audio, or
+    /// gated out before routing. Holding it would leave a socket open for the life of the process.
+    func discardEarlyConnection(reason: String) {
+        guard let held = earlyConnection else { return }
+        earlyConnection = nil
+        held.task.cancel(with: .goingAway, reason: nil)
+        FileLog.shared.addMessage("[CloudRoute] early connection discarded — \(reason)")
+    }
+
+    /// The age of the held early connection, or nil when none is held.
+    private func heldConnectionAge() -> TimeInterval? {
+        guard let held = earlyConnection else { return nil }
+        return now().timeIntervalSince(held.requestedAt)
+    }
+
     func routeWithResultSocket(
         request: String,
         context: CloudRouteContext,
@@ -129,6 +202,7 @@ final class CloudRouteClient {
         // (cloud-assistant.md → Interruption): the server applies it to already-settled history
         // BEFORE assembling model input, so it must ride the auth frame rather than the turn body.
         pendingInterruptReport: CloudInterruptionState.PendingReport? = nil,
+        onRequestSent: (@Sendable (MonotonicTime) -> Void)? = nil,
         onReportAttached: (@Sendable (String) async -> Void)? = nil
     ) -> (stream: AsyncStream<CloudRouteEvent>, resultSocket: AppOperationResultSocket) {
         let socket = AppOperationResultSocket(requestId: turn.requestId)
@@ -155,6 +229,7 @@ final class CloudRouteClient {
             sourceTranscript: sourceTranscript,
             sourceLanguage: sourceLanguage,
             pendingInterruptReport: pendingInterruptReport,
+            onRequestSent: onRequestSent,
             onReportAttached: onReportAttached
         )
         return (stream, socket)
@@ -261,11 +336,12 @@ final class CloudRouteClient {
         sourceTranscript: String? = nil,
         sourceLanguage: String? = nil,
         pendingInterruptReport: CloudInterruptionState.PendingReport? = nil,
+        onRequestSent: (@Sendable (MonotonicTime) -> Void)? = nil,
         onReportAttached: (@Sendable (String) async -> Void)? = nil
     ) -> AsyncStream<CloudRouteEvent> {
         AsyncStream { continuation in
             let task = Task {
-                await self.performWebSocket(request: request, context: context, turn: turn, continuation: continuation, resultSocket: resultSocket, lifetime: lifetime, sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage, pendingInterruptReport: pendingInterruptReport, onReportAttached: onReportAttached)
+                await self.performWebSocket(request: request, context: context, turn: turn, continuation: continuation, resultSocket: resultSocket, lifetime: lifetime, sourceTranscript: sourceTranscript, sourceLanguage: sourceLanguage, pendingInterruptReport: pendingInterruptReport, onRequestSent: onRequestSent, onReportAttached: onReportAttached)
             }
             continuation.onTermination = { [lifetime] reason in
                 task.cancel()
@@ -510,6 +586,7 @@ final class CloudRouteClient {
         sourceTranscript: String?,
         sourceLanguage: String?,
         pendingInterruptReport: CloudInterruptionState.PendingReport? = nil,
+        onRequestSent: (@Sendable (MonotonicTime) -> Void)? = nil,
         onReportAttached: (@Sendable (String) async -> Void)? = nil
     ) async -> Bool {
         let playbackTiming = playbackTimingFactory(turn.requestId)
@@ -542,8 +619,53 @@ final class CloudRouteClient {
 
         var req = URLRequest(url: url)
         req.timeoutInterval = requestTimeoutSeconds
-        let wsTask: WebSocketTasking
-        if let injected = webSocketTaskFactory?(req) {
+
+        // Take the early connection if one was opened while the utterance was still being spoken.
+        //
+        // The freshness rule is applied here, BEFORE the socket is used, and a stale connection is
+        // REPLACED rather than failed: the request is already built and the user has already
+        // spoken, so ending the turn for an idle socket would charge them for a timeout they did
+        // not cause. Deciding it here also avoids spending a send to discover what was already
+        // knowable: a socket found unusable AFTER its send failed is re-dialled further down, but
+        // that path costs a round trip and can meet `duplicate_request` if the frame did leave.
+        let inheritedAge = heldConnectionAge() ?? inheritedConnectionAge?()
+        var inheritedTask: WebSocketTasking?
+        if let age = inheritedAge {
+            // BOTH conditions, because they answer different questions: age bounds how long the
+            // socket has been idle, liveness says whether it is still open. A socket the server
+            // closed inside the age limit passes the age rule and fails this one.
+            if EarlyConnectionPolicy.canSend(connectionAge: age), earlyConnection?.task.isAlive == true {
+                inheritedTask = earlyConnection?.task
+                FileLog.shared.addMessage(
+                    "[CloudRoute] using the early connection (\(EarlyConnectionPolicy.describe(connectionAge: age)))"
+                )
+            } else {
+                // Which rule refused is recorded: "too old" and "already dead" call for different
+                // readings of a run, and one line for both would leave them indistinguishable.
+                let reason = earlyConnection?.task.isAlive == true
+                    ? EarlyConnectionPolicy.describe(connectionAge: age)
+                    : "the early connection is no longer open"
+                FileLog.shared.addMessage("[CloudRoute] \(reason) — not reusing it; opening a fresh connection")
+                earlyConnection?.task.cancel(with: .goingAway, reason: nil)
+            }
+        }
+        // Cleared whether or not it was usable: a connection belongs to exactly one turn, and
+        // leaving it set would offer a consumed socket to the next turn.
+        earlyConnection = nil
+
+        var wsTask: WebSocketTasking
+        // Only an INHERITED socket may be re-dialled. A connection this turn opened itself has no
+        // idle window in which it could have died unseen, so a failure on it is the server's or the
+        // network's answer about this turn — retrying that would repeat a request, not recover one.
+        let usedInheritedConnection = inheritedTask != nil
+        // Set only when this turn actually re-dialled. A `duplicate_request` on a turn that never
+        // re-dialled is a different fact — some other socket carried this id — and is passed through
+        // unchanged rather than relabelled as a loss this turn did not suffer.
+        var redialledInheritedConnection = false
+        if let inheritedTask {
+            // Already connecting since the early open: no new handshake, which is the whole point.
+            wsTask = inheritedTask
+        } else if let injected = webSocketTaskFactory?(req) {
             // A test double. It owns its own readiness, so nothing is resumed here.
             wsTask = injected
         } else {
@@ -566,7 +688,7 @@ final class CloudRouteClient {
         // `app_operation_result` sends ride the SAME socket the operation arrived on. The
         // registration identity is retired conditionally at close (a duplicate live id keeps
         // its own registration).
-        let socketRegistration = registerSocket(wsTask, requestId: turn.requestId, resultSocket: resultSocket)
+        var socketRegistration = registerSocket(wsTask, requestId: turn.requestId, resultSocket: resultSocket)
         // DETERMINISTIC BIND SEAM (test-only). This point is the last instant before the bind makes
         // its ACCEPTANCE DECISION, and the registration has already been published into the live
         // table — so a lifetime settled here is exactly the window that a publish-then-check bind
@@ -602,18 +724,16 @@ final class CloudRouteClient {
             }
         }
 
-        // THERE IS NO never-submitted PRODUCER IN THIS TRANSPORT, and this is the place to say so
-        // plainly rather than leave a dead branch implying otherwise.
+        // WHAT MAY BE RE-DIALLED, AND WHY IT IS ONLY THIS.
         //
-        // The failure kinds that could precede submission — frame construction and encoding —
-        // already return above as `invalid_request` BEFORE this point. Everything that can fail
-        // from here on happens after the send has been INVOKED, and a send may transmit and then
-        // throw, so admission is possible and the outcome must be preserved rather than replayed.
+        // A send can TRANSMIT and then throw, so a failed send does not by itself prove the frame
+        // never left. Re-driving it is safe anyway on an INHERITED socket, because the retry carries
+        // the SAME `request_id`: if the first frame was admitted, the server answers the retry with
+        // `duplicate_request` and runs nothing a second time. That refusal is reported below as
+        // `connection_lost`, which is the truth — the answer went to a socket that died.
         //
-        // Consequence, stated as a limit: this client cannot currently produce the one outcome that
-        // would make eligible automatic recovery possible. The transport never reports "provably
-        // never submitted", so any recovery caller has nothing eligible to act on. Supplying that
-        // producer is separate work; until then, automatic retry of a turn is not available.
+        // Frame construction and encoding failures still return above as `invalid_request`; they are
+        // not transport failures and are never re-dialled.
 
         // PENDING INTERRUPTION REPORT ON THE AUTH FRAME (cloud-assistant.md → Interruption, spec
         // c5fe3416): the contract says to report the interruption in the NEXT turn's
@@ -652,8 +772,51 @@ final class CloudRouteClient {
             // admitted. The conservative reading is the correct one here: once the send is
             // INVOKED, admission is possible, so only a failure BEFORE entry proves the frame
             // never left.
-            try await wsTask.send(.string(authText))
-
+            do {
+                try await wsTask.send(.string(authText))
+            } catch {
+                // Cancellation is the consumer abandoning the turn, not a transport failure.
+                if Task.isCancelled { throw error }
+                guard usedInheritedConnection else { throw error }
+                // ONE attempt, on a fresh socket, with the SAME frame — so the same request id.
+                // A loop here would turn a dead network into repeated submissions.
+                FileLog.shared.addMessage(
+                    "[CloudRoute] the inherited connection failed before the turn was sent — dialling a fresh one (request_id=\(turn.requestId))"
+                )
+                wsTask.cancel(with: .goingAway, reason: nil)
+                retireSocket(requestId: turn.requestId, identity: socketRegistration)
+                let replacement: WebSocketTasking
+                if let injected = webSocketTaskFactory?(req) {
+                    replacement = injected
+                } else {
+                    let production = session.webSocketTask(with: req)
+                    production.resume()
+                    replacement = production
+                }
+                redialledInheritedConnection = true
+                wsTask = replacement
+                socketRegistration = registerSocket(replacement, requestId: turn.requestId, resultSocket: resultSocket)
+                if let lifetime, !lifetime.bind(requestId: turn.requestId, identity: socketRegistration, client: self, wsTask: replacement) {
+                    retireSocket(requestId: turn.requestId, identity: socketRegistration)
+                    replacement.cancel(with: .goingAway, reason: nil)
+                    continuation.yield(.error(source: .requestConstruction, code: "connection_lost", message: "turn closed before submission"))
+                    continuation.finish()
+                    return true
+                }
+                try await replacement.send(.string(authText))
+            }
+            // CLOUD REQUEST SENT — the instant a send of this turn RETURNED, which is the first
+            // instant the client can report one without guessing. Logged after the send returns, so
+            // a send that failed is never reported as sent, and before any response is awaited, so
+            // it marks our send rather than the reply. On the re-dial path this is the SECOND send:
+            // the first may have transmitted before it threw, so this is not necessarily when the
+            // frame first reached the wire — only when a send was confirmed to have returned.
+            FileLog.shared.addMessage("[VoicePipeline] cloudRequestSent request_id=\(turn.requestId)")
+            // The same instant, recorded for the turn's latency measurement: a latency record must
+            // subtract THIS send, not the arrival of the server's first reply frame, which also
+            // carries admission (and possibly inference). `CACurrentMediaTime` is the clock every
+            // other instant in that record is read from.
+            onRequestSent?(CACurrentMediaTime())
             // THE REPORT IS NOW SPENT — confirmed only HERE, after the frame actually reached the
             // transport (reviewer ff00457c item 4). A URL/auth/encoding failure above throws before
             // this point, so the correction survives for the next attempt instead of being
@@ -706,6 +869,16 @@ final class CloudRouteClient {
                             // an arbitrary server string is not known to be free of sensitive content,
                             // and the allowlist here is the acceptance protocol, not general traffic.
                             FileLog.shared.addMessage("[CloudRoute] server error code=\(code)")
+                        }
+                        // A DUPLICATE after this turn re-dialled an inherited socket means the
+                        // first frame WAS admitted and its answer went to the dead socket. The
+                        // user's turn was lost to the transport, not refused, so it is reported as
+                        // the same connection loss any other dead socket produces — never as a
+                        // refusal, which would read as "you may not do that".
+                        if redialledInheritedConnection, case .error(_, "duplicate_request", _) = event {
+                            continuation.yield(.error(source: .transport, code: "connection_lost", message: ""))
+                            terminalFlag.set()
+                            break receiveLoop
                         }
                         continuation.yield(event)
                         // A terminal event ends the turn: the server closes the
@@ -889,7 +1062,11 @@ final class CloudRouteClient {
 
         case "done":
             let usage = parseDone(json: json)
-            return [.done(usage: usage)]
+            // The wire's REQUIRED `outcome`. Anything other than the one interruption value is
+            // read as a completion, so an omitted field keeps the behaviour it always had rather
+            // than discarding a finished answer.
+            let outcome = CloudTurnDoneOutcome(rawValue: json["outcome"] as? String ?? "") ?? .completed
+            return [.done(usage: usage, outcome: outcome)]
 
         case "error":
             guard let code = json["code"] as? String,
@@ -973,8 +1150,12 @@ extension CloudRouteJSONValue {
     }
 }
 
-// The real task satisfies the seam unchanged.
-extension URLSessionWebSocketTask: CloudRouteClient.WebSocketTasking {}
+// The real task satisfies the seam's calls unchanged; liveness reads its own state.
+extension URLSessionWebSocketTask: CloudRouteClient.WebSocketTasking {
+    /// `.running` is the only state that can carry a frame. `.suspended` has not started,
+    /// `.canceling`/`.completed` are finished — all three mean this socket cannot serve the turn.
+    var isAlive: Bool { state == .running }
+}
 
 /// A one-way flag shared between the receive loop and the first-frame timeout
 /// task. Plain cross-task `Bool` access is a data race; this is the smallest

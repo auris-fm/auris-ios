@@ -65,23 +65,14 @@ enum CloudAcceptanceHarness {
             // The envelope's ONE identity is the prepared conversation's requestId (the
             // envelope no longer mints its own), so the acceptance recall presents a real UUID
             // on the wire and keeps the retry identity stable.
-            let envelope = CloudTurnEnvelope.make(
+            // ONE construction per step: the envelope built here is the turn submitted, so
+            // the recorded request identity and the wire identity cannot drift (monthly
+            // review core#157: the same envelope used to be built twice).
+            let turn = CloudTurnEnvelope.make(
                 capabilities: [],
                 routeHint: nil,
-                recentConversation: [],
                 conversation: CloudPreparedConversation(
                     requestId: UUID().uuidString,
-                    conversationId: conversationId,
-                    mode: mode
-                )
-            )
-            let turn = CloudTurnEnvelope(
-                requestId: envelope.requestId,
-                capabilities: [],
-                routeHint: nil,
-                recentConversation: [],
-                conversation: CloudPreparedConversation(
-                    requestId: envelope.requestId,
                     conversationId: conversationId,
                     mode: mode
                 )

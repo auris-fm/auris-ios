@@ -187,7 +187,6 @@ func testTurnEnvelope(
     CloudTurnEnvelope.make(
         capabilities: [],
         routeHint: nil,
-        recentConversation: [],
         conversation: CloudPreparedConversation(
             requestId: requestId,
             conversationId: conversationId,
@@ -238,7 +237,6 @@ extension CloudRouteClient {
     /// against; only the transport under it changed.
     static func stubbed(
         baseURL: String = "https://cloud.test",
-        userId: String = "user_test",
         token: String? = "test_token",
         fixture: String,
         /// OPT-IN binary audio. The transport delivers audio as `.data` frames
@@ -262,7 +260,6 @@ extension CloudRouteClient {
         prepareTask(task)
         let client = CloudRouteClient(
             baseURL: baseURL,
-            userId: userId,
             requestTimeoutSeconds: 15,
             tokenProvider: StubTokenProvider(token: token),
             webSocketTaskFactory: { _ in task }
@@ -349,7 +346,9 @@ final class Promise<Value>: @unchecked Sendable {
 final class HoldLatch: @unchecked Sendable {
     private let lock = NSLock()
     private var open = false
-    private var resume: (() -> Void)?
+    // Every parked waiter, not one. A single stored continuation would let a second `wait` on the
+    // same latch displace the first's, leaking it and leaving its task suspended forever.
+    private var resumes: [() -> Void] = []
 
     /// True once `release()` has run — the still-held probe for controls.
     var released: Bool {
@@ -366,7 +365,7 @@ final class HoldLatch: @unchecked Sendable {
                 lock.unlock()
                 cont.resume()
             } else {
-                resume = cont.resume
+                resumes.append(cont.resume)
                 lock.unlock()
             }
         }
@@ -393,7 +392,7 @@ final class HoldLatch: @unchecked Sendable {
                 lock.unlock()
                 cont.resume()
             } else {
-                resume = cont.resume
+                resumes.append(cont.resume)
                 lock.unlock()
             }
         }
@@ -406,10 +405,10 @@ final class HoldLatch: @unchecked Sendable {
         guard !open else { lock.unlock(); return }
         open = true
         openedByRetirement = true
-        let r = resume
-        resume = nil
+        let r = resumes
+        resumes = []
         lock.unlock()
-        r?()
+        r.forEach { $0() }
     }
 
     private var retiredCheck: (@Sendable () -> Bool)?
@@ -426,10 +425,10 @@ final class HoldLatch: @unchecked Sendable {
     func release() {
         lock.lock()
         open = true
-        let r = resume
-        resume = nil
+        let r = resumes
+        resumes = []
         lock.unlock()
-        r?()
+        r.forEach { $0() }
     }
 }
 
@@ -618,6 +617,75 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
         self.incoming = incoming
     }
 
+    /// TEST-ONLY: the frame the server would send to END an interrupted turn. Unset (the default,
+    /// and every production path) leaves the stub purely scripted. Cleared after it is served once,
+    /// so a second interrupt of the same socket does not resurrect a finished turn.
+    var interruptTerminalFrame: String?
+    /// Set once the interrupt's terminal is queued, so a control can wait for it to be SERVED
+    /// rather than guess how long the turn needs.
+    private(set) var interruptTerminalScheduled = false
+
+
+    /// TEST-ONLY: replace the events still to be served on this socket, for cases that need the
+    /// turn to reach its TERMINAL after the case has already captured what it asserts on (a
+    /// predecessor that must finish before a successor starts, having been parked on purpose).
+    /// Frames already served are unaffected. No production caller: nothing replaces a live
+    /// server's script.
+    func replaceRemainingScript(textFrames: [String]) {
+        scriptLock.lock()
+        incoming = textFrames.map { .string($0) }
+        scriptLock.unlock()
+    }
+
+    private let scriptLock = NSLock()
+
+    /// Parks currently holding a receive callback open (see `releaseProductionParks`). A control
+    /// parks a producer to keep a turn live; a terminal or interrupt must be able to reach it, so
+    /// those parks are opened here rather than left to the control's own release.
+    ///
+    /// Holds the semaphores THEMSELVES, not their identities: an ObjectIdentifier outlives the
+    /// object it names, and a deallocated semaphore's address is reused by the next allocation.
+    /// Tracking identities across tests therefore made a later test's fresh semaphore look
+    /// "already released" the moment it landed on a recycled address, so that park silently did
+    /// not block — a state leak from one test into the next, and exactly the order-dependence it
+    /// produced. Strong references cannot collide that way, and the list is emptied on release.
+    private nonisolated(unsafe) static var productionParks: [DispatchSemaphore] = []
+    private static let productionParksLock = NSLock()
+
+    /// Register a park so a terminal or interrupt can release it. Returns false when this exact
+    /// semaphore has already been opened, so a caller stops blocking instead of parking on it again.
+    @discardableResult
+    static func registerProductionPark(_ semaphore: DispatchSemaphore) -> Bool {
+        productionParksLock.lock(); defer { productionParksLock.unlock() }
+        if releasedParks.contains(where: { $0 === semaphore }) { return false }
+        if !productionParks.contains(where: { $0 === semaphore }) {
+            productionParks.append(semaphore)
+        }
+        return true
+    }
+
+    /// Parks that have been opened. Identity comparison against LIVE objects only.
+    private nonisolated(unsafe) static var releasedParks: [DispatchSemaphore] = []
+
+    /// Drop ALL park state. Called from the test classes' `tearDown` so a park can never outlive
+    /// the test that made it, whatever order tests run in.
+    static func resetProductionParks() {
+        productionParksLock.lock()
+        productionParks = []
+        releasedParks = []
+        productionParksLock.unlock()
+    }
+
+    /// Open every registered park, then forget both lists, so nothing carries into the next test.
+    static func releaseProductionParks() {
+        productionParksLock.lock()
+        let parks = productionParks
+        productionParks = []
+        releasedParks = parks
+        productionParksLock.unlock()
+        parks.forEach { $0.signal() }
+    }
+
     convenience init(textFrames: [String]) {
         self.init(textFrames.map { .string($0) })
     }
@@ -632,9 +700,45 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
     /// automatic recovery may re-drive.
     var throwsBeforeRecording = false
 
+    /// What the control says about this socket's liveness, reported verbatim rather than inferred
+    /// from the script: a stub that guessed would let a test pass on the guess instead of on the
+    /// condition it set. Defaults to open, which is what a freshly issued socket is.
+    var reportsAlive = true
+
+    var isAlive: Bool {
+        snapshotLock.lock(); defer { snapshotLock.unlock() }
+        return reportsAlive && cancelled == nil
+    }
+
     func send(_ message: URLSessionWebSocketTask.Message) async throws {
         if throwsBeforeRecording { throw URLError(.notConnectedToInternet) }
-        sent.append(message)
+        // Recorded under `scriptLock`: `sent` is written from the client's task and read by the
+        // test task, so an unsynchronised append/read is a data race that can report a frame that
+        // was already written as absent.
+        scriptLock.lock(); sent.append(message); scriptLock.unlock()
+        // AN INTERRUPTED TURN TERMINATES ON THE REAL SERVER. A control that keeps a predecessor
+        // alive while a successor barges in needs that terminal to arrive, or the successor parks
+        // on an acknowledgement the stub can never produce (and an emptied script surfaces as a
+        // transport error instead). When configured, answering the interrupt with the turn's
+        // terminal is exactly what the server does; the frame is served on the NEXT receive, in
+        // order, so an action already queued ahead of it still lands first.
+        if let terminal = interruptTerminalFrame,
+           case let .string(text) = message,
+           text.contains("\"type\":\"interrupt\"") {
+            scriptLock.lock()
+            // Anything ALREADY queued was sent by the server before it saw the interrupt, so it is
+            // served first — that is what makes "the interrupted turn's late frame arrives before
+            // its terminal" deterministic instead of a race with how far the control got.
+            incoming.append(.string(terminal))
+            scriptLock.unlock()
+            interruptTerminalScheduled = true
+            // SPEC fc4d3160 (Option 2): the park sits inside the receive callback, BEFORE the
+            // frame is parsed, so a parked predecessor could never read the answer queued above —
+            // and the successor waiting on it would time out. Open the parks once the answer is
+            // queued, so A reads it and exits as the superseded turn it is.
+            StubWebSocketTask.releaseProductionParks()
+        }
+
         if transmitsThenThrows { throw URLError(.networkConnectionLost) }
     }
 
@@ -766,6 +870,14 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
         }
         framesServedForPark += 1
         if let receiveError { throw receiveError }
+        // UNDER THE SAME LOCK `send()` TAKES. `receive()` checked `incoming` and then
+        // `removeFirst()`d it as two unsynchronised steps while a concurrent `send`-side script
+        // mutation could append to the same array, so a control that scripted a frame while the
+        // transport was serving could corrupt the buffer or lose a frame. The lock is taken for
+        // the empty-check and the pop TOGETHER, so "there was a frame" and "here it is" describe
+        // the same state. `NSLock` is not held across an `await` here: both steps are synchronous.
+        scriptLock.lock()
+        defer { scriptLock.unlock() }
         guard !incoming.isEmpty else {
             // A closed socket: the server ended the stream without a terminal
             // event, which the client must surface rather than treat as success.
@@ -810,7 +922,8 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
 
     /// The JSON payloads the client sent, decoded for assertions.
     var sentTextFrames: [String] {
-        sent.compactMap { message in
+        scriptLock.lock(); let snapshot = sent; scriptLock.unlock()
+        return snapshot.compactMap { message in
             if case let .string(text) = message { return text }
             return nil
         }

@@ -14,6 +14,17 @@ struct IntentRoutingInput: Equatable {
     /// has its own id and dispatches its own request, even inside one grace window.
     let utteranceId: String
 
+    /// The turn's own latency bookkeeping, created when the capture was admitted. Carried here
+    /// because this envelope is the one object that spans admission → routing → dispatch, so the
+    /// instants recorded at admission reach the cloud request without a side table keyed by
+    /// utterance id — and die with the turn when it ends, whatever path it takes. NON-optional so
+    /// a turn with a context and one without compare equal; see `LatencyHandle`.
+    /// TASK 90: the playback snapshot taken at speech start for this utterance. Present
+    /// `.absent` means capture ran and nothing was playing; nil means no capture was wired.
+    let playbackContext: PlaybackContext?
+    
+    let latency: LatencyHandle
+
     init(
         sourceTranscript: String?,
         sourceLanguage: String?,
@@ -21,7 +32,8 @@ struct IntentRoutingInput: Equatable {
         translationKind: TranslationKind,
         selection: CloudConversationSelection?,
         utteranceId: String,
-        playbackContext: PlaybackContext? = nil
+        playbackContext: PlaybackContext? = nil,
+        latency: LatencyHandle = LatencyHandle()
     ) {
         self.sourceTranscript = sourceTranscript
         self.sourceLanguage = sourceLanguage
@@ -30,7 +42,9 @@ struct IntentRoutingInput: Equatable {
         self.selection = selection
         self.utteranceId = utteranceId
         self.playbackContext = playbackContext
+        self.latency = latency
     }
+
 
     /// What SELECTED this utterance, carried from the gate decision that produced it.
     ///
@@ -40,20 +54,14 @@ struct IntentRoutingInput: Equatable {
     /// (`detected` true/false) and it is a property of the INPUT, so it travels with it.
     let selection: CloudConversationSelection?
 
-    /// TASK 90 SNAPSHOT: the playback context frozen at utterance start, before ASR and
-    /// routing ran. The cloud route must describe the turn as it was SPOKEN, not as playback
-    /// stands when the request is dispatched (spec cloud-assistant.md, playback-snapshot).
-    /// `nil` means no snapshot was captured; the turn then represents context absence like
-    /// any other turn rather than inventing one.
-    let playbackContext: PlaybackContext?
-
     /// Same source/router text with `.none` (native English path).
     static func english(
         transcript: String,
         language: String? = nil,
         selection: CloudConversationSelection? = nil,
         utteranceId: String,
-        playbackContext: PlaybackContext? = nil
+        playbackContext: PlaybackContext? = nil,
+        latency: LatencyHandle = LatencyHandle()
     ) -> IntentRoutingInput {
         IntentRoutingInput(
             sourceTranscript: transcript,
@@ -62,7 +70,8 @@ struct IntentRoutingInput: Equatable {
             translationKind: .none,
             selection: selection,
             utteranceId: utteranceId,
-            playbackContext: playbackContext
+            playbackContext: playbackContext,
+            latency: latency
         )
     }
 }

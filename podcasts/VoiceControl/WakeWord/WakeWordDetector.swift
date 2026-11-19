@@ -4,13 +4,15 @@ import PocketCastsUtils
 class WakeWordDetector: WakeWordDetectorProtocol {
     private var nativeHandle: UnsafeMutableRawPointer?
     private let threshold: Float
+    private var loadedIdentity: VoiceSharingContributionEncoder.ModelRef?
 
     /// - Parameters:
-    ///   - melModel: Path to melspectrogram ONNX model
-    ///   - embedModel: Path to embedding ONNX model
-    ///   - classifierModel: Path to "Auris" classifier ONNX model
-    ///   - threshold: Deployment threshold loaded from the eval manifest
-    init(melModel: URL, embedModel: URL, classifierModel: URL, threshold: Float) {
+    /// - melModel: Path to melspectrogram ONNX model
+    /// - embedModel: Path to embedding ONNX model
+    /// - classifierModel: Path to "Auris" classifier ONNX model
+    /// - threshold: Deployment threshold loaded from the eval manifest
+    init(melModel: URL, embedModel: URL, classifierModel: URL, threshold: Float,
+         verifiedModelIdentity: VoiceSharingContributionEncoder.ModelRef? = nil) {
         self.threshold = threshold
         fflush(stderr)
         self.nativeHandle = melModel.path.withCString { melPath in
@@ -29,23 +31,35 @@ class WakeWordDetector: WakeWordDetectorProtocol {
             }
             FileLog.shared.addMessage("[VoicePipeline] Failed to initialize ONNX pipeline\(errorDetail)")
         } else {
+            loadedIdentity = verifiedModelIdentity
             FileLog.shared.addMessage("[VoicePipeline] ONNX pipeline initialized OK")
         }
         fflush(stderr)
     }
 
+    /// See `WakeWordDetectorProtocol.activeModelIdentity`.
+    var activeModelIdentity: VoiceSharingContributionEncoder.ModelRef? { loadedIdentity }
+
     /// Scores the utterance and returns the tagged result. An initialization or
     /// scoring failure is never converted into a zero-confidence `notDetected`.
     func detect(samples: [Float], sampleRate: Int) -> WakeWordResult {
+        detect(samples: samples, sampleRate: sampleRate, modelUsed: { _ in })
+    }
+
+    func detect(samples: [Float], sampleRate: Int,
+                modelUsed: (VoiceSharingContributionEncoder.ModelRef?) -> Void) -> WakeWordResult {
         guard let handle = nativeHandle else {
+            modelUsed(nil)
             return .error(code: "init_failed")
         }
         guard !samples.isEmpty else {
+            modelUsed(nil)
             return .error(code: "no_samples")
         }
 
         // Native entry points clear the thread-local last-error, so a non-null
         // pointer after the call means this segment failed to score.
+        modelUsed(loadedIdentity)
         var completionSample: Int32 = -1
         let maxScore = samples.withUnsafeBufferPointer { ptr in
             wakeword_detect_segment(handle, ptr.baseAddress, Int32(samples.count), Int32(sampleRate), &completionSample)
@@ -67,6 +81,7 @@ class WakeWordDetector: WakeWordDetectorProtocol {
         if let handle = nativeHandle {
             wakeword_release(handle)
             nativeHandle = nil
+            loadedIdentity = nil
         }
     }
 
@@ -75,7 +90,7 @@ class WakeWordDetector: WakeWordDetectorProtocol {
 
 // MARK: - C Bridge
 
-/// These C functions are implemented in WakeWordDetector.cpp and linked
+/// These C functions are implemented in WakeWordDetector.mm and linked
 /// via the bridging header. They wrap the ONNX Runtime 3-stage pipeline
 /// (mel spectrogram → embedding → classifier).
 
@@ -89,16 +104,6 @@ private func wakeword_init(
     _ classifierModelPath: UnsafePointer<CChar>,
     _ threshold: Float
 ) -> UnsafeMutableRawPointer?
-
-/// Runs detection on a single window of 16kHz mono float PCM.
-/// Returns a confidence score in [0, 1].
-@_silgen_name("wakeword_detect")
-private func wakeword_detect(
-    _ handle: UnsafeMutableRawPointer,
-    _ samples: UnsafePointer<Float>?,
-    _ sampleCount: Int32,
-    _ sampleRate: Int32
-) -> Float
 
 /// Runs detection on a complete VAD segment per the recognition-pipeline
 /// detection-window policy (virtual 2s context, single preprocessing pass,
