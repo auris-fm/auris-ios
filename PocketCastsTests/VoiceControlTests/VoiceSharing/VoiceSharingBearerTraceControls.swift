@@ -415,6 +415,9 @@ final class VoiceSharingBearerTraceControls: XCTestCase {
     private struct StaticToken: CloudTokenProviding {
         func token() async -> String? { "tok" }
         func handleUnauthorized(rejectedToken: String?) async {}
-    }
+    /// Explicit: this stub has no established principal (see CloudTokenProviding).
+    func authenticatedSession() async -> CloudAuthenticatedSession? { nil }
+}
+
 
 }

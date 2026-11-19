@@ -280,7 +280,10 @@ private final class RecordingTokens: CloudTokenProviding {
     func token() async -> String? { "tok-acct-1" }
     func prepare() async {}
     func handleUnauthorized(rejectedToken: String?) async {}
+    /// Explicit: this stub has no established principal (see CloudTokenProviding).
+    func authenticatedSession() async -> CloudAuthenticatedSession? { nil }
 }
+
 
 /// Stands in for live consent, and records that the transport consulted it.
 private final class VoiceSharingPermissionBox: @unchecked Sendable {

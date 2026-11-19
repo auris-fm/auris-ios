@@ -100,8 +100,17 @@ final class CloudPrefetchClientTests: XCTestCase {
         private let lock = NSLock()
         private var _rejections: [String?] = []
         private let tokenValue: String?
+        /// The account this stub's credential authenticates — a FIXTURE value, associated
+        /// deliberately rather than inferred. Token presence alone is not evidence of a principal:
+        /// a provider could hold a credential with no issuer-vouched account behind it, which is
+        /// exactly the TOT-bearer case the production type models. This stub exists to exercise
+        /// 401 reporting, so it states both halves of its pair and stays out of the ambiguity.
+        private let accountId: String
 
-        init(token: String?) { tokenValue = token }
+        init(token: String?, accountId: String = "test-owner") {
+            tokenValue = token
+            self.accountId = accountId
+        }
 
         var rejections: [String?] {
             lock.lock(); defer { lock.unlock() }
@@ -109,6 +118,14 @@ final class CloudPrefetchClientTests: XCTestCase {
         }
 
         func token() async -> String? { tokenValue }
+
+        /// EXPLICIT, not inherited. A credential without an account is not a principal, so this
+        /// pairs the fixture's token with the fixture's account and never invents one from the
+        /// other. No token ⇒ no session, stated.
+        func authenticatedSession() async -> CloudAuthenticatedSession? {
+            guard let tokenValue, !tokenValue.isEmpty, !accountId.isEmpty else { return nil }
+            return CloudAuthenticatedSession(accountId: accountId, accessToken: tokenValue)
+        }
 
         func handleUnauthorized(rejectedToken: String?) async {
             lock.lock(); _rejections.append(rejectedToken); lock.unlock()
@@ -265,6 +282,9 @@ final class CloudTokenProvidingTests: XCTestCase {
             let value: String
             func token() async -> String? { value }
             func handleUnauthorized(rejectedToken: String?) async {}
+            func authenticatedSession() async -> CloudAuthenticatedSession? {
+                CloudAuthenticatedSession(accountId: "fixed-owner", accessToken: value)
+            }
         }
 
         let task = StubWebSocketTask(textFrames: [#"{"type":"done","usage":{"input_tokens":1,"output_tokens":0}}"#])
@@ -296,6 +316,9 @@ final class CloudTokenFailClosedTests: XCTestCase {
     private struct NoTokenProvider: CloudTokenProviding {
         func token() async -> String? { nil }
         func handleUnauthorized(rejectedToken: String?) async {}
+        /// NO CREDENTIAL means NO SESSION — stated, not inherited, so "this provider has none"
+        /// cannot be confused with "this provider never implemented the requirement".
+        func authenticatedSession() async -> CloudAuthenticatedSession? { nil }
     }
 
     func testRouteSendsNoRequestWithoutACredential() async {

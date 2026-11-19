@@ -86,7 +86,19 @@ final class ToolSchemaTests: XCTestCase {
         let tools = ToolSchema.tools()
         let playback = tools.first { ($0["name"] as? String) == "playback" }
         let params = playback?["parameters"] as? [[String: Any]] ?? []
-        XCTAssertEqual(params.map { $0["name"] as? String }, ["action", "position_seconds", "delta_seconds"])
+        XCTAssertEqual(params.map { $0["name"] as? String }, ["action", "position_seconds", "delta_seconds", "direction"])
+    }
+
+    func test_playback_exposesDirectionEnum() {
+        // voice-intents.md: a directional utterance with no stated amount keeps its
+        // direction and takes the app's default interval — so the model needs a
+        // declared direction parameter with the forward/backward enum to emit it.
+        let tools = ToolSchema.tools()
+        let playback = tools.first { ($0["name"] as? String) == "playback" }
+        let params = playback?["parameters"] as? [[String: Any]] ?? []
+        let direction = params.first { ($0["name"] as? String) == "direction" }
+        XCTAssertNotNil(direction, "playback must declare the direction parameter")
+        XCTAssertEqual(direction?["enum"] as? [String], ["forward", "backward"])
     }
 
     func test_eachTool_hasNameDescriptionAndOrderedParameters() {

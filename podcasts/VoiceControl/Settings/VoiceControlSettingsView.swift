@@ -209,5 +209,8 @@ struct VoiceSharingSectionHost: View {
 /// is configured so the screen still renders, while every server action fails closed.
 private struct NeverTokenProvider: CloudTokenProviding {
     func token() async -> String? { nil }
+    func prepare() async {}
     func handleUnauthorized(rejectedToken: String?) async {}
+    /// No session: this provider never authenticates anything (see CloudTokenProviding).
+    func authenticatedSession() async -> CloudAuthenticatedSession? { nil }
 }

@@ -24,7 +24,10 @@ final class VoiceSharingSwitchPutControls: XCTestCase {
         func token() async -> String? { "switch-bearer" }
         func prepare() async {}
         func handleUnauthorized(rejectedToken: String?) async {}
-    }
+    /// Explicit: this stub has no established principal (see CloudTokenProviding).
+    func authenticatedSession() async -> CloudAuthenticatedSession? { nil }
+}
+
 
     override func setUp() {
         super.setUp()

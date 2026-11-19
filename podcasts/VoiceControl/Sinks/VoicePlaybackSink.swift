@@ -21,6 +21,12 @@ protocol VoicePlaybackSink {
     /// hold: a pause of ours may only be released if it stopped playback that
     /// was already running.
     var isPlaying: Bool { get }
+    /// A post-action playback observation for the identified app-operation path
+    /// (voice-intents.md): `nil` = no current engine reading could be produced
+    /// (unavailable), `.some(false)` = observed not playing (an already-paused engine
+    /// included), `.some(true)` = observed playing. Unlike `isPlaying`, this keeps
+    /// unavailable separate from observed-paused.
+    var observedPlaying: Bool? { get }
     func pause() -> VoiceResponse
     func resume() -> VoiceResponse
     /// Seek relative to the current position.
@@ -29,6 +35,12 @@ protocol VoicePlaybackSink {
     /// applies its own interval in `direction`. `direction` is `forward` when
     /// the request stated neither an amount nor a direction.
     func seekRelative(deltaSeconds: Int?, direction: SeekDirection) -> VoiceResponse
+    /// ADDITIVE REQUIREMENT (identified seek): identified relative seek. Declared as
+    /// a REQUIREMENT so conformers that implement it dispatch dynamically; the extension below
+    /// supplies the fail-closed nil default for conformers that do not.
+    func seekRelativeIdentified(deltaSeconds: Int?, direction: SeekDirection, invocationToken: UUID, deadlineNs: UInt64?, typedCompletion: @escaping (SeekExecutionOutcome) -> Void) -> SeekIdentity?
+    /// ADDITIVE REQUIREMENT: the LIVE engine objects for replacement detection at settlement.
+    func identifiedEngineIdentity() -> SeekIdentity?
     func seekTo(positionSeconds: Int) -> VoiceResponse
     /// A negative `positionSeconds` is an offset back from the episode end.
     /// The sink resolves and bounds it against the episode; callers must not
@@ -56,4 +68,15 @@ extension VoicePlaybackSink {
     func nextEpisodeWithFact() -> (response: VoiceResponse, fact: SinkActionFact?) {
         (nextEpisode(), nil)
     }
+}
+
+/// ADDITIVE (identified seek): the identified relative seek. Default nil = this
+/// sink cannot produce completion evidence; the identified path settles `unknown` WITHOUT
+/// releasing any effect (fail-closed) — the legacy `seekRelative` stays fire-and-forget.
+extension VoicePlaybackSink {
+    /// Fail-closed default: no completion evidence, no effect. Declared as a requirement so
+    /// conformer overrides dispatch dynamically; this default satisfies non-implementers.
+    func seekRelativeIdentified(deltaSeconds: Int?, direction: SeekDirection, invocationToken: UUID, deadlineNs: UInt64?, typedCompletion: @escaping (SeekExecutionOutcome) -> Void) -> SeekIdentity? { nil }
+    /// ADDITIVE REQUIREMENT: the LIVE engine objects for replacement detection at settlement.
+    func identifiedEngineIdentity() -> SeekIdentity? { nil }
 }

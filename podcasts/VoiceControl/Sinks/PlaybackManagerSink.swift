@@ -9,16 +9,33 @@ protocol PlaybackManagerProtocol {
     /// this to decide whether a turn may pause and later release playback (a
     /// pause the user made themselves must not be released).
     var isPlaying: Bool { get }
+    /// Tri-state post-action observation (voice-intents.md): `nil` = no engine
+    /// reading exists, `.some(false)` = observed not playing, `.some(true)` = observed playing.
+    func observedPlaybackState() -> Bool?
     func duration() -> TimeInterval
     func currentTime() -> TimeInterval
     func seekTo(time: TimeInterval)
     func pause()
     func play()
     func skipToNextUpNextEpisode() -> String?
+    /// ADDITIVE REQUIREMENT (identified seek): identified seek — see the extension
+    /// default below. Declared as a requirement so the real manager's override dispatches.
+    func seekToIdentified(time: TimeInterval, invocationToken: UUID, deadlineNs: UInt64?, typedCompletion: @escaping (SeekExecutionOutcome) -> Void) -> SeekIdentity?
+    /// ADDITIVE REQUIREMENT: the LIVE engine objects for replacement detection at settlement.
+    func identifiedEngineIdentity() -> SeekIdentity?
     /// The skip WITH its actual decision: `outcome` is returned at the manager's own
     /// guard/action branches (played episode — shuffle-attributed — vs decline). The
     /// `presentationTitle` carries only the historical spoken candidate and proves nothing.
     func skipToNextUpNextEpisodeWithFact() -> (presentationTitle: String?, outcome: PlaybackManager.NextEpisodeSkipOutcome)
+}
+
+/// ADDITIVE (identified seek): identified seek issued with a caller-supplied
+/// invocation token and a typed completion. Default nil = this manager cannot produce
+/// completion evidence; the identified path then settles `unknown` WITHOUT releasing an
+/// effect (fail-closed).
+extension PlaybackManagerProtocol {
+    func seekToIdentified(time: TimeInterval, invocationToken: UUID, deadlineNs: UInt64?, typedCompletion: @escaping (SeekExecutionOutcome) -> Void) -> SeekIdentity? { nil }
+    func identifiedEngineIdentity() -> SeekIdentity? { nil }
 }
 
 /// Default implementation of `VoicePlaybackSink` backed by `PlaybackManager`.
@@ -35,6 +52,8 @@ class PlaybackManagerSink: VoicePlaybackSink {
     }
 
     var isPlaying: Bool { playbackManager.isPlaying }
+
+    var observedPlaying: Bool? { playbackManager.observedPlaybackState() }
 
     func pause() -> VoiceResponse {
         AnalyticsPlaybackHelper.shared.currentSource = .voiceCommands
@@ -99,6 +118,31 @@ class PlaybackManagerSink: VoicePlaybackSink {
         AnalyticsPlaybackHelper.shared.currentSource = .voiceCommands
         playbackManager.seekTo(time: TimeInterval(clamped) / 1000.0)
         return .silent
+    }
+
+    /// ADDITIVE (identified seek): computes the same clamped target as
+    /// `seekRelative`, then issues it as an IDENTIFIED seek — the completion is correlated to
+    /// the initiating invocation token, and the engine's typed outcome carries the evidence.
+    /// Returns the initiated identity, or nil when the manager cannot seek with evidence
+    /// (player not ready): no effect is released on nil.
+    func seekRelativeIdentified(deltaSeconds: Int?, direction: SeekDirection, invocationToken: UUID, deadlineNs: UInt64?, typedCompletion: @escaping (SeekExecutionOutcome) -> Void) -> SeekIdentity? {
+        let deltaMs: Int
+        if let deltaSeconds {
+            deltaMs = deltaSeconds * 1000
+        } else {
+            // Same interval rule as `seekRelative` — the sink owns the interval; the mapper
+            // must never manufacture a delta for a direction-only call.
+            let interval = direction == .backward ? Settings.skipBackTime : Settings.skipForwardTime
+            deltaMs = (direction == .backward ? -1 : 1) * interval * 1000
+        }
+        let currentPos = Int(playbackManager.currentTime() * 1000)
+        let duration = Int(playbackManager.duration() * 1000)
+        let clamped = max(0, min(duration, currentPos + deltaMs))
+        AnalyticsPlaybackHelper.shared.currentSource = .voiceCommands
+        return playbackManager.seekToIdentified(time: TimeInterval(clamped) / 1000.0,
+                                                invocationToken: invocationToken,
+                                                deadlineNs: deadlineNs,
+                                                typedCompletion: typedCompletion)
     }
 
     /// Seek to an absolute position.

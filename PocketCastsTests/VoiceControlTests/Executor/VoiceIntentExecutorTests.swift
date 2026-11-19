@@ -521,6 +521,11 @@ final class VoiceIntentExecutorTests: XCTestCase {
 // MARK: - Mock Sinks
 
 private final class MockPlaybackSink: VoicePlaybackSink {
+
+    /// App-operation observation (voice-intents.md): this double has no notion of an
+    /// unavailable engine, so it mirrors `isPlaying`.
+    var observedPlaying: Bool? { isPlaying }
+
     /// Host playing at the moment the turn reads it. Tests set this to
     /// false to model a user who paused before speaking.
     var isPlaying = true

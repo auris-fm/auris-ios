@@ -53,8 +53,9 @@ enum ToolSchema {
         "Basic playback controls: pause, resume, skip forward or backward, seek to a position, play next episode.",
         parameters: [
             parameter("action", "string", enum: ["pause", "resume", "seek_relative", "seek_to", "next_episode"]),
-            parameter("position_seconds", "integer", "Non-negative absolute episode position in seconds from the beginning. Use with seek_to; 0 means the beginning."),
-            parameter("delta_seconds", "integer", "Signed seek delta. Use with seek_relative; positive=forward, negative=backward."),
+            parameter("position_seconds", "integer", "Signed absolute episode position. Use with seek_to; non-negative values are offsets from the beginning, 0 means beginning, and negative values are offsets back from the episode end."),
+            parameter("delta_seconds", "integer", "Signed seek delta. Use with seek_relative; positive=forward, negative=backward. When no amount is stated, omit the delta and preserve any stated direction in direction. Zero is treated as absent. A nonzero delta's sign takes precedence over direction."),
+            parameter("direction", "string", "Seek direction for seek_relative when no amount is stated. Preserve a stated direction and use the app's default interval in that direction. Omit both direction and delta_seconds only when neither is stated.", enum: ["forward", "backward"]),
         ]
     )
 

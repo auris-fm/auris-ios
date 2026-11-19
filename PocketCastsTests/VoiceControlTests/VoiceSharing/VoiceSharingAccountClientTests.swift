@@ -100,6 +100,9 @@ private final class AccountStubTokenProvider: CloudTokenProviding {
         unauthorizedCalls += 1
         lastRejectedToken = rejectedToken
     }
+
+    /// Explicit: this stub has no established principal (see CloudTokenProviding).
+    func authenticatedSession() async -> CloudAuthenticatedSession? { nil }
 }
 
 final class VoiceSharingAccountClientTests: XCTestCase {
@@ -958,7 +961,10 @@ private final class SharingAccountTokenClosure: CloudTokenProviding {
     init(_ body: @escaping () async -> String?) { self.body = body }
     func token() async -> String? { await body() }
     func handleUnauthorized(rejectedToken: String?) async {}
+    /// Explicit: this stub has no established principal (see CloudTokenProviding).
+    func authenticatedSession() async -> CloudAuthenticatedSession? { nil }
 }
+
 private actor SharingAccountHold {
     var opened = false
     var continuation: CheckedContinuation<String?, Never>?

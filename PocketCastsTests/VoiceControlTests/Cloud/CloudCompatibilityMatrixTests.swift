@@ -108,7 +108,7 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
             data: {"text":"She"}
 
             event: action
-            data: {"tool":"playback","operation_id":"op-X12625","capability_version":"v7","action":"seek_to","params":{"reference_position_ms":100000}}
+            data: {"tool":"playback","operation_id":"77d9ee31-a3b8-47cd-a43e-000000012625","capability_version":"app-ops/1","action":"seek_to","params":{"reference_position_ms":100000},"precondition":{"episode_id":"ep"}}
 
             """
         mapper.playbackSecondsForReference = [100.0: 110.0]
@@ -138,13 +138,13 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
         self.pendingFixture =
             """
             event: action
-            data: {"tool":"playback","operation_id":"op-X77564","capability_version":"v7","action":"play_quote","params":{"reference_position_ms":500000}}
+            data: {"tool":"playback","operation_id":"77d9ee31-a3b8-47cd-a43e-000000077564","capability_version":"app-ops/1","action":"play_quote","params":{"reference_position_ms":500000},"precondition":{"episode_id":"ep"}}
 
             event: token
             data: {"text":"quote"}
 
             event: action
-            data: {"tool":"playback","operation_id":"op-X57434","capability_version":"v7","action":"stop_quote","params":{}}
+            data: {"tool":"playback","operation_id":"77d9ee31-a3b8-47cd-a43e-000000057434","capability_version":"app-ops/1","action":"stop_quote","params":{},"precondition":{"episode_id":"ep"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -171,13 +171,13 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
         self.pendingFixture =
             """
             event: action
-            data: {"tool":"playback","operation_id":"op-X77564","capability_version":"v7","action":"play_quote","params":{"reference_position_ms":500000}}
+            data: {"tool":"playback","operation_id":"77d9ee31-a3b8-47cd-a43e-000000077564","capability_version":"app-ops/1","action":"play_quote","params":{"reference_position_ms":500000},"precondition":{"episode_id":"ep"}}
 
             event: token
             data: {"text":"quote"}
 
             event: action
-            data: {"tool":"playback","operation_id":"op-X57434","capability_version":"v7","action":"stop_quote","params":{}}
+            data: {"tool":"playback","operation_id":"77d9ee31-a3b8-47cd-a43e-000000057434","capability_version":"app-ops/1","action":"stop_quote","params":{},"precondition":{"episode_id":"ep"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -234,20 +234,39 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
 
     // MARK: - helpers
 
+    /// The episode every identified action in these fixtures targets. The wire requires an
+    /// episode-relative action to name its target and that target to be the CURRENT one, so the
+    /// fixtures and the sink's live target agree by construction.
+    private static let matrixEpisodeId = "ep"
+
     private func makeSink() -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
         let fixture = pendingFixture ?? ""
         return CloudRouteSink(
             clientFactory: {
-                CloudRouteClient.stubbed(baseURL: cloudConfig.baseUrl, fixture: fixture).client
+                // Credential AND account travel through the real acquisition as one fixture, so
+                // the journaled owner is necessarily the one that supplied the authenticate frame.
+                CloudRouteClient.stubbed(
+                    baseURL: cloudConfig.baseUrl, fixture: fixture,
+                    tokenProvider: StubTokenProvider(token: "test-credential", accountId: "test-owner")
+                ).client
             },
             isConfigured: { !cloudConfig.baseUrl.isEmpty },
             playbackSink: playback,
             fingerprintMapper: mapper,
             playbackPositionMs: { self.playback.positionMs },
+            currentEpisodeIdProvider: { Self.matrixEpisodeId },
             cloudPlaybackContextState: CloudPlaybackContextState(),
             analytics: VoiceAnalytics(analytics: analytics),
-            conversationManager: testConversationManager()
+            // An identified operation executes only with a durable exactly-once record; the
+            // matrix cases exercise effects, so the sink gets a working in-memory journal.
+            operationJournal: OperationJournal(store: InMemoryOperationRecordStore()),
+            conversationManager: testConversationManager(),
+            // The manifest THIS turn advertises is the negotiated truth: declare exactly the
+            // operations these fixtures use.
+            appOperationSupportProvider: {
+                CloudAppOperationSupport(operations: ["playback.seek_to", "playback.play_quote", "playback.stop_quote"])
+            }
         )
     }
 
@@ -267,6 +286,11 @@ final class CloudCompatibilityMatrixTests: XCTestCase {
 // MARK: - local test doubles (the shared ones are file-private)
 
 private final class MatrixPlaybackSink: VoicePlaybackSink {
+
+    /// App-operation observation (voice-intents.md): this double has no notion of an
+    /// unavailable engine, so it mirrors `isPlaying`.
+    var observedPlaying: Bool? { isPlaying }
+
     /// Host playing at the moment the turn reads it. Tests set this to
     /// false to model a user who paused before speaking.
     var isPlaying = true

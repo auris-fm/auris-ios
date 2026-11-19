@@ -23,6 +23,8 @@ final class EarlyConnectionLifecycleControl: XCTestCase {
     /// Unused by this control: it exercises the early-connection lifecycle, never playback.
     private struct UnusedPlaybackSink: VoicePlaybackSink {
         var isPlaying: Bool { false }
+        /// Explicit: this control never reads a playback observation; unavailable is fail-closed.
+        var observedPlaying: Bool? { nil }
         func pause() -> VoiceResponse { .silent }
         func resume() -> VoiceResponse { .silent }
         func seekRelative(deltaSeconds: Int?, direction: SeekDirection) -> VoiceResponse { .silent }
