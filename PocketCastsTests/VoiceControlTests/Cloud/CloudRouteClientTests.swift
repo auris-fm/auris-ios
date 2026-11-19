@@ -386,7 +386,6 @@ final class CloudRouteClientTests: XCTestCase {
         let provider = CloudStaticIdentityTokenProvider(identity: identity)
         let client = CloudRouteClient(
             baseURL: "https://cloud.test",
-            userId: identity.userId,
             tokenProvider: provider,
             webSocketTaskFactory: { _ in task }
         )

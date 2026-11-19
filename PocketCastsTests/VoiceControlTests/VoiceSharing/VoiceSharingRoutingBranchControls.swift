@@ -1333,7 +1333,7 @@ private final class LocalSharingToken: CloudTokenProviding {
     func token() async -> String? { value }
     func prepare() async {}
     func handleUnauthorized(rejectedToken: String?) async {}
-}
-
     /// Explicit: this stub has no established principal (see CloudTokenProviding).
     func authenticatedSession() async -> CloudAuthenticatedSession? { nil }
+}
+
