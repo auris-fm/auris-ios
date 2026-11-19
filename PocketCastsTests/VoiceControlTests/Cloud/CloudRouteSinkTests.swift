@@ -3694,8 +3694,10 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         // sink's own socket carried while the turn was live.
         let socket = AppOperationResultSocket(requestId: "u-two-actions")
         await MainActor.run {
-            socket.freezeAcquisition(CloudAuthenticatedSession(
-                accountId: "test-owner", accessToken: "test-credential"))
+            let session = CloudAuthenticatedSession(
+                accountId: "test-owner", accessToken: "test-credential")
+            socket.freezeAcquisition(session)
+            socket.authenticatedSession = session
         }
         let client = try XCTUnwrap(capturedClient)
         let box = await MainActor.run {
