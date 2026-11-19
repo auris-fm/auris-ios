@@ -28,26 +28,8 @@
       }
     },
     {
-      "skippedTests" : [
-        "AutoAddCandidatesDataManagerTests\/testNewQueryPerformance()",
-        "AutoAddCandidatesDataManagerTests\/testSyncableUpNextSetting()"
-      ],
       "target" : {
-        "containerPath" : "container:Modules\/DataModel",
-        "identifier" : "PocketCastsDataModelTests",
-        "name" : "PocketCastsDataModelTests"
-      }
-    },
-    {
-      "target" : {
-        "containerPath" : "container:Modules\/Server",
-        "identifier" : "PocketCastsServerTests",
-        "name" : "PocketCastsServerTests"
-      }
-    },
-    {
-      "target" : {
-        "containerPath" : "container:Modules\/Utils",
+        "containerPath" : "container:Modules",
         "identifier" : "PocketCastsUtilsTests",
         "name" : "PocketCastsUtilsTests"
       }
