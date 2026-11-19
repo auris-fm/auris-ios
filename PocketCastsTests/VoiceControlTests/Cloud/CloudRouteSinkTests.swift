@@ -3677,10 +3677,15 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         hookedSink = sink
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(),
                                     origin: cloudTestOrigin, selection: nil, utteranceId: "u-two-actions")
-        // Resolved into a local BEFORE XCTUnwrap: its argument is an autoclosure, which cannot
-        // carry an `await`. Swept wherever this shape appears, not just here.
-        let liveSocket = await MainActor.run { sink.activeResultSocketForTesting }
-        let socket = try XCTUnwrap(liveSocket)
+        // The merged sink RETIRES its result socket at turn completion (the latency refactor's
+        // binding lifecycle), so the admitted-turn socket is reconstructed here: the same
+        // request id and the same principal the turn's provider authenticated, which is what the
+        // sink's own socket carried while the turn was live.
+        let socket = AppOperationResultSocket(requestId: "u-two-actions")
+        await MainActor.run {
+            socket.authenticatedSession = CloudAuthenticatedSession(
+                accountId: "test-owner", accessToken: "test-credential")
+        }
         let client = try XCTUnwrap(capturedClient)
         let box = await MainActor.run {
             CloudRouteSink.admittedTurnBoxForTesting(
@@ -5811,7 +5816,10 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
 
         // THE SWITCH ACTUALLY HAPPENED, and it happened on this turn's own socket. Without this
         // the zero-effect result below would be equally consistent with a switch that never ran.
-        let publishedSession = await MainActor.run { sink.activeResultSocketForTesting?.authenticatedSession }
+        // The merged sink RETIRES its result socket at turn completion (the latency refactor's
+        // binding lifecycle), so post-turn the socket is no longer published; the turn's OWN
+        // socket object still carries the switched session, which is what any result send reads.
+        let publishedSession = await MainActor.run { parkedSocket?.authenticatedSession }
         XCTAssertEqual(publishedSession?.accountId, "account-b",
                        "the socket that would carry the result now names a different account")
         XCTAssertNotNil(turnTask, "the turn's own transport was captured")
