@@ -85,20 +85,69 @@ final class CloudFingerprintFetchAuthTests: XCTestCase {
         XCTAssertTrue(seen.isEmpty, "no credential ⇒ no request, and never the legacy bearer")
     }
 
-    /// The production default is the turn route's router — the SAME shared
-    /// provider instance, so the fingerprint path shares the token cache and
-    /// refresh lock with turns instead of minting a second chain.
-    func testDefaultProviderIsTheTurnRoutesSharedRouterProvider() {
-        let routed = CloudTokenProviderRouter.provider()
+    /// The production default is the shared AURIS provider directly — never
+    /// the router's per-call choice, whose legacy branch would send a TOFU id
+    /// that the verified route rejects.
+    func testDefaultProviderIsTheSharedAurisProvider() {
+        let auris = CloudTokenProviderRouter.fingerprintReferenceProvider()
+        XCTAssertTrue(auris is CloudAuthTokenProvider)
+        let sharing = CloudTokenProviderRouter.voiceSharingProvider(aurisBaseURL: "https://gateway.test")
+        XCTAssertTrue((auris as AnyObject) === (sharing as AnyObject),
+                      "one shared Auris provider: a second instance would rotate the same refresh chain")
         let fetcher = CloudFingerprintReferenceFetcher(session: makeSession())
-        XCTAssertTrue(fetcher.tokenProviderForTesting === (routed as AnyObject),
-                      "the fetcher must present the router's selected provider, not a private identity string")
+        XCTAssertTrue((fetcher.tokenProviderForTesting as AnyObject) === (auris as AnyObject),
+                      "the fetcher must present the shared Auris provider, not the routing choice")
     }
 
-    /// A 401 tells the provider its token was rejected, so the next fetch
-    /// carries a fresh one — the same reactive contract the turn route has.
-    func testUnauthorizedNotifiesTheProvider() async {
-        let provider = StubTokenProvider("stale-token")
+    /// A 401 refreshes once and retries once with the fresh token — the plan's
+    /// refresh-and-retry-once contract for this route.
+    func testUnauthorizedRefreshesAndRetriesOnceWithTheFreshToken() async throws {
+        final class RotatingProvider: CloudTokenProviding {
+            var tokens: [String]
+            private(set) var unauthorizedCalls = 0
+            init(_ tokens: [String]) { self.tokens = tokens }
+            func token() async -> String? { tokens.isEmpty ? nil : tokens[0] }
+            func handleUnauthorized(rejectedToken: String?) async {
+                unauthorizedCalls += 1
+                if !tokens.isEmpty { tokens.removeFirst() }
+            }
+        }
+        let provider = RotatingProvider(["stale-token", "fresh-token"])
+        var seen: [String] = []
+        CloudRouteTestURLProtocol.onRequest = { request, _ in
+            seen.append(request.value(forHTTPHeaderField: "Authorization") ?? "")
+        }
+        let body = compactV2Body()
+        CloudRouteTestURLProtocol.requestHandler = { request in
+            if request.value(forHTTPHeaderField: "Authorization") == "Bearer fresh-token" {
+                return .complete(status: 200, headers: ["Content-Type": "application/json"], body: body)
+            }
+            return .complete(status: 401, headers: [:], body: Data())
+        }
+
+        let fetcher = CloudFingerprintReferenceFetcher(session: makeSession(), tokenProvider: provider)
+        let matcher = await fetcher.fetchReference(baseUrl: "https://gateway.test", episodeUuid: "ep-1", podcastUuid: "pod-1")
+
+        XCTAssertNotNil(matcher, "the retry with the refreshed token must succeed")
+        XCTAssertEqual(seen, ["Bearer stale-token", "Bearer fresh-token"])
+        XCTAssertEqual(provider.unauthorizedCalls, 1)
+    }
+
+    /// A second rejection gives up: two requests, one refresh report, nil.
+    func testSecondRejectionGivesUp() async {
+        final class RotatingProvider: CloudTokenProviding {
+            var tokens: [String]
+            private(set) var unauthorizedCalls = 0
+            init(_ tokens: [String]) { self.tokens = tokens }
+            func token() async -> String? { tokens.isEmpty ? nil : tokens[0] }
+            func handleUnauthorized(rejectedToken: String?) async {
+                unauthorizedCalls += 1
+                if !tokens.isEmpty { tokens.removeFirst() }
+            }
+        }
+        let provider = RotatingProvider(["bad-1", "bad-2"])
+        var requests = 0
+        CloudRouteTestURLProtocol.onRequest = { _, _ in requests += 1 }
         CloudRouteTestURLProtocol.requestHandler = { _ in
             .complete(status: 401, headers: [:], body: Data())
         }
@@ -107,6 +156,6 @@ final class CloudFingerprintFetchAuthTests: XCTestCase {
         let matcher = await fetcher.fetchReference(baseUrl: "https://gateway.test", episodeUuid: "ep-1", podcastUuid: "pod-1")
 
         XCTAssertNil(matcher)
-        XCTAssertEqual(provider.unauthorizedCalls, 1)
+        XCTAssertEqual(requests, 2, "refresh-and-retry-ONCE, never a loop")
     }
 }
