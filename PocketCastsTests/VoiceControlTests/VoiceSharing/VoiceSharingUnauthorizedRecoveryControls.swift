@@ -40,7 +40,10 @@ final class VoiceSharingUnauthorizedRecoveryControls: XCTestCase {
     private final class StaticRecoveryTokenProvider: CloudTokenProviding {
         func token() async -> String? { "tok" }
         func handleUnauthorized(rejectedToken: String?) async {}
-    }
+}
+
+    /// Explicit: this stub has no established principal (see CloudTokenProviding).
+    func authenticatedSession() async -> CloudAuthenticatedSession? { nil }
 
     /// Rotates on recovery, remembering WHICH token was rejected (the provider contract).
     private final class RotatingTokenProvider: CloudTokenProviding {
@@ -53,7 +56,10 @@ final class VoiceSharingUnauthorizedRecoveryControls: XCTestCase {
         func handleUnauthorized(rejectedToken: String?) async {
             recoveries += 1
             rejected = rejectedToken
-        }
+}
+
+    /// Explicit: this stub has no established principal (see CloudTokenProviding).
+    func authenticatedSession() async -> CloudAuthenticatedSession? { nil }
     }
 
     private final class CountingTokenProvider: CloudTokenProviding {
@@ -62,7 +68,10 @@ final class VoiceSharingUnauthorizedRecoveryControls: XCTestCase {
         init(token: String) { self.token = token }
         func token() async -> String? { token }
         func handleUnauthorized(rejectedToken: String?) async { recoveries += 1 }
-    }
+}
+
+    /// Explicit: this stub has no established principal (see CloudTokenProviding).
+    func authenticatedSession() async -> CloudAuthenticatedSession? { nil }
 
     private func makeStore(account: String = "acct-1") -> VoiceSharingEnrollmentStore {
         let store = VoiceSharingEnrollmentStore(

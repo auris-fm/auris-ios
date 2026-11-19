@@ -7563,7 +7563,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                        "C is suspended: the queued stop it cannot see holds its admission while the runner is parked")
         // And C RETIRED before admitting: E1's clear (A's leftovers) plus C's own retire clear.
         // A C that skipped its wait (queued stop invisible) never performs the second clear.
-        let clears: Int = await MainActor.run { sink.audioPlayerForTesting?.bufferClearCountForTesting ?? 0 }
+        let clears: Int = await MainActor.run { sink.audioPlayerForTesting?.bufferClearCount ?? 0 }
         XCTAssertEqual(clears, 2, "C retired B's queued-stop-window output before admitting")
         // Process the queue: the runner handles E1 then E2; confirmations withheld until now.
         await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(false) }

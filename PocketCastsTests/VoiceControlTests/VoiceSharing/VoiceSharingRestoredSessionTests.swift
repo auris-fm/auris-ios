@@ -17,7 +17,10 @@ final class VoiceSharingRestoredSessionTests: XCTestCase {
         func token() async -> String? { token }
         func prepare() async {}
         func handleUnauthorized(rejectedToken: String?) async {}
-    }
+}
+
+    /// Explicit: this stub has no established principal (see CloudTokenProviding).
+    func authenticatedSession() async -> CloudAuthenticatedSession? { nil }
 
     /// The store reads its lifecycle from this provider, so a control can move the session under an
     /// in-flight read exactly as sign-out/login does.

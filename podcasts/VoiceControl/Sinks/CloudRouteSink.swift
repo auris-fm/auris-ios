@@ -2304,7 +2304,7 @@ struct AdmittedTurnIdentity: Equatable {
             actionBytes: actionBytes, parameterViolation: parameterViolation,
             admittedTurn: admittedTurn, admittedTurnSocket: admittedTurnSocket,
             admittedTurnClient: admittedTurnClient, admittedTurnRoute: admittedTurnRoute,
-            negotiatedSupport: negotiatedSupport)
+            negotiatedSupport: negotiatedSupport, onFact: onFact)
     }
 
     /// Continues an IDENTIFIED operation through the fail-closed gates to its effect.
@@ -2320,7 +2320,8 @@ struct AdmittedTurnIdentity: Equatable {
         admittedTurnSocket: AppOperationResultSocket?,
         admittedTurnClient: CloudRouteClient,
         admittedTurnRoute: (socket: AppOperationResultSocket, client: CloudRouteClient)?,
-        negotiatedSupport: CloudAppOperationSupport?
+        negotiatedSupport: CloudAppOperationSupport?,
+        onFact: (SinkActionFact) -> Void = { _ in }
     ) async {
         // THE ORIGINAL ADMISSION INSTANT (review blocker): captured before the durable claim
         // and before ANY suspension (effect gate, queue delay) — the 15s budget is measured
