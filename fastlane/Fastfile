@@ -708,6 +708,68 @@ platform :ios do
   #
   # @param set_up_code_signing [Boolean] If true, will call `configure_code_signing_app_store` before building. Recommended on CI.
   #
+  # ------------------------------------------------------------------
+  # Auris beta distribution (TestFlight, internal testers)
+  #
+  # Independent of the upstream release choreography above: the app signs
+  # with the project's own identifiers (`fm.auris` and the project's
+  # DEVELOPMENT_TEAM) via automatic signing and the App Store Connect API
+  # key from the environment. No upstream lane, cert store or team id is
+  # used, and nothing here touches the enterprise/prototype configuration.
+  # ------------------------------------------------------------------
+
+  AURIS_APP_BUNDLE_IDENTIFIER = 'fm.auris'
+  AURIS_BUILD_OUTPUT_NAME = 'auris'
+  AURIS_XCARCHIVE_PATH = File.join(ARTIFACTS_FOLDER, "#{AURIS_BUILD_OUTPUT_NAME}.xcarchive")
+  AURIS_IPA_PATH = File.join(ARTIFACTS_FOLDER, "#{AURIS_BUILD_OUTPUT_NAME}.ipa")
+
+  # Archives the Auris app for TestFlight. The speech runtime is a static
+  # library (`liblfm_runtime.a`) linked into the app binary, so a device
+  # archive built without `ThirdParty/llama-cpp-build/ios-device` still
+  # succeeds — `scripts/check-auris-ipa.sh` makes that failure visible
+  # instead of shipping a build that crashes at first voice use.
+  #
+  # @param build_number [String, nil] When given, overrides `VERSION_LONG`
+  #   (`CURRENT_PROJECT_VERSION`). Defaults to the xcconfig value.
+  #
+  lane :auris_beta_build do |build_number: nil|
+    xcargs = build_number ? { VERSION_LONG: build_number } : {}
+
+    build_app(
+      scheme: SCHEME,
+      include_symbols: true,
+      clean: true,
+      xcargs: xcargs,
+      export_options: {
+        method: 'app-store',
+        manageAppVersionAndBuildNumber: false,
+        signingStyle: 'automatic'
+      },
+      archive_path: AURIS_XCARCHIVE_PATH,
+      output_directory: ARTIFACTS_FOLDER,
+      output_name: AURIS_BUILD_OUTPUT_NAME
+    )
+
+    sh("#{PROJECT_ROOT_FOLDER}/scripts/check-auris-ipa.sh #{AURIS_IPA_PATH.shellescape}")
+  end
+
+  # Uploads the archived Auris ipa to TestFlight for internal testers.
+  #
+  # @param ipa_path [String] Path to the `.ipa` file to upload.
+  # @param skip_waiting [Boolean] When true, returns right after the upload
+  #   instead of waiting for App Store Connect processing.
+  #
+  lane :auris_beta_upload do |ipa_path: AURIS_IPA_PATH, skip_waiting: true|
+    require_env_vars!(*ASC_API_KEY_ENV_VARS)
+
+    upload_to_testflight(
+      ipa: ipa_path,
+      distribute_external: false,
+      skip_waiting_for_build_processing: skip_waiting,
+      api_key: app_store_connect_api_key
+    )
+  end
+
   lane :build_app_store_connect do |set_up_code_signing: true|
     configure_code_signing_app_store if set_up_code_signing
 
