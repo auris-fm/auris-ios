@@ -14,15 +14,16 @@ struct IntentRoutingInput: Equatable {
     /// has its own id and dispatches its own request, even inside one grace window.
     let utteranceId: String
 
+    /// The playback snapshot taken at speech start for this utterance, dispatched verbatim.
+    /// A present `.absent` means capture ran and nothing was playing; `nil` means no capture
+    /// was wired for the utterance.
+    let playbackContext: PlaybackContext?
+
     /// The turn's own latency bookkeeping, created when the capture was admitted. Carried here
     /// because this envelope is the one object that spans admission → routing → dispatch, so the
     /// instants recorded at admission reach the cloud request without a side table keyed by
     /// utterance id — and die with the turn when it ends, whatever path it takes. NON-optional so
     /// a turn with a context and one without compare equal; see `LatencyHandle`.
-    /// TASK 90: the playback snapshot taken at speech start for this utterance. Present
-    /// `.absent` means capture ran and nothing was playing; nil means no capture was wired.
-    let playbackContext: PlaybackContext?
-    
     let latency: LatencyHandle
 
     init(

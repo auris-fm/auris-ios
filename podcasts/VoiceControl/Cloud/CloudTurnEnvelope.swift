@@ -29,7 +29,7 @@ struct CloudTurnEnvelope: Equatable {
     /// pipeline minted at admission and the manager prepared. There is no fallback mint here:
     /// a turn without an admitted identity is refused upstream (sink), never re-identifed.
     /// Keeping ONE identity on the type means every consumer — wire frame, socket/result
-    /// registration, bind callbacks, diagnostics — binds the same value (reviewer 9ab31c6d).
+    /// registration, bind callbacks, diagnostics — binds the same value.
     static func make(
         capabilities: [String],
         routeHint: CloudRouteHint?,
@@ -111,8 +111,8 @@ enum CloudRouteRequestBuilder {
         if let podcastId = context.podcastId { contextObject["podcast_id"] = podcastId }
         if let referencePositionMs = context.referencePositionMs { contextObject["reference_position_ms"] = referencePositionMs }
         if let previousReferencePositionMs = context.previousReferencePositionMs { contextObject["previous_reference_position_ms"] = previousReferencePositionMs }
-        // TASK 90 PROVENANCE: the version is sent ONLY WITH its mapped position — the
-        // pairing invariant is ENFORCED here, not just at capture (review d815be4a): a
+        // PROVENANCE: the version is sent ONLY WITH its mapped position — the
+        // pairing invariant is ENFORCED here, not just at capture: a
         // version without a position names nothing and is omitted, never invented.
         if let referenceAssetVersion = context.referenceAssetVersion, context.referencePositionMs != nil {
             contextObject["reference_asset_version"] = referenceAssetVersion

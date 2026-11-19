@@ -15,7 +15,7 @@ protocol FingerprintMappingProviding {
     func matchedReferenceTime(forPlaybackTime playbackTime: TimeInterval) -> TimeInterval?
     /// Reverse map: reference (transcript) time → playback time. Nil when unmapped.
     func playbackTime(forReferenceTime referenceTime: TimeInterval) -> TimeInterval?
-    /// TASK 90 PROVENANCE: the mapped position, the reference version AND the episode the
+    /// PROVENANCE: the mapped position, the reference version AND the episode the
     /// map was built for, resolved ATOMICALLY (one lock acquisition) so a map/reference
     /// replacement can never pair an old position with a new version, and a stale episode's
     /// map can never serve a newly captured episode. Nil when unmapped. Nil version =
@@ -93,7 +93,7 @@ struct DefaultPlaybackContextProvider: PlaybackContextProvider {
         let clientPositionMs = Self.milliseconds(fromSeconds: currentTimeSeconds)
         guard clientPositionMs >= 0 else { return nil }
 
-        // ATOMIC position+version+episode read (review d815be4a): the version only ever
+        // ATOMIC position+version+episode read: the version only ever
         // travels WITH the position it was mapped under, and the map must belong to THE
         // EPISODE NOW CAPTURED — a stale episode A map is rejected rather than attached to
         // newly playing episode B while a queued reset/reprepare has not run.
@@ -252,7 +252,7 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
 
     /// Retires the sink's retained dispatches on the window boundary (production wiring). The
     /// sink transition is lock-guarded and nonisolated, so this stays synchronous — the window
-    /// transition is atomic with the manager's origin clear (reviewer a2723c92).
+    /// transition is atomic with the manager's origin clear.
     /// The follow-up an interruption acknowledgement released, waiting to be submitted on its own
     /// socket (cloud-assistant.md → Interruption, spec c5fe3416). Read-and-clear: the submitter
     /// takes it once, so a follow-up can never be submitted twice.
@@ -348,7 +348,7 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
             // interaction has nothing playing, and the contract describes that as absent
             // context rather than as an invented episode and position. Refusing here is what
             // made the discovery turn unreachable on the client.
-            // TASK 90 SNAPSHOT: the intent's utterance-start snapshot, when present, is the
+            // SNAPSHOT: the intent's utterance-start snapshot, when present, is the
             // ONLY source — dispatching live playback here is the forbidden resample. The
             // provider is consulted solely for constructions that predate the snapshot field.
             let context = cr.context ?? playbackContextProvider.current() ?? PlaybackContext.absent
@@ -385,7 +385,7 @@ class VoiceIntentExecutor: VoiceIntentExecuting {
             )
             // A duplicate (a joined or settled copy of the owner's dispatch) observes
             // completion QUIETLY: it must not repeat the owner's analytics, grace renewal, or
-            // rendered feedback (reviewer 0c546ce5 item 4).
+            // rendered feedback.
             if !ownsEffects {
                 FileLog.shared.addMessage("[VoicePipeline] Duplicate utterance completed quietly: \(cr.utteranceId ?? "?")")
                 return (.silent, nil)

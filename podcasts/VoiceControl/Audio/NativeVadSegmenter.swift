@@ -135,7 +135,7 @@ class NativeVadSegmenter {
     /// too late to wait for another onset. Without this it would wait for an event that has
     /// already happened and never open at all.
     var isInTrailingSilence: Bool { speechActive && silenceStart != nil }
-    /// TASK 90 SNAPSHOT (review bcb42c49 #1): fired at the SPEECH-START boundary — the frame
+    /// SNAPSHOT: fired at the SPEECH-START boundary — the frame
     /// that confirms speech, after the pre-roll merge settles the true utterance start — NOT
     /// at `emitUtterance`. Consumers that must describe the moment the utterance BEGAN (e.g.
     /// the playback snapshot) read here; by emission time the user may already have spoken a

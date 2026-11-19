@@ -18,7 +18,7 @@ enum FingerprintMappingCache {
     struct LoadResult {
         let entries: [FingerprintTimingManager.TimeMappingEntry]
         let referenceDuration: Double
-        /// TASK 90 PROVENANCE (spec 351dd308): the full lowercase SHA-256 hex digest of the
+        /// PROVENANCE: the full lowercase SHA-256 hex digest of the
         /// reference fingerprint bytes this map was validated against — the same bytes the
         /// mapping was derived from. Travels WITH the map, atomically, so a map/reference
         /// replacement can never pair an old position with a new version.

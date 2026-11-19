@@ -94,13 +94,13 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
     struct MappingAccumulator {
         var playbackToReference: [TimeMappingEntry] = []
         var referenceToPlayback: [TimeMappingEntry] = []
-        /// TASK 90 PROVENANCE (spec 351dd308): the `reference_asset_version` of the reference
+        /// PROVENANCE: the `reference_asset_version` of the reference
         /// bytes THIS map was derived from. Lives on the accumulator so it is installed,
         /// replaced and discarded together with the mapping — a map/reference replacement can
         /// never leave an old position paired with a new version. Nil = provenance unknown;
         /// an otherwise valid mapped position still serves.
         var referenceAssetVersion: String? = nil
-        /// The episode the map was built FOR (review d815be4a): carried with the map so a
+        /// The episode the map was built FOR: carried with the map so a
         /// read can never attach episode A's map to newly playing episode B while a queued
         /// reset/reprepare has not run yet.
         var episodeUuid: String? = nil
@@ -385,11 +385,11 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         }
     }
 
-    /// TASK 90 PROVENANCE: the mapped position, the reference version AND the episode the
+    /// PROVENANCE: the mapped position, the reference version AND the episode the
     /// map was built for, read under ONE lock acquisition. Two separate reads could straddle
     /// a map/reference replacement and pair an old position with a new version — the exact
     /// defect the source contract forbids — and the episode lets the caller reject a map that
-    /// belongs to a DIFFERENT episode than the one now captured (review d815be4a). Nil
+    /// belongs to a DIFFERENT episode than the one now captured. Nil
     /// version = provenance unknown; the position still serves.
     func matchedReferenceContext(forPlaybackTime playbackTime: Double)
         -> (position: Double, referenceAssetVersion: String?, episodeUuid: String?)? {

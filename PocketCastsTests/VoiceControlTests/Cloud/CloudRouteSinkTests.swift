@@ -895,7 +895,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-10")
 
         // This case is about the ERROR PATH's buffer/seek rollback. The remote `message` is never
-        // spoken (spec 961fab07) and `rate_limited` has no local template, so the user hears the
+        // spoken and `rate_limited` has no local template, so the user hears the
         // error earcon; the subject here is the buffer/seek/pause outcome below, not the wording.
         XCTAssertEqual(response.response, .earcon(.error))
         XCTAssertTrue(playback.calls.contains(.seekTo(110)))
@@ -1100,7 +1100,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         )
     }
 
-    /// RETENTION BOUNDARY (reviewer 39beabc7): the sink's settled results are retained for the
+    /// RETENTION BOUNDARY: the sink's settled results are retained for the
     /// whole WINDOW — no cap. More than 16 settled utterances, then a RETAINED id is delivered
     /// again: it must be served from the retained result with NO new client, NO new admission
     /// and NO predecessor cancellation. An evicting cache would re-enter the owner path here.
@@ -1131,7 +1131,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertNotNil(replayed.response, "the retained result is returned")
     }
 
-    /// HELD OWNER + JOINER ACROSS A WINDOW CLOSE (reviewer a2723c92): an owner is held in
+    /// HELD OWNER + JOINER ACROSS A WINDOW CLOSE: an owner is held in
     /// flight with a duplicate JOINER parked on it, then the window RETIRES (close) and a new
     /// window opens, all before the owner completes. The retirement must NOT discard the held
     /// joiner: releasing the old owner settles the JOINER with that owner's result, and the late
@@ -1181,7 +1181,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         )
     }
 
-    /// THE EXACT BOUNDARY (reviewer b2c09394). Owner A obtains its ownership token, then is held
+    /// THE EXACT BOUNDARY. Owner A obtains its ownership token, then is held
     /// BEFORE its dispatch entry. Duplicate B arrives while A is held, and the WINDOW CHANGES
     /// (a real production transition: the live origin moves and the sink retires) before A is
     /// released. Requirements asserted:
@@ -1250,10 +1250,10 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         )
     }
 
-    /// JOINER BOUND TO ITS OWN ADMISSION ACROSS A REAL CLOSE/REOPEN (reviewer 8501bd91). A joiner
+    /// JOINER BOUND TO ITS OWN ADMISSION ACROSS A REAL CLOSE/REOPEN. A joiner
     /// obtains `.join(token)` for owner A, PAUSES before dispatch, the window retires and the
     /// successor reuses the SAME utterance id, then the joiner resumes. It must resolve against
-    /// COHERENT ADMISSION with an EXPLICIT INTERLEAVING BARRIER (review 5fa6e007): the admission
+    /// COHERENT ADMISSION with an EXPLICIT INTERLEAVING BARRIER: the admission
     /// is paused INSIDE the coherent block, before its liveness read; AT THAT MOMENT — mid-decision
     /// — the window moves and the origin retires. The resumed decision must observe the retirement
     /// and REFUSE. A pre-block snapshot implementation fails this control: its cached liveness
@@ -1287,7 +1287,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
 
 
-    /// COHERENT ADMISSION (review 086c0172): a retirement that lands between a pre-lock snapshot
+    /// COHERENT ADMISSION: a retirement that lands between a pre-lock snapshot
     /// and publication must not admit the stale origin. `beginDispatch` now decides and publishes
     /// in ONE main-queue block, so a retirement preceding the block is OBSERVED by the decision:
     /// an origin retired before admission runs is refused even though an earlier read of the live
@@ -1307,7 +1307,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertTrue(disposition.isRefused, "an origin retired before the admission block runs is refused, got \(disposition)")
     }
 
-    /// ADMISSION ENTERED FROM A DETACHED TASK (review 086c0172/47328768/7443c3ea). The sink class
+    /// ADMISSION ENTERED FROM A DETACHED TASK. The sink class
     /// is `@MainActor`-annotated, so its `routeToCloud` witness is MAIN-ISOLATED: a detached caller
     /// suspends and the body runs on main. There is no off-main admission branch to exercise, and
     /// this control does not claim one. What it verifies is what a remote caller sees: entering from
@@ -1416,7 +1416,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         )
     }
 
-    /// NO IMMORTAL SECOND MAP (reviewer be89233d) AND NO PRETENDED REFCOUNT (reviewer f3492082).
+    /// NO IMMORTAL SECOND MAP AND NO PRETENDED REFCOUNT.
     /// (a) A completed utterance is DETACHED from the live map on a window change — not retained
     /// forever. (b) LIFETIME IS ARC: once the retiring detaches the map entry and EVERY reference
     /// to the record is gone, the record is DEALLOCATED — proved with a weak handle, not inferred
@@ -1811,7 +1811,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
     /// Waits (bounded) for the app_operation_result frame named by `operationId` on the current
     /// captured transport.
-        /// REAL PRECONDITION (review 5295572f): with NO current episode (zero duration), the
+        /// REAL PRECONDITION: with NO current episode (zero duration), the
     /// system seek wrapper early-returns and its silent response is NOT a success — the honest
     /// durable outcome is a refusal, and no seek is attempted.
     func testSeekToWithNoCurrentEpisodeIsRefusedStalePrecondition() async throws {
@@ -1885,7 +1885,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(refusals.first?.result.reason, OperationReason.stalePrecondition)
     }
 
-    /// PRODUCTION DEFAULT availability (review 0846e993): with NO injected availability closure
+    /// PRODUCTION DEFAULT availability: with NO injected availability closure
     /// and the REAL manager reporting no current episode, the reference-form seek refuses on the
     /// production path (existing-episode-with-unknown-duration would be AVAILABLE — duration is
     /// not availability — but the test host has no episode, which is the absent branch).
@@ -1911,7 +1911,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(refusals.first?.result.reason, OperationReason.stalePrecondition)
     }
 
-    /// STOP-COMPLETION ORDER (review 24f236de): an error terminal WITH pending owned audio
+    /// STOP-COMPLETION ORDER: an error terminal WITH pending owned audio
     /// releases the host playback only after the ACTUAL stop the cancel requested — the resume
     /// never overlaps the un-stopped cloud output.
     func testErrorTerminalReleasesHostPlaybackOnlyAfterTheConfirmedStop() async throws {
@@ -2128,7 +2128,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertNil(body["route_hint"], "free-text turns carry no hint")
     }
 
-    /// MISSING-ID BOUNDARY (reviewer c580c42b item 4): a dispatch with NO admitted utterance
+    /// MISSING-ID BOUNDARY: a dispatch with NO admitted utterance
     /// identity is refused with NO wire frame, NO consumed result, and NO successor-state
     /// contamination — the next admitted id dispatches as a clean first turn.
     func testSinkRefusesAnUnidentifiedDispatchWithNoWireFrameAndCleanSuccessorState() async throws {
@@ -2388,7 +2388,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
 
 
-    /// TASK 90 CONTROL (review d815be4a #3): production-path serialized-frame evidence for a
+    /// CONTROL: production-path serialized-frame evidence for a
     /// retry/duplicate. The owner dispatch serializes the utterance-start snapshot; a duplicate
     /// callback for the SAME utterance — arriving after the playing episode was "replaced" —
     /// joins the owner and must NOT mint a second frame: exactly one serialized request, and
@@ -3118,7 +3118,7 @@ private final class RecordingAnalytics: AnalyticsService {
 /// A second turn (double wake / barge-in) supersedes the first: the older turn
 /// must stop consuming its stream and must not touch playback state, analytics,
 /// or late actions after the new turn takes over.
-/// Independent completion flag for bounded completion probes (review 9fc2603e).
+/// Independent completion flag for bounded completion probes.
 private final class ProbeCompletionFlag: @unchecked Sendable {
     private let lock = NSLock()
     private var done = false
@@ -3151,7 +3151,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     }
 
     @MainActor
-    /// REGRESSION CONTROL for a park that leaked between tests (spec 16fdf2a0, reviewer b48a85f8).
+    /// REGRESSION CONTROL for a park that leaked between tests.
     ///
     /// `releaseProductionParks` used to record released parks by `ObjectIdentifier`. An identifier
     /// outlives the object it names and a deallocated semaphore's address is immediately reused,
@@ -3788,7 +3788,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertFalse(m.log.contains("rejected: the interrupt was already sent"), "no effects were closed")
     }
 
-    /// OWNER-CANCEL STOP ORDERING (review dee03708/fa03b7f9, reworked for 14f66b72): a
+    /// OWNER-CANCEL STOP ORDERING: a
     /// superseded turn with NO pending playback owes no await — it returns earlyClose, never
     /// restores (the successor owns the window), and the successor's single resume is intact.
     ///
@@ -3837,7 +3837,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // the predecessor owned); what must never happen is A blocking on one.
     }
 
-    /// ADMISSION AWAITS PREDECESSOR QUIESCENCE (review 14f66b72): B's retire only QUEUES a
+    /// ADMISSION AWAITS PREDECESSOR QUIESCENCE: B's retire only QUEUES a
     /// runner stop, so B must not admit (or even build) its stream until A's stop is CONFIRMED.
     /// A's producer is parked after its audio frames (all enqueued, A still running); B
     /// supersedes; with the retire stop's confirmation withheld, B has neither built its client
@@ -3849,7 +3849,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             data: {"text":"slow"}
 
             """
-        // A IS SUPERSEDED WHILE STILL ACTIVE, so its script has NO `done` (spec 43ab05d3): this
+        // A IS SUPERSEDED WHILE STILL ACTIVE, so its script has NO `done`: this
         // case is about a turn that never finished, and a script that served `done` would describe
         // the different case where A had already concluded. A's producer is parked and only B
         // ever ends it.
@@ -3950,7 +3950,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         }
     }
 
-    /// SUCCESS-PATH OWNERSHIP (review 4fc59e2c / spec dbf71ccf): the scoped rollback defer must
+    /// SUCCESS-PATH OWNERSHIP: the scoped rollback defer must
     /// fire ONLY on early return. On a successful A-retire, B keeps its active ownership,
     /// playback ownership, and admitted hold through its live stream and drain — snapshot at
     /// B's first frame (exactly one hold end: A's transfer) and after B completes (two).
@@ -4052,7 +4052,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         var value: Int { lock.lock(); defer { lock.unlock() }; return v }
     }
 
-    /// ROLLBACK HOLD RESPONSIBILITY (review 8eb9fb44): when a TIMED-OUT admission rolls back,
+    /// ROLLBACK HOLD RESPONSIBILITY: when a TIMED-OUT admission rolls back,
     /// it is still the active owner and its hold is the LAST live one over the predecessor's
     /// still-unconfirmed output — ending it at rollback would re-arm the allowance mid-flight.
     /// The hold must stay live until the retire stop CONFIRMS, and end exactly then.
@@ -4133,7 +4133,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                        "exactly ONE host resume: the confirmation restores the inherited pause")
     }
 
-    /// CLAIMED-DRAIN CANCEL (review 0585959a): a cancel landing while A's drain is claimed
+    /// CLAIMED-DRAIN CANCEL: a cancel landing while A's drain is claimed
     /// must be CONSUMED by the drain's own physical stop — no second physical stop may follow
     /// it. Premise: A's drain is claimed and parked; the gate parks the SUBSEQUENT stop. After
     /// the first confirmation delivers and B admits with its audio buffered, no queued stop
@@ -4217,7 +4217,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // design — the discriminator is the stop-identity log above.)
     }
 
-    /// PHYSICAL STOP OPERATION HELD (spec ea755ba1; reviewer 6453dfaa/3d4f5619/76215282):
+    /// PHYSICAL STOP OPERATION HELD:
     /// the stop NOTIFICATION is not the physical contract — the actual `stopEngine()` operation
     /// is, so this control parks the REAL stop and asserts the ordering that falls out of it.
     ///
@@ -4347,7 +4347,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertEqual(bResult.outcome, .completed, "B completes once its own drain settles")
         let confirmedFinal: Int = await MainActor.run { sink.audioPlayerForTesting?.confirmedStopEpoch() ?? -1 }
         XCTAssertEqual(confirmedFinal, 2, "the physical stop confirmed the retire cancel's identity (2); got \(confirmedFinal)")
-        // Gate-exit cause (reviewer 6453dfaa): the park ended because the gate was RELEASED,
+        // Gate-exit cause: the park ended because the gate was RELEASED,
         // not because its bound expired and the runner proceeded anyway.
         let outcomeFinal: String = await MainActor.run {
             switch sink.audioPlayerForTesting?.physicalStopGateOutcomeForTesting {
@@ -4368,7 +4368,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertEqual(resumes, 1, "the host resumed exactly once, after the physical stop ran")
     }
 
-    /// COALESCED STOP ACCOUNTING (review 4fc59e2c): cancel coalesces through the runner's
+    /// COALESCED STOP ACCOUNTING: cancel coalesces through the runner's
     /// flags — B and C's stops behind a parked runner share ONE processed stop/notification.
     /// Request-per-increment accounting would strand the counter positive and refuse every
     /// later admission; transition-only accounting settles to zero and D runs normally.
@@ -4460,7 +4460,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertEqual(cancelsAfterD, cancelsBeforeD, "D's admission issues no stop request when nothing is outstanding")
     }
 
-    /// QUEUED-STOP VISIBILITY (review 05d27ddb): a stop that is queued but not yet processed is
+    /// QUEUED-STOP VISIBILITY: a stop that is queued but not yet processed is
     /// invisible to buffer/isPlaying — a THIRD turn (C) superseding B must still wait, because
     /// the queued stop would shed anything C admits. With A buffered and the runner parked, B
     /// and C both queue stops; neither may complete before the runner processes them.
@@ -4556,7 +4556,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertEqual(resumes, 1, "only C restores the window")
     }
 
-    /// NETWORK-COMPLETED PREDECESSOR (review ea755ba1/05d27ddb): A finished its NETWORK work
+    /// NETWORK-COMPLETED PREDECESSOR: A finished its NETWORK work
     /// (done returned, deferral recorded) with playback still pending under the drain hold. B's
     /// admission must still await A's quiescence — playback ownership outlives the Task.
     func testAdmissionAwaitsQuiescenceOfANetworkCompletedPredecessor() async throws {
@@ -4604,7 +4604,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         let b = Task { await sink.routeToCloud(request: "B", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-69") }
         let bFinishedEarly = try await timeoutProbe(b, nanoseconds: 200_000_000)
         XCTAssertFalse(bFinishedEarly, "B is suspended: A's pending playback must quiesce first")
-        // MIXED FLAGS (spec d2561f9b): A's finish (drain) was queued FIRST and B's retire-
+        // MIXED FLAGS: A's finish (drain) was queued FIRST and B's retire-
         // cancel SECOND — the one processed stop must be the CANONICAL end: no second drain
         // stop may follow B's admission. From here every stop is recorded and delivered
         // immediately, so the total count over the rest of the test is exact.
@@ -4636,7 +4636,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertFalse(pending, "no audio survives")
     }
 
-    /// CAPTURED RETIRE IDENTITY (review 14f66b72): the superseded turn's cleanup awaits the
+    /// CAPTURED RETIRE IDENTITY: the superseded turn's cleanup awaits the
     /// identity captured for ITS token at the transfer — never the shared latest counter. A
     /// test-injected stop (E2) moves the counter AFTER B's admission; A must still resolve on
     /// E1's confirmation and return while E2's confirmation is still withheld.
@@ -4647,7 +4647,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             data: {"text":"slow"}
 
             """
-        // A IS SUPERSEDED WHILE STILL ACTIVE, so its script has NO `done` (spec 43ab05d3): this
+        // A IS SUPERSEDED WHILE STILL ACTIVE, so its script has NO `done`: this
         // case is about a turn that never finished, and a script that served `done` would describe
         // the different case where A had already concluded. A's producer is parked and only B
         // ever ends it.
@@ -4897,7 +4897,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// running" is observable (`StubWebSocketTask.cancelled`).
     private var heldTurn: (task: StubWebSocketTask, gate: Gate)?
 
-    /// BOUNDED completion probe (review 9fc2603e): an INDEPENDENT completion flag set by a
+    /// BOUNDED completion probe: an INDEPENDENT completion flag set by a
     /// detached watcher; the probe polls the flag under a bound and NEVER awaits the watched
     /// task's value inside the group (a cancelled probe must not hang on the underlying wait).
     private func timeoutProbe<T>(_ task: Task<T, Never>, nanoseconds: UInt64) async throws -> Bool {
@@ -4929,7 +4929,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// OPT-IN binary audio for the next built turn, mirroring `nextTurnFixture`. Empty means the
     /// turn carries no audio, so every existing case is unaffected.
     private var nextTurnAudioPayloads: [Data] = []
-    /// Producer-side park (review 14f66b72 controls): blocks the NEXT built client's producer
+    /// Producer-side park: blocks the NEXT built client's producer
     /// after N frames — A's audio is enqueued while A is still running.
     private var blockProducerAfterFrames: (count: Int, semaphore: DispatchSemaphore)?
     /// Install a first-frame hook on the NEXT built client that cancels the player (a stop the
@@ -6340,7 +6340,7 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
         XCTAssertEqual(text.components(separatedBy: "Auris").count - 1, 1, "Auris is named exactly once")
     }
 
-    /// THE REMOTE MESSAGE IS NEVER SPOKEN (spec 961fab07) — and not only for `limit_exceeded`.
+    /// THE REMOTE MESSAGE IS NEVER SPOKEN — and not only for `limit_exceeded`.
     /// A non-limit code whose frame carries a nonempty `message` must NOT speak that text: the
     /// old pass-through behaviour is superseded by the diagnostic-only contract.
     func testNonLimitRemoteMessageIsNotSpoken() async {
@@ -6401,13 +6401,13 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
         XCTAssertEqual(response.outcome, .failed(code: "limit_exceeded"))
     }
 
-    /// SERVICE-TO-RENDERER, DUPLICATE AND TERMINAL-CLOSE (spec a8580c0c). An executor return
+    /// SERVICE-TO-RENDERER, DUPLICATE AND TERMINAL-CLOSE. An executor return
     /// value from an always-owner mock does not establish exactly-once USER FEEDBACK, so this
     /// runs the whole path against the REAL sink and the REAL AudioFeedbackRenderer: an owner
     /// refusal turn, a DUPLICATE of the same utterance, and a terminal-close variant. The user must
     /// hear the daily-limit line EXACTLY ONCE, and a refused turn must not extend grace.
     @MainActor
-    /// E2E REQUEST-ID PROPAGATION (reviewer d16c0246): the utterance-admitted identity must
+    /// E2E REQUEST-ID PROPAGATION: the utterance-admitted identity must
     /// reach the wire VERBATIM. ASR mints the id at admission, the sink prepares the conversation
     /// with it, and the socket auth frame presents THAT literal string — no hop downstream may
     /// mint a fresh one. A duplicate dispatch of the SAME utterance observes the settled outcome
@@ -6515,7 +6515,7 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
         )
     }
 
-    /// EVERY SUPPORTED RESPONSE LANGUAGE CARRIES THE DAILY-LIMIT KEY (spec c259dc64). The scope is
+    /// EVERY SUPPORTED RESPONSE LANGUAGE CARRIES THE DAILY-LIMIT KEY. The scope is
     /// exactly en/de/es/fr/ja/ko/zh/yue: an English entry alone does not satisfy localized
     /// daily-limit feedback, and a Chinese turn must not be answered by an English earcon. This
     /// uses the REAL resolver's own locale discovery (`SpokenTemplateResolver(locale:)`), not a
@@ -7017,7 +7017,7 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
         player.delegate = delegate
         defer { player.setDrainHoldForTesting(false) }
 
-        // EXACTLY-ONCE LEDGER (reviewer 38dffe3e): every notification identity across ALL
+        // EXACTLY-ONCE LEDGER: every notification identity across ALL
         // cycles — a second physical stop for a coalesced request would show up here.
         var emittedIdentities: [Int] = []
         player.setCapturedStopNotificationForTesting { identity, completion in
@@ -7094,7 +7094,7 @@ final class CloudAudioPlayerClaimIdentityTests: XCTestCase {
         )
         assertNoStrandedStopNotifications(player, "final retirement")
 
-        // EXACTLY ONCE (reviewer 38dffe3e), asserted AFTER all notifications settled: one
+        // EXACTLY ONCE, asserted AFTER all notifications settled: one
         // physical stop per cycle plus the final one; the coalesced b/c requests never
         // produced notifications of their own.
         XCTAssertEqual(
@@ -7182,7 +7182,7 @@ final class SettlementFailingOperationRecordStore: OperationRecordStore {
 }
 
 
-// MARK: - Service-to-renderer helpers (spec a8580c0c)
+// MARK: - Service-to-renderer helpers
 
 /// Counts daily-limit utterances so "exactly once" is measured, not inferred from a substring.
 private final class CountingDailyLimitTtsEngine: TtsEngineProtocol {
@@ -7310,7 +7310,7 @@ private final class NoOpCloudStatsQuerySink: VoiceStatsQuerySink {
     func newEpisodes(timeframe: String?) -> VoiceResponse { .silent }
     func timeSinceLastListen() -> VoiceResponse { .silent }
 
-    // MARK: - Buffered playback after an ordinary `done` (reviewer 79614a4f item 3)
+    // MARK: - Buffered playback after an ordinary `done`
 
 }
 

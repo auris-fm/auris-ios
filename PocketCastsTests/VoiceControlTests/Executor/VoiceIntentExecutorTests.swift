@@ -75,7 +75,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         )
     }
 
-    /// TASK 90 CONTROL (review bcb42c49 #2): a captured ABSENCE is a PRESENT snapshot. The
+    /// CONTROL: a captured ABSENCE is a PRESENT snapshot. The
     /// episode the provider would return now did not exist at speech start; the executor must
     /// dispatch the captured absence verbatim and never resample.
     func test_execute_capturedAbsence_survivesLaterPlaybackStart() async {
@@ -99,7 +99,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
                        "a present snapshot (even an absence) never triggers a resample")
     }
 
-    /// TASK 90 SNAPSHOT CONTROL (spec cloud-assistant.md, playback-snapshot): when the intent
+    /// SNAPSHOT CONTROL: when the intent
     /// carries the utterance-start snapshot, the executor dispatches EXACTLY that context and
     /// does NOT consult the live provider at dispatch time — a provider consult here would be
     /// the resample the spec forbids. Playback advanced between utterance start and dispatch
@@ -162,7 +162,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
     /// it was issued under. Completing after a privacy close and a new wake must
     /// not reset whatever window is current — that would re-arm a session this
     /// turn never belonged to.
-    /// QUIET DUPLICATES (reviewer 0c546ce5 item 4): a duplicate of an utterance the executor
+    /// QUIET DUPLICATES: a duplicate of an utterance the executor
     /// already completed — the joined or settled copy the sink hands back — observes completion
     /// WITHOUT repeating the owner's effects. The grace renewal happens exactly once (the
     /// duplicate cannot restore a spent allowance), the duplicate's response renders nothing,
@@ -205,7 +205,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         )
     }
 
-    /// CROSS-GENERATION INTERLEAVING (reviewer 39beabc7): completions can interleave — A(gen1)
+    /// CROSS-GENERATION INTERLEAVING: completions can interleave — A(gen1)
     /// completes, B(gen2) completes, then a DELAYED A duplicate completes. Effects are granted
     /// by the request owner at dispatch, not inferred from a generation change, so A's late
     /// duplicate cannot replay A's effects, and it cannot disturb B's.
@@ -779,7 +779,7 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
     /// (stand-in for the real sink's once-per-utterance claim), with `effectOwnerForTesting`
     /// overriding for the duplicate controls.
     var effectOwnerForTesting: ((String?) -> Bool)?
-    /// ORDER EVIDENCE (reviewer 39beabc7): was the effect claim taken BEFORE the dispatch began?
+    /// ORDER EVIDENCE: was the effect claim taken BEFORE the dispatch began?
     /// Effects must be granted by the owner at dispatch time, not after the await — otherwise a
     /// joiner the dispatch awaits can win them. The claim records whether routeToCloud had
     /// already run; the control asserts this stayed true.
@@ -802,7 +802,7 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
 
 private final class MockPlaybackContextProvider: PlaybackContextProvider {
     var context: PlaybackContext?
-    /// TASK 90: a dispatch-time consult is a forbidden resample. Counted so the
+    ///  a dispatch-time consult is a forbidden resample. Counted so the
     /// snapshot control can prove the provider was never read at dispatch.
     private(set) var consultCount = 0
 

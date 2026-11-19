@@ -129,7 +129,7 @@ struct CloudRouteIntent: VoiceIntent, Equatable {
     /// restore the escalation allowance that permitted it, or one window could
     /// dispatch repeatedly. Mirrors Android's origin marker on the intent.
     let origin: CloudRouteOrigin
-    /// TASK 90 SNAPSHOT: the playback context frozen at utterance start and carried through
+    /// SNAPSHOT: the playback context frozen at utterance start and carried through
     /// routing. Present ⇒ the executor uses EXACTLY this; it must not resample live playback
     /// at dispatch time. `nil` on legacy constructions keeps the pre-snapshot behavior so
     /// existing tests and call sites compile unchanged.
@@ -209,7 +209,7 @@ struct PlaybackContext: Equatable {
     let clientPositionMs: Int64?
     let recentReferencePositions: [Int64]
     let previousReferencePositionMs: Int64?
-    /// TASK 90 PROVENANCE (spec 351dd308): the `reference_asset_version` of the fingerprint
+    /// PROVENANCE: the `reference_asset_version` of the fingerprint
     /// bytes the mapped position was derived from, carried only when that position exists.
     /// Nil = unknown provenance — omitted on the wire, never invented, never blocking.
     var referenceAssetVersion: String? = nil

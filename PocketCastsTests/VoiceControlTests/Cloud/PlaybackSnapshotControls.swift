@@ -2,8 +2,7 @@ import XCTest
 import PocketCastsDataModel
 @testable import podcasts
 
-/// TASK 90 SNAPSHOT + PROVENANCE CONTROLS (spec cloud-assistant.md playback-snapshot;
-/// spec 351dd308 same-reference source binding; corrections in review bcb42c49).
+/// SNAPSHOT + PROVENANCE CONTROLS.
 ///
 /// The playback context a cloud turn carries must be frozen at the SPEECH-START boundary and
 /// dispatch verbatim — including a captured ABSENCE — and its reference version must travel
@@ -51,7 +50,7 @@ final class PlaybackSnapshotControls: XCTestCase {
 
     // MARK: - Speech-start capture through the segmenter
 
-    /// CONTROL (review bcb42c49 #1): the segmenter fires the speech-start hook at the
+    /// CONTROL: the segmenter fires the speech-start hook at the
     /// CONFIRMATION frame — before the utterance is emitted — so the engine's capture
     /// happens while the user is still speaking, not at admission after speech ends.
     func test_segmenterFiresSpeechStartBeforeEmission() {
@@ -69,7 +68,7 @@ final class PlaybackSnapshotControls: XCTestCase {
                        "speech-start capture must precede emission, not accompany it")
     }
 
-    /// CONTROL (review bcb42c49 #1 + #3; d815be4a #3): the REAL engine/segmenter wiring.
+    /// CONTROL: the REAL engine/segmenter wiring.
     /// Speech frames are fed through the engine's own segmenter with the production callbacks
     /// installed: `onSpeechStart` captures, the utterance is emitted and ASR runs gated —
     /// playback advances WHILE ASR is suspended — and the routing input still carries the
@@ -130,7 +129,7 @@ final class PlaybackSnapshotControls: XCTestCase {
                        + "advanced while ASR was suspended")
     }
 
-    // MARK: - Provenance pairing (spec 351dd308)
+    // MARK: - Provenance pairing
 
     /// CONTROL: the cache load returns the digest of the EXACT reference bytes it validated,
     /// paired with the map — not a hash of another file or a recomputation at read time.
@@ -166,7 +165,7 @@ final class PlaybackSnapshotControls: XCTestCase {
         XCTAssertEqual(context?.referencePositionMs, 42_000)
     }
 
-    /// CONTROL (review d815be4a #1): the atomic read carries the mapped EPISODE, and the
+    /// CONTROL: the atomic read carries the mapped EPISODE, and the
     /// provider rejects a map that belongs to a different episode — a stale episode A map is
     /// never attached to newly playing episode B while a queued reset/reprepare has not run.
     func test_staleEpisodeMap_isRejectedForNewlyPlayingEpisode() {
@@ -184,7 +183,7 @@ final class PlaybackSnapshotControls: XCTestCase {
                      "episode B must not inherit episode A's reference version")
     }
 
-    /// CONTROL (review d815be4a #1): a map whose episode is unknown still serves the position
+    /// CONTROL: a map whose episode is unknown still serves the position
     /// for the captured episode (providers that predate episode identity).
     func test_unknownEpisodeMap_stillServesPosition() {
         let mapper = PairedMapperDouble(position: 42.0, version: nil, episodeUuid: nil)
@@ -241,7 +240,7 @@ final class PlaybackSnapshotControls: XCTestCase {
                      "unknown provenance is omitted, not invented")
     }
 
-    /// CONTROL (review d815be4a #2): the pairing invariant is ENFORCED at serialization —
+    /// CONTROL: the pairing invariant is ENFORCED at serialization —
     /// a version without its mapped position is omitted from the actual request, even if a
     /// caller supplied one.
     func test_serializedRequest_omitsVersionWithoutItsMappedPosition() throws {

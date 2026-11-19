@@ -225,7 +225,7 @@ struct CloudRouteContext: Equatable, Encodable {
     let clientPositionMs: Int64?
     let recentReferencePositions: [Int64]
     let previousReferencePositionMs: Int64?
-    /// TASK 90 PROVENANCE (spec 351dd308): present only when a mapped position exists; nil is
+    /// PROVENANCE: present only when a mapped position exists; nil is
     /// OMITTED on the wire — unknown provenance never blocks the turn.
     let referenceAssetVersion: String?
 

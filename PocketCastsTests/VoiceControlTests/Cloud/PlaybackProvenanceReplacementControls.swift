@@ -5,8 +5,7 @@ import XCTest
 @testable import PocketCastsUtils
 @testable import podcasts
 
-/// TASK 90 PROVENANCE — REAL-MANAGER replacement/reset controls (review d815be4a #3;
-/// spec 351dd308). The provider-seam doubles prove the call shape; these controls drive the
+/// PROVENANCE — REAL-MANAGER replacement/reset controls. The provider-seam doubles prove the call shape; these controls drive the
 /// REAL `FingerprintTimingManager` over real reference bytes through two distinct maps and a
 /// reset, asserting the version is replaced and cleared WITH the map it describes.
 final class PlaybackProvenanceReplacementControls: XCTestCase {

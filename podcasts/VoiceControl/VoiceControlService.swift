@@ -109,7 +109,7 @@ class VoiceControlService: ObservableObject {
         // the manager's prepared requests do. Driven by the real window state, not a counter.
         // Retire atomically with the authoritative origin: the manager path is synchronous, so
         // the sink clear must be too — a queued MainActor Task would let a new-window
-        // preparation/effect claim land before the clear and then be erased (reviewer a2723c92).
+        // preparation/effect claim land before the clear and then be erased.
         // The signal publishes on the main thread, so the sink transition runs inline.
         // Retire atomically with the authoritative origin: the manager path is synchronous, so
         // the sink clear must be too. The signal publishes on the main thread, so the transition
@@ -507,7 +507,7 @@ class VoiceControlService: ObservableObject {
     /// `origin: nil` means "capture the live window at enqueue time"; a caller that already holds
     /// the dispatch origin (the draining turn) passes it so the re-processed command belongs to the
     /// same window it was spoken in.
-    /// THE SHARED CAPTURE OPERATION (review 5fa6e007): the grace reads + `transcriptLock`
+    /// THE SHARED CAPTURE OPERATION: the grace reads + `transcriptLock`
     /// listening check that `enqueueRoutingInput`'s capture phase performs. Production and the
     /// test control call THIS operation, so the control cannot drift from the structure it
     /// exercises. The grace reads happen BEFORE the lock (lock-order safety, review 4d474d80).
@@ -515,7 +515,7 @@ class VoiceControlService: ObservableObject {
         let admittedOrigin = gracePeriodSignal.admittedOriginForTurn(utteranceId: utteranceId)
         let retiredTurn = gracePeriodSignal.isRetiredTurn(utteranceId)
         let liveGeneration = gracePeriodSignal.currentGeneration()
-        // TEST HOOK (review 92de14ea/47328768): fires AFTER the grace reads and BEFORE lock
+        // TEST HOOK: fires AFTER the grace reads and BEFORE lock
         // acquisition — the exact window the fix owns. The hook may BLOCK: a control parks the
         // capture here while main runs stop, then releases. Nil in production.
         captureBeforeAcquisitionBarrierForTesting?()
@@ -537,7 +537,7 @@ class VoiceControlService: ObservableObject {
         origin: Int? = nil,
         selection: CloudConversationSelection? = nil
     ) -> Bool {
-            // LOCK-ORDER SAFETY (review 4d474d80): the grace-signal reads hop to main
+            // LOCK-ORDER SAFETY: the grace-signal reads hop to main
             // synchronously when called off-main, while `stop()` takes `transcriptLock` ON main.
             // Holding `transcriptLock` across those reads is a lock-order cycle (off-main:
             // transcriptLock → main queue; on-main stop: main queue → transcriptLock). The
@@ -545,7 +545,7 @@ class VoiceControlService: ObservableObject {
             // callback, never after the queue wait — and the lock then guards only the
             // listening check, epoch and chain.
             let capture = self.captureRoutingOrigin(utteranceId: input.utteranceId)
-            // TEST-ONLY (review ece440bc): fires AFTER the capture returns and BEFORE the
+            // TEST-ONLY: fires AFTER the capture returns and BEFORE the
             // nil-capture guard — the exact stop/restart window the guard owns. A control parks
             // the enqueue here and restarts the service, so the guard's refusal is exercised
             // against a lock-time listening check the restart has made true. Nil in production.
@@ -634,7 +634,7 @@ class VoiceControlService: ObservableObject {
                         Task { @MainActor in notifyFinished(input) }
                     }
                 }
-                // EAGER BARGE-IN, AHEAD OF THE SERIAL QUEUE (spec e38a790a, reviewer bea7a291).
+                // EAGER BARGE-IN, AHEAD OF THE SERIAL QUEUE.
                 //
                 // The contract requires the `interrupt` frame "while the prior socket remains
                 // open" (`9e309cc1` → Interruption). This turn's DISPATCH cannot run until
@@ -647,7 +647,7 @@ class VoiceControlService: ObservableObject {
                 //
                 // Fired from the chain's own task so the capture/ordering guarantees above are
                 // unchanged. Echo rejection and gate ownership were already applied at admission.
-                // REVALIDATE BEFORE ANY EAGER EFFECT (reviewer b36c8ab1 item 3). The eager
+                // REVALIDATE BEFORE ANY EAGER EFFECT. The eager
                 // interruption stops playback and sends on the live predecessor's socket — real,
                 // externally visible effects. The staleness guard below only runs after the queue
                 // wait, so a service that stopped, restarted, or retired this capture in between
@@ -664,7 +664,7 @@ class VoiceControlService: ObservableObject {
                         epoch: epoch
                     ) ?? false
                 }
-                // EXPLICIT OWNERSHIP TRANSFER (reviewer ca629c34). If the eager step retained this
+                // EXPLICIT OWNERSHIP TRANSFER. If the eager step retained this
                 // utterance for an interruption, the FOLLOW-UP SUBMITTER is the one execution path
                 // for it: it submits the same complete admitted input, with its provenance, once
                 // the predecessor settles. This queued link must therefore end HERE — before
@@ -761,7 +761,7 @@ class VoiceControlService: ObservableObject {
 
     /// Trigger the sink's eager barge-in for this input.
     ///
-    /// Carries the admitted provenance (reviewer b36c8ab1 item 3): the interruption belongs to the
+    /// Carries the admitted provenance: the interruption belongs to the
     /// window that accepted the capture, not to whichever window is live when the step runs.
     /// Run the interruption steps for an input that may barge in. Returns whether the input was
     /// RETAINED for follow-up submission, which transfers its execution to the bridge.
@@ -788,8 +788,8 @@ class VoiceControlService: ObservableObject {
             sourceLanguage: input.sourceLanguage,
             translationKind: input.translationKind,
             latency: input.latency,
-            // The window this capture was ADMITTED under, carried to the effect boundary
-            // (reviewer c38ff4ba item 3). A service stop/restart between the caller's check and
+            // The window this capture was ADMITTED under, carried to the effect boundary.
+            // A service stop/restart between the caller's check and
             // the main-actor hop is otherwise invisible: the sink would interrupt on behalf of a
             // capture whose window has already ended.
             validatingEpoch: epoch,
@@ -1013,7 +1013,7 @@ class VoiceControlService: ObservableObject {
             "[VoicePipeline] submitting retained follow-up \(released.utteranceId) on its own socket"
         )
         // THE COMPLETE ADMITTED INPUT, with the provenance it was admitted under — not a
-        // reconstructed turn with a live default selection (reviewer ca629c34).
+        // reconstructed turn with a live default selection.
         await handleRoutingInput(
             IntentRoutingInput(
                 sourceTranscript: released.sourceTranscript,
@@ -1225,7 +1225,7 @@ class VoiceControlService: ObservableObject {
                     sourceLanguage: input.sourceLanguage,
                     // REQUEST ownership: the captured utterance's identity travels with the turn.
                     utteranceId: input.utteranceId,
-                    // TASK 90 SNAPSHOT: the utterance-start playback context the input froze
+                    // SNAPSHOT: the utterance-start playback context the input froze
                     // ahead of ASR — never a live read here, which is post-routing.
                     context: input.playbackContext,
                     origin: route.origin,
@@ -1458,7 +1458,7 @@ class VoiceControlService: ObservableObject {
                         sourceLanguage: input.sourceLanguage,
                         // REQUEST ownership: the fallback carries the same utterance identity.
                         utteranceId: input.utteranceId,
-                        // TASK 90 SNAPSHOT: same frozen context as the model-chosen path — an
+                        // SNAPSHOT: same frozen context as the model-chosen path — an
                         // escalation is the SAME utterance, so it describes the same moment.
                         context: input.playbackContext,
                         origin: .routingFailure,
