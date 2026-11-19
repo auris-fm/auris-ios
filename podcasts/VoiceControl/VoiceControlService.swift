@@ -788,6 +788,9 @@ class VoiceControlService: ObservableObject {
             sourceLanguage: input.sourceLanguage,
             translationKind: input.translationKind,
             latency: input.latency,
+            // The utterance's admission snapshot travels with the retained record, so the
+            // eventual resubmission dispatches the state the user spoke about.
+            playbackContext: input.playbackContext,
             // The window this capture was ADMITTED under, carried to the effect boundary.
             // A service stop/restart between the caller's check and
             // the main-actor hop is otherwise invisible: the sink would interrupt on behalf of a
@@ -1022,6 +1025,7 @@ class VoiceControlService: ObservableObject {
                 translationKind: released.translationKind ?? .none,
                 selection: released.selection,
                 utteranceId: released.utteranceId,
+                playbackContext: released.playbackContext,
                 latency: released.latency
             ),
             origin: released.origin,
@@ -1356,7 +1360,14 @@ class VoiceControlService: ObservableObject {
                 // continuation that never ran. The marker is set after the enqueue returns, and the
                 // enqueue releases it again if it refused — so the two can never disagree.
                 let enqueued = enqueueRoutingInput(
-                    .english(transcript: reprocessValue, selection: capturedSelection, utteranceId: input.utteranceId),
+                    .english(
+                        transcript: reprocessValue, selection: capturedSelection,
+                        utteranceId: input.utteranceId,
+                        // The value is the SAME utterance re-processed: it dispatches the
+                        // completing capture's admission snapshot, never a fresh live read.
+                        playbackContext: input.playbackContext,
+                        latency: input.latency
+                    ),
                     origin: capturedOrigin,
                     selection: capturedSelection
                 )

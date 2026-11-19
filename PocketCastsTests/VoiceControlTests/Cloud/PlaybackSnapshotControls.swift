@@ -407,30 +407,6 @@ private final class ContinuousWakeStub: WakeWordDetectorProtocol {
     func release() {}
 }
 
-private final class StubAsrBackend: AsrBackend {
-    let result: AsrResult
-    let canTranslate: Bool
-
-    init(result: AsrResult, canTranslate: Bool) {
-        self.result = result
-        self.canTranslate = canTranslate
-    }
-
-    var requiredModel: ModelSpec {
-        ModelSpec(id: "stub", files: [], targetDir: "stub")
-    }
-
-    var capabilities: AsrCapabilities {
-        AsrCapabilities(canTranslateToEnglish: canTranslate)
-    }
-
-    func ensureReady() async -> Result<Void, Error> { .success(()) }
-
-    func transcribe(samples: [Float], sampleRateHz: Int) async -> AsrResult { result }
-
-    func release() {}
-}
-
 private final class StubTranslationStage: TranslationStage {
     let ensureReadyResult: Result<Void, Error>
     let translateResult: String
