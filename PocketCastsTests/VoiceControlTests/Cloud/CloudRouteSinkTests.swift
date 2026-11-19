@@ -3447,7 +3447,19 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         }
         XCTAssertTrue(observedWaiting, "the client did reach the acquisition seam")
 
+        // The merged sink RETIRES the result socket at turn completion (the latency refactor's
+        // binding lifecycle), so admission evidence must be observed CONCURRENTLY with the turn:
+        // the watcher samples while the turn runs, and release then lets it proceed.
+        let socketWatcher = Task {
+            for _ in 0..<500 {
+                if await MainActor.run({ sink.activeResultSocketForTesting != nil }) { return true }
+                try? await Task.sleep(nanoseconds: 5_000_000)
+            }
+            return false
+        }
         provider.release()
+        let liveTarget = await socketWatcher.value
+        XCTAssertTrue(liveTarget, "the turn published a result socket, so admission completed")
         _ = await turn.value
         // The refusal path is not what is being tested; if the action ran, ownership resolved.
         // The typed settlement is asynchronous; wait bounded for the initiation, without
@@ -3471,7 +3483,6 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
                        "the journaled owner is the one that supplied the credential")
         // THE NEGATIVE CASES STAY: the target observer is live (`ep-task67`), so this operation is
         // not refused for lack of a target, and the only thing under test is late ownership.
-        let liveTarget = await MainActor.run { sink.activeResultSocketForTesting != nil }
         XCTAssertTrue(liveTarget, "the turn published a result socket, so admission completed")
         let captured = try XCTUnwrap(turnTask, "the factory returned the task this turn wrote to")
         let sent = await MainActor.run { captured.sentTextFrames }
@@ -3683,8 +3694,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         // sink's own socket carried while the turn was live.
         let socket = AppOperationResultSocket(requestId: "u-two-actions")
         await MainActor.run {
-            socket.authenticatedSession = CloudAuthenticatedSession(
-                accountId: "test-owner", accessToken: "test-credential")
+            socket.freezeAcquisition(CloudAuthenticatedSession(
+                accountId: "test-owner", accessToken: "test-credential"))
         }
         let client = try XCTUnwrap(capturedClient)
         let box = await MainActor.run {

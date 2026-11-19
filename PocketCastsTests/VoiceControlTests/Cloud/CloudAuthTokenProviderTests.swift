@@ -630,6 +630,7 @@ final class CloudAuthTokenReviewFixTests: XCTestCase {
             authBaseURLProvider: { "https://auth.test" },
             credentialProvider: { credential },
             identityProvider: { identity },
+            session: makeStubSession(),
             now: { self.now }
         )
         let forA = await provider.token()
