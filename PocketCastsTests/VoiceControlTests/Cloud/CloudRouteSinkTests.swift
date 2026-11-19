@@ -2231,7 +2231,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     /// is answered from the durable journal on the second delivery — the recorded outcome rides
     /// the real socket, and the effect does NOT run twice. Success replays with the ACTUAL
     /// resulting state (wire contract §3): a replayed success is not a bare outcome.
-    // MARK: - Resume result-path controls (voice-intents.md; task67)
+    // MARK: - Resume result-path controls (voice-intents.md)
 
     // ENABLEMENT SLICE: these controls are bound to THE PRODUCTION CONSTANT
     // (`VoiceControlAssembly.declaredAppOperations`, now pause + resume) so the result table is

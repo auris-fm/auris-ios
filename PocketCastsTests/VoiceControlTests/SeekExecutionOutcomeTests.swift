@@ -159,7 +159,7 @@ final class SeekExecutionOutcomeTests: XCTestCase {
         XCTAssertEqual(gotLegacy, [true], "legacy Bool unchanged")
     }
 
-    // MARK: - read-task expiry state ownership (review 4b784fa2, real engine + read task)
+    // MARK: - read-task expiry state ownership (real engine + read task)
 
     /// CONNECTED READ-TASK-EXPIRY CONTROL: a seek whose budget expires at the SECOND queue
     /// hop (AudioReadTask's locked mutation) must (a) deliver expiredBeforeMutation, (b) NOT
