@@ -699,40 +699,10 @@ platform :ios do
     trigger_buildkite_release_build(branch: branch_to_build, beta: false, platform: platform, notify_slack: notify_slack, create_release: create_release)
   end
 
-  # Builds the app binary for distribution to App Store Connect
-  #
-  # Once the app binary is built by this lane, you might want to call:
-  #  - `upload_app_store_connect_build_to_testflight` to upload the binary to TestFlight
-  #  - `symbols_upload` to upload dSYMs to Sentry
-  #  - `create_release_on_github(beta_release: …)` to create the GitHub Release
-  #
-  # @param set_up_code_signing [Boolean] If true, will call `configure_code_signing_app_store` before building. Recommended on CI.
-  #
-  # Builds the xcodebuild arguments that let automatic signing create and
-  # download profiles on a headless agent: `-allowProvisioningUpdates` plus
-  # the App Store Connect API key, taken from the three env vars below.
-  # Raises when the key is absent, so the failure is at the start, not at
-  # the export step.
-  def signing_provisioning_xcargs
-    require_env_vars!(*ASC_API_KEY_ENV_VARS)
-    key_id = ENV['APP_STORE_CONNECT_API_KEY_KEY_ID']
-    issuer_id = ENV['APP_STORE_CONNECT_API_KEY_ISSUER_ID']
-    key_content = ENV['APP_STORE_CONNECT_API_KEY_KEY']
-    key_path = File.join(Dir.tmpdir, "AuthKey_#{key_id}.p8")
-    File.write(key_path, key_content)
-    File.chmod(0o600, key_path)
-    {
-      allowProvisioningUpdates: true,
-      authenticationKeyPath: key_path,
-      authenticationKeyID: key_id,
-      authenticationKeyIssuerID: issuer_id
-    }
-  end
-
   # ------------------------------------------------------------------
   # Auris beta distribution (TestFlight, internal testers)
   #
-  # Independent of the upstream release choreography above: the app signs
+  # Independent of the upstream release choreography below: the app signs
   # with the project's own identifiers (`fm.auris` and the project's
   # DEVELOPMENT_TEAM) via automatic signing and the App Store Connect API
   # key from the environment. No upstream lane, cert store or team id is
@@ -744,30 +714,42 @@ platform :ios do
   AURIS_XCARCHIVE_PATH = File.join(ARTIFACTS_FOLDER, "#{AURIS_BUILD_OUTPUT_NAME}.xcarchive")
   AURIS_IPA_PATH = File.join(ARTIFACTS_FOLDER, "#{AURIS_BUILD_OUTPUT_NAME}.ipa")
 
+  # Builds the xcodebuild arguments that let automatic signing create and
+  # download profiles on a headless agent: `-allowProvisioningUpdates`
+  # plus the App Store Connect API key, taken from the three env vars the
+  # upload uses. Raises when the key is absent, so the failure is at the
+  # start, not at the export step. Returns a shell string — gym passes
+  # xcargs straight to xcodebuild, so flags, not build settings.
+  def signing_provisioning_xcargs
+    require_env_vars!(*ASC_API_KEY_ENV_VARS)
+    key_id = ENV['APP_STORE_CONNECT_API_KEY_KEY_ID']
+    issuer_id = ENV['APP_STORE_CONNECT_API_KEY_ISSUER_ID']
+    key_content = ENV['APP_STORE_CONNECT_API_KEY_KEY']
+    key_path = File.join(Dir.tmpdir, "AuthKey_#{key_id}.p8")
+    File.write(key_path, key_content)
+    File.chmod(0o600, key_path)
+    "-allowProvisioningUpdates -authenticationKeyPath #{key_path.shellescape} -authenticationKeyID #{key_id.shellescape} -authenticationKeyIssuerID #{issuer_id.shellescape}"
+  end
+
   # Archives the Auris app for TestFlight. The speech runtime is linked
   # into the binary by the project config (`-llfm_runtime` from
   # `ThirdParty/llama-cpp-build/$(LLAMA_SLICE)/lfm`), so a device archive
   # cannot exist without it: a missing device build fails the link, not
-  # the upload. Automatic signing on a headless agent needs the App Store
-  # Connect API key passed through to xcodebuild, so both the archive and
-  # the export steps get `-allowProvisioningUpdates` and the key arguments
-  # from the same three `APP_STORE_CONNECT_API_KEY_*` env vars the upload
-  # uses.
+  # the upload.
   #
   # @param build_number [String, nil] When given, overrides `VERSION_LONG`
   #   (`CURRENT_PROJECT_VERSION`). Defaults to the xcconfig value.
   #
   lane :auris_beta_build do |build_number: nil|
-    xcargs = build_number ? { VERSION_LONG: build_number } : {}
-    provisioning_xcargs = signing_provisioning_xcargs
-    xcargs.merge!(provisioning_xcargs)
+    xcargs = signing_provisioning_xcargs
+    xcargs = "#{build_number ? "VERSION_LONG=#{build_number} " : ''}#{xcargs}"
 
     build_app(
       scheme: SCHEME,
       include_symbols: true,
       clean: true,
       xcargs: xcargs,
-      export_xcargs: provisioning_xcargs,
+      export_xcargs: signing_provisioning_xcargs,
       export_options: {
         method: 'app-store',
         manageAppVersionAndBuildNumber: false,
@@ -796,6 +778,15 @@ platform :ios do
     )
   end
 
+  # Builds the app binary for distribution to App Store Connect
+  #
+  # Once the app binary is built by this lane, you might want to call:
+  #  - `upload_app_store_connect_build_to_testflight` to upload the binary to TestFlight
+  #  - `symbols_upload` to upload dSYMs to Sentry
+  #  - `create_release_on_github(beta_release: …)` to create the GitHub Release
+  #
+  # @param set_up_code_signing [Boolean] If true, will call `configure_code_signing_app_store` before building. Recommended on CI.
+  #
   lane :build_app_store_connect do |set_up_code_signing: true|
     configure_code_signing_app_store if set_up_code_signing
 
