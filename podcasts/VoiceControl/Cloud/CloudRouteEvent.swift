@@ -117,7 +117,7 @@ enum CloudRouteEvent: Equatable {
     /// contract rev da327e624); existing local-path holds carry neither and parse as nils.
     ///
     /// `actionBytes` are the action frame's serialized UTF-8 bytes EXACTLY as received: replay
-    /// identity is byte equality (cloud-assistant.md @ bf5fb219), so re-serializing parsed
+    /// identity is byte equality (cloud-assistant.md), so re-serializing parsed
     /// parts would lose the identity the server can reproduce. Nil only for events a test
     /// constructs directly, which then carry no replay identity.
     case action(tool: String, action: String, params: [String: CloudRouteJSONValue],

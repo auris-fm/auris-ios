@@ -1,7 +1,7 @@
 import Foundation
 
-/// ONE identified `playback.seek_relative` settlement (task67 seek_relative client slice,
-/// spec cloud-assistant.md "Client seek completion and settlement" @ a3af56dd).
+/// ONE identified `playback.seek_relative` settlement
+/// (spec cloud-assistant.md "Client seek completion and settlement").
 ///
 /// The coordinator owns the bounded client completion budget for a single admitted operation:
 /// the completion observer is registered BEFORE the effect is released, the budget is monotonic

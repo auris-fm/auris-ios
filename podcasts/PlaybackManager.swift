@@ -162,7 +162,7 @@ class PlaybackManager: ServerPlaybackDelegate {
     }
 
     /// A post-action playback observation that keeps UNAVAILABLE separate from OBSERVED-PAUSED
-    /// (voice-intents.md @ 818c8f75). `isPlaying` collapses a missing engine into `false`, which
+    /// (voice-intents.md). `isPlaying` collapses a missing engine into `false`, which
     /// would report an unobservable state as a successful pause; this returns `nil` when there
     /// is no engine to read (no player), `.some(false)` for an observed not-playing state (an
     /// already-paused engine included), and `.some(true)` for an observed playing state. It
@@ -559,7 +559,7 @@ class PlaybackManager: ServerPlaybackDelegate {
         seekTo(time: time, syncChanges: SyncManager.isUserLoggedIn(), startPlaybackAfterSeek: startPlaybackAfterSeek, seekHint: seekHint)
     }
 
-    /// ADDITIVE (task67 seek_relative slice): identified seek — forwards to the live player's
+    /// ADDITIVE (identified seek): identified seek — forwards to the live player's
     /// typed overload with the caller's invocation token. Player not a typed seeker or absent:
     /// returns nil with NO fallback effect released — the identified path settles unknown
     /// fail-closed, never dresses the fire-and-forget wrapper as evidence.

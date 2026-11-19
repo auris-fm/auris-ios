@@ -133,12 +133,12 @@ class AudioReadTask {
         minRMS = minRMSForSilenceAmount()
     }
 
-    /// ADDITIVE `typedCapture` (task67 seek-completion slice): delivers the immutable value
+    /// ADDITIVE `typedCapture` (seek-completion surface): delivers the immutable value
     /// captured inside the locked seek operation, on the same callback path as the legacy
     /// Bool — which is unchanged. Default nil keeps every existing caller identical.
     func seekTo(_ time: TimeInterval, deadlineNs: UInt64? = nil, expired: (() -> Void)? = nil, completion: ((Bool) -> Void)?, typedCapture: ((LockedSeekCapture) -> Void)? = nil) {
         DispatchQueue.global(qos: .default).async { () in
-            // DEADLINE AT THE LOCKED MUTATION SITE (review 7d4bc057): this queue is a SECOND
+            // DEADLINE AT THE LOCKED MUTATION SITE (ownership contract): this queue is a SECOND
             // hop after EffectsPlayer's serialSeekQueue, and performSeek waits on its lock —
             // the check must run after the lock is acquired and before ANY cursor/buffer/EOF
             // mutation. Expiry here issues nothing and reports through `expired`.

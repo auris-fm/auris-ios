@@ -3,7 +3,7 @@ import XCTest
 
 // Mock PlaybackManagerProtocol that captures seekTo calls and provides controlled duration.
 final class MockPlaybackManager: PlaybackManagerProtocol {
-    /// voice-intents.md @ 818c8f75: tri-state engine observation, settable per control.
+    /// voice-intents.md: tri-state engine observation, settable per control.
     var observedPlaying: Bool?
     func observedPlaybackState() -> Bool? { observedPlaying }
 
@@ -113,7 +113,7 @@ final class PlaybackManagerSinkTests: XCTestCase {
         XCTAssertEqual(response, .silent)
     }
 
-    /// OBSERVED PAUSE DELEGATION (voice-intents.md @ 818c8f75): `PlaybackManagerSink`
+    /// OBSERVED PAUSE DELEGATION (voice-intents.md): `PlaybackManagerSink`
     /// forwards `observedPlaying` to the manager's tri-state engine reading, through the
     /// protocol seam — no singleton construction. Unavailable stays `nil`, observed values
     /// pass through untouched; delegation never collapses one into the other.

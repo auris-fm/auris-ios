@@ -3,7 +3,7 @@ import AVFoundation
 @testable import podcasts
 
 /// Controls for the identified `playback.seek_relative` settlement (spec cloud-assistant.md
-/// "Client seek completion and settlement" @ a3af56dd). The coordinator is the unit under
+/// "Client seek completion and settlement"). The coordinator is the unit under
 /// test: the engine outcome arrives through an injected awaitable, the observation and the
 /// monotonic clock are injected, so every control observes the exact classification and the
 /// exact immutable result — no mock of the journal itself (journal-level replay keeps its own
@@ -235,11 +235,11 @@ final class SeekRelativeCompletionTests: XCTestCase {
         XCTAssertLessThanOrEqual(c.remainingSeconds(since: initn), 0)
     }
 
-    // MARK: - review-blocker controls (spec a3af56dd + review 885b244d)
+    // MARK: - review-blocker controls (settlement guards)
 
     /// The engine's at-mutation deadline check PROVES no seek was issued: refused with the
     /// deadline reason (the before-release arm), never unknown/cancelled. PRODUCTION
-    /// CONDITION (review 7d4bc057): this proof only exists at/after the deadline — the fake
+    /// CONDITION (ownership contract): this proof only exists at/after the deadline — the fake
     /// clock reaches the boundary as the proof is delivered, and the proof must SURVIVE the
     /// expiry arbitration that would discard success evidence.
     func test_expiredBeforeMutationIsRefusedWithTheDeadlineReason() async throws {

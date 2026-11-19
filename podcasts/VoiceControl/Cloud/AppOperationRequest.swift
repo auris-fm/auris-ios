@@ -1,6 +1,6 @@
 import Foundation
 
-/// The client side of the app-operation REQUEST contract (cloud-assistant.md @ bf5fb219).
+/// The client side of the app-operation REQUEST contract (cloud-assistant.md).
 ///
 /// Two rules the amendment states that a permissive parser silently breaks:
 ///

@@ -1,6 +1,6 @@
 import Foundation
 
-/// ADDITIVE typed seek outcome (task67 seek-completion slice): identity-carrying evidence
+/// ADDITIVE typed seek outcome (seek-completion surface): identity-carrying evidence
 /// captured at the engine. Purely additive — every legacy completion and EOF side effect is
 /// unchanged; no await, journal classification or manifest surface ships in this slice.
 ///
@@ -68,7 +68,7 @@ extension SeekIdentity {
 }
 
 /// Engines that can issue an identity-carrying seek with a CALLER-SUPPLIED invocation token
-/// (task67 seek_relative client slice, spec a3af56dd): the identified path correlates the
+/// (identified seek completion): the identified path correlates the
 /// completion to the initiating invocation by token, so the token must be minted by the
 /// initiator, not by the engine.
 protocol TypedSeekingPlayer: AnyObject {

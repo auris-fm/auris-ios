@@ -779,7 +779,7 @@ extension CloudRouteClientTests {
     }
 }
 
-// MARK: - Result-frame codec controls (wire amendment cloud-assistant.md @ bf5fb219)
+// MARK: - Result-frame codec controls (wire amendment cloud-assistant.md)
 
 /// The result frame is the ONLY thing the server can believe about an operation, so its shape
 /// rules are enforced at construction: no call site can build a frame the contract refuses.

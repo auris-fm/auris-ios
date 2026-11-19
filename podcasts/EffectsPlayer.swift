@@ -42,7 +42,7 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
     private var audioFileSampleRate: Double = 0
 
     var playBufferManager: PlayBufferManager?
-    /// Internally settable (task67 seek controls): the typed-surface controls inject real
+    /// Internally settable (seek controls): the typed-surface controls inject real
     /// read tasks; production wiring still assigns via loadEpisode.
     var audioReadTask: AudioReadTask?
     private var audioPlayTask: AudioPlayTask?
@@ -63,10 +63,10 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
     /// Whether a seek mutation is pending (read-only probe; also the connected-control seam).
     var isSeekPending: Bool { seekStateLock.lock(); defer { seekStateLock.unlock() }; return seeking }
     /// Which invocation's SPECULATIVE state (`lastSeekTime`/`seeking`) currently owns the
-    /// engine (review 4b784fa2): an expired request must not clear or rewrite a newer seek's
+    /// engine (ownership contract): an expired request must not clear or rewrite a newer seek's
     /// state, and must not publish its target at all when it expires before mutation.
     private var seekingOwnerToken: UUID?
-    /// OWNERSHIP ATOMICITY (review 61ebb558): the serial queue publishes the speculative
+    /// OWNERSHIP ATOMICITY (ownership contract): the serial queue publishes the speculative
     /// state while the read-task's expiry/completion closures check and retire it on other
     /// queues — the ownership COMPARISON and the state transition must be one locked
     /// transaction, and `currentTime()` snapshots under the same lock.
@@ -277,7 +277,7 @@ class EffectsPlayer: PlaybackProtocol, Hashable {
         seekTo(time, completion: completion, typedCompletion: nil)
     }
 
-    /// ADDITIVE typed overload (task67 seek-completion slice): identity-carrying outcomes
+    /// ADDITIVE typed overload (seek-completion surface): identity-carrying outcomes
     /// alongside the unchanged legacy completion.
     @discardableResult
     func seekTo(_ time: TimeInterval, completion: (() -> Void)?, typedCompletion: ((SeekExecutionOutcome) -> Void)?, invocationToken: UUID? = nil, deadlineNs: UInt64? = nil) -> SeekIdentity? {

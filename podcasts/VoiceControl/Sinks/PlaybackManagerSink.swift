@@ -9,7 +9,7 @@ protocol PlaybackManagerProtocol {
     /// this to decide whether a turn may pause and later release playback (a
     /// pause the user made themselves must not be released).
     var isPlaying: Bool { get }
-    /// Tri-state post-action observation (voice-intents.md @ 818c8f75): `nil` = no engine
+    /// Tri-state post-action observation (voice-intents.md): `nil` = no engine
     /// reading exists, `.some(false)` = observed not playing, `.some(true)` = observed playing.
     func observedPlaybackState() -> Bool?
     func duration() -> TimeInterval
@@ -18,7 +18,7 @@ protocol PlaybackManagerProtocol {
     func pause()
     func play()
     func skipToNextUpNextEpisode() -> String?
-    /// ADDITIVE REQUIREMENT (task67 seek_relative slice): identified seek — see the extension
+    /// ADDITIVE REQUIREMENT (identified seek): identified seek — see the extension
     /// default below. Declared as a requirement so the real manager's override dispatches.
     func seekToIdentified(time: TimeInterval, invocationToken: UUID, deadlineNs: UInt64?, typedCompletion: @escaping (SeekExecutionOutcome) -> Void) -> SeekIdentity?
     /// ADDITIVE REQUIREMENT: the LIVE engine objects for replacement detection at settlement.
@@ -29,7 +29,7 @@ protocol PlaybackManagerProtocol {
     func skipToNextUpNextEpisodeWithFact() -> (presentationTitle: String?, outcome: PlaybackManager.NextEpisodeSkipOutcome)
 }
 
-/// ADDITIVE (task67 seek_relative slice): identified seek issued with a caller-supplied
+/// ADDITIVE (identified seek): identified seek issued with a caller-supplied
 /// invocation token and a typed completion. Default nil = this manager cannot produce
 /// completion evidence; the identified path then settles `unknown` WITHOUT releasing an
 /// effect (fail-closed).
@@ -120,7 +120,7 @@ class PlaybackManagerSink: VoicePlaybackSink {
         return .silent
     }
 
-    /// ADDITIVE (task67 seek_relative slice): computes the same clamped target as
+    /// ADDITIVE (identified seek): computes the same clamped target as
     /// `seekRelative`, then issues it as an IDENTIFIED seek — the completion is correlated to
     /// the initiating invocation token, and the engine's typed outcome carries the evidence.
     /// Returns the initiated identity, or nil when the manager cannot seek with evidence

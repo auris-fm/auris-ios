@@ -7,7 +7,7 @@ import PocketCastsUtils
 
 class DefaultPlayer: PlaybackProtocol, Hashable {
     private var audioMix: AVAudioMix?
-    /// Internally settable (task67 seek controls): the typed-surface controls inject real
+    /// Internally settable (seek controls): the typed-surface controls inject real
     /// AVPlayer instances; production wiring still assigns via loadEpisode.
     var player: AVPlayer?
 
@@ -253,7 +253,7 @@ class DefaultPlayer: PlaybackProtocol, Hashable {
         seekTo(time, completion: completion, typedCompletion: nil)
     }
 
-    /// ADDITIVE typed overload (task67 seek-completion slice): reports the effective request
+    /// ADDITIVE typed overload (seek-completion surface): reports the effective request
     /// as ACTUALLY handed to AVPlayer (the quantized CMTime, read back in seconds — not the
     /// pre-quantization clamp value), the initiating item identity, and the native
     /// finished/cancelled result. Legacy behavior unchanged.
@@ -280,7 +280,7 @@ class DefaultPlayer: PlaybackProtocol, Hashable {
         let tolerance = CMTime.zero // in testing setting this to 1 second wasn't honoured and it would sometimes be 10 seconds out. So go for accuracy over seek speed here
 
         player.seek(to: timeToSeekTo, toleranceBefore: tolerance, toleranceAfter: tolerance, completionHandler: { finished in
-            // CONTROLLED NATIVE-CALL SEAM (task67 seek controls): the handler body is an
+            // CONTROLLED NATIVE-CALL SEAM (seek controls): the handler body is an
             // internal adapter method, invoked here AND directly from the cancelled-control
             // test to exercise `finished == false` deterministically. Adapter evidence only —
             // the real AVPlayer call above is unchanged.

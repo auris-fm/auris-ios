@@ -1,7 +1,7 @@
 import XCTest
 @testable import podcasts
 
-/// The app-operation REQUEST contract (cloud-assistant.md @ bf5fb219), enforced before anything
+/// The app-operation REQUEST contract (cloud-assistant.md), enforced before anything
 /// is admitted for execution. Two rules, deliberately tested at the byte level because both are
 /// about what a permissive parser would let through:
 ///
@@ -332,7 +332,7 @@ final class AppOperationRequestTests: XCTestCase {
                        message: "resume addresses the engine")
     }
 
-    /// OPTIONAL SUPPLIED TARGET IDENTITIES (task67 resume gate finding): an action that declares
+    /// OPTIONAL SUPPLIED TARGET IDENTITIES (resume target gate): an action that declares
     /// no required precondition still cannot let a SUPPLIED episode_id escape the live check.
     /// Absence stays optional; a present null/blank/non-string is the required-table's
     /// `invalid_request`; a valid supplied ID runs the SAME current-target match.

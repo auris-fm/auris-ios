@@ -40,7 +40,7 @@ struct AppOperationResultFrame: Equatable {
         guard (outcome == .succeeded) == (reason == nil) else { return nil }
         if let reason { guard Self.isWireReason(reason) else { return nil } }
         if outcome != .succeeded && state != nil { return nil }
-        // Wire amendment (cloud-assistant.md @ bf5fb219): success REQUIRES a state OBJECT —
+        // Wire amendment (cloud-assistant.md): success REQUIRES a state OBJECT —
         // the actual observed result, never a request echo or an earcon. Presence is enforced
         // here; each action's concrete result SHAPE is validated by its owning producer, not
         // by a blanket non-empty rule (an action whose honest observed result is an empty
@@ -63,7 +63,7 @@ struct AppOperationResultFrame: Equatable {
         self.detail = boundedDetail
     }
 
-    /// The published reason grammar (cloud-assistant.md @ bf5fb219): 1 + up to 127 ASCII
+    /// The published reason grammar (cloud-assistant.md): 1 + up to 127 ASCII
     /// bytes, lowercase letters/digits/underscore, starting with a letter. Bounded in BYTES,
     /// which for this ASCII alphabet equals characters.
     static func isWireReason(_ reason: String) -> Bool {

@@ -77,7 +77,7 @@ enum CloudClientCapabilities {
 }
 
 /// The `app_operation_support` object the owning contract (trainer-reduced-local-scope
-/// @ 818c8f75, cloud-assistant.md "App-operation protocol v1") requires alongside
+///, cloud-assistant.md "App-operation protocol v1") requires alongside
 /// `app_operations_v1`: exact, unique `tool.action` keys the client fully implements —
 /// validation, execution, result observation AND durable replay handling.
 /// FAIL CLOSED: a manifest that cannot be constructed exactly is no manifest at all —

@@ -1103,7 +1103,7 @@ final class CloudRouteClient {
             return [.connected(codec: codec)]
 
         case "action":
-            // IDENTITY GATE (cloud-assistant.md @ bf5fb219). This runs AFTER the pre-decode bound
+            // IDENTITY GATE (cloud-assistant.md). This runs AFTER the pre-decode bound
             // above, on the already-parsed object, so parsing cost was already bounded. Its only
             // job is the identity pair.
             //

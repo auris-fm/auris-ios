@@ -834,7 +834,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         self.pendingFixture =
             """
             event: action
-            data:{"tool":"playback","action":"seek_relative","params":{"delta_seconds":15},"precondition":{"episode_id":"ep-task67"}}
+            data:{"tool":"playback","action":"seek_relative","params":{"delta_seconds":15},"precondition":{"episode_id":"ep-current"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -1529,7 +1529,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     /// The episode identity every identified playback fixture targets. The wire requires an
     /// episode-relative action to name its target, and requires that target to be the CURRENT one,
     /// so a fixture and the sink's live target must agree by construction.
-    static let testEpisodeId = "ep-task67"
+    static let testEpisodeId = "ep-current"
 
     /// The account these controls' operations are journaled under. One fixture for BOTH halves —
     /// credential and account — so the owner can only ever be the one that supplied the
@@ -1695,7 +1695,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     func testIdentifiedUnmappedSeekSendsRefusedResultFrameThroughTheSocket() async throws {
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"acb9d6cc-0b7f-4710-ab0c-76e7f5f0fa64","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"reference_position_ms":200000},"precondition":{"episode_id":"ep-task67"}}
+            data: {"operation_id":"acb9d6cc-0b7f-4710-ab0c-76e7f5f0fa64","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"reference_position_ms":200000},"precondition":{"episode_id":"ep-current"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -1743,7 +1743,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     func testIdentifiedMalformedSeekSendsRefusedResultFrameThroughTheSocket() async throws {
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"66de3931-3507-47be-a2a2-7bb01e199fa6","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"position_seconds":null,"reference_position_ms":200000},"precondition":{"episode_id":"ep-task67"}}
+            data: {"operation_id":"66de3931-3507-47be-a2a2-7bb01e199fa6","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"position_seconds":null,"reference_position_ms":200000},"precondition":{"episode_id":"ep-current"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -1854,7 +1854,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertTrue(consumer.consumed.isEmpty, "no result is consumed for a frame the server never admitted")
     }
 
-    /// OBSERVED PAUSE — TRUE→FALSE TRANSITION (voice-intents.md @ 818c8f75): the engine is
+    /// OBSERVED PAUSE — TRUE→FALSE TRANSITION (voice-intents.md): the engine is
     /// playing, the pause stops it, and the single fresh observation reads `false`, which is
     /// both the success gate AND the settled wire state.
     func testCloudPauseOnAPlayingEngineThatStopsSucceedsWithTheObservedState() async throws {
@@ -1890,7 +1890,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
                        "classification and settlement must come from ONE post-pause observation")
     }
 
-    /// OBSERVED PAUSE — ALREADY-PAUSED (voice-intents.md @ 818c8f75): an engine observed `false`
+    /// OBSERVED PAUSE — ALREADY-PAUSED (voice-intents.md): an engine observed `false`
     /// before and after the pause satisfies the idempotent operation.
     func testCloudPauseOnAnAlreadyPausedEngineSucceedsWithAnObservedNotPlayingState() async throws {
         playback.setPlaying(false)
@@ -1913,7 +1913,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(playback.calls.filter { if case .pause = $0 { return true }; return false }.count, 1)
     }
 
-    /// OBSERVED PAUSE — STILL PLAYING (voice-intents.md @ 818c8f75): the pause sink completed
+    /// OBSERVED PAUSE — STILL PLAYING (voice-intents.md): the pause sink completed
     /// but the fresh observation still reads `true` (a real engine can fail to stop). The
     /// result is `failed` with reason `pause_not_observed` — a FAILED pause, not a refusal —
     /// and carries NO state. The legacy VoiceResponse earcon behaviour of the pause itself is
@@ -1955,7 +1955,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
                        "the mutation was attempted exactly once")
     }
 
-    /// IDENTIFIED SEEK_RELATIVE — SUCCESS (task67 slice, spec a3af56dd): the typed completion
+    /// IDENTIFIED SEEK_RELATIVE — SUCCESS (identified seek completion): the typed completion
     /// correlated to the invocation token settles `succeeded` with the OBSERVED position and
     /// playing state; the legacy fire-and-forget seekRelative is NOT called.
     func testCloudIdentifiedSeekRelativeSettlesSuccessWithObservedState() async throws {
@@ -1970,7 +1970,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             effectiveRequest: 135, observedItemClock: 120.4))
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"5b1f0a92-6c34-4e71-9d28-a3f5c8e17d40","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":15},"precondition":{"episode_id":"ep-task67"}}
+            data: {"operation_id":"5b1f0a92-6c34-4e71-9d28-a3f5c8e17d40","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":15},"precondition":{"episode_id":"ep-current"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -2012,7 +2012,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             identity: SeekIdentity(invocationToken: UUID(), playerID: ObjectIdentifier(NSObject()), readTaskID: nil, itemID: nil)))
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"7e2d4c81-90a5-4b36-8f17-c2e9b0d4a6f3","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":-15},"precondition":{"episode_id":"ep-task67"}}
+            data: {"operation_id":"7e2d4c81-90a5-4b36-8f17-c2e9b0d4a6f3","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":-15},"precondition":{"episode_id":"ep-current"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -2046,7 +2046,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             effectiveRequest: 135, observedItemClock: 135))
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"1d9e4c07-58a2-4b63-9f10-b7e4a2c9d8e5","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":15},"precondition":{"episode_id":"ep-task67"}}
+            data: {"operation_id":"1d9e4c07-58a2-4b63-9f10-b7e4a2c9d8e5","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":15},"precondition":{"episode_id":"ep-current"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -2086,7 +2086,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             effectiveRequest: 135, observedItemClock: 135))
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"3f8a7b52-1c94-4e70-b26d-8a5e0f3c7d19","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":15},"precondition":{"episode_id":"ep-task67"}}
+            data: {"operation_id":"3f8a7b52-1c94-4e70-b26d-8a5e0f3c7d19","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":15},"precondition":{"episode_id":"ep-current"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -2110,7 +2110,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertNil(frame["state"])
     }
 
-    /// OBSERVED PAUSE — UNAVAILABLE (voice-intents.md @ 818c8f75): no current engine reading
+    /// OBSERVED PAUSE — UNAVAILABLE (voice-intents.md): no current engine reading
     /// exists (a missing engine — `PlaybackManager.isPlaying` collapses this into `false`,
     /// which the tri-state `observedPlaying` must not). The result is `unknown` with reason
     /// `playback_state_unavailable` and carries NO state: it must NOT report a success built
@@ -2148,7 +2148,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(playback.calls.filter { if case .pause = $0 { return true }; return false }.count, 1)
     }
 
-    /// CROSS-TURN CONFLICTING ID (cloud-assistant.md @ bf5fb219): an operation id is
+    /// CROSS-TURN CONFLICTING ID (cloud-assistant.md): an operation id is
     /// turn-bound. The same id arriving in a LATER turn is a different operation — refined from
     /// the earlier turn's admission — so it is refused before any effect and never resolved
     /// against the earlier turn's record. What must NOT happen is the dangerous middle: executing
@@ -2231,7 +2231,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     /// is answered from the durable journal on the second delivery — the recorded outcome rides
     /// the real socket, and the effect does NOT run twice. Success replays with the ACTUAL
     /// resulting state (wire contract §3): a replayed success is not a bare outcome.
-    // MARK: - Resume result-path controls (voice-intents.md @ df5def09; task67)
+    // MARK: - Resume result-path controls (voice-intents.md; task67)
 
     // ENABLEMENT SLICE: these controls are bound to THE PRODUCTION CONSTANT
     // (`VoiceControlAssembly.declaredAppOperations`, now pause + resume) so the result table is
@@ -2507,7 +2507,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
                        "replay must not take a new observation")
     }
 
-    /// FOCUSED IDENTITYLESS RESUME LEGACY CONTROL (ruling @ 3c5576de): a resume frame with NO
+    /// FOCUSED IDENTITYLESS RESUME LEGACY CONTROL (identityless resume): a resume frame with NO
     /// operation identity takes the legacy path exactly as before — the effect runs, and NO
     /// app-operation result frame is produced. General identityless separation remains covered
     /// by `testLegacyIdentitylessFrameExecutesWithoutIdentityOrResultFrame` (seek_to); this pins
@@ -2542,7 +2542,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(frames.count, 0, "a legacy turn never produces an app-operation result frame")
     }
 
-    // MARK: - Declaration controls (app_operations_v1 negotiation, trainer-reduced-local-scope @ 818c8f75)
+    // MARK: - Declaration controls (app_operations_v1 negotiation, local-scope declaration)
 
     /// THE ADVERTISED AUTHENTICATE FRAME: a turn whose declaration carries `playback.pause`
     /// serializes the token AND the exact support object on the REAL authenticate frame.
@@ -2725,7 +2725,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let manager = testConversationManager()
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"c581d3e2-94ab-4f07-a6c3-7b2e8d1f4a90","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"position_seconds":42},"precondition":{"episode_id":"ep-task67"}}
+            data: {"operation_id":"c581d3e2-94ab-4f07-a6c3-7b2e8d1f4a90","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"position_seconds":42},"precondition":{"episode_id":"ep-current"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -2771,9 +2771,9 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(playback.calls.filter { if case .seekTo = $0 { return true }; return false }.count, 0)
     }
 
-    // MARK: - Production-declaration enablement controls (task67)
+    // MARK: - Production-declaration enablement controls
 
-    // EVIDENCE BOUNDARY (rulings @ ff5c6621, 807e16b0): these controls bind THE PRODUCTION
+    // EVIDENCE BOUNDARY (declaration evidence boundary): these controls bind THE PRODUCTION
     // CONSTANT (`VoiceControlAssembly.declaredAppOperations`) so the tested manifest is the
     // shipped value, but they run on test-built sinks — they prove the DECLARATION'S behavior,
     // not the assembly's wiring (direct review evidence). The RESULT/REPLAY evidence claimed for
@@ -2847,7 +2847,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let manager = testConversationManager()
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"9d4b7a15-62c8-4f30-a9e1-5c8b3d2f7a46","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"ep-task67"}}
+            data: {"operation_id":"9d4b7a15-62c8-4f30-a9e1-5c8b3d2f7a46","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"ep-current"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -2891,7 +2891,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
     /// THE PRODUCTION CONSTANT, BY VALUE: the shipped declaration supports pause and NOTHING
     /// else — so the constant the assembly wires is proven here, not re-typed. ASSEMBLY WIRING
-    /// EVIDENCE BOUNDARY (ruling @ 807e16b0): that the constructor passes this constant as the
+    /// EVIDENCE BOUNDARY (declaration evidence boundary): that the constructor passes this constant as the
     /// sink's provider is DIRECT REVIEW EVIDENCE — inspected on the real production constructor,
     /// not proven here; the former source-mirror/string assertions were removed as a
     /// machine-specific stale-source dependency. Runtime behavior of a constant-declared sink is
@@ -3071,7 +3071,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         // contaminate a pause-call count. A seek has no such second writer.
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"283bc9cc-1700-4596-af9e-94b930efccfd","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"position_seconds":42},"precondition":{"episode_id":"ep-task67"}}
+            data: {"operation_id":"283bc9cc-1700-4596-af9e-94b930efccfd","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"position_seconds":42},"precondition":{"episode_id":"ep-current"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -3130,7 +3130,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         // not the live state T that B created.
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"283bc9cc-1700-4596-af9e-94b930efccfd","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"position_seconds":42},"precondition":{"episode_id":"ep-task67"}}
+            data: {"operation_id":"283bc9cc-1700-4596-af9e-94b930efccfd","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"position_seconds":42},"precondition":{"episode_id":"ep-current"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -3208,7 +3208,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let frame = try await awaitResultFrame(operationId: operationId)
         XCTAssertEqual(frame["outcome"] as? String, "succeeded",
                        "a valid request is not refused: \(String(describing: frame["reason"]))")
-        // REWRITTEN ONTO THE TYPED PATH (spec a3af56dd): identified seek_relative settles from
+        // REWRITTEN ONTO THE TYPED PATH (typed completion path): identified seek_relative settles from
         // correlated typed completion evidence — the fire-and-forget sink is never used. The
         // settlement races done, so the count is asserted AFTER the result frame is awaited.
         XCTAssertEqual(playback.identifiedSeekCalls.count, 1, "a matching target must execute exactly once")
@@ -3415,7 +3415,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             playbackSink: playback,
             fingerprintMapper: mapper,
             playbackPositionMs: { self.playback.positionMs },
-            // THE MATCHING TARGET OBSERVER. The fixture's precondition names `ep-task67`, so without
+            // THE MATCHING TARGET OBSERVER. The fixture's precondition names `ep-current`, so without
             // a provider the sink cannot confirm the current target and the operation is refused as
             // unavailable — which would make the late-acquisition variable untestable here. The
             // missing-observer NEGATIVE lives in its own control
@@ -3429,7 +3429,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             appOperationSupportProvider: { self.fixtureSupport("playback.seek_relative") }
         )
 
-        // REWRITTEN ONTO THE TYPED PATH (spec a3af56dd): the identified seek needs completion
+        // REWRITTEN ONTO THE TYPED PATH (typed completion path): the identified seek needs completion
         // evidence; the double delivers a correlated completed outcome.
         playback.setPositionMs(120_000)
         playback.armIdentifiedSeek(mode: .completes, outcome: .completed(
@@ -3481,7 +3481,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         }
         XCTAssertEqual(identity.owner, "delayed-owner",
                        "the journaled owner is the one that supplied the credential")
-        // THE NEGATIVE CASES STAY: the target observer is live (`ep-task67`), so this operation is
+        // THE NEGATIVE CASES STAY: the target observer is live (`ep-current`), so this operation is
         // not refused for lack of a target, and the only thing under test is late ownership.
         XCTAssertTrue(liveTarget, "the turn published a result socket, so admission completed")
         let captured = try XCTUnwrap(turnTask, "the factory returned the task this turn wrote to")
@@ -4050,7 +4050,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             let reCompletedOwner = await MainActor.run { turnBox.completing(from: liveSocket).owner }
             XCTAssertEqual(reCompletedOwner, completedOwner,
                            "the completed owner stays sticky across the switch — the box is not relabelled")
-            // REWRITTEN ONTO THE TYPED PATH (spec a3af56dd): identified seek_relative settles
+            // REWRITTEN ONTO THE TYPED PATH (typed completion path): identified seek_relative settles
             // from correlated typed completion evidence.
             playback.setPositionMs(120_000)
             playback.armIdentifiedSeek(mode: .completes, outcome: .completed(
@@ -4157,7 +4157,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             XCTAssertEqual(owner, liveAccount,
                            "the live session still names the admitted account — the ONLY difference")
 
-            // REWRITTEN ONTO THE TYPED PATH (spec a3af56dd): identified seek_relative settles
+            // REWRITTEN ONTO THE TYPED PATH (typed completion path): identified seek_relative settles
             // from correlated typed completion evidence.
             playback.setPositionMs(120_000)
             playback.armIdentifiedSeek(mode: .completes, outcome: .completed(
@@ -4445,13 +4445,13 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
     /// Waits (bounded) for the app_operation_result frame named by `operationId` on the current
     /// captured transport.
-        /// REAL PRECONDITION (review 5295572f): with NO current episode (zero duration), the
+        /// REAL PRECONDITION: with NO current episode (zero duration), the
     /// system seek wrapper early-returns and its silent response is NOT a success — the honest
     /// durable outcome is a refusal, and no seek is attempted.
     func testSeekToWithNoCurrentEpisodeIsRefusedStalePrecondition() async throws {
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"3933547d-c3c2-4003-a81f-94a43f67b972","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"position_seconds":42},"precondition":{"episode_id":"ep-task67"}}
+            data: {"operation_id":"3933547d-c3c2-4003-a81f-94a43f67b972","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"position_seconds":42},"precondition":{"episode_id":"ep-current"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -4485,11 +4485,11 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     }
 
     /// REAL PRECONDITION, reference form: seek_to reference_target ALSO refuses when no episode
-    /// is available (it was bypassed before review fa03b7f9) — no mapping attempt, no seek.
+    /// is available (it must never be bypassed) — no mapping attempt, no seek.
     func testSeekToReferenceFormWithNoEpisodeIsRefusedBeforeMapping() async throws {
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"1bf6d033-6a20-4cd7-ab32-a62548b2f17c","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"reference_position_ms":1000},"precondition":{"episode_id":"ep-task67"}}
+            data: {"operation_id":"1bf6d033-6a20-4cd7-ab32-a62548b2f17c","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"reference_position_ms":1000},"precondition":{"episode_id":"ep-current"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -4525,7 +4525,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(refusals.first?.result.reason, OperationReason.stalePrecondition)
     }
 
-    /// PRODUCTION DEFAULT availability (review 0846e993): with NO injected availability closure
+    /// PRODUCTION DEFAULT availability (ownership contract): with NO injected availability closure
     /// and the REAL manager reporting no current episode, the reference-form seek refuses on the
     /// production path (existing-episode-with-unknown-duration would be AVAILABLE — duration is
     /// not availability — but the test host has no episode, which is the absent branch).
@@ -4533,7 +4533,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let consumer = RecordingResultConsumer()
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"fb36a011-ba98-418a-a177-39bcef233b16","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"reference_position_ms":1000},"precondition":{"episode_id":"ep-task67"}}
+            data: {"operation_id":"fb36a011-ba98-418a-a177-39bcef233b16","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"reference_position_ms":1000},"precondition":{"episode_id":"ep-current"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -4624,7 +4624,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     func testPlayQuoteWithoutReferenceIsRefusedAndDurablySettled() async throws {
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"9433422b-78ee-4676-a1fe-71f898fcd638","capability_version":"app-ops/1","tool":"playback","action":"play_quote","params":{"reference_position_ms":null},"precondition":{"episode_id":"ep-task67"}}
+            data: {"operation_id":"9433422b-78ee-4676-a1fe-71f898fcd638","capability_version":"app-ops/1","tool":"playback","action":"play_quote","params":{"reference_position_ms":null},"precondition":{"episode_id":"ep-current"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -4656,7 +4656,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     func testStopQuoteWithoutASavedPositionIsRefusedStalePrecondition() async throws {
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"df99ef63-7bbe-4c29-a608-576f6d645833","capability_version":"app-ops/1","tool":"playback","action":"stop_quote","params":{},"precondition":{"episode_id":"ep-task67"}}
+            data: {"operation_id":"df99ef63-7bbe-4c29-a608-576f6d645833","capability_version":"app-ops/1","tool":"playback","action":"stop_quote","params":{},"precondition":{"episode_id":"ep-current"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -5144,7 +5144,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     func testHeldWorkOwnerCancellationMidOperationNeverExecutesAfterRelease() async throws {
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"1a59989a-5e54-44cf-a59c-3c06b9f34658","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"ep-task67"}}
+            data: {"operation_id":"1a59989a-5e54-44cf-a59c-3c06b9f34658","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"ep-current"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -5323,7 +5323,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordState() async throws {
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"f0c729f0-ff82-4cf0-a314-657f0056b6d4","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"ep-task67"}}
+            data: {"operation_id":"f0c729f0-ff82-4cf0-a314-657f0056b6d4","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"ep-current"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -5439,7 +5439,7 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
     func testFailingClaimPersistenceRefusesEffectWithoutExecution() async throws {
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"14c7a45d-b3b2-4b4c-a5ce-0cbfc5b0b1c9","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"ep-task67"}}
+            data: {"operation_id":"14c7a45d-b3b2-4b4c-a5ce-0cbfc5b0b1c9","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"ep-current"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -5493,7 +5493,7 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
     func testRestartReconstructedUnknownReplaysThroughTransportWithoutReExecution() async throws {
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"7138bc14-6823-45bc-a8a2-4a90f47ab9eb","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"position_seconds":30},"precondition":{"episode_id":"ep-task67"}}
+            data: {"operation_id":"7138bc14-6823-45bc-a8a2-4a90f47ab9eb","capability_version":"app-ops/1","tool":"playback","action":"seek_to","params":{"position_seconds":30},"precondition":{"episode_id":"ep-current"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -5657,7 +5657,7 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
     func testIdentifiedActionWithoutAJournalRefusesBeforeAnyEffect() async throws {
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"7e14606e-e88e-4c39-a857-12294cd9dd32","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"ep-task67"}}
+            data: {"operation_id":"7e14606e-e88e-4c39-a857-12294cd9dd32","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"ep-current"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -5691,7 +5691,7 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
     func testIdentifiedActionWithoutATrustedOwnerRefusesBeforeAnyEffect() async throws {
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"9df43bff-7093-4c40-a12b-d339d50e949d","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"ep-task67"}}
+            data: {"operation_id":"9df43bff-7093-4c40-a12b-d339d50e949d","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"ep-current"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -5732,7 +5732,7 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
     func testAccountSwitchAfterAdmissionRefusesBeforeAnyEffect() async throws {
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"132b2d8b-c918-4062-a684-59b1e314944d","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"ep-task67"}}
+            data: {"operation_id":"132b2d8b-c918-4062-a684-59b1e314944d","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"ep-current"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -5857,7 +5857,7 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
         let journal = OperationJournal(store: InMemoryOperationRecordStore())
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"1bcc78d9-a144-4f8b-a04f-146c49aa9f81","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"ep-task67"}}
+            data: {"operation_id":"1bcc78d9-a144-4f8b-a04f-146c49aa9f81","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":5},"precondition":{"episode_id":"ep-current"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -5875,7 +5875,7 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
 
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"b426dd7e-28e0-43a1-aaf1-14846dba4065","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":6},"precondition":{"episode_id":"ep-task67"}}
+            data: {"operation_id":"b426dd7e-28e0-43a1-aaf1-14846dba4065","capability_version":"app-ops/1","tool":"playback","action":"seek_relative","params":{"delta_seconds":6},"precondition":{"episode_id":"ep-current"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -5923,7 +5923,7 @@ private final class NoOpCloudStatsQuerySink: VoiceStatsQuerySink {
 /// test observes the state the double actually holds.
 private final class RecordingPlaybackSink: VoicePlaybackSink, @unchecked Sendable {
 
-    /// voice-intents.md @ 818c8f75 knob: no current engine reading exists (a missing engine),
+    /// voice-intents.md knob: no current engine reading exists (a missing engine),
     /// so the observation is UNAVAILABLE rather than observed-paused.
     private var simulateUnavailableObservation = false
     func setSimulateUnavailableObservation(_ on: Bool) {
@@ -5933,7 +5933,7 @@ private final class RecordingPlaybackSink: VoicePlaybackSink, @unchecked Sendabl
     /// The single observation the identified pause path reads: unavailable, observed playing,
     /// or observed paused — never collapsing a missing engine into `false`.
     private var storedObservedPlayingReads = 0
-    /// voice-intents.md @ 818c8f75 guard: classification and settlement must come from ONE
+    /// voice-intents.md guard: classification and settlement must come from ONE
     /// observation, so the identified pause path may read this EXACTLY ONCE after its pause.
     var observedPlayingReads: Int {
         lock.lock(); defer { lock.unlock() }
@@ -5975,11 +5975,11 @@ private final class RecordingPlaybackSink: VoicePlaybackSink, @unchecked Sendabl
         lock.lock(); storedIsPlaying = playing; lock.unlock()
     }
 
-    /// voice-intents.md @ 818c8f75 control knob: a real engine can fail to stop. When set,
+    /// voice-intents.md control knob: a real engine can fail to stop. When set,
     /// `pause()` records the call but leaves the engine playing, so the sink's fresh post-sink
     /// observation reads `true` — the only way the `pause_not_observed` arm is reachable.
     private var simulatesFailedPause = false
-    /// voice-intents.md @ df5def09 knob (TEST DOUBLE ONLY): the resume sink "completed" but the
+    /// voice-intents.md knob (TEST DOUBLE ONLY): the resume sink "completed" but the
     /// engine stayed paused, so the post-sink observation still reads `false` — the
     /// `resume_not_observed` arm is otherwise unreachable because this double always flips
     /// `storedIsPlaying` to true in `resume()`.
@@ -6050,7 +6050,7 @@ private final class RecordingPlaybackSink: VoicePlaybackSink, @unchecked Sendabl
         return .silent
     }
 
-    // MARK: identified seek_relative (task67 slice controls)
+    // MARK: identified seek_relative (identified seek controls)
 
     enum IdentifiedSeekMode {
         case unavailable // engine refuses to initiate (no evidence, no effect)
@@ -10248,7 +10248,7 @@ private struct NoOpCloudPlaybackContextProvider: PlaybackContextProvider {
 
 private final class NoOpCloudPlaybackSink: VoicePlaybackSink {
 
-    /// App-operation observation (voice-intents.md @ 818c8f75): this double has no notion of an
+    /// App-operation observation (voice-intents.md): this double has no notion of an
     /// unavailable engine, so it mirrors `isPlaying`.
     var observedPlaying: Bool? { isPlaying }
 

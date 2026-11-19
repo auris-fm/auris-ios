@@ -6,7 +6,7 @@ import PocketCastsServer
 import PocketCastsUtils
 
 class VoiceControlAssembly {
-    /// THE PRODUCTION APP-OPERATION DECLARATION (enablement slices, task67): pause + resume.
+    /// THE PRODUCTION APP-OPERATION DECLARATION (production enablement): pause + resume.
     /// ONE value with two consumers that must never disagree: the CloudRouteSink construction
     /// below wires it as the sink's `appOperationSupportProvider`, and the sink reads the
     /// provider ONCE per admitted turn — the same captured value serializes the authenticate
@@ -422,7 +422,7 @@ class VoiceControlAssembly {
                 // so the dispatch fence must admit a claimed-but-expired origin. This is the
                 // PRODUCTION registration path; the authority reads the live admission state.
                 admittedWorkAuthority: { gracePeriodSignal.admittedWorkAuthority },
-                // APP-OPERATION ENABLEMENT (task67): the production declaration above, read by
+                // APP-OPERATION ENABLEMENT: the production declaration above, read by
                 // the sink once per turn — the SAME snapshot advertises on the authenticate
                 // frame and gates execution. Behavior controls bind the constant; the wiring
                 // HERE is pinned by the assembly source-audit control.

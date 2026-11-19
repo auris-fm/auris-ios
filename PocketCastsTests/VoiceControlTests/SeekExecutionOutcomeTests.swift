@@ -2,7 +2,7 @@ import XCTest
 import AVFoundation
 @testable import podcasts
 
-/// Controls for the ADDITIVE typed seek-completion surface (task67 seek slice). Legacy
+/// Controls for the ADDITIVE typed seek-completion surface (identified seek). Legacy
 /// completions and EOF side effects are exercised alongside the typed deliveries. No await,
 /// journal classification or manifest surface is in scope here.
 ///
@@ -208,7 +208,7 @@ final class SeekExecutionOutcomeTests: XCTestCase {
         XCTAssertFalse(engine.isSeekPending, "the newer seek retired its own state")
     }
 
-    /// CONTROLLED OVERLAP (review 61ebb558): B must OWN the pending speculative state
+    /// CONTROLLED OVERLAP (ownership contract): B must OWN the pending speculative state
     /// before A's late expiry is released — proving the ownership comparison and state
     /// transition are one atomic transaction. A (first read task) is parked INSIDE its
     /// hop-2 clock; B (second read task) publishes and mutates, and is held PENDING by

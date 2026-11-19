@@ -510,7 +510,7 @@ struct AdmittedTurnIdentity: Equatable {
     /// keep today's interpretation path.
     private let routeHintProvider: () -> CloudRouteHint?
     private let appOperationSupportProvider: () -> CloudAppOperationSupport?
-    /// ADDITIVE (task67): the identified seek completion budget (seconds, monotonic from the
+    /// ADDITIVE: the identified seek completion budget (seconds, monotonic from the
     /// original admission).
     private let identifiedSeekBudgetSeconds: TimeInterval
     /// Renders negotiated discovery results. Present only when the UI can show
@@ -799,13 +799,13 @@ struct AdmittedTurnIdentity: Equatable {
         // default, so a direct-constructed sink keeps the live-origin-only fence.
         admittedWorkAuthority: (() -> GracePeriodSignal.AdmittedWorkAuthority?)? = nil,
         // THE APP-OPERATION DECLARATION for the contract's capability negotiation
-        // (trainer-reduced-local-scope @ 818c8f75): the support manifest this turn's
+        // (local-scope declaration): the support manifest this turn's
         // authenticate envelope advertises. Read ONCE per turn — one immutable snapshot per
         // admitted turn/socket — and the SAME value both serializes onto the frame and gates
         // execution. Default stays nil (empty declaration); the production assembly wires
         // `VoiceControlAssembly.declaredAppOperations` (pause + resume) as its provider.
         appOperationSupportProvider: @escaping () -> CloudAppOperationSupport? = { nil },
-        // ADDITIVE (task67): the identified seek completion budget. Production keeps the spec
+        // ADDITIVE: the identified seek completion budget. Production keeps the spec
         // default (15s); a control may inject a short budget to exercise expiry arms in
         // real time without long waits.
         identifiedSeekBudgetSeconds: TimeInterval = SeekRelativeCompletion.defaultBudgetSeconds
@@ -2241,7 +2241,7 @@ struct AdmittedTurnIdentity: Equatable {
         return fact ?? unknown
     }
 
-    /// The wire contract's runtime gate (rev da327e624 §1, amended @ bf5fb219): every cloud app
+    /// The wire contract's runtime gate (cloud-assistant.md app-operation protocol v1): every cloud app
     /// operation carries `operation_id` AND `capability_version`, both non-empty; an operation
     /// missing either is MALFORMED — refused before any effect, never executed as a legacy
     /// playback frame. A missing half is the amendment's explicit "incomplete pair is
@@ -2452,7 +2452,7 @@ struct AdmittedTurnIdentity: Equatable {
                 targetMatch = .absent
             }
             var refusalReason: String? = {
-                // NEGOTIATED-SUPPORT RECHECK (trainer-reduced-local-scope @ 818c8f75): the
+                // NEGOTIATED-SUPPORT RECHECK (local-scope declaration): the
                 // manifest THIS TURN advertised is the negotiated truth. An operation outside
                 // it — including ANY operation under an empty declaration — is refused before
                 // its effect and the refusal settles durably. Identityless legacy playback
@@ -2526,7 +2526,7 @@ struct AdmittedTurnIdentity: Equatable {
             // be reported as success — the durable record is still in progress, so the honest
             // answer is unknown, never a replayable success.
             // Settle with the SINGLE OBSERVATION the classification used (voice-intents.md
-            // @ 818c8f75): `performIdentifiedMutation` captured it once, so the gate that
+            //): `performIdentifiedMutation` captured it once, so the gate that
             // decided success and the state on the wire cannot come from different readings —
             // for a pause, a gate on observed `false` can never settle `playing: true`.
             Swift.precondition(outcome.settledState != nil,
@@ -2572,8 +2572,8 @@ struct AdmittedTurnIdentity: Equatable {
         }
     }
 
-    /// ADDITIVE identified seek_relative (task67 slice, spec cloud-assistant.md "Client seek
-    /// completion and settlement" @ a3af56dd): the effect is issued with a caller-minted
+    /// ADDITIVE identified seek_relative (spec cloud-assistant.md "Client seek
+    /// completion and settlement"): the effect is issued with a caller-minted
     /// invocation token; the coordinator owns the 15-second monotonic budget from THIS
     /// admission, correlates the typed outcome to the token, and settles the classification
     /// table. The legacy fire-and-forget path stays for identityless frames.
@@ -2655,7 +2655,7 @@ struct AdmittedTurnIdentity: Equatable {
         }
     }
 
-    /// The IDENTIFIED-operation mutation path (voice-intents.md @ 818c8f75): for `playback.pause`
+    /// The IDENTIFIED-operation mutation path (voice-intents.md): for `playback.pause`
     /// it produces ONE fresh post-sink observation and returns it as the state the caller must
     /// settle and send, so classification and wire state cannot come from different readings.
     /// Every other action, and the whole legacy path, behave exactly as `performMutation` does.
@@ -2692,7 +2692,7 @@ struct AdmittedTurnIdentity: Equatable {
             }
         }
         if action == "resume" {
-            // IDENTIFIED resume (voice-intents.md @ df5def09): the existing target-precondition
+            // IDENTIFIED resume (voice-intents.md): the existing target-precondition
             // STAYS IN FORCE — resume's sink (PlaybackManager.play) early-returns on no current
             // episode, so the availability precondition runs BEFORE the effect; its refusal is
             // `stale_precondition`, never a dressed-up success. Note the order against the gate:
@@ -2787,7 +2787,7 @@ struct AdmittedTurnIdentity: Equatable {
             _ = playbackSink.seekRelative(deltaSeconds: delta, direction: direction)
             return nil
         case "pause":
-            // LEGACY path: unchanged response behaviour (voice-intents.md @ 818c8f75). The
+            // LEGACY path: unchanged response behaviour (voice-intents.md). The
             // OBSERVED pause classification lives only in the identified-operation path —
             // `performIdentifiedMutation` below — so a legacy turn never reports an
             // app-operation result and never classifies a pause at all.

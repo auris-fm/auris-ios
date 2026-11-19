@@ -763,7 +763,7 @@ private struct EmptyInterruptionMapper: FingerprintMappingProviding {
 
 private final class InterruptPlaybackSink: VoicePlaybackSink, @unchecked Sendable {
 
-    /// App-operation observation (voice-intents.md @ 818c8f75): this double has no notion of an
+    /// App-operation observation (voice-intents.md): this double has no notion of an
     /// unavailable engine, so it mirrors `isPlaying`.
     var observedPlaying: Bool? { isPlaying }
 

@@ -104,7 +104,7 @@ enum OperationReason {
     /// The sink does not support this operation at all, as opposed to supporting it and
     /// refusing for a policy reason.
     static let unsupportedOperation = "unsupported_operation"
-    /// Wire-pinned (cloud-assistant.md @ bf5fb219): a required identity precondition is
+    /// Wire-pinned (cloud-assistant.md): a required identity precondition is
     /// missing — the operation is malformed, refused before any execution.
     static let invalidRequest = "invalid_request"
     /// The exactly-once record could not be durably persisted (or existing history is
@@ -130,18 +130,18 @@ enum OperationReason {
     static let malformedSeekTarget = "malformed_seek_target"
 
     /// A cloud `playback.pause` was attempted and completed, but a fresh post-sink observation
-    /// still found the engine playing (voice-intents.md @ 818c8f75). A FAILED pause, not a
+    /// still found the engine playing (voice-intents.md). A FAILED pause, not a
     /// refusal: the mutation was attempted, so the wire's table places it under `failed`.
     static let pauseNotObserved = "pause_not_observed"
 
     /// A cloud `playback.resume` was attempted and completed, but a fresh post-sink observation
-    /// still found the engine paused (voice-intents.md @ df5def09, resume observation contract).
+    /// still found the engine paused (voice-intents.md, resume observation contract).
     /// A FAILED resume, not a refusal: the mutation was attempted, so the wire's table places it
     /// under `failed`. Mirror of `pause_not_observed`; carries no state.
     static let resumeNotObserved = "resume_not_observed"
 
     /// A post-action playback observation could not be produced (voice-intents.md
-    /// @ 818c8f75): the wire's `playback_state_unavailable`. Produced when the engine exposes
+    ///): the wire's `playback_state_unavailable`. Produced when the engine exposes
     /// no current reading — `PlaybackManager.observedPlaybackState()` returns `nil` for a
     /// missing player — distinct from an observed paused engine.
     static let playbackStateUnavailable = "playback_state_unavailable"
@@ -229,7 +229,7 @@ enum OperationRecordLoadResult {
 
 /// WHO an app operation belongs to, and WHICH bytes it was.
 ///
-/// The amendment (cloud-assistant.md @ bf5fb219) does not let an operation id stand alone: the id
+/// The amendment (cloud-assistant.md) does not let an operation id stand alone: the id
 /// is server-issued and turn-bound, a redelivery within a turn must carry byte-identical
 /// serialized action, and the same id with different contents is a DIFFERENT operation the
 /// client refuses rather than executes.

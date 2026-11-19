@@ -801,7 +801,7 @@ final class CloudProducerInterleavingControls: XCTestCase {
 /// audio the producer emits, so these answers are inert by construction.
 private final class SilentPlaybackSink: VoicePlaybackSink, @unchecked Sendable {
 
-    /// App-operation observation (voice-intents.md @ 818c8f75): this double has no notion of an
+    /// App-operation observation (voice-intents.md): this double has no notion of an
     /// unavailable engine, so it mirrors `isPlaying`.
     var observedPlaying: Bool? { isPlaying }
 
