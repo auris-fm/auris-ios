@@ -656,6 +656,7 @@ final class CloudAuthTokenReviewFixTests: XCTestCase {
             authBaseURLProvider: { "https://auth.test" },
             credentialProvider: credential,
             identityProvider: { "acct-A" },
+            session: makeStubSession(),
             now: { self.now }
         )
     }
