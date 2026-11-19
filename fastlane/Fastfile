@@ -708,6 +708,27 @@ platform :ios do
   #
   # @param set_up_code_signing [Boolean] If true, will call `configure_code_signing_app_store` before building. Recommended on CI.
   #
+  # Builds the xcodebuild arguments that let automatic signing create and
+  # download profiles on a headless agent: `-allowProvisioningUpdates` plus
+  # the App Store Connect API key, taken from the three env vars below.
+  # Raises when the key is absent, so the failure is at the start, not at
+  # the export step.
+  def signing_provisioning_xcargs
+    require_env_vars!(*ASC_API_KEY_ENV_VARS)
+    key_id = ENV['APP_STORE_CONNECT_API_KEY_KEY_ID']
+    issuer_id = ENV['APP_STORE_CONNECT_API_KEY_ISSUER_ID']
+    key_content = ENV['APP_STORE_CONNECT_API_KEY_KEY']
+    key_path = File.join(Dir.tmpdir, "AuthKey_#{key_id}.p8")
+    File.write(key_path, key_content)
+    File.chmod(0o600, key_path)
+    {
+      allowProvisioningUpdates: true,
+      authenticationKeyPath: key_path,
+      authenticationKeyID: key_id,
+      authenticationKeyIssuerID: issuer_id
+    }
+  end
+
   # ------------------------------------------------------------------
   # Auris beta distribution (TestFlight, internal testers)
   #
@@ -723,23 +744,30 @@ platform :ios do
   AURIS_XCARCHIVE_PATH = File.join(ARTIFACTS_FOLDER, "#{AURIS_BUILD_OUTPUT_NAME}.xcarchive")
   AURIS_IPA_PATH = File.join(ARTIFACTS_FOLDER, "#{AURIS_BUILD_OUTPUT_NAME}.ipa")
 
-  # Archives the Auris app for TestFlight. The speech runtime is a static
-  # library (`liblfm_runtime.a`) linked into the app binary, so a device
-  # archive built without `ThirdParty/llama-cpp-build/ios-device` still
-  # succeeds — `scripts/check-auris-ipa.sh` makes that failure visible
-  # instead of shipping a build that crashes at first voice use.
+  # Archives the Auris app for TestFlight. The speech runtime is linked
+  # into the binary by the project config (`-llfm_runtime` from
+  # `ThirdParty/llama-cpp-build/$(LLAMA_SLICE)/lfm`), so a device archive
+  # cannot exist without it: a missing device build fails the link, not
+  # the upload. Automatic signing on a headless agent needs the App Store
+  # Connect API key passed through to xcodebuild, so both the archive and
+  # the export steps get `-allowProvisioningUpdates` and the key arguments
+  # from the same three `APP_STORE_CONNECT_API_KEY_*` env vars the upload
+  # uses.
   #
   # @param build_number [String, nil] When given, overrides `VERSION_LONG`
   #   (`CURRENT_PROJECT_VERSION`). Defaults to the xcconfig value.
   #
   lane :auris_beta_build do |build_number: nil|
     xcargs = build_number ? { VERSION_LONG: build_number } : {}
+    provisioning_xcargs = signing_provisioning_xcargs
+    xcargs.merge!(provisioning_xcargs)
 
     build_app(
       scheme: SCHEME,
       include_symbols: true,
       clean: true,
       xcargs: xcargs,
+      export_xcargs: provisioning_xcargs,
       export_options: {
         method: 'app-store',
         manageAppVersionAndBuildNumber: false,
@@ -749,8 +777,6 @@ platform :ios do
       output_directory: ARTIFACTS_FOLDER,
       output_name: AURIS_BUILD_OUTPUT_NAME
     )
-
-    sh("#{PROJECT_ROOT_FOLDER}/scripts/check-auris-ipa.sh #{AURIS_IPA_PATH.shellescape}")
   end
 
   # Uploads the archived Auris ipa to TestFlight for internal testers.
