@@ -7,6 +7,19 @@ import XCTest
 /// `arch/ios.md` requires an inspectable fault state. A flag private to the segmenter satisfies
 /// neither: nothing outside it can see the interruption, so the user gets silence with no reason.
 final class SegmentationFaultSurfacingControl: XCTestCase {
+    /// Offline backend stand-in: no on-device model is available to a unit test, and the
+    /// Whisper fixture this control used to use is gone with the unselected backend
+    /// (monthly review core#157).
+    private final class StubAsrBackendForControl: AsrBackend {
+        let capabilities = AsrCapabilities(canTranslateToEnglish: false)
+        var requiredModel: ModelSpec { ModelSpec(id: "stub", files: [], targetDir: "stub") }
+        func ensureReady() async -> Result<Void, Error> { .success(()) }
+        func transcribe(samples: [Float], sampleRateHz: Int) async -> AsrResult {
+            AsrResult(text: "", detectedLanguage: nil, tokens: nil)
+        }
+        func release() {}
+    }
+
     private final class SilentDetector: WakeWordDetectorProtocol {
         func detect(samples: [Float], sampleRate: Int) -> WakeWordResult {
             .notDetected(confidence: 0)
@@ -34,7 +47,7 @@ final class SegmentationFaultSurfacingControl: XCTestCase {
         VoiceAsrEngine(
             capture: capture ?? NativeAudioCapture(),
             segmenter: segmenter,
-            backend: WhisperCppBackend(modelPath: "/tmp/test"),
+            backend: StubAsrBackendForControl(),
             signalFilter: SignalFilter(),
             wakeWordDetector: SilentDetector(),
             gracePeriodSignal: GracePeriodSignal()
@@ -55,7 +68,7 @@ final class SegmentationFaultSurfacingControl: XCTestCase {
         engine.onSegmentationFault = { faults.append($0) }
         // Install the engine's forwarding without opening the microphone, then reach the ceiling.
         engine.installCaptureCallbacksForTesting()
-        segmenter.onUtterance = { (utterance: [Float], _: MonotonicTime?) in dispatched.append(utterance) }
+        segmenter.onUtterance = { (utterance: [Float], _: MonotonicTime?, _: WakeWordResult?, _: String?, _: MonotonicTime) in dispatched.append(utterance) }
 
         for _ in 0..<((240_000 / 20) + 10) { segmenter.process([Float](repeating: 0.1, count: 320)) }
         drainMainQueue()
@@ -340,7 +353,7 @@ final class SegmentationFaultSurfacingControl: XCTestCase {
         let engine = makeEngine(segmenter: segmenter, capture: capture)
         var utterances = 0
         var faults = 0
-        segmenter.onUtterance = { _, _ in utterances += 1 }
+        segmenter.onUtterance = { _, _, _, _, _ in utterances += 1 }
         segmenter.onStuckActiveFault = { _ in faults += 1 }
         engine.installCaptureCallbacksForTesting()
 
@@ -458,7 +471,7 @@ final class SegmentationFaultSurfacingControl: XCTestCase {
         let script = ScriptedSpeechClassifier(silentFrames: 0, speechFrames: Int.max)
         let segmenter = NativeVadSegmenter(threshold: 0.020, silenceTimeoutMs: 60_000, classifier: script)
         var dispatched: [[Float]] = []
-        segmenter.onUtterance = { (utterance: [Float], _: MonotonicTime?) in dispatched.append(utterance) }
+        segmenter.onUtterance = { (utterance: [Float], _: MonotonicTime?, _: WakeWordResult?, _: String?, _: MonotonicTime) in dispatched.append(utterance) }
         segmenter.onStuckActiveFault = { _ in }
 
         for _ in 0..<((240_000 / 20) + 10) { segmenter.process([Float](repeating: 0.1, count: 320)) }
@@ -505,7 +518,7 @@ final class SegmentationFaultSurfacingControl: XCTestCase {
         let engine = VoiceAsrEngine(
             capture: capture,
             segmenter: segmenter,
-            backend: WhisperCppBackend(modelPath: "/tmp/test"),
+            backend: StubAsrBackendForControl(),
             signalFilter: SignalFilter(),
             wakeWordDetector: SilentDetector(),
             gracePeriodSignal: GracePeriodSignal()
@@ -552,7 +565,7 @@ final class SegmentationFaultSurfacingControl: XCTestCase {
         var faults: [NativeVadSegmenter.ClassifierUnavailableFault] = []
         var dispatched: [[Float]] = []
         segmenter.onClassifierUnavailable = { faults.append($0) }
-        segmenter.onUtterance = { (utterance: [Float], _: MonotonicTime?) in dispatched.append(utterance) }
+        segmenter.onUtterance = { (utterance: [Float], _: MonotonicTime?, _: WakeWordResult?, _: String?, _: MonotonicTime) in dispatched.append(utterance) }
 
         segmenter.reportClassifierUnavailable("model missing")
         for _ in 0..<50 { segmenter.process([Float](repeating: 0.3, count: 320)) }

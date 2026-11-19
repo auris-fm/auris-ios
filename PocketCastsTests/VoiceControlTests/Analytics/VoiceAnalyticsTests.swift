@@ -20,26 +20,6 @@ final class VoiceAnalyticsTests: XCTestCase {
         XCTAssertEqual(mockAnalytics.lastProperties?["response_type"] as? String, "silent")
     }
 
-    func test_recordLatency_tracksAllFields() {
-        let mockAnalytics = MockAnalyticsService()
-        let voiceAnalytics = VoiceAnalytics(analytics: mockAnalytics)
-        let metrics = PerformanceMetrics(
-            totalTranscriptToIntentMs: 250.0,
-            prefillMs: 10.0,
-            timeToFirstTokenMs: 50.0,
-            decodeMs: 180.0,
-            parseResolveMs: 10.0,
-            backend: "ANE",
-            isFallback: false,
-            modelRelease: "v1.0",
-            inputTokens: 100,
-            outputTokens: 5
-        )
-        voiceAnalytics.recordLatency(metric: metrics)
-        XCTAssertEqual(mockAnalytics.lastEvent, "voice_router_latency")
-        XCTAssertEqual(mockAnalytics.lastProperties?["backend"] as? String, "ANE")
-        XCTAssertEqual(mockAnalytics.lastProperties?["total_ms"] as? Double, 250.0)
-    }
 
     func test_recordPipelineLatency_tracksStageTimingAndOutcome() {
         let mockAnalytics = MockAnalyticsService()

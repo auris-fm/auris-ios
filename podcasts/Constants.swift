@@ -360,6 +360,12 @@ struct Constants {
         static let errorLogoutHandling = "error_logout_handling"
         static let errorLogoutHandlingDefault: Bool = false
 
+        // Voice Recording Uploads (voice-recording-uploads spec): the only remote
+        // control for the feature. Local fallback is false by design — an absent or
+        // invalid remote value must disable collection, never a local default enable it.
+        static let voiceSharingEnabled = "voice_sharing_enabled"
+        static let voiceSharingEnabledDefault: Bool = false
+
         static let slumberStudiosPromoCode = "slumber_studios_yearly_promo_code"
         static let slumberStudiosPromoCodeDefault = ""
     }
@@ -367,9 +373,9 @@ struct Constants {
     static let defaultDebounceTime: TimeInterval = 0.5
 
     /// The `SettingValue` provides a way to:
-    ///     - Define a UserDefaults setting
-    ///     - Specify the default value to be used if it's not set
-    ///     - Retrieve and save the value to the user defaults
+    /// - Define a UserDefaults setting
+    /// - Specify the default value to be used if it's not set
+    /// - Retrieve and save the value to the user defaults
     /// Example:
     /// let helloWorld = SettingValue("hello", defaultValue: "world")
     /// print(helloWorld.value()) -> "world" // Default value is used
@@ -381,11 +387,11 @@ struct Constants {
     ///
     /// Specify an optional and a default value by wrapping the value in an `Optional`
     ///
-    ///     SettingValue("nullable", defaultValue: Optional("HelloWorld"))
+    /// SettingValue("nullable", defaultValue: Optional("HelloWorld"))
     ///
     /// Specify a type and a default value of nil by using `.none`
     ///
-    ///     SettingValue("nullable", defaultValue: String?.none)
+    /// SettingValue("nullable", defaultValue: String?.none)
     ///
     struct SettingValue<Value> {
         let key: String

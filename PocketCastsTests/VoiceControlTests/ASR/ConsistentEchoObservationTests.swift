@@ -228,7 +228,7 @@ private final class ParkedCapture: NativeAudioCapture { }
 private final class IdleBackend: AsrBackend {
     var requiredModel: ModelSpec { ModelSpec(id: "test", files: [], targetDir: "/tmp/test") }
     var capabilities: AsrCapabilities {
-        AsrCapabilities(languages: ["en"], canTranslateToEnglish: false, requiresHardwareAccel: false)
+        AsrCapabilities(canTranslateToEnglish: false)
     }
     func ensureReady() async -> Result<Void, Error> { .success(()) }
     func release() {}

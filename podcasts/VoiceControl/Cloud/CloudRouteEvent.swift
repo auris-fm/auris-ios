@@ -48,6 +48,18 @@ struct CloudAudioFrame: Equatable {
     var timingReceipt: CloudPlaybackTiming.Receipt? = nil
 }
 
+/// How the server ended the turn, from the `done` frame's REQUIRED `outcome` field.
+///
+/// Only the two values the wire defines. An absent or unknown value is not a third state: the
+/// parser defaults to `completed`, which is the behaviour every existing frame produced, so a
+/// server that omits the field cannot silently discard a finished answer.
+enum CloudTurnDoneOutcome: String, Equatable {
+    /// The answer finished: drain buffered audio, then restore the host window.
+    case completed
+    /// The turn was interrupted: discard this turn's output WITHOUT draining it.
+    case interrupted
+}
+
 /// Usage reported in the `done` frame (cloud-assistant.md).
 struct CloudTurnUsage: Equatable {
     /// Model input tokens; `nil` when the provider completed without reporting.
@@ -122,8 +134,12 @@ enum CloudRouteEvent: Equatable {
     /// Negotiated structured discovery result (only when client advertised
     /// `search_results_v1`).
     case result(DiscoveryResult)
-    /// Terminal success: answer model finished, final audio delivered.
-    case done(usage: CloudTurnUsage)
+    /// Terminal `done`. The wire REQUIRES `outcome` (`cloud-assistant.md` → Completion, and the
+    /// worker's `DoneFrame`): `completed` means the answer finished and its buffered audio drains;
+    /// `interrupted` means the user took the turn back, so that audio is DISCARDED without draining.
+    /// Carried structurally because the two are indistinguishable from usage alone — a client that
+    /// cannot tell them apart plays out an answer nobody is listening to.
+    case done(usage: CloudTurnUsage, outcome: CloudTurnDoneOutcome = .completed)
     /// Terminal error.
     /// WHERE the error originated, carried STRUCTURALLY so a consumer never has to infer it from the
     /// message text. Text sniffing misclassifies: a server could legitimately send a message that looks

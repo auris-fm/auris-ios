@@ -40,5 +40,5 @@ log stream --process podcasts --level debug --style compact
 
 - `--color always` can be added when piping to a human terminal (omit for agent use — ANSI codes create noise)
 - `--style compact` shows timestamp + process + message on one line
-- Add `--predicate 'category == "voice"'` to narrow to a specific log category
+- Add `--predicate 'category == "VoicePipeline"'` to narrow to a specific log category
 - Simulator microphone works via the Mac's built-in mic — grant permission in System Settings → Privacy & Security → Microphone

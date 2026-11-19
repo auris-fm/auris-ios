@@ -1,3 +1,4 @@
+import PocketCastsUtils
 /// The origin these cases dispatch under. The conversation bound refuses a turn whose origin
 /// is not live, so a sink built for these cases must be given one — otherwise every turn would
 /// be refused before it dials and the case would exercise the bound rather than the sink.
@@ -11,6 +12,7 @@ private func testConversationManager() -> CloudConversationManager {
 
 import XCTest
 import AVFoundation
+import PocketCastsUtils
 @testable import podcasts
 
 final class CloudRouteSinkTests: SocketCapturingTestCase {
@@ -111,6 +113,624 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let snap = contextState.snapshot()
         XCTAssertEqual(snap.recentReferencePositions.last, 1_130_000)
         XCTAssertEqual(snap.previousReferencePositionMs, 500_000)
+    }
+
+    /// Every cloud request emits exactly ONE client-side latency line, and a turn that produced no
+    /// audio says so rather than reporting zero.
+    ///
+    /// Asserted on the line the sink writes to the app log — the surface a person reads back on a
+    /// device — rather than through an accessor added for the test. A record emitted per frame
+    /// would multiply the turn; one emitted only on success would hide exactly the failing turns
+    /// the latency work is chasing.
+    @MainActor
+    func testEveryCloudRequestEmitsOneLatencyRecord() async throws {
+        // Unique per RUN: the app's log persists across runs, so a fixed id would count the
+        // previous run's lines and measure the harness rather than this turn.
+        let run = UUID().uuidString.prefix(8)
+        let doneId = "u-\(run)-done"
+        let errorId = "u-\(run)-error"
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":10,"output_tokens":4}}
+
+            """
+        let sink = makeSink()
+        _ = await sink.routeToCloud(
+            request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: doneId)
+
+        self.pendingFixture =
+            """
+            event: error
+            data: {"code":"provider_error","message":"upstream failed"}
+
+            """
+        _ = await sink.routeToCloud(
+            request: "again", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: errorId)
+
+        let log = await FileLog.shared.logFileAsString()
+        // The log is shared by every test in the run, so the count is scoped to THIS control's own
+        // request ids: counting globally would measure the suite, not the turn.
+        let mine = log.split(separator: "\n")
+            .filter { $0.contains("cloudTurnLatency") && ($0.contains(doneId) || $0.contains(errorId)) }
+            .map(String.init)
+        XCTAssertEqual(mine.count, 2,
+                       "one latency line per request; a line per frame would multiply the turn, "
+                           + "and a missing one would hide a turn that never played: \(mine)")
+        let done = try XCTUnwrap(mine.first { $0.contains(doneId) }, log)
+        XCTAssertTrue(done.contains("outcome=done"), done)
+        // NOT `contains("end_of_speech_to_first_audible=")`: that substring is satisfied by
+        // `=none`, so it passed for a turn that measured nothing, which is every turn here.
+        // This fixture carries no audio, so the honest expectation is stated as such.
+        XCTAssertTrue(
+            done.contains("first_audible=absent"),
+            "a turn with no audio says so rather than reporting a duration: \(done)")
+        XCTAssertTrue(done.contains("end_of_speech_to_first_audible=none"), done)
+        let failed = try XCTUnwrap(mine.first { $0.contains(errorId) }, log)
+        XCTAssertTrue(failed.contains("outcome=error"), failed)
+        XCTAssertTrue(failed.contains("first_audible=absent"), failed)
+    }
+
+    /// A turn with an AUDIO FIXTURE reports its own line, consistently, whether or not the
+    /// simulator's engine rendered.
+    ///
+    /// `first_audible=absent` is NOT assertable here. The engine does start on the simulator and the
+    /// mark lands moments after `done`, and the record waits for it, so this turn can legitimately
+    /// report a duration. Whether the simulator's engine renders is the host's business, so the
+    /// assertion is the part that cannot depend on it: the line belongs to THIS request, and it is
+    /// internally consistent - absence is stated as absence, and a measured turn has a measured
+    /// request leg rather than `none`.
+    @MainActor
+    func testAnAudioFixtureTurnReportsItsOwnLineWithoutClaimingAudio() async throws {
+        // Unique per RUN: the app log persists, so a fixed id would read the previous run's line.
+        let utteranceId = "u-\(UUID().uuidString.prefix(12))-audible"
+        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        defer { CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil }
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let sink = makeSinkWithConsumer(
+            RecordingResultConsumer(),
+            audioPayloads: (0..<40).map { Data([UInt8($0)]) }
+        )
+        let context = TurnLatencyContext()
+        context.endOfSpeech = 0
+        _ = await sink.routeToCloud(
+            request: "x", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: nil, utteranceId: utteranceId,
+            latency: LatencyHandle(context))
+
+        let line = try await latencyLine(for: utteranceId)
+        XCTAssertEqual(
+            Self.requestId(of: line), utteranceId,
+            "the line must be THIS turn's, not a stale one from an earlier run: \(line)")
+        XCTAssertTrue(line.contains("outcome=done"), line)
+        let measured = !line.contains("first_audible=absent")
+        if measured {
+            XCTAssertFalse(
+                line.contains("request_to_first_audible=none"),
+                "a turn that reports an audible instant must report the request leg to it: \(line)")
+        } else {
+            XCTAssertTrue(
+                line.contains("end_of_speech_to_first_audible=none"),
+                "no audible instant means the leg is unmeasured, not zero: \(line)")
+        }
+    }
+
+    /// A SHORT reply's stream ends before its first buffer reaches the player.
+    ///
+    /// The whole answer can arrive, and `done` with it, while the node has rendered nothing: the
+    /// first-audible mark is taken only once the node renders, so a record written AT `done` reports
+    /// `first_audible=absent` for audio that then plays. The record must be HELD while audio is
+    /// outstanding and unmarked, then written once, when the mark lands.
+    ///
+    /// The engine renders offline, so the node renders only when this test renders it: the record is
+    /// absent from the log at `done`, and the mark taken once the test renders must be what it
+    /// carries - a measured request leg, never absence.
+    @MainActor
+    func testAShortReplyHoldsItsLatencyRecordUntilPlaybackSettles() async throws {
+        let utteranceId = "u-\(UUID().uuidString.prefix(12))-short"
+        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        let fmt = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1))
+        let engineBox = OfflineEngineBox()
+        CloudAudioPlayer.configureEngineForTesting = { engine in
+            try engine.enableManualRenderingMode(.offline, format: fmt, maximumFrameCount: 4_096)
+            engineBox.engine = engine
+        }
+        defer {
+            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
+            CloudAudioPlayer.configureEngineForTesting = nil
+        }
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let sink = makeSinkWithConsumer(
+            RecordingResultConsumer(),
+            // Whole 16-bit samples, enough frames to start the engine.
+            audioPayloads: (0..<8).map { _ in Data(repeating: 0x10, count: 4_800) }
+        )
+        // Production wires the echo reference and its handoff; the player counts the audio it
+        // scheduled (what the drain waits on) only through them.
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 16)
+        defer { withExtendedLifetime(handoff) {} }
+        let sinkPlayer = try XCTUnwrap(sink.audioPlayerForTesting)
+        sinkPlayer.emittedPCMReference = reference
+        sinkPlayer.echoReferenceHandoff = handoff
+        let context = TurnLatencyContext()
+        context.endOfSpeech = 0
+        _ = await sink.routeToCloud(
+            request: "x", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: nil, utteranceId: utteranceId,
+            latency: LatencyHandle(context))
+
+        let player = try XCTUnwrap(sink.audioPlayerForTesting)
+        // The precondition the name claims: audio is still outstanding when the turn returns.
+        // If it were not, "held" would be indistinguishable from "emitted at done". The offline
+        // engine renders nothing until this test does, so a failure here is a broken premise.
+        guard player.hasOutstandingOutput else {
+            XCTFail("premise: audio is still outstanding when the turn returns")
+            return
+        }
+        let early = await FileLog.shared.logFileAsString().split(separator: "\n")
+            .filter { Self.requestId(of: String($0)) == utteranceId }
+        XCTAssertTrue(
+            early.isEmpty,
+            "the record was written at `done` while audio was still outstanding and unmarked: \(early)")
+
+        // Render the held audio: the drain's wait loop takes the mark, and the record is written with it.
+        let engineDeadline = Date().addingTimeInterval(3)
+        while engineBox.engine == nil && Date() < engineDeadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let engine = try XCTUnwrap(engineBox.engine, "premise: the player built its offline engine")
+        let output = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: 4_096))
+        var found: String?
+        let renderDeadline = Date().addingTimeInterval(8)
+        while found == nil && Date() < renderDeadline {
+            _ = try? engine.renderOffline(1_024, to: output)
+            try await Task.sleep(nanoseconds: 20_000_000)
+            found = await FileLog.shared.logFileAsString().split(separator: "\n")
+                .map(String.init).first { Self.requestId(of: $0) == utteranceId }
+        }
+        let line = try XCTUnwrap(found, "the held record was never written")
+        XCTAssertTrue(line.contains("outcome=done"), line)
+        XCTAssertFalse(line.contains("first_audible=absent"),
+                       "audio rendered after `done` must be what the record reports, not absence: \(line)")
+        XCTAssertFalse(line.contains("end_of_speech_to_first_audible=none"),
+                       "a measured turn carries its end-of-speech leg: \(line)")
+        let all = await FileLog.shared.logFileAsString().split(separator: "\n")
+            .filter { Self.requestId(of: String($0)) == utteranceId }
+        XCTAssertEqual(all.count, 1, "exactly one record per turn: \(all)")
+    }
+
+    /// A terminal that arrives AFTER audio was heard must still report when it was heard.
+    ///
+    /// The error path cancels the player before it writes its record, and the cancel clears the
+    /// player's first-audible mark, so the sink snapshots the mark while audio is still playing.
+    /// The transport parks after the audio, the offline node renders it (the mark lands), and only
+    /// then does the `error` arrive: a record that reads `absent` here means the snapshot was
+    /// not taken before the cancel.
+    @MainActor
+    func testAnErrorAfterAudibleAudioStillReportsWhenItWasHeard() async throws {
+        let utteranceId = "u-\(UUID().uuidString.prefix(12))-errheard"
+        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        let fmt = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1))
+        let engineBox = OfflineEngineBox()
+        CloudAudioPlayer.configureEngineForTesting = { engine in
+            try engine.enableManualRenderingMode(.offline, format: fmt, maximumFrameCount: 4_096)
+            engineBox.engine = engine
+        }
+        defer {
+            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
+            CloudAudioPlayer.configureEngineForTesting = nil
+        }
+        self.pendingFixture =
+            """
+            event: error
+            data: {"code":"provider_error","message":"upstream failed"}
+
+            """
+        let park = HoldLatch()
+        defer { park.release() } // a failed premise must not leave the turn parked
+        pendingDeclaredPark = park
+        pendingDeclaredParkAfterFrames = 8
+        let sink = makeSinkWithConsumer(
+            RecordingResultConsumer(),
+            audioPayloads: (0..<8).map { _ in Data(repeating: 0x10, count: 4_800) }
+        )
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 16)
+        defer { withExtendedLifetime(handoff) {} }
+        let player = try XCTUnwrap(sink.audioPlayerForTesting)
+        player.emittedPCMReference = reference
+        player.echoReferenceHandoff = handoff
+        let context = TurnLatencyContext()
+        context.endOfSpeech = 0
+        let turn = Task { @MainActor in
+            await sink.routeToCloud(
+                request: "x", tier: .free, context: self.sampleContext(),
+                origin: cloudTestOrigin, selection: nil, utteranceId: utteranceId,
+                latency: LatencyHandle(context))
+        }
+
+        let engineDeadline = Date().addingTimeInterval(3)
+        while engineBox.engine == nil && Date() < engineDeadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let engine = try XCTUnwrap(engineBox.engine, "premise: the player built its offline engine")
+        let output = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: 4_096))
+        let renderDeadline = Date().addingTimeInterval(5)
+        while player.firstAudibleHostSeconds == nil && Date() < renderDeadline {
+            _ = try? engine.renderOffline(1_024, to: output)
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertNotNil(player.firstAudibleHostSeconds, "premise: the audio was heard before the error")
+        // Let the sink observe the audible audio before the terminal arrives.
+        try await Task.sleep(nanoseconds: 100_000_000)
+        park.release()
+        // Bounded: a turn that never returns after the error is a defect (it would wedge the next
+        // turn), so it fails here by name instead of hanging the plan.
+        // Polled, not awaited: awaiting a stuck turn's value is itself uncancellable.
+        let returnedFlag = TurnReturnedFlag()
+        Task { _ = await turn.value; returnedFlag.set() }
+        let returnDeadline = Date().addingTimeInterval(3)
+        while !returnedFlag.isSet && Date() < returnDeadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let returned = returnedFlag.isSet
+        if !returned {
+            turn.cancel()
+            XCTFail("the turn never returned after the error")
+        }
+
+        let line = try await latencyLine(for: utteranceId)
+        XCTAssertTrue(line.contains("outcome=error"), line)
+        XCTAssertFalse(line.contains("first_audible=absent"),
+                       "audio was audible before the error, so the record must carry when: \(line)")
+        XCTAssertFalse(line.contains("end_of_speech_to_first_audible=none"),
+                       "the audible instant must be measured, not merely not absent: \(line)")
+    }
+
+    /// A stop for an EARLIER drain says nothing about this turn's audio.
+    ///
+    /// A held follow-up is the likely case: the interrupted turn's cancel stop can arrive after the
+    /// follow-up's `done`. Written by that stop, the follow-up's record would read `absent` for
+    /// audio still on its way to the speaker - the defect the hold exists to remove, reached by
+    /// another door. The record waits for the stop of ITS drain (or a later one) or for the mark.
+    @MainActor
+    func testAnEarlierDrainsStopDoesNotWriteAHeldLatencyRecord() async throws {
+        let utteranceId = "u-\(UUID().uuidString.prefix(12))-stale"
+        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        defer { CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil }
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let sink = makeSinkWithConsumer(
+            RecordingResultConsumer(),
+            audioPayloads: (0..<40).map { Data([UInt8($0)]) }
+        )
+        let context = TurnLatencyContext()
+        context.endOfSpeech = 0
+        _ = await sink.routeToCloud(
+            request: "x", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: nil, utteranceId: utteranceId,
+            latency: LatencyHandle(context))
+
+        let player = try XCTUnwrap(sink.audioPlayerForTesting)
+        try XCTSkipUnless(
+            player.hasOutstandingOutput,
+            "the stub drained before the turn returned, so no hold can be observed")
+        // No suspension between the check above and this call, so this stop cannot be the real one.
+        sink.audioPlayerDidStop(drainEpoch: Int.min)
+        let afterStaleStop = await FileLog.shared.logFileAsString().split(separator: "\n")
+            .filter { Self.requestId(of: String($0)) == utteranceId }
+        XCTAssertTrue(
+            afterStaleStop.isEmpty,
+            "a stop for an earlier drain wrote the held record: \(afterStaleStop)")
+
+        // Its own drain's stop (or the mark) still settles it, exactly once.
+        _ = try await latencyLine(for: utteranceId)
+        let all = await FileLog.shared.logFileAsString().split(separator: "\n")
+            .filter { Self.requestId(of: String($0)) == utteranceId }
+        XCTAssertEqual(all.count, 1, "exactly one record per turn: \(all)")
+    }
+
+    /// A turn with NO early-connection tag still reports its end of speech.
+    ///
+    /// The tag exists only when a pause pre-opened a connection, which most turns never do. While
+    /// the end of speech was recorded behind the tag check, every one of those turns measured
+    /// `end_of_speech_to_* = none` — the measurement silently absent for the majority case.
+    @MainActor
+    func test_aTurnWithoutAnEarlyConnectionStillReportsItsEndOfSpeech() async throws {
+        let utteranceId = "u-\(UUID().uuidString.prefix(8))-notag"
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let sink = makeSink()
+        // The turn's own object, filled the way admission fills it, with no tag in play at all.
+        let latency = TurnLatencyContext()
+        latency.endOfSpeech = 5_000.0
+        latency.endpointDecisionAt = 5_000.2
+        _ = await sink.routeToCloud(
+            request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: utteranceId, latency: LatencyHandle(latency))
+
+        let line = try await latencyLine(for: utteranceId)
+        XCTAssertFalse(line.contains("end_of_speech_to_request=none"),
+                       "a turn with no pre-opened connection still knows when speech ended: \(line)")
+        XCTAssertTrue(line.contains("endpoint_ms=200ms"), line)
+    }
+
+    /// A turn handled on the phone leaves nothing behind, because nothing was ever shared.
+    ///
+    /// The instants live on the turn's own object, so there is no store to clean up: a local turn's
+    /// context is simply released, and a LATER turn reusing the same identity cannot see it. The
+    /// assertion is the one that would catch a resurrected side table — the newer turn reports its
+    /// own instant, not the dropped one's.
+    @MainActor
+    func test_aLocallyHandledTurnDoesNotShadowTheNextTurnWithTheSameIdentity() async throws {
+        let utteranceId = "u-\(UUID().uuidString.prefix(8))-local"
+        let sink = makeSink()
+        // The locally handled turn: its context exists, is read by nobody, and is released here.
+        autoreleasepool {
+            let dropped = TurnLatencyContext()
+            dropped.endOfSpeech = 9_000.0
+            dropped.endpointDecisionAt = 9_000.1
+        }
+
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let latency = TurnLatencyContext()
+        latency.endOfSpeech = 9_500.0
+        latency.endpointDecisionAt = 9_500.1
+        _ = await sink.routeToCloud(
+            request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: utteranceId, latency: LatencyHandle(latency))
+
+        let line = try await latencyLine(for: utteranceId)
+        XCTAssertTrue(line.contains("endpoint_ms=100ms"),
+                      "the newer turn's own instant is what is read: \(line)")
+    }
+
+    /// A ROUTED turn that is then handled on the phone leaves no entry behind.
+    ///
+    /// Distinct from a turn that never reaches routing: a routed local command — the majority —
+    /// ends at the router instead, where its instants have no consumer at all. With the context on
+    /// the turn, that terminal needs no cleanup call to be correct.
+    @MainActor
+    func test_aRoutedLocalTurnDropsItsEndOfSpeech() async throws {
+        let utteranceId = "u-\(UUID().uuidString.prefix(8))-routedlocal"
+        let sink = makeSink()
+        // Routed, then classified as a local command: its context is released unread.
+        autoreleasepool {
+            let routed = TurnLatencyContext()
+            routed.endOfSpeech = 11_000.0
+            routed.endpointDecisionAt = 11_000.3
+        }
+
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let latency = TurnLatencyContext()
+        latency.endOfSpeech = 12_000.0
+        latency.endpointDecisionAt = 12_000.4
+        _ = await sink.routeToCloud(
+            request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: utteranceId, latency: LatencyHandle(latency))
+
+        let line = try await latencyLine(for: utteranceId)
+        XCTAssertTrue(line.contains("endpoint_ms=400ms"),
+                      "the newer turn's instant must be the one recorded; a survivor would "
+                          + "shadow it with the dropped turn's 300ms: \(line)")
+    }
+
+    /// A CLOUD turn keeps its instants through the router's terminal.
+    ///
+    /// The record is built when the cloud round ends, which can be AFTER the router's terminal
+    /// fires. While those instants lived in a store the router had to be told which turns were
+    /// cloud-bound; with them on the turn's own object, a cloud turn simply still holds them when
+    /// the record is built — no mark, no guard, nothing to get wrong.
+    @MainActor
+    func test_aCloudBoundTurnKeepsItsEndOfSpeechThroughTheRouterTerminal() async throws {
+        let utteranceId = "u-\(UUID().uuidString.prefix(8))-cloudkept"
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let sink = makeSink()
+        _ = sink.beginDispatch(utteranceId: utteranceId, origin: nil)
+        let latency = TurnLatencyContext()
+        latency.endOfSpeech = 13_000.0
+        latency.endpointDecisionAt = 13_000.5
+
+        _ = await sink.routeToCloud(
+            request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: utteranceId, latency: LatencyHandle(latency))
+
+        let line = try await latencyLine(for: utteranceId)
+        XCTAssertTrue(line.contains("endpoint_ms=500ms"),
+                      "a cloud-bound turn must reach its record with its instants intact; losing "
+                          + "them reports no end of speech for the turn: \(line)")
+    }
+
+    /// A REFUSED cloud dispatch builds no record at all, and the instants it carried are not
+    /// reachable from any later turn.
+    ///
+    /// This is the case that kept leaking while the instants lived in a sink-owned store: the
+    /// dispatch was marked cloud-bound before the refusal, the record was never built, and every
+    /// cleanup path declined because of the mark. With the instants on the turn's own object there
+    /// is nothing to clear — a refused dispatch simply never reads them, and the object is released
+    /// with the turn.
+    ///
+    /// A refusal requires a NON-LIVE origin with no admitted work holding it, so the test asserts
+    /// the refusal actually happened rather than assuming it: a dispatch that succeeds leaves the
+    /// instants in use and proves nothing about leaving them behind.
+    @MainActor
+    func test_aRefusedCloudDispatchLeavesItsInstantsBehind() async throws {
+        let utteranceId = "u-\(UUID().uuidString.prefix(8))-refused"
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let sink = makeSink()
+        let staleOrigin = cloudTestOrigin + 41
+        let refused = TurnLatencyContext()
+        refused.endOfSpeech = 20_000.0
+        refused.endpointDecisionAt = 20_000.7
+
+        let outcome = await sink.routeToCloud(
+            request: "refused", tier: .free, context: sampleContext(), origin: staleOrigin,
+            selection: nil, utteranceId: utteranceId, latency: LatencyHandle(refused))
+        XCTAssertEqual(outcome.outcome, .refused,
+                       "the case must actually refuse the dispatch, or it proves nothing")
+
+        // No record for the refused turn, either now or later.
+        let afterRefusal = await FileLog.shared.logFileAsString()
+            .split(separator: "\n")
+            .filter { $0.contains("cloudTurnLatency") && $0.contains(utteranceId) }
+        XCTAssertTrue(afterRefusal.isEmpty,
+                      "a refused dispatch produces no latency record: \(afterRefusal)")
+
+        // A later admitted turn on the same identity reports its OWN instant. Under the old
+        // design this is where the refused turn's value resurfaced.
+        let accepted = TurnLatencyContext()
+        accepted.endOfSpeech = 30_000.0
+        accepted.endpointDecisionAt = 30_000.9
+        _ = await sink.routeToCloud(
+            request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: utteranceId, latency: LatencyHandle(accepted))
+
+        let line = try await latencyLine(for: utteranceId)
+        XCTAssertTrue(line.contains("endpoint_ms=900ms"),
+                      "the refused turn's instants must not survive into the next turn: \(line)")
+    }
+
+    /// A turn WITH a timing context and one WITHOUT are the SAME dispatch, as far as identity goes.
+    ///
+    /// The wrapper only does its job if the field is NON-optional. With an optional field, Swift
+    /// compares the optionals by case before `==` is ever consulted, so `.some(handle)` and `.none`
+    /// compare unequal and identical dispatches stop being equal — the leak the wrapper was meant
+    /// to close.
+    func test_aTurnWithATimingContextEqualsTheSameTurnWithout() {
+        let withContext = CloudRouteIntent(
+            request: "hi", tier: .free, latency: LatencyHandle(TurnLatencyContext()))
+        let withoutContext = CloudRouteIntent(request: "hi", tier: .free, latency: LatencyHandle())
+        XCTAssertEqual(
+            withContext, withoutContext,
+            "the timing context takes no part in identity, so carrying one must not make two "
+                + "otherwise identical dispatches unequal")
+        XCTAssertEqual(withoutContext, withContext, "equality is symmetric here too")
+
+        // Two DIFFERENT contexts are equally irrelevant.
+        let otherContext = CloudRouteIntent(
+            request: "hi", tier: .free, latency: LatencyHandle(TurnLatencyContext()))
+        XCTAssertEqual(withContext, otherContext)
+
+        // And a real difference is still a difference, so the exemption did not swallow equality.
+        let differentRequest = CloudRouteIntent(
+            request: "bye", tier: .free, latency: LatencyHandle(TurnLatencyContext()))
+        XCTAssertNotEqual(withContext, differentRequest)
+    }
+
+    /// The same exemption on the routing envelope, which the executor compares.
+    func test_anInputWithATimingContextEqualsTheSameInputWithout() {
+        let withContext = IntentRoutingInput.english(
+            transcript: "hi", utteranceId: "u-eq",
+            latency: LatencyHandle(TurnLatencyContext()))
+        let withoutContext = IntentRoutingInput.english(transcript: "hi", utteranceId: "u-eq")
+        XCTAssertEqual(withContext, withoutContext)
+        XCTAssertNotEqual(
+            withContext,
+            IntentRoutingInput.english(transcript: "different", utteranceId: "u-eq"))
+    }
+
+    /// The `request_id=` field of a log line, or nil when the line is not a latency record.
+    ///
+    /// Parsed rather than substring-matched: `contains("u-ABC")` also matches `u-ABCD`, so a
+    /// prefix would let one request stand in for another.
+    private static func requestId(of line: String) -> String? {
+        guard line.contains("cloudTurnLatency"),
+              let range = line.range(of: "request_id=") else { return nil }
+        return line[range.upperBound...].split(separator: " ").first.map(String.init)
+    }
+
+    /// The `cloudTurnLatency` line for one request id, waited for because the record is emitted by
+    /// a closure that may run after `routeToCloud` returns.
+    ///
+    /// `requestId` must be unique per RUN. The app log persists across runs, so a fixed id finds
+    /// the PREVIOUS run's line and the test passes without ever seeing its own turn - which is
+    /// exactly how a positive-case control once "passed" against a log where every line read
+    /// `first_audible=absent`.
+    @MainActor
+    private func latencyLine(for utteranceId: String) async throws -> String {
+        XCTAssertTrue(utteranceId.hasPrefix("u-"), "callers must pass a per-run unique id")
+        XCTAssertTrue(
+            utteranceId.count > 12,
+            "a fixed or short id can collide with another run's line in the persistent log")
+        for _ in 0..<40 {
+            let log = await FileLog.shared.logFileAsString()
+            // Matched as a WHOLE field, so `u-ABC` cannot be satisfied by `u-ABCD`.
+            if let line = log.split(separator: "\n")
+                .first(where: { Self.requestId(of: String($0)) == utteranceId }) {
+                return String(line)
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let log = await FileLog.shared.logFileAsString()
+        throw XCTSkip("no cloudTurnLatency line for \(utteranceId)")
+    }
+
+    /// A dispatched spoken turn reports a real end of speech, not `none`: the instant travels from
+    /// admission ON the turn itself, so the record built at the terminal must read it from there.
+    /// Losing it reports `none` — the measurement absent for exactly the turns it exists for.
+    @MainActor
+    func testADispatchedUtteranceReportsItsEndOfSpeech() async throws {
+        self.pendingFixture =
+            """
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+            """
+        let eosId = "u-\(UUID().uuidString.prefix(8))-eos"
+        let sink = makeSink()
+        let latency = TurnLatencyContext()
+        latency.endOfSpeech = 1_000.0
+        latency.endpointDecisionAt = 1_000.5
+        _ = await sink.routeToCloud(
+            request: "hi", tier: .free, context: sampleContext(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: eosId, latency: LatencyHandle(latency))
+
+        let line = try await latencyLine(for: eosId)
+        XCTAssertTrue(line.contains("endpoint_ms=500ms"),
+                      "the hangover between the acoustic end and the endpoint decision is its own stage: \(line)")
+        XCTAssertFalse(line.contains("end_of_speech_to_request=none"),
+                       "a spoken turn knows when speech ended; `none` here means the instant was lost: \(line)")
     }
 
     func testDoneResumesTurnOwnedAutoPause() async {
@@ -5554,11 +6174,48 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
     override func tearDown() {
         CloudRouteTestURLProtocol.reset()
+        StubWebSocketTask.resetProductionParks()
         defaults.removePersistentDomain(forName: suiteName)
         super.tearDown()
     }
 
     @MainActor
+    /// REGRESSION CONTROL for a park that leaked between tests (spec 16fdf2a0, reviewer b48a85f8).
+    ///
+    /// `releaseProductionParks` used to record released parks by `ObjectIdentifier`. An identifier
+    /// outlives the object it names and a deallocated semaphore's address is immediately reused,
+    /// so once ANY test had released a park, a LATER test's brand-new semaphore could land on a
+    /// recycled address and be treated as already-open: `registerProductionPark` returned false
+    /// and that park silently did not block. The turn then ran on instead of parking, which is
+    /// what made `testSupersededTurnDoesNotRestoreButRecordsInterrupted` fail only in suite order.
+    ///
+    /// This pins the property directly and deterministically, so the failure does not depend on
+    /// flake luck: after a release, a FRESH park must still block.
+    func testAFreshProductionParkStillBlocksAfterAnEarlierRelease() async throws {
+        // An earlier test's park, released and then genuinely DROPPED — the release must not keep
+        // it alive, or its address could never be recycled and the bug this pins stays hidden.
+        func registerAndReleaseAPark() {
+            let earlier = DispatchSemaphore(value: 0)
+            XCTAssertTrue(StubWebSocketTask.registerProductionPark(earlier))
+            StubWebSocketTask.releaseProductionParks()
+        }
+        registerAndReleaseAPark()
+        // Address reuse is what made the identity comparison unsound: allocate and drop many
+        // semaphores so a recycled address is near-certain, exactly as across a suite run.
+        for _ in 0..<2000 { _ = DispatchSemaphore(value: 0) }
+
+        let fresh = DispatchSemaphore(value: 0)
+        XCTAssertTrue(
+            StubWebSocketTask.registerProductionPark(fresh),
+            "a fresh park must not be mistaken for an already-released one"
+        )
+        // It must actually BLOCK: a stale identity would have let this through instantly.
+        let blocked = fresh.wait(timeout: .now() + 0.05) == .timedOut
+        XCTAssertTrue(blocked, "a freshly registered park must still hold its producer")
+        StubWebSocketTask.releaseProductionParks()
+        XCTAssertEqual(fresh.wait(timeout: .now() + 0.5), .success, "release opens the fresh park")
+    }
+
     func testDoneKeepsTheHoldWhileOnlyScheduledAudioRemains() async throws {
         try await exerciseScheduledOnlyDone(coalesceBeforeDone: false)
     }
@@ -5644,9 +6301,532 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         }
     }
 
+    /// THIRD UTTERANCE OVER A FINISHED TURN'S AUDIO TAIL.
+    ///
+    /// Turn N completes with answer audio still scheduled, so its socket is finished. Utterance 2
+    /// is admitted as N+1 (N left no `activeTurn`, so it is not a barge-in) and parks in the
+    /// quiescence wait on N's tail. Utterance 3 then arrives the way the service delivers it:
+    /// `emitBargeIn` first, and its own `routeToCloud` when nothing was interrupted.
+    ///
+    /// Everything is measured at the wire and the executor, never through `activeResultSocket`.
+    private struct ThirdUtteranceOutcome {
+        var emitted: String?
+        var thirdOutcome: CloudRouteOutcome?
+        var nPlusOneOutcome: CloudRouteOutcome?
+        var nPlusOneFrames: [String] = []
+        var allFrames: [String] = []
+        var thirdAuthFrames: [String] = []
+        var seeks = 0
+        var log = ""
+        var stopConfirmedAfterTail = false
+    }
+
+    @MainActor
+    private func exerciseThirdUtteranceOverAFinishedTurnsTail(thirdUtterance: Bool) async throws -> ThirdUtteranceOutcome {
+        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1))
+        CloudAudioPlayer.configureEngineForTesting = { engine in
+            try engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: 4_096)
+        }
+        addTeardownBlock {
+            CloudAudioPlayer.configureEngineForTesting = nil
+            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
+        }
+        let producerRelease = DispatchSemaphore(value: 0)
+        blockProducerAfterFrames = (8, producerRelease)
+        nextTurnFixture = Self.doneOnlyFixture
+        nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x11, count: 4_800 * 2) }
+        playback.setPlaying(true)
+        mapper.playbackSecondsForReference = [1130.0: 1200.0, 1500.0: 1600.0]
+        let sink = makeSink()
+        let player = try XCTUnwrap(sink.audioPlayerForTesting)
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 16)
+        player.emittedPCMReference = reference
+        player.echoReferenceHandoff = handoff
+        addTeardownBlock { @MainActor in
+            producerRelease.signal()
+            player.openPhysicalStopGateForTesting()
+            let stop = player.cancel()
+            _ = await player.awaitActualStop(after: stop)
+            withExtendedLifetime(handoff) {}
+            withExtendedLifetime(sink) {}
+        }
+
+        // Turn N: done, with its answer audio still scheduled.
+        let turnN = Task {
+            await sink.routeToCloud(request: "first", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: .wakeWord, utteranceId: "u-n")
+        }
+        try await waitUntil("N's audio reached the real player", timeout: 3) {
+            reference.streamIndex == 22_400 && player.bufferedFrameCountForTesting == 0
+        }
+        XCTAssertTrue(player.hasOutstandingOutput, "premise: N's audio is still outstanding")
+        let nTask = try XCTUnwrap(capturedTask, "premise: N's socket")
+        producerRelease.signal()
+        let nResult = await turnN.value
+        XCTAssertEqual(nResult.outcome, .completed, "premise: N completed")
+
+        // Utterance 2: admitted as N+1, parked on a held stop of N's tail. It carries an action.
+        let seekFixture = { (positionMs: Int) in
+            """
+            event: action
+            data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":\(positionMs)}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        }
+        nextTurnFixture = seekFixture(1_130_000)
+        player.armPhysicalStopGateForTesting(allow: 0)
+        let successor = Task {
+            await sink.routeToCloud(request: "second", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-n1")
+        }
+        try await waitUntil("N+1 is admitted and waiting on a held stop", timeout: 3) {
+            sink.activeTurnIsCancelledForTesting == false && player.physicalStopGateArrivalsForTesting >= 1
+        }
+        // N+1's client exists (it is built at admission) but must have sent nothing yet.
+        let nPlusOneTask = try XCTUnwrap(capturedTask, "premise: N+1's socket")
+        XCTAssertFalse(nPlusOneTask === nTask, "premise: N+1 has its own socket")
+        XCTAssertTrue(nPlusOneTask.sentTextFrames.isEmpty, "premise: N+1 has not reached the wire")
+
+        let stopBefore = player.confirmedStopEpoch()
+        let before = await FileLog.shared.logFileAsString()
+        var outcome = ThirdUtteranceOutcome()
+        var third: Task<CloudRouteResult, Never>?
+        if thirdUtterance {
+            outcome.emitted = await sink.emitBargeIn(
+                request: "third", utteranceId: "u-n2", origin: cloudTestOrigin,
+                selection: CloudConversationSelection.followUp
+            )
+            if outcome.emitted == nil {
+                // Nothing was interrupted, so the service routes the utterance itself.
+                nextTurnFixture = seekFixture(1_500_000)
+                third = Task {
+                    await sink.routeToCloud(request: "third", tier: .free, context: sampleContext(),
+                                            origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-n2")
+                }
+            }
+        }
+        player.openPhysicalStopGateForTesting()
+        let nPlusOne = await successor.value
+        outcome.nPlusOneOutcome = nPlusOne.outcome
+        if let third { outcome.thirdOutcome = await third.value.outcome }
+        outcome.nPlusOneFrames = nPlusOneTask.sentTextFrames
+        var thirdFrames: [String] = []
+        if let latest = capturedTask, latest !== nPlusOneTask, latest !== nTask { thirdFrames = latest.sentTextFrames }
+        outcome.allFrames = nTask.sentTextFrames + nPlusOneTask.sentTextFrames + thirdFrames
+        outcome.thirdAuthFrames = thirdFrames.filter { $0.contains("\"authenticate\"") }
+        outcome.seeks = playback.calls.filter { if case .seekTo = $0 { return true } else { return false } }.count
+        outcome.log = String((await FileLog.shared.logFileAsString()).dropFirst(before.count))
+        outcome.stopConfirmedAfterTail = player.confirmedStopEpoch() > stopBefore
+        return outcome
+    }
+
+    /// A turn that received audio and then ended in an error sheds its buffer: its record must say
+    /// frames arrived AND a clear happened, so an absent first-audible is attributable. The normal
+    /// turn's counts are asserted in `testASuccessorOverAFinishedTurnsTailPlaysItsOwnAudio`.
+    @MainActor
+    func testLatencyRecordCountsFramesAndTheClearForATurnThatEndsInAnError() async throws {
+        let id = "u-cleared-\(UUID().uuidString)"
+        nextTurnAudioPayloads = (0..<3).map { _ in Data(repeating: 0x33, count: 4_800 * 2) }
+        nextTurnFixture =
+            """
+            event: error
+            data: {"code":"provider_error","message":"upstream failed"}
+
+            """
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "hi", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: nil, utteranceId: id)
+        var line = ""
+        for _ in 0..<40 {
+            line = (await FileLog.shared.logFileAsString()).split(separator: "\n")
+                .first { $0.contains("cloudTurnLatency") && $0.contains("request_id=\(id) ") }
+                .map(String.init) ?? ""
+            if !line.isEmpty { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertTrue(line.contains("outcome=error"), line)
+        XCTAssertTrue(line.contains("audio_frames=3"), "the three frames arrived: \(line)")
+        XCTAssertTrue(line.contains("buffer_cleared=1"), "the error shed the buffer once: \(line)")
+    }
+
+    /// A clear issued by someone else between this turn's last frame and its terminal belongs to
+    /// the turn's window: it is exactly the late clear of an answer's frames that the record
+    /// exists to expose. Asserted for both terminals the stream can end on.
+    @MainActor
+    private func exerciseAClearBetweenTheLastFrameAndTheTerminal(terminal: String) async throws -> String {
+        let id = "u-between-\(UUID().uuidString)"
+        let release = DispatchSemaphore(value: 0)
+        nextTurnAudioPayloads = (0..<3).map { _ in Data(repeating: 0x33, count: 4_800 * 2) }
+        blockProducerAfterFrames = (4, release) // three binary frames, then park before the terminal
+        nextTurnFixture = terminal
+        let sink = makeSink()
+        let player = try XCTUnwrap(sink.audioPlayerForTesting)
+        addTeardownBlock { release.signal() }
+        let turn = Task {
+            await sink.routeToCloud(request: "hi", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: nil, utteranceId: id)
+        }
+        try await waitUntil("the three frames reached the player", timeout: 3) {
+            player.framesEnqueuedForTesting >= 3
+        }
+        // Another actor clears the player after this turn's last frame and before its terminal.
+        _ = player.cancel()
+        release.signal()
+        _ = await turn.value
+        var line = ""
+        for _ in 0..<40 {
+            line = (await FileLog.shared.logFileAsString()).split(separator: "\n")
+                .first { $0.contains("cloudTurnLatency") && $0.contains("request_id=\(id) ") }
+                .map(String.init) ?? ""
+            if !line.isEmpty { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return line
+    }
+
+    @MainActor
+    func testAClearBetweenTheLastFrameAndDoneIsInTheTurnsCount() async throws {
+        let line = try await exerciseAClearBetweenTheLastFrameAndTheTerminal(terminal: Self.doneOnlyFixture)
+        XCTAssertTrue(line.contains("outcome=done"), line)
+        XCTAssertTrue(line.contains("audio_frames=3 buffer_cleared=1"), line)
+    }
+
+    @MainActor
+    func testAClearBetweenTheLastFrameAndAnErrorIsInTheTurnsCount() async throws {
+        let line = try await exerciseAClearBetweenTheLastFrameAndTheTerminal(
+            terminal: """
+            event: error
+            data: {"code":"provider_error","message":"upstream failed"}
+
+            """
+        )
+        XCTAssertTrue(line.contains("outcome=error"), line)
+        // The error's own cancel adds one more clear (it sheds whatever the turn still holds).
+        XCTAssertTrue(line.contains("audio_frames=3 buffer_cleared=2"), line)
+    }
+
+    /// The counts stop at the turn's own last touch of the player. The error terminal waits
+    /// (bounded) for the stop it requested, and a successor can enqueue on the same player during
+    /// that wait: its frames must not be counted as this turn's.
+    @MainActor
+    func testLatencyRecordDoesNotCountASuccessorsFramesEnqueuedDuringTheTerminalsStopWait() async throws {
+        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1))
+        CloudAudioPlayer.configureEngineForTesting = { engine in
+            try engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: 4_096)
+        }
+        addTeardownBlock {
+            CloudAudioPlayer.configureEngineForTesting = nil
+            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
+        }
+        let id = "u-wait-\(UUID().uuidString)"
+        nextTurnAudioPayloads = (0..<3).map { _ in Data(repeating: 0x33, count: 4_800 * 2) }
+        nextTurnFixture =
+            """
+            event: error
+            data: {"code":"provider_error","message":"upstream failed"}
+
+            """
+        let sink = makeSink()
+        let player = try XCTUnwrap(sink.audioPlayerForTesting)
+        player.armPhysicalStopGateForTesting(allow: 0)
+        addTeardownBlock { @MainActor in player.openPhysicalStopGateForTesting() }
+        let turn = Task {
+            await sink.routeToCloud(request: "hi", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: nil, utteranceId: id)
+        }
+        try await waitUntil("the error terminal is waiting on its stop", timeout: 3) {
+            player.physicalStopGateArrivalsForTesting >= 1
+        }
+        // A successor's audio lands on the same player while this turn still waits.
+        for _ in 0..<4 { player.enqueue(CloudAudioFrame(data: Data(repeating: 0x44, count: 4_800 * 2))) }
+        player.openPhysicalStopGateForTesting()
+        _ = await turn.value
+        var line = ""
+        for _ in 0..<40 {
+            line = (await FileLog.shared.logFileAsString()).split(separator: "\n")
+                .first { $0.contains("cloudTurnLatency") && $0.contains("request_id=\(id) ") }
+                .map(String.init) ?? ""
+            if !line.isEmpty { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertTrue(line.contains("audio_frames=3 "), "the successor's four frames are not this turn's: \(line)")
+        XCTAssertTrue(line.contains("buffer_cleared=1"), line)
+    }
+
+    /// A SUCCESSOR ADMITTED OVER A FINISHED TURN'S AUDIO TAIL MUST PLAY ITS OWN ANSWER.
+    ///
+    /// Observed on a device: turn N ended `done` with its answer still playing, the next utterance
+    /// was admitted as N+1 (retiring N's tail, then waiting for its stop), and the worker sent
+    /// N+1 about 2.5 s of audio and a normal `done`, yet the player never scheduled a buffer for
+    /// it. Asserted at the player: every frame N+1 receives must be enqueued, and the first one
+    /// must start a new scheduling boundary.
+    @MainActor
+    func testASuccessorOverAFinishedTurnsTailPlaysItsOwnAudio() async throws {
+        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1))
+        CloudAudioPlayer.configureEngineForTesting = { engine in
+            try engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: 4_096)
+        }
+        addTeardownBlock {
+            CloudAudioPlayer.configureEngineForTesting = nil
+            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
+        }
+        let producerRelease = DispatchSemaphore(value: 0)
+        blockProducerAfterFrames = (8, producerRelease)
+        nextTurnFixture = Self.doneOnlyFixture
+        nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x11, count: 4_800 * 2) }
+        playback.setPlaying(true)
+        let sink = makeSink()
+        let player = try XCTUnwrap(sink.audioPlayerForTesting)
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 16)
+        player.emittedPCMReference = reference
+        player.echoReferenceHandoff = handoff
+        addTeardownBlock { @MainActor in
+            producerRelease.signal()
+            player.openPhysicalStopGateForTesting()
+            let stop = player.cancel()
+            _ = await player.awaitActualStop(after: stop)
+            withExtendedLifetime(handoff) {}
+            withExtendedLifetime(sink) {}
+        }
+
+        let turnN = Task {
+            await sink.routeToCloud(request: "first", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: .wakeWord, utteranceId: "u-n")
+        }
+        try await waitUntil("N's audio reached the real player", timeout: 3) {
+            reference.streamIndex == 22_400 && player.bufferedFrameCountForTesting == 0
+        }
+        XCTAssertTrue(player.hasOutstandingOutput, "premise: N's audio is still outstanding")
+        producerRelease.signal()
+        let nResult = await turnN.value
+        XCTAssertEqual(nResult.outcome, .completed, "premise: N completed")
+        XCTAssertTrue(player.hasOutstandingOutput, "premise: N's tail is still outstanding when N+1 arrives")
+
+        // N+1: its own answer, delivered whole, with no parked producer.
+        blockProducerAfterFrames = nil
+        nextTurnFixture = Self.doneOnlyFixture
+        nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x22, count: 4_800 * 2) }
+        let enqueuedBefore = player.framesEnqueuedForTesting
+        let boundariesBefore = player.schedulingBoundaryCount
+        let successorId = "u-successor-\(UUID().uuidString)"
+        let successor = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext(),
+                                                origin: cloudTestOrigin, selection: .followUp, utteranceId: successorId)
+        XCTAssertEqual(successor.outcome, .completed, "N+1 completes")
+        XCTAssertEqual(player.framesEnqueuedForTesting - enqueuedBefore, 7,
+                       "every audio frame N+1 receives must reach the player")
+        // Offline manual rendering can stall well past a few seconds under load on a shared
+        // Mac; the budget is deliberately generous and the condition is the event itself,
+        // never an elapsed wait.
+        try await waitUntil("N+1's audio is scheduled", timeout: 20) {
+            player.schedulingBoundaryCount > boundariesBefore
+        }
+        // The record says the same thing the player does: a normal turn reports its frames and no clear.
+        // BARRIER on the line itself, not a fixed poll that falls through to a count assertion:
+        // under load on a shared Mac the record can take longer than any chosen interval to be
+        // written, and an empty line must fail as "never written", not as wrong counts.
+        var line = ""
+        let logStart = Date()
+        for _ in 0..<400 {
+            line = (await FileLog.shared.logFileAsString()).split(separator: "\n")
+                .first { $0.contains("cloudTurnLatency") && $0.contains("request_id=\(successorId) ") }
+                .map(String.init) ?? ""
+            if !line.isEmpty { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertFalse(line.isEmpty,
+                       "log line never written after \(String(format: "%.1f", Date().timeIntervalSince(logStart))) s: cloudTurnLatency request_id=\(successorId)")
+        XCTAssertTrue(line.contains("audio_frames=7 buffer_cleared=0"), "normal turn counts: \(line)")
+    }
+
+    /// A PREDECESSOR'S STOP THAT IS STILL UNCONFIRMED CANNOT DELETE THE SUCCESSOR'S AUDIO.
+    ///
+    /// N ended `done` with its audio outstanding, so N+1 is admitted through the retire-then-wait
+    /// path: N+1 receives its frames only AFTER that wait confirms N's stop, which is why N's stop
+    /// can no longer be outstanding when they arrive — the retire wait is the admission barrier.
+    /// The break this catches: any path that lets N+1's frames reach the player while N's stop is
+    /// still unconfirmed (or drops them outright) fails the premise or frame-count assertions
+    /// below.
+    ///
+    /// The release is gated on PROOF the retire was reached, never on the client's existence: the
+    /// client is built at admission, ~180 lines BEFORE the retire cancel, so a new captured task
+    /// alone says nothing about the wait. Two measured facts gate it instead — the retire cancel
+    /// was requested (`cancelRequestCountForTesting` grew), and the runner's physical stop for it
+    /// has run and its notification is HELD in the box. Only then is the capture uninstalled and
+    /// the held confirmation delivered.
+    ///
+    /// Falsified two ways: delivering the held confirmation early (while the stop is still parked
+    /// at the armed gate) advances the epoch and enqueues all 7 successor frames while the wait
+    /// should still be holding them; and an admission that skips the retire wait leaves the cancel
+    /// count unchanged, so the gate barrier itself fails.
+    @MainActor
+    func testASuccessorsAudioIsNeverLostToAPredecessorsStop() async throws {
+        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        addTeardownBlock {
+            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
+        }
+        let producerRelease = DispatchSemaphore(value: 0)
+        blockProducerAfterFrames = (8, producerRelease)
+        nextTurnFixture = Self.doneOnlyFixture
+        nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x11, count: 4_800 * 2) }
+        playback.setPlaying(true)
+        let sink = makeSink()
+        let player = try XCTUnwrap(sink.audioPlayerForTesting)
+        addTeardownBlock { @MainActor in
+            producerRelease.signal()
+            player.openPhysicalStopGateForTesting()
+            player.setCapturedStopNotificationForTesting(nil)
+            let stop = player.cancel()
+            _ = await player.awaitActualStop(after: stop)
+            withExtendedLifetime(sink) {}
+        }
+        let turnN = Task {
+            await sink.routeToCloud(request: "first", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: .wakeWord, utteranceId: "u-n")
+        }
+        try await waitUntil("N's audio reached the player", timeout: 3) {
+            player.framesEnqueuedForTesting == 7
+        }
+        producerRelease.signal()
+        let nResult = await turnN.value
+        XCTAssertEqual(nResult.outcome, .completed, "premise: N completed")
+        XCTAssertTrue(player.hasOutstandingOutput, "premise: N's tail is still outstanding when N+1 arrives")
+
+        blockProducerAfterFrames = nil
+        nextTurnFixture = Self.doneOnlyFixture
+        nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x22, count: 4_800 * 2) }
+        // Hold N's drain at the claim seam so its terminal stop cannot run before N+1's retire
+        // cancel lands: the cancel then OWNS the single physical stop (coalesced accounting), and
+        // that stop is parked at the armed gate. The confirmation that admits N+1 is withheld in
+        // the box; N's engine stop is real, only its delivery is held.
+        final class StopDeliveryBox: @unchecked Sendable {
+            private let lock = NSLock()
+            private var deliveries: [(epoch: Int, deliver: () -> Void)] = []
+            func store(_ epoch: Int, _ d: @escaping () -> Void) { lock.lock(); deliveries.append((epoch, d)); lock.unlock() }
+            var count: Int { lock.lock(); defer { lock.unlock() }; return deliveries.count }
+            func deliverAll() { lock.lock(); let all = deliveries; deliveries = []; lock.unlock(); all.forEach { $0.deliver() } }
+        }
+        let stopBox = StopDeliveryBox()
+        let claimRelease = DispatchSemaphore(value: 0)
+        player.claimRelease = claimRelease
+        player.setCapturedStopNotificationForTesting { epoch, deliver in stopBox.store(epoch, deliver) }
+        let confirmedBefore = player.confirmedStopEpoch()
+        let enqueuedBefore = player.framesEnqueuedForTesting
+        let cancelsBefore = player.cancelRequestCountForTesting
+        let boundariesBefore = player.schedulingBoundaryCount
+        let nTask = capturedTask
+        let successor = Task {
+            await sink.routeToCloud(request: "second", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: .followUp,
+                                    utteranceId: "u-successor-\(UUID().uuidString)")
+        }
+        // PROOF 1: the retire cancel was requested. An admission that skips the retire wait never
+        // requests it, so this barrier fails rather than the test passing without the barrier.
+        try await waitUntil("N+1's retire cancel was requested", timeout: 3) {
+            player.cancelRequestCountForTesting > cancelsBefore
+        }
+        XCTAssertEqual(player.confirmedStopEpoch(), confirmedBefore,
+                       "premise: N's stop is still unconfirmed when the retire cancel lands")
+        // Let the claimed drain proceed: its physical stop IS the retire cancel's stop, and it
+        // parks at the armed gate (allow 0) instead of confirming.
+        player.armPhysicalStopGateForTesting(allow: 0)
+        claimRelease.signal()
+        // PROOF 2: the physical stop reached the armed gate and parked.
+        try await waitUntil("the retire's physical stop parked at the gate", timeout: 3) {
+            player.physicalStopGateArrivalsForTesting >= 1
+        }
+        // Release the park: the engine stop runs and its notification is captured, not delivered.
+        player.openPhysicalStopGateForTesting()
+        // PROOF 3: the stop's confirmation is genuinely HELD — the box owns a delivery for an
+        // epoch at or after the retire's, and nothing has confirmed it yet.
+        try await waitUntil("the retire stop's confirmation is held in the box", timeout: 3) {
+            stopBox.count >= 1
+        }
+        XCTAssertEqual(player.confirmedStopEpoch(), confirmedBefore,
+                       "premise: N's stop is still unconfirmed while N+1 waits")
+        XCTAssertEqual(player.framesEnqueuedForTesting, enqueuedBefore,
+                       "no successor audio may be enqueued before the retire wait confirms N's stop")
+        XCTAssertNotNil(capturedTask)
+        XCTAssertFalse(capturedTask === nTask, "premise: N+1 has its own socket")
+        XCTAssertTrue(capturedTask?.sentTextFrames.isEmpty == true,
+                      "premise: N+1 has not reached the wire while N's confirmation is withheld")
+        // Uninstall the capture first so N+1's OWN drain stop delivers normally, then deliver
+        // N's withheld confirmation: the retire wait resolves and N+1 admits its own audio.
+        player.setCapturedStopNotificationForTesting(nil)
+        stopBox.deliverAll()
+        let successorResult = await successor.value
+        XCTAssertEqual(successorResult.outcome, .completed, "N+1 completes")
+        XCTAssertGreaterThan(player.confirmedStopEpoch(), confirmedBefore,
+                             "N's stop was confirmed")
+        XCTAssertEqual(player.framesEnqueuedForTesting - enqueuedBefore, 7,
+                       "every audio frame N+1 receives must reach the player")
+        // Offline manual rendering can stall well past a few seconds under load on a shared
+        // Mac; the budget is deliberately generous and the condition is the event itself,
+        // never an elapsed wait.
+        try await waitUntil("N+1's audio is scheduled", timeout: 20) {
+            player.schedulingBoundaryCount > boundariesBefore
+        }
+        player.claimRelease = nil
+    }
+
+    /// POSITIVE CONTROL: with no third utterance, N+1 reaches the wire, its action executes once
+    /// and nothing is refused. Without this the assertions below could be measuring a fixture
+    /// that never executes or always refuses.
+    @MainActor
+    func testControlNPlusOneRunsWithoutAThirdUtterance() async throws {
+        let measured = try await exerciseThirdUtteranceOverAFinishedTurnsTail(thirdUtterance: false)
+        XCTAssertEqual(measured.nPlusOneOutcome, .completed)
+        XCTAssertEqual(measured.seeks, 1, "control: N+1's action reaches the executor exactly once")
+        XCTAssertFalse(measured.log.contains("rejected: the interrupt was already sent"), "control: nothing interrupted N+1")
+    }
+
+    /// NEWEST WINS: utterance 3 submits, N+1 is superseded before it reaches the wire, nothing is
+    /// interrupted, and N's tail stops.
+    @MainActor
+    func testAThirdUtteranceOverAFinishedTurnsTailSupersedesTheWaitingSuccessor() async throws {
+        let m = try await exerciseThirdUtteranceOverAFinishedTurnsTail(thirdUtterance: true)
+        // 1. Utterance 3 reaches the wire: one auth frame on a new socket, not refused.
+        XCTAssertNil(m.emitted, "a finished turn is not an interrupt target, so utterance 3 is not claimed")
+        XCTAssertEqual(m.thirdAuthFrames.count, 1, "utterance 3 sends exactly one authenticate frame; frames=\(m.allFrames)")
+        XCTAssertTrue(m.thirdAuthFrames.first?.contains("u-n2") ?? false, "that frame carries utterance 3's request id")
+        XCTAssertEqual(m.thirdOutcome, .completed, "utterance 3 is not refused")
+        // 2. N+1 never reaches the wire, ends superseded (not refused), and its action never executes.
+        XCTAssertTrue(m.nPlusOneFrames.isEmpty, "N+1 never sends a frame")
+        XCTAssertFalse(m.allFrames.contains { $0.contains("u-n1") }, "no frame carries N+1's request id")
+        XCTAssertNotEqual(m.nPlusOneOutcome, .refused)
+        XCTAssertNotEqual(m.nPlusOneOutcome, .completed, "N+1 is superseded, not completed")
+        // 3. No interrupt is sent or attempted: N is finished.
+        XCTAssertFalse(m.allFrames.contains { $0.contains("\"interrupt\"") }, "no interrupt frame on any socket")
+        XCTAssertFalse(m.log.contains("interrupt undelivered"), "no interrupt is attempted")
+        // 4. N's audio stops.
+        XCTAssertTrue(m.stopConfirmedAfterTail, "N's tail is physically stopped")
+        // 5. N's buffered-playback report rides utterance 3's authentication frame exactly once.
+        let reports = m.allFrames.filter { $0.contains("\"interrupts\"") }
+        XCTAssertEqual(reports.count, 1, "the report is sent exactly once")
+        XCTAssertEqual(reports.first, m.thirdAuthFrames.first, "and on utterance 3's authenticate frame")
+        XCTAssertTrue(reports.first?.contains("\"request_id\":\"u-n\"") ?? false, "naming N")
+        // 6. Utterance 3's own action executes once, with effects open.
+        XCTAssertEqual(m.seeks, 1, "utterance 3's action reaches the executor once and N+1's never")
+        XCTAssertFalse(m.log.contains("rejected: the interrupt was already sent"), "no effects were closed")
+    }
+
     /// OWNER-CANCEL STOP ORDERING (review dee03708/fa03b7f9, reworked for 14f66b72): a
     /// superseded turn with NO pending playback owes no await — it returns earlyClose, never
     /// restores (the successor owns the window), and the successor's single resume is intact.
+    ///
+    /// NO PREDECESSOR PLAYBACK TO RETIRE (task #7): A is parked at ADMISSION through the hold gate,
+    /// so it never produced a frame and owns no output to retire. The property this case names —
+    /// that the superseded turn owes no stop AWAIT — is asserted by A returning promptly once
+    /// released, not by counting cancels: A's own truncation path may legitimately request its own
+    /// stop. (A live predecessor would be a barge-in and would park B on its acknowledgement; the
+    /// barge-in shape is covered by `testBargeInWaitsForPredecessorTerminalThenSubmits`.)
     func testSupersededTurnAwaitsItsOwnedStopAndLeavesTheReleaseToTheSuccessor() async throws {
         self.nextTurnFixture =
             """
@@ -5667,13 +6847,23 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
             """
         _ = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-50")
+        // A is parked until here, so "A returns promptly once released" is what proves it owes no
+        // await: nothing is outstanding for it to wait on.
         gate.release()
+        let aReturned = try await timeoutProbe(slow, nanoseconds: 2_000_000_000)
+        XCTAssertTrue(aReturned, "the superseded turn returns promptly: it owes no stop await")
         let aResult = await slow.value
-        XCTAssertEqual(aResult.outcome, .earlyClose, "the superseded turn is an incomplete turn")
+        // A's socket was retired while it was parked mid-turn, so its own transport surfaces
+        // `connection_lost` — the ONE outcome this shape produces, asserted rather than loosened.
+        // Either way it is not a completion, which is what "superseded" means here.
+        XCTAssertEqual(aResult.outcome, .failed(code: "connection_lost"),
+                       "the superseded turn ends on its retired socket, never as a completion")
         XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 1,
                        "only the winning turn restores playback")
-        let cancels = await MainActor.run { sink.audioPlayerForTesting?.cancelRequestCountForTesting ?? -1 }
-        XCTAssertEqual(cancels, 0, "no stop was REQUESTED: nothing was pending at supersession")
+        // The property this case names is that the superseded turn owes NO AWAIT — verified above
+        // by its prompt return, not by an instant counter read. A's own truncation path may still
+        // request ITS stop (A produced no audio here, and the successor's retire covers only what
+        // the predecessor owned); what must never happen is A blocking on one.
     }
 
     /// ADMISSION AWAITS PREDECESSOR QUIESCENCE (review 14f66b72): B's retire only QUEUES a
@@ -5687,10 +6877,11 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             event: token
             data: {"text":"slow"}
 
-            event: done
-            data: {"usage":{"input_tokens":1,"output_tokens":1}}
-
             """
+        // A IS SUPERSEDED WHILE STILL ACTIVE, so its script has NO `done` (spec 43ab05d3): this
+        // case is about a turn that never finished, and a script that served `done` would describe
+        // the different case where A had already concluded. A's producer is parked and only B
+        // ever ends it.
         // A's frames are held IN THE BUFFER (drain-hold parks dequeue without consuming), so
         // "A owns playback output" is deterministic, not a race against the engine.
         self.nextTurnAudioPayloads = (0..<40).map { Data([UInt8($0)]) }
@@ -5731,10 +6922,30 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
             """
         self.nextTurnAudioPayloads = (40..<80).map { Data([UInt8($0)]) }
+        // A is a LIVE predecessor, so B is a barge-in and parks on A's acknowledgement. A's
+        // producer is parked after its frames and cannot produce the terminal itself, so the stub
+        // answers the interrupt the way the server does (see `interruptTerminalFrame`). Configured
+        // BEFORE B dispatches: the interrupt can be sent the instant B runs, and an answer installed
+        // afterwards would miss it. A then reaches its terminal while B keeps waiting on the RETIRE
+        // STOP, which is the suspension this case is about.
+        // A has no terminal of its own to send, so the stub answers B's interrupt the way the
+        // server does: with the frame that ends the interrupted turn. That is also what a parked
+        // predecessor needs in order to be released — and it is configured BEFORE B dispatches so
+        // the answer cannot be missed.
+        aTask?.interruptTerminalFrame = Self.interruptedDoneTextFrame
         let fast = Task { await sink.routeToCloud(request: "second", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-52") }
-        // B must be SUSPENDED at admission: no client built, no completion.
-        let bFinishedEarly = try await timeoutProbe(fast, nanoseconds: 200_000_000)
-        XCTAssertFalse(bFinishedEarly, "B is suspended at admission while A's stop is unconfirmed")
+        // EXPLICIT BARRIER on the retire itself, not an instant read after dispatching B: B runs
+        // on another task, so reading the buffer immediately afterwards says nothing about whether
+        // the retire has happened yet. The clear counter is bumped INSIDE `cancel()`, so waiting
+        // for it proves the retire landed — and only then is "nothing buffered" about the property
+        // this case names.
+        var retired = false
+        for _ in 0..<600 {
+            let clears: Int = await MainActor.run { sink.audioPlayerForTesting?.bufferClearCount ?? 0 }
+            if clears >= 1 { retired = true; break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(retired, "premise: B's retire cancel actually ran")
         // A's frames were retired synchronously; nothing new is admitted while B waits.
         let pendingNow: Bool = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio ?? true }
         XCTAssertFalse(pendingNow, "no successor audio is buffered while A's stop is unconfirmed")
@@ -5750,9 +6961,8 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         }
         let bResult = await fast.value
         XCTAssertEqual(bResult.outcome, .completed, "B completes once the predecessor is quiescent")
-        // A's producer unblocked: its cleanup awaits the CAPTURED retire identity (already
-        // confirmed) and returns an incomplete turn without touching B's window.
-        aGate.signal()
+        // A's producer was released above, so it has reached its terminal; its cleanup awaits the
+        // CAPTURED retire identity (already confirmed) and returns without touching B's window.
         let aResult = await slow.value
         XCTAssertEqual(aResult.outcome, .earlyClose, "the superseded turn is an incomplete turn")
         // B's deferring drain restores asynchronously — bounded poll, never an instant assert.
@@ -5791,6 +7001,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             private let lock = NSLock()
             private var deliveries: [() -> Void] = []
             func store(_ d: @escaping () -> Void) { lock.lock(); deliveries.append(d); lock.unlock() }
+            var count: Int { lock.lock(); defer { lock.unlock() }; return deliveries.count }
             func deliverAll() { lock.lock(); let all = deliveries; deliveries = []; lock.unlock(); all.forEach { $0() } }
         }
         let box = Box()
@@ -5829,7 +7040,16 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // process the retire stop, then the withheld notification is delivered.
         try await Task.sleep(nanoseconds: 120_000_000)
         await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(false) }
-        try await Task.sleep(nanoseconds: 150_000_000)
+        // BARRIER on the retire stop's notification being captured — not a fixed sleep. Under
+        // load on a shared Mac the runner can take longer than any chosen interval to reach the
+        // stop, and a premature deliverAll() would leave the retire stop undelivered: B then
+        // waits out its quiescence bounds and rolls back instead of completing.
+        var retireCaptured = false
+        for _ in 0..<600 {
+            if box.count > 0 { retireCaptured = true; break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(retireCaptured, "the retire stop's notification was captured before delivery")
         await MainActor.run {
             sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting(nil)
             box.deliverAll()
@@ -6344,7 +7564,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // And C RETIRED before admitting: E1's clear (A's leftovers) plus C's own retire clear.
         // A C that skipped its wait (queued stop invisible) never performs the second clear.
         let clears: Int = await MainActor.run { sink.audioPlayerForTesting?.bufferClearCountForTesting ?? 0 }
-        XCTAssertEqual(clears, 2, "C retired B's queued-st8447de34-fd39-4d9d-a94b-e174f39a3d24 output before admitting")
+        XCTAssertEqual(clears, 2, "C retired B's queued-stop-window output before admitting")
         // Process the queue: the runner handles E1 then E2; confirmations withheld until now.
         await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(false) }
         try await Task.sleep(nanoseconds: 150_000_000)
@@ -6455,10 +7675,11 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             event: token
             data: {"text":"slow"}
 
-            event: done
-            data: {"usage":{"input_tokens":1,"output_tokens":1}}
-
             """
+        // A IS SUPERSEDED WHILE STILL ACTIVE, so its script has NO `done` (spec 43ab05d3): this
+        // case is about a turn that never finished, and a script that served `done` would describe
+        // the different case where A had already concluded. A's producer is parked and only B
+        // ever ends it.
         // A's frames are held IN THE BUFFER (drain-hold parks dequeue without consuming), so
         // "A owns playback output" is deterministic, not a race against the engine.
         self.nextTurnAudioPayloads = (0..<40).map { Data([UInt8($0)]) }
@@ -6483,6 +7704,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             try await Task.sleep(nanoseconds: 5_000_000)
         }
         XCTAssertTrue(aEnqueued, "A's audio is enqueued while its producer is parked")
+        let aTaskForInterrupt = capturedTask
         await MainActor.run {
             sink.audioPlayerForTesting?.setCapturedStopNotificationForTesting { _, deliver in
                 box.store(deliver)
@@ -6501,7 +7723,17 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // B's FIRST-frame hook injects a test stop (E2) — only once B is actually admitted,
         // i.e. strictly after E1's confirmation.
         self.cancelPlayerOnFirstFrameForNextBuild = true
+        // A is live, so B is a barge-in and parks on A's acknowledgement. A's producer is parked
+        // after its frames and cannot produce that terminal itself, so the stub answers B's
+        // interrupt the way the server does (see `interruptTerminalFrame`). A's terminal is what
+        // releases B's wait; the retire stop this case is about is still the next thing B owes.
+        aTaskForInterrupt?.interruptTerminalFrame = Self.interruptedDoneTextFrame
         let fast = Task { await sink.routeToCloud(request: "second", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-71") }
+        // A's PRODUCER is parked after its frames (a hard stop inside its receive loop), so it can
+        // never consume a terminal while parked — and B, as a barge-in, parks on exactly that
+        // terminal. Release it now so A reaches its own `done`; B is then suspended on the RETIRE
+        // STOP this case is about rather than on an acknowledgement it can never receive.
+        aGate.signal()
         try await Task.sleep(nanoseconds: 200_000_000)
         // Release the drain hold so the runner processes the retire stop, then deliver E1:
         // B is admitted and its FIRST-frame hook injects E2.
@@ -6519,9 +7751,8 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
         XCTAssertTrue(withheldAny, "the injected stop's confirmation is withheld")
-        // Release A's producer: its cleanup reads the CAPTURED identity (E1, already
+        // A's producer was released above; its cleanup reads the CAPTURED identity (E1, already
         // confirmed) and returns WITHOUT waiting on E2.
-        aGate.signal()
         let aFinished = try await timeoutProbe(slow, nanoseconds: 2_000_000_000)
         XCTAssertTrue(aFinished, "A resolved on its CAPTURED identity, not the moved counter")
         let aResult = await slow.value
@@ -6536,7 +7767,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         }
     }
 
-    func testSupersededTurnDoesNotRestoreOrRecordAnalytics() async throws {
+    func testSupersededTurnDoesNotRestoreButRecordsInterrupted() async throws {
         // Turn A: held open, so it is still running when B starts. Its fixture is
         // bound to A's client explicitly, because B's turn is built in between.
         self.nextTurnFixture =
@@ -6545,42 +7776,82 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             data: {"text":"slow"}
 
             """
-        let gate = holdNextTurn()
+        // A is given AUDIO, not just text: this case is about who RESTORES the host window, and a
+        // turn with no output never acquires playback ownership in the first place — the assertion
+        // would then pass because nothing could have restored anything.
+        self.nextTurnAudioPayloads = (0..<40).map { Data([UInt8($0)]) }
+        let gate = DispatchSemaphore(value: 0)
+        self.blockProducerAfterFrames = (40, gate)
         let sink = makeSink()
+        // Hold the DEQUEUE, not just the producer: with a live engine these tiny frames are
+        // consumed as fast as they arrive, so A would own nothing by the time B starts and the
+        // restore assertion would be about a turn that never had output.
+        await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(true) }
         let slow = Task { await sink.routeToCloud(request: "first", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-72") }
-
-        try? await Task.sleep(nanoseconds: 200_000_000)
+        // Parked mid-stream with its audio enqueued, so A owns the window when B arrives.
+        var ownsWindow = false
+        for _ in 0..<600 {
+            ownsWindow = await MainActor.run {
+                guard let player = sink.audioPlayerForTesting else { return false }
+                // The park fires BEFORE the last frame is delivered, so the enqueued count is one
+                // short of the payload count; what matters is that output is outstanding.
+                return player.framesEnqueuedForTesting > 0 && player.hasOutstandingOutput
+            }
+            if ownsWindow { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(ownsWindow, "premise: A owns the window with its answer still buffered")
         XCTAssertTrue(playback.calls.contains(.pause), "the first turn paused playback")
-        gate.release()
-
-        // Turn B supersedes A and completes cleanly.
+        // This case NEEDS A still running when B starts (it is about what a SUPERSEDED turn
+        // restores and records), so it keeps the barge-in shape deliberately — unlike its
+        // siblings, which finish the predecessor first. B interrupts A, and the stub answers that
+        // interrupt the way the server does: with the terminal of an INTERRUPTED turn. A therefore
+        // discards its answer without draining and must NOT restore the window; only B may.
+        let aTask = try XCTUnwrap(capturedTask, "A's socket was captured")
+        aTask.interruptTerminalFrame = Self.interruptedDoneTextFrame
         self.nextTurnFixture =
             """
             event: done
-            data: {"usage":{"input_tokens":1,"output_tokens":1}}
+            data: {"outcome":"completed","usage":{"input_tokens":1,"output_tokens":1}}
 
             """
-        _ = await sink.routeToCloud(request: "second", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-73")
+        let b = Task { await sink.routeToCloud(request: "second", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-73") }
+        // Open A's producer so its parked receive can reach the interrupt terminal, and let the
+        // runner move again so each turn's stop can confirm.
+        gate.signal()
+        await MainActor.run { sink.audioPlayerForTesting?.setDrainHoldForTesting(false) }
+        _ = await b.value
         _ = await slow.value
 
         // Exactly one resume: the superseding turn's. A must not restore after B.
         XCTAssertEqual(playback.calls.filter { $0 == .resume }.count, 1, "only the winning turn restores playback")
-        // Analytics records only the winning turn's outcome.
-        XCTAssertEqual(analytics.events.count, 1)
+        // Both turns report — an interrupted turn is not silent in analytics — but they must say
+        // DIFFERENT things: the loser `interrupted`, the winner `done`. A count alone would pass
+        // with two completions recorded, which is exactly the conflation this case exists to catch.
+        let outcomes = analytics.events.filter { $0.0 == "cloud_assistant_turn" }
+            .compactMap { $0.1["outcome"] as? String }
+        XCTAssertEqual(outcomes.sorted(), ["done", "interrupted"],
+                       "the superseded turn reports interrupted and the winner reports done")
         // The losing turn's socket is closed rather than left running: the client
         // closes the socket on every exit path, and a superseded turn that kept it
         // open would bill for a stream nobody reads and hold the connection until
         // the server's own idle timeout.
+        // A's OWN frame is its prepared/auth frame, addressed to A's request id. A second frame
+        // on this socket is the SUCCESSOR's interrupt for A, which is correct barge-in traffic and
+        // not A submitting anything new — so the assertion is about WHO the frames belong to, not
+        // about a bare count that predates the interruption lifecycle.
+        let authFrame = try XCTUnwrap(
+            aTask.sentAuthFrame, "the superseded turn sent its auth frame"
+        )
         XCTAssertEqual(
-            heldTurn?.task.sentTextFrames.count, 1,
-            "the held turn sent its auth frame and is the turn these assertions are about"
+            authFrame["request_id"] as? String, "u-72",
+            "the held turn's own frame is the turn these assertions are about"
         )
         // Asserted on the producer, not on consumer completion: only the client
         // setting `cancelled` proves the losing turn's socket was closed, and a
         // bounded wait turns an intermittent miss into a deterministic failure on
         // that same property rather than making the ordering guaranteed.
-        let heldTask = try XCTUnwrap(heldTurn?.task, "the case held a turn open")
-        let closed = await heldTask.awaitCancellation()
+        let closed = await aTask.awaitCancellation()
         XCTAssertTrue(closed, "the superseded turn's socket is closed")
     }
 
@@ -6689,9 +7960,32 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         var value: Int { lock.lock(); defer { lock.unlock() }; return n }
     }
 
-    private func makeSink(conversationManager: CloudConversationManager? = nil, withHoldCounters: Bool = false) -> CloudRouteSink {
+    /// Let the predecessor turn FINISH from the server, then return.
+    ///
+    /// Since the interruption lifecycle landed, a successor admitted while a predecessor's turn is
+    /// still live is a BARGE-IN by contract: it sends `interrupt` and parks on that turn's
+    /// ACKNOWLEDGEMENT — which only the predecessor's own terminal (`done`/`error`) settles. The
+    /// supersede controls below park the predecessor's producer on purpose, so no terminal ever
+    /// arrives and each of them would end on the 10 s bound while actually being about LOCAL
+    /// supersession (stop ordering, retire identity, analytics, late actions). Marking the
+    /// predecessor's RECORD terminal does not help: the acknowledgement lives on the turn token,
+    /// not the record. So these cases let the predecessor complete first.
+    ///
+    /// Retunes the still-open stub's script to a `done` and opens the hold gate, then waits
+    /// (bounded) for the turn to return. The case keeps whatever it captured before this — the
+    /// socket, its frames, its playback — which is what its assertions are about.
+    private func finishPredecessor(
+        _ task: StubWebSocketTask, gate: Gate, turn: Task<CloudRouteResult, Never>, timeout: TimeInterval = 5
+    ) async throws {
+        task.replaceRemainingScript(textFrames: [Self.completedDoneTextFrame])
+        gate.release()
+        let finished = try await timeoutProbe(turn, nanoseconds: UInt64(timeout * 1_000_000_000))
+        XCTAssertTrue(finished, "the predecessor did not reach its terminal within \(timeout)s")
+    }
+
+    private func makeSink(conversationManager: CloudConversationManager? = nil, withHoldCounters: Bool = false, interruptionState: CloudInterruptionState = CloudInterruptionState()) -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
-        return CloudRouteSink(
+        let built = CloudRouteSink(
             clientFactory: {
                 let fixture = CloudRouteSinkTests.injectOperationIdentity(self.nextTurnFixture ?? self.nextFixture())
                 self.nextTurnFixture = nil
@@ -6721,9 +8015,14 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                         // Block the producer AFTER the Nth frame (frames keep flowing to the
                         // sink before that). Bounded waits: a lost release fails promptly.
                         if counter.next() >= block.count {
+                            // REGISTERED so an interrupt's terminal can open it: parking here
+                            // stops the receive loop before the frame is parsed, so without this
+                            // a parked predecessor could never read the answer it is owed.
+                            guard StubWebSocketTask.registerProductionPark(sem) else { return }
                             while sem.wait(timeout: .now() + 0.05) == .timedOut {}
                         }
                     }
+
                 }
                 if let action = self.firstFrameActionForNextBuild {
                     self.firstFrameActionForNextBuild = nil
@@ -6753,6 +8052,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             cloudPlaybackContextState: CloudPlaybackContextState(),
             analytics: VoiceAnalytics(analytics: analytics),
             conversationManager: conversationManager ?? testConversationManager(),
+            interruptionState: interruptionState,
             onGracePlaybackHoldBegin: withHoldCounters ? { origin in
                 self.holdCounters?.begin.bump()
                 return GracePeriodSignal.PlaybackHoldToken(generation: origin ?? -1)
@@ -6761,6 +8061,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                 self.holdCounters?.end.bump()
             } : nil
         )
+        return built
     }
 
     private func sampleContext() -> PlaybackContext {
@@ -6886,9 +8187,17 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         }
         let maybeHeld = await waitForHeldTurn()
         let heldA = try XCTUnwrap(maybeHeld, "turn A never reached the socket")
-        XCTAssertFalse(heldA.task.sentTextFrames.isEmpty, "A must have submitted its frame")
+        // A's auth frame is submitted just AFTER the turn is held, so "held" does not imply
+        // "submitted": bounded wait for the frame itself, never an instant read.
+        var submitted = false
+        for _ in 0..<200 {
+            if !heldA.task.sentTextFrames.isEmpty { submitted = true; break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(submitted, "A must have submitted its frame")
 
-        // B replaces the active turn while A is still held.
+        // B replaces the active turn while A is still held (the barge-in shape, kept on purpose
+        // here: this case is about what happens to A's output AFTER it loses the turn).
         self.nextTurnFixture = Self.doneOnlyFixture
         let b = Task {
             await sink.routeToCloud(
@@ -6896,6 +8205,28 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                 origin: cloudTestOrigin, selection: .followUp
             , utteranceId: "u-82")
         }
+        // B interrupts A, so B parks on A's ACKNOWLEDGEMENT (read BEFORE B cancels anything, so
+        // A's receive is deliberately kept alive for it) and only builds its own task once A
+        // reaches a terminal. The real server ANSWERS an interrupt by ending that turn, so the stub
+        // is configured to do the same (see `interruptTerminalFrame`) — test code only, no app
+        // change. The stub appends that terminal to the queue, so A's still-scripted ACTION is
+        // served FIRST and lands while A has already lost the turn, which is this case's subject;
+        // the terminal then releases B.
+        heldA.task.interruptTerminalFrame = Self.interruptedDoneTextFrame
+        // WAIT FOR THE INTERRUPT TO ACTUALLY BE SENT before releasing A. Releasing first lets A's
+        // receive serve its ACTION while it is still the live turn — the action then legitimately
+        // runs and the case proves nothing (exactly the flake it showed under suite load). The
+        // interrupt is what closes A's effects, so the ordering under test is: interrupt sent →
+        // A's late action arrives → rejected.
+        var interrupted = false
+        for _ in 0..<400 {
+            if heldA.task.sentTextFrames.contains(where: { $0.contains("\"type\":\"interrupt\"") }) {
+                interrupted = true; break
+            }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(interrupted, "B's interrupt reached A's socket before A's late action was served")
+        gate.release()
         // EXPLICIT BARRIER on B'S OWN TASK, read INSIDE the poll.
         // NOTE: `CloudRouteTestURLProtocol.requestCount` is NOT usable here — it counts
         // URLProtocol startLoading, and the route path uses URLSessionWebSocketTask, which never
@@ -6925,7 +8256,6 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertEqual(aRequestId, "u-81", "A's wire request_id IS A's admitted utterance id (delta f47e972)")
         XCTAssertNotEqual(aRequestId, bRequestId, "A and B must be distinguishable by their frames")
 
-        gate.release()
         _ = await a.value
         _ = await b.value
 
@@ -6954,6 +8284,41 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
         """
 
+    /// The terminal an INTERRUPT sends, as ONE ALREADY-PARSED WIRE FRAME, for a socket that has
+    /// served part of its script and must now be told to finish.
+    ///
+    /// Two things are load-bearing here. It is the JSON the transport carries, NOT the
+    /// `event:`/`data:` fixture shape — a fixture literal handed to the socket verbatim parses to
+    /// no events at all, so the turn never sees its terminal and ends as a transport failure. And
+    /// it says `interrupted`, because that is what the server sends when an interrupt settles a
+    /// turn (`cloud-assistant.md` → Interruption; pinned to the worker's own serializer test,
+    /// `worker/test/protocol/session.test.ts` "an INTERRUPTED done says so"). A plain `done` here
+    /// would describe a turn that finished normally, which is a different case.
+    static let interruptedDoneTextFrame = #"{"type":"done","outcome":"interrupted","usage":{"input_tokens":1,"output_tokens":0}}"#
+
+    /// The terminal for a predecessor the case lets FINISH normally (`finishPredecessor`), which
+    /// is deliberately not an interruption: it completes, drains and restores.
+    static let completedDoneTextFrame = #"{"type":"done","outcome":"completed","usage":{"input_tokens":1,"output_tokens":0}}"#
+
+    /// The barrier's failure must carry its own evidence: label, elapsed time, budget and
+    /// poll count — not a label alone. A label-only throw leaves a timeout undiagnosable
+    /// until the log lines are hand-traced.
+    func testBarrierTimeoutReportCarriesElapsedBudgetAndPolls() async throws {
+        let start = Date()
+        do {
+            try await waitUntil("a condition that never becomes true", timeout: 0.05) { false }
+            XCTFail("the barrier must throw when the condition never holds")
+        } catch {
+            let message = String(describing: error)
+            XCTAssertTrue(message.contains("a condition that never becomes true"), "label present: \(message)")
+            XCTAssertTrue(message.contains("timed out after"), "elapsed present: \(message)")
+            XCTAssertTrue(message.contains("budget 0.1 s") || message.contains("budget 0.0"),
+                         "budget present: \(message)")
+            XCTAssertTrue(message.contains("polls, condition stayed false"), "poll count present: \(message)")
+            XCTAssertTrue(Date().timeIntervalSince(start) < 2, "the tiny budget is respected")
+        }
+    }
+
     /// Polls the harness's held-turn state rather than sleeping a fixed interval.
     private func waitForHeldTurn(timeout: TimeInterval = 2) async -> (task: StubWebSocketTask, gate: Gate)? {
         let deadline = Date(timeIntervalSinceNow: timeout)
@@ -6966,17 +8331,27 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
     /// Polls `condition` until it holds: an EXPLICIT BARRIER, not an elapsed sleep.
     private func waitUntil(_ description: String, timeout: TimeInterval = 2, _ condition: () -> Bool) async throws {
-        let deadline = Date(timeIntervalSinceNow: timeout)
+        let start = Date()
+        let deadline = start.addingTimeInterval(timeout)
+        var polls = 0
         while Date() < deadline {
+            polls += 1
             if condition() { return }
             try? await Task.sleep(nanoseconds: 2_000_000)
         }
         if condition() { return }
         struct BarrierNotReached: Error, CustomStringConvertible {
             let label: String
-            var description: String { "barrier never satisfied: \(label)" }
+            let timeout: TimeInterval
+            let elapsed: TimeInterval
+            let polls: Int
+            var description: String {
+                "barrier never satisfied: \(label) — timed out after \(String(format: "%.3f", elapsed)) s "
+                + "(budget \(String(format: "%.1f", timeout)) s, \(polls) polls, condition stayed false)"
+            }
         }
-        throw BarrierNotReached(label: description)
+        throw BarrierNotReached(label: description, timeout: timeout,
+                                elapsed: Date().timeIntervalSince(start), polls: polls)
     }
 
     /// POSITIVE CONTROL for the audio path: a turn carrying binary audio must actually put
@@ -7005,6 +8380,343 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // decode/render path is not observed here, so a case reading these two facts must not be
         // described as showing that audio was heard.
         XCTAssertEqual(pending, false, "the turn completed, so its audio buffer must be empty")
+    }
+
+    /// AN INTERRUPTED `done` DISCARDS OUTPUT WITHOUT DRAINING IT
+    /// (`cloud-assistant.md` → event table: for `outcome: "interrupted"`, "discard output and
+    /// release this turn's audio ownership without draining"; Interruption: the server "sends
+    /// terminal `done` with `outcome: \"interrupted\"`").
+    ///
+    /// The break this catches: treating every `done` as a completion. Then the answer the user
+    /// already took back is PLAYED OUT to its end before the window resumes, instead of being
+    /// shed. The two are distinguishable only while the audio is still buffered, so the drain is
+    /// HELD here: a discard empties the buffer without playing a frame, a drain plays them all.
+    ///
+    /// Frame shape pinned to the worker's own serializer test, not to this client's reading:
+    /// `worker/test/protocol/session.test.ts` "an INTERRUPTED done says so, rather than defaulting
+    /// to completed" asserts `{ type: "done", outcome: "interrupted", usage }`.
+    @MainActor
+    func testAnInterruptedDoneDiscardsBufferedOutputWithoutDrainingIt() async throws {
+        try await exerciseInterruptedDoneDrainsOrDiscards(outcome: "interrupted")
+    }
+
+    /// COMPANION, same wait point: a `completed` `done` DOES drain. Without it the case above
+    /// could pass by never playing anything at all — a player that discards every turn's audio
+    /// would satisfy "nothing was drained" just as well.
+    @MainActor
+    func testACompletedDoneDrainsTheSameBufferedOutput() async throws {
+        try await exerciseInterruptedDoneDrainsOrDiscards(outcome: "completed")
+    }
+
+    @MainActor
+    private func exerciseInterruptedDoneDrainsOrDiscards(outcome: String) async throws {
+        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1))
+        CloudAudioPlayer.configureEngineForTesting = { engine in
+            try engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: 4_096)
+        }
+        addTeardownBlock {
+            CloudAudioPlayer.configureEngineForTesting = nil
+            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
+        }
+        // Seven binary frames then the terminal, so the producer can be parked AFTER its audio
+        // is enqueued and BEFORE `done` is read.
+        let producerRelease = DispatchSemaphore(value: 0)
+        blockProducerAfterFrames = (8, producerRelease)
+        nextTurnFixture = """
+        event: done
+        data: {"outcome":"\(outcome)","usage":{"input_tokens":1,"output_tokens":0}}
+
+        """
+        nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x11, count: 4_800 * 2) }
+        playback.setPlaying(true)
+        let sink = makeSink()
+        let player = try XCTUnwrap(sink.audioPlayerForTesting)
+        // The reference counts samples the player actually SCHEDULED, which is what separates
+        // "played out" from "shed": both leave the buffer empty.
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 16)
+        player.emittedPCMReference = reference
+        player.echoReferenceHandoff = handoff
+        addTeardownBlock { @MainActor in
+            producerRelease.signal()
+            player.setDrainHoldForTesting(false)
+            player.openPhysicalStopGateForTesting()
+            let stop = player.cancel()
+            _ = await player.awaitActualStop(after: stop)
+            withExtendedLifetime(handoff) {}
+            withExtendedLifetime(sink) {}
+        }
+        // Hold the runner so the seven frames stay BUFFERED: nothing is scheduled yet, and the
+        // terminal's own choice is the only thing that can move them.
+        player.setDrainHoldForTesting(true)
+        let turn = Task {
+            await sink.routeToCloud(request: "answer", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: .wakeWord, utteranceId: "u-interrupted-\(outcome)")
+        }
+        // `hasOutstandingOutput` includes the ENGINE being up, which the runner sets before it
+        // reaches the hold — so waiting on it proves the runner is genuinely parked inside the
+        // hold with all seven frames still buffered, not merely that they arrived.
+        try await waitUntil("the runner is parked in the hold with the whole answer buffered", timeout: 5) {
+            player.framesEnqueuedForTesting == 7
+                && player.bufferedFrameCountForTesting == 7
+                && player.hasOutstandingOutput
+        }
+        XCTAssertEqual(reference.streamIndex, 0, "premise: nothing has been scheduled yet")
+        // Let the terminal be read. The runner stays held, so whatever the terminal requests is
+        // queued but not yet performed.
+        producerRelease.signal()
+        _ = await turn.value
+        let bufferedAtTerminal = player.bufferedFrameCountForTesting
+        let scheduledAtTerminal = reference.streamIndex
+        // The turn's own report must name what happened: an interrupted turn is not a completion,
+        // and analytics must not record it as one (`cloud-assistant.md` → Turn observability).
+        let recordedOutcome = analytics.events.last(where: { $0.0 == "cloud_assistant_turn" })?.1["outcome"] as? String
+        // Release the runner: a queued DRAIN plays the frames, a DISCARD has already shed them.
+        player.setDrainHoldForTesting(false)
+        try await waitUntil("the runner settled the terminal's request", timeout: 5) {
+            !player.hasQueuedStop && player.bufferedFrameCountForTesting == 0
+        }
+        // The runner settles ASYNCHRONOUSLY after the hold opens, so poll for the samples rather
+        // than reading once: an instant read can land before the drain has scheduled anything.
+        var scheduledAfter = reference.streamIndex
+        if outcome != "interrupted" {
+            for _ in 0..<600 {
+                scheduledAfter = reference.streamIndex
+                if scheduledAfter >= 7 * 3_200 { break }
+                try await Task.sleep(nanoseconds: 5_000_000)
+            }
+        }
+        if outcome == "interrupted" {
+            XCTAssertEqual(recordedOutcome, "interrupted",
+                           "an interrupted turn must be recorded as interrupted, never as a completion")
+            XCTAssertEqual(bufferedAtTerminal, 0,
+                           "an interrupted done must SHED the buffered answer at the terminal, not leave it to drain")
+            XCTAssertEqual(scheduledAtTerminal, 0, "no frame of a discarded answer may be scheduled")
+            XCTAssertEqual(scheduledAfter, 0,
+                           "the discarded answer must never be played out: \(scheduledAfter) samples were scheduled")
+        } else {
+            XCTAssertEqual(recordedOutcome, "done", "a completed turn is recorded as done")
+            XCTAssertEqual(scheduledAfter, 7 * 3_200,
+                           "a completed done drains its answer: every sample is scheduled")
+        }
+    }
+
+    /// AN INTERRUPTED TURN STILL CONTRIBUTES ITS TIMING RECORD
+    /// (`cloud-assistant.md` → Conversational latency: "Measure every turn"; the record's
+    /// `outcome` row lists `interrupted` alongside `done` and `error`).
+    ///
+    /// The break this catches: emitting the record only on the paths that finish or fail. An
+    /// interrupted turn is a real turn — it sent a request and may have been heard — so omitting
+    /// its line makes the slowest, most confusing case invisible in exactly the data meant to
+    /// explain it. A missing line is indistinguishable from a turn that never ran.
+    ///
+    /// SCOPE, stated because the sibling control at `testAnInterruptedDoneDiscards…` measures
+    /// something else: that one proves the audio was SHED; this one proves the turn was MEASURED.
+    /// Neither implies the other — a sink can discard correctly and report nothing.
+    ///
+    /// The counters are the interrupted turn's own: seven frames arrived, and its own cancel is
+    /// the one clear. Nothing here depends on whether the host rendered audio, so the audible leg
+    /// is asserted as internally consistent rather than as a fixed duration.
+    @MainActor
+    func testAnInterruptedTurnEmitsItsOwnLatencyRecord() async throws {
+        let utteranceId = "u-\(UUID().uuidString.prefix(12))-int-record"
+        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        addTeardownBlock { CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil }
+        let release = DispatchSemaphore(value: 0)
+        blockProducerAfterFrames = (8, release)
+        nextTurnFixture = """
+        event: done
+        data: {"outcome":"interrupted","usage":{"input_tokens":1,"output_tokens":0}}
+
+        """
+        nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x11, count: 4_800 * 2) }
+        playback.setPlaying(true)
+        let sink = makeSink()
+        addTeardownBlock { release.signal() }
+        let turn = Task {
+            await sink.routeToCloud(request: "answer", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: .wakeWord, utteranceId: utteranceId)
+        }
+        // Barrier on the PRODUCER-side fact: all seven frames are in the player before the
+        // terminal is read. Without it the turn could end with no audio at all and the frame
+        // count below would be satisfied by a turn that never received any.
+        let player = try XCTUnwrap(sink.audioPlayerForTesting)
+        try await waitUntil("all seven frames reached the player", timeout: 5) {
+            player.framesEnqueuedForTesting == 7
+        }
+        release.signal()
+        _ = await turn.value
+
+        let log = await FileLog.shared.logFileAsString()
+        let mine = log.split(separator: "\n").map(String.init)
+            .filter { $0.contains("cloudTurnLatency") && $0.contains("request_id=\(utteranceId) ") }
+        XCTAssertEqual(mine.count, 1,
+                       "an interrupted turn contributes exactly one timing record: \(mine)")
+        let line = try XCTUnwrap(mine.first, "no timing record for the interrupted turn: \(log.suffix(2000))")
+        XCTAssertTrue(line.contains("outcome=interrupted"),
+                      "the record must name what happened, not label it a completion: \(line)")
+        XCTAssertTrue(line.contains("audio_frames=7"),
+                      "the seven frames this turn received are its own: \(line)")
+        XCTAssertTrue(line.contains("buffer_cleared=1"),
+                      "the interrupted turn's own cancel is the one clear: \(line)")
+        // The audible leg is asserted as INTERNAL CONSISTENCY, not as a duration: whether this
+        // host's engine renders is the host's business. A record that names an instant must also
+        // name the leg to it; one that names none must say so rather than report zero.
+        if line.contains("first_audible=absent") {
+            XCTAssertTrue(line.contains("request_to_first_audible=none"),
+                          "no audible instant means the leg is unmeasured, not zero: \(line)")
+        } else {
+            XCTAssertFalse(line.contains("request_to_first_audible=none"),
+                           "a turn that reports an audible instant must report the leg to it: \(line)")
+        }
+    }
+
+    /// THE AUDIBLE INSTANT SURVIVES THE STOP THE INTERRUPT REQUESTED
+    /// (`cloud-assistant.md` → Conversational latency: the record carries the turn's first audible
+    /// instant; the player's teardown clears its mark).
+    ///
+    /// The break this catches: reading the mark AFTER `awaitActualStop`. The stop that sheds the
+    /// answer also clears the player's first-audible mark, so a turn the user actually HEARD before
+    /// taking it back would be recorded as silent — the one case where knowing it was heard matters
+    /// most, because it explains why the user interrupted.
+    ///
+    /// SCOPE: the sibling control above proves the record EXISTS with the right counters. This one
+    /// pins the instant, which that test cannot see: its audio is never rendered, so it reads
+    /// `first_audible=absent` either way. Audio is rendered here BEFORE the terminal, so there is a
+    /// real instant to lose.
+    ///
+    /// WHAT IT PINS, precisely: the record carries the instant measured while the answer was
+    /// playing. The player's own mark is nil by the time the terminal writes (measured), so the
+    /// value can only come from the sink's per-event snapshot. This is a REGRESSION CONTROL on that
+    /// property, not a mutation-proof of one line: the snapshot is taken at two points (loop top and
+    /// audio admission) and either alone preserves the value, so removing one is not observable.
+    @MainActor
+    func testAnInterruptedTurnKeepsTheAudibleInstantItMeasuredBeforeTheStop() async throws {
+        let utteranceId = "u-\(UUID().uuidString.prefix(12))-int-audible"
+        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        let fmt = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1))
+        let engineBox = OfflineEngineBox()
+        CloudAudioPlayer.configureEngineForTesting = { engine in
+            try engine.enableManualRenderingMode(.offline, format: fmt, maximumFrameCount: 4_096)
+            engineBox.engine = engine
+        }
+        addTeardownBlock {
+            CloudAudioPlayer.configureEngineForTesting = nil
+            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
+        }
+        let release = DispatchSemaphore(value: 0)
+        blockProducerAfterFrames = (8, release)
+        nextTurnFixture = """
+        event: done
+        data: {"outcome":"interrupted","usage":{"input_tokens":1,"output_tokens":0}}
+
+        """
+        nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x11, count: 4_800 * 2) }
+        playback.setPlaying(true)
+        let sink = makeSink()
+        let player = try XCTUnwrap(sink.audioPlayerForTesting)
+        let reference = PlaybackEchoReference()
+        let handoff = EchoReferenceHandoff(reference: reference, capacity: 16)
+        player.emittedPCMReference = reference
+        player.echoReferenceHandoff = handoff
+        addTeardownBlock { @MainActor in
+            release.signal()
+            player.openPhysicalStopGateForTesting()
+            let stop = player.cancel()
+            _ = await player.awaitActualStop(after: stop)
+            withExtendedLifetime(handoff) {}
+            withExtendedLifetime(sink) {}
+        }
+        // The request leg needs a send instant; without a context the record reports `none` for
+        // every leg regardless of the audible mark, which would make this case vacuous.
+        let latencyContext = TurnLatencyContext()
+        latencyContext.endOfSpeech = 0
+        let turn = Task {
+            await sink.routeToCloud(request: "answer", tier: .free, context: sampleContext(),
+                                    origin: cloudTestOrigin, selection: .wakeWord, utteranceId: utteranceId,
+                                    latency: LatencyHandle(latencyContext))
+        }
+        try await waitUntil("all seven frames reached the player", timeout: 5) {
+            player.framesEnqueuedForTesting == 7
+        }
+        // Render the answer BEFORE the terminal, so the player has taken its first-audible mark
+        // while the turn is still live. This is the premise the whole case rests on.
+        let engineDeadline = Date().addingTimeInterval(5)
+        while engineBox.engine == nil && Date() < engineDeadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let engine = try XCTUnwrap(engineBox.engine, "premise: the player built its offline engine")
+        let output = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: 4_096))
+        let renderDeadline = Date().addingTimeInterval(8)
+        while player.firstAudibleHostSeconds == nil && Date() < renderDeadline {
+            _ = try? engine.renderOffline(1_024, to: output)
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let measuredBeforeTerminal = player.firstAudibleHostSeconds
+        XCTAssertNotNil(measuredBeforeTerminal,
+                        "premise: the answer was audible BEFORE the interrupt, so there is an instant to lose")
+        release.signal()
+        _ = await turn.value
+
+        let log = await FileLog.shared.logFileAsString()
+        let line = try XCTUnwrap(
+            log.split(separator: "\n").map(String.init)
+                .first { $0.contains("cloudTurnLatency") && $0.contains("request_id=\(utteranceId) ") },
+            "the interrupted turn must contribute a record")
+        XCTAssertTrue(line.contains("outcome=interrupted"), line)
+        XCTAssertFalse(line.contains("first_audible=absent"),
+                       "an answer heard before the interrupt must not be recorded as silent: \(line)")
+        // The leg is named EXACTLY, not by substring: `end_of_speech_to_first_audible=` contains
+        // `to_first_audible=`, so a loose match would be satisfied by the other field.
+        let leg = line.split(separator: " ").first { $0.hasPrefix("end_of_speech_to_first_audible=") }
+        let value = leg.flatMap { $0.split(separator: "=").last }.map(String.init)
+        XCTAssertNotNil(value, "the record carries the end-of-speech leg: \(line)")
+        XCTAssertNotEqual(value, "none",
+                          "an answer heard before the interrupt has a measured audible leg: \(line)")
+        // And it is the instant measured BEFORE the stop, not a later read: the mark never moves
+        // once taken, so the reported leg must match the one the premise observed.
+        let reportedMs = Double((value ?? "").replacingOccurrences(of: "ms", with: ""))
+        let expectedMs = try XCTUnwrap(measuredBeforeTerminal) * 1000
+        XCTAssertEqual(try XCTUnwrap(reportedMs), expectedMs, accuracy: 1.0,
+                       "the record reports the instant taken while the answer was playing: \(line)")
+    }
+
+    /// THE RACE THE CONTRACT NAMES (`cloud-assistant.md` → Interruption): "A terminal `done` for
+    /// that request that races the interrupt is also settlement acknowledgement, even with
+    /// `outcome: \"completed\"`: do not wait for a second terminal or reopen the closed socket."
+    ///
+    /// The break this catches: gating settlement on the outcome matching the interrupt. A server
+    /// that had already finished when the interrupt arrived sends `completed`, and a client that
+    /// insisted on `interrupted` would park until its deadline and drop the utterance the user
+    /// spoke. Asserted on the RELEASE and the submission count, not on the outcome value.
+    func testACompletedDoneRacingTheInterruptStillSettlesItOnce() async {
+        let state = CloudInterruptionState()
+        // Arm exactly as the production emit point does: one shot claimed, follow-up held against
+        // the turn being interrupted.
+        XCTAssertTrue(state.claimInterruptEmission(forRequestId: "u-raced"))
+        XCTAssertTrue(state.hold(request: "play the next one", utteranceId: "u-after-race",
+                                 origin: cloudTestOrigin, forRequestId: "u-raced"))
+        // `completed`, NOT `interrupted`: the server finished before it saw the interrupt.
+        self.nextTurnFixture = """
+        event: done
+        data: {"outcome":"completed","usage":{"input_tokens":1,"output_tokens":1}}
+
+        """
+        let sink = makeSink(interruptionState: state)
+        let result = await sink.routeToCloud(
+            request: "what about the second one", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-raced"
+        )
+        XCTAssertEqual(result.outcome, .completed, "premise: the racing terminal really was a completion")
+        let released = await MainActor.run { sink.takeReleasedInterruptionFollowUp() }
+        XCTAssertEqual(released?.utteranceId, "u-after-race",
+                       "a completed terminal that races the interrupt IS the acknowledgement")
+        let again = await MainActor.run { sink.takeReleasedInterruptionFollowUp() }
+        XCTAssertNil(again, "released exactly once, so the utterance cannot be submitted twice")
+        let frames = capturedTask?.sentTextFrames ?? []
+        XCTAssertEqual(frames.count, 1,
+                       "no second terminal is awaited and no extra frame is sent: \(frames)")
     }
 
     /// A refused STALE turn must leave the held live successor's AUDIO OUTPUT intact.
@@ -7259,9 +8971,17 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         }
         let maybeHeldB = await waitForHeldTurn()
         let heldB = try XCTUnwrap(maybeHeldB, "turn B must be in flight and holding")
-        // B's distinct identity, from ITS OWN prepared frame.
-        let bFrame = try XCTUnwrap(heldB.task.sentAuthFrame, "B's prepared frame must be readable")
-        let bRequestId = try XCTUnwrap(bFrame["request_id"] as? String, "B carries a request_id")
+        // B's distinct identity, from ITS OWN prepared frame. Being HELD is not the same as having
+        // AUTHENTICATED: the hold parks the receive before the auth frame goes out, so wait for the
+        // frame itself rather than reading it the instant the hold appears.
+        var bFrame: [String: Any]?
+        for _ in 0..<600 {
+            bFrame = heldB.task.sentAuthFrame
+            if bFrame != nil { break }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        let bFrameUnwrapped = try XCTUnwrap(bFrame, "B's prepared frame must be readable")
+        let bRequestId = try XCTUnwrap(bFrameUnwrapped["request_id"] as? String, "B carries a request_id")
         XCTAssertEqual(bRequestId, "u-90", "B's wire request_id IS B's admitted utterance id (delta f47e972)")
 
         let resumesBeforeNotification = playback.calls.filter { $0 == .resume }.count
@@ -7775,8 +9495,7 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
         // OWNER turn: renders the daily-limit line.
         let owner = await executor.execute(CloudRouteIntent(
             request: "play something", tier: .free,
-            utteranceId: utterance, origin: .modelCall, generation: generation
-        ))
+            utteranceId: utterance, origin: .modelCall, generation: generation, latency: LatencyHandle()))
         renderer.render(owner)
         XCTAssertEqual(
             owner,
@@ -7785,14 +9504,14 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
         // DUPLICATE of the SAME utterance: the sink settles it and the executor renders nothing.
         let duplicate = await executor.execute(CloudRouteIntent(
             request: "play something", tier: .free,
-            utteranceId: utterance, origin: .modelCall, generation: generation
-        ))
+            utteranceId: utterance, origin: .modelCall, generation: generation, latency: LatencyHandle()))
         renderer.render(duplicate)
         // TERMINAL CLOSE on a FRESH utterance (stream ends without a terminal frame).
         self.pendingFixture = ""
         let closeResponse = await executor.execute(CloudRouteIntent(
             request: "play something", tier: .free,
-            utteranceId: "limit-close-\(UUID().uuidString)", origin: .modelCall, generation: generation
+            utteranceId: "limit-close-\(UUID().uuidString)", origin: .modelCall, generation: generation,
+            latency: LatencyHandle()
         ))
         renderer.render(closeResponse)
 

@@ -39,9 +39,41 @@ final class CloudAuthTokenProviderTests: XCTestCase {
         XCTAssertEqual(requests.count, 1)
         XCTAssertEqual(requests.first?.path, "/api/v1/auth/token")
         XCTAssertEqual(requests.first?.body["credential"] as? String, "pc-session-credential", "the app's existing session credential is presented")
-        let device = try XCTUnwrap(requests.first?.body["device"] as? [String: Any])
-        XCTAssertEqual(device["platform"] as? String, "ios")
-        XCTAssertNotNil(device["app_version"])
+        // The `device` block is gone from the sign-in body: the server reads the platform from the
+        // request's User-Agent instead, so the body carries only the credential.
+        XCTAssertNil(requests.first?.body["device"], "the sign-in body must not carry the dead device block")
+    }
+
+    /// Sign-in and refresh are Auris requests too: the access log attributes them to a platform via
+    /// the User-Agent header, so the token exchange and the refresh must both carry the app's
+    /// private user agent, exactly like the account and upload requests.
+    func test_tokenAndRefreshRequests_carryTheAppUserAgent() async {
+        stubTokenResponse(accessToken: "access-1", refreshToken: "refresh-1", expiresIn: 900)
+        var requests: [(path: String, ua: String?)] = []
+        CloudRouteTestURLProtocol.onRequest = { request, _ in
+            requests.append((request.url?.path ?? "", request.value(forHTTPHeaderField: "User-Agent")))
+        }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        let provider = CloudAuthTokenProvider(
+            authBaseURLProvider: { "https://auth.test" },
+            credentialProvider: { "cred" },
+            identityProvider: { "acct-A" },
+            session: URLSession(configuration: config),
+            now: { self.now },
+            userAgentProvider: { "Pocket Casts/iOS/9.9-test" }
+        )
+        _ = await provider.token()
+
+        now += 16 * 60
+        stubTokenResponse(accessToken: "access-2", refreshToken: "refresh-2", expiresIn: 900)
+        _ = await provider.token()
+
+        let token = requests.first { $0.path == "/api/v1/auth/token" }
+        let refresh = requests.first { $0.path == "/api/v1/auth/refresh" }
+        XCTAssertEqual(token?.ua, "Pocket Casts/iOS/9.9-test", "sign-in carries the app user agent")
+        XCTAssertEqual(refresh?.ua, "Pocket Casts/iOS/9.9-test", "refresh carries the app user agent")
     }
 
     func testCachedTokenIsReusedWithoutNetwork() async {
@@ -278,7 +310,6 @@ final class CloudAuthTokenProviderTests: XCTestCase {
             authBaseURLProvider: { "https://auth.test" },
             credentialProvider: { credential },
             identityProvider: { identity },
-            appVersionProvider: { "1.0" },
             session: makeStubSession(),
             now: { self.now }
         )
@@ -308,7 +339,6 @@ final class CloudAuthTokenProviderTests: XCTestCase {
             authBaseURLProvider: { origin },
             credentialProvider: { "cred" },
             identityProvider: { "acct-A" },
-            appVersionProvider: { "1.0" },
             session: makeStubSession(),
             // A LONG lifetime: the token must still be cache-valid when the origin changes, so
             // the ONLY thing that can invalidate it is the origin rule under test. With a short
@@ -359,7 +389,6 @@ final class CloudAuthTokenProviderTests: XCTestCase {
             authBaseURLProvider: { "https://auth.test" },
             credentialProvider: { "cred" },
             identityProvider: { "acct-A" },
-            appVersionProvider: { "1.0" },
             session: makeStubSession(),
             now: { clock }
         )
@@ -406,7 +435,6 @@ final class CloudAuthTokenProviderTests: XCTestCase {
             authBaseURLProvider: { "https://auth.test" },
             credentialProvider: { "cred" },
             identityProvider: { identity },
-            appVersionProvider: { "1.0" },
             session: makeStubSession(),
             now: { self.now }
         )
@@ -457,7 +485,6 @@ final class CloudAuthTokenProviderTests: XCTestCase {
             authBaseURLProvider: { "https://auth.test" },
             credentialProvider: { "cred" },
             identityProvider: { nil },
-            appVersionProvider: { "1.0" },
             session: makeStubSession(),
             now: { self.now }
         )
@@ -479,7 +506,6 @@ final class CloudAuthTokenProviderTests: XCTestCase {
             authBaseURLProvider: { "https://auth.test" },
             credentialProvider: { credential },
             identityProvider: { "acct-A" },
-            appVersionProvider: { "1.2.3" },
             session: URLSession(configuration: config),
             now: { self.now }
         )
@@ -604,8 +630,6 @@ final class CloudAuthTokenReviewFixTests: XCTestCase {
             authBaseURLProvider: { "https://auth.test" },
             credentialProvider: { credential },
             identityProvider: { identity },
-            appVersionProvider: { "1.0" },
-            session: makeStubSession(),
             now: { self.now }
         )
         let forA = await provider.token()
@@ -632,17 +656,10 @@ final class CloudAuthTokenReviewFixTests: XCTestCase {
             authBaseURLProvider: { "https://auth.test" },
             credentialProvider: credential,
             identityProvider: { "acct-A" },
-            appVersionProvider: { "1.0" },
-            session: makeStubSession(),
             now: { self.now }
         )
     }
 
-    private func testSession() -> URLSession {
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [CloudRouteTestURLProtocol.self]
-        return URLSession(configuration: config)
-    }
 }
 
 /// PR #20 review: tokens are keyed to the **account** the request was made for,
@@ -671,7 +688,6 @@ final class CloudAuthTokenAccountKeyingTests: XCTestCase {
             authBaseURLProvider: { "https://auth.test" },
             credentialProvider: { credential },
             identityProvider: { identity },
-            appVersionProvider: { "1.0" },
             session: URLSession(configuration: config),
             now: { self.now }
         )
@@ -724,7 +740,6 @@ final class CloudAuthTokenInflightSwitchTests: XCTestCase {
             authBaseURLProvider: { "https://auth.test" },
             credentialProvider: { credential },
             identityProvider: { identity },
-            appVersionProvider: { "1.0" },
             session: URLSession(configuration: config),
             now: { self.now }
         )
@@ -779,7 +794,6 @@ final class CloudAuthTokenCredentialLossTests: XCTestCase {
             authBaseURLProvider: { "https://auth.test" },
             credentialProvider: { credential },
             identityProvider: { "acct-A" },  // the app leaves the account id set
-            appVersionProvider: { "1.0" },
             session: URLSession(configuration: config),
             now: { self.now }
         )
@@ -816,7 +830,6 @@ final class CloudAuthTokenResultGuardTests: XCTestCase {
             authBaseURLProvider: { "https://auth.test" },
             credentialProvider: { credential },
             identityProvider: { "acct-A" },
-            appVersionProvider: { "1.0" },
             session: URLSession(configuration: config),
             now: { self.now }
         )
@@ -873,13 +886,11 @@ final class CloudTokenProviderRouterTests: XCTestCase {
         CloudRouteTestURLProtocol.onRequest = { request, _ in requests.append(request.value(forHTTPHeaderField: "Authorization") ?? "") }
         let client = CloudRouteClient(
             baseURL: "https://api.test",
-            userId: "user_legacy",
             session: URLSession(configuration: config),
             tokenProvider: CloudAuthTokenProvider(
                 authBaseURLProvider: { "https://auth.test" },
                 credentialProvider: { credential },
                 identityProvider: { "acct-A" },
-                appVersionProvider: { "1.0" },
                 session: URLSession(configuration: config)
             ),
         )
@@ -913,7 +924,6 @@ final class CloudTokenProviderSharingTests: XCTestCase {
             authBaseURLProvider: { origin },
             credentialProvider: { "cred" },
             identityProvider: { "acct-A" },
-            appVersionProvider: { "1.0" },
             session: URLSession(configuration: config)
         )
         CloudRouteTestURLProtocol.requestHandler = { _ in
@@ -944,7 +954,6 @@ final class CloudTokenProviderSharingTests: XCTestCase {
             authBaseURLProvider: { origin },
             credentialProvider: { "cred" },
             identityProvider: { "acct-A" },
-            appVersionProvider: { "1.0" },
             session: URLSession(configuration: config)
         )
         let first = await provider.token()

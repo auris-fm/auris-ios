@@ -18,6 +18,4 @@ struct PocketCastsLoginResponse: Decodable {
     let isNew: Bool?
     let accessToken: String?
     let refreshToken: String?
-    let tokenType: String?
-    let expiresIn: Int?
 }

@@ -59,7 +59,7 @@ public final class GatewayURLProvider {
     public func resolve(upstream: String) -> String {
         let gateway = configuredGatewayURL().trimmingCharacters(in: .whitespacesAndNewlines)
         let direct = isDirectUpstreamForced()
-        let cutover = !gateway.isEmpty && !direct
+        let cutover = isCutoverActive()
         let resolved = cutover ? Self.withTrailingSlash(gateway) : upstream
         // Bounded diagnostic: the DECISION and the hosts, never a credential. Without this a
         // cutover that silently stops applying is indistinguishable from one that never applied

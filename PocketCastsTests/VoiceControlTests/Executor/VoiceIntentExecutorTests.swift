@@ -66,8 +66,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
             request: "what did they say",
             tier: .unknown,
             origin: .routingFailure,
-            generation: generation
-        ))
+            generation: generation, latency: LatencyHandle()))
 
         XCTAssertTrue(mockCloudRouteSink.routeToCloudCalled, "the fallback still dispatches")
         XCTAssertFalse(
@@ -88,8 +87,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         _ = await executor.execute(CloudRouteIntent(
             request: "what did they say",
             tier: .unknown,
-            generation: generation
-        ))
+            generation: generation, latency: LatencyHandle()))
 
         XCTAssertTrue(mockCloudRouteSink.routeToCloudCalled)
         XCTAssertTrue(
@@ -115,8 +113,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
 
         let owner = CloudRouteIntent(
             request: "play something", tier: .unknown,
-            utteranceId: "utterance-dup", origin: .modelCall, generation: generation
-        )
+            utteranceId: "utterance-dup", origin: .modelCall, generation: generation, latency: LatencyHandle())
         // The REAL executor path with the sink's once-per-utterance effect claim (the mock's
         // default): the first call owns, later calls for the same id are duplicates.
         _ = await executor.execute(owner)
@@ -124,7 +121,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         XCTAssertEqual(mockCloudRouteSink.claimObservedBeforeDispatch, [true],
                        "effect ownership is claimed BEFORE the dispatch — a joiner cannot win it")
         // Re-arm the observable: the owner's renewal cleared the refusal-tone claim, so holding
-        // it again gives the duplicate a detectable renewal to (NOT) perform.
+        // it again gives the duplicate a detectable renewal to (not) perform.
         XCTAssertTrue(gracePeriodSignal.claimRefusalTone(), "the re-armed refusal is announced")
 
         // The duplicate: identical captured intent (same utterance id + generation).
@@ -138,8 +135,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         // An INDEPENDENT utterance in the same window still gets its effects.
         let independent = CloudRouteIntent(
             request: "skip forward", tier: .unknown,
-            utteranceId: "utterance-ind", origin: .modelCall, generation: generation
-        )
+            utteranceId: "utterance-ind", origin: .modelCall, generation: generation, latency: LatencyHandle())
         _ = await executor.execute(independent)
         XCTAssertTrue(
             gracePeriodSignal.windowIsRenewedForTesting(),
@@ -158,8 +154,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
 
         let intentA = CloudRouteIntent(
             request: "play something", tier: .unknown,
-            utteranceId: "utterance-A", origin: .modelCall, generation: generationA
-        )
+            utteranceId: "utterance-A", origin: .modelCall, generation: generationA, latency: LatencyHandle())
         _ = await executor.execute(intentA)  // A owns its effects
 
         // A NEW window: generation B.
@@ -168,8 +163,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         XCTAssertNotEqual(generationB, generationA, "premise: a new generation")
         let intentB = CloudRouteIntent(
             request: "skip forward", tier: .unknown,
-            utteranceId: "utterance-B", origin: .modelCall, generation: generationB
-        )
+            utteranceId: "utterance-B", origin: .modelCall, generation: generationB, latency: LatencyHandle())
         _ = await executor.execute(intentB)  // B owns its effects
         XCTAssertTrue(gracePeriodSignal.windowIsRenewedForTesting(), "B renewed its own window")
 
@@ -177,8 +171,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         XCTAssertTrue(gracePeriodSignal.claimRefusalTone(), "re-arm the observable for B's window")
         let lateA = CloudRouteIntent(
             request: "play something", tier: .unknown,
-            utteranceId: "utterance-A", origin: .modelCall, generation: generationA
-        )
+            utteranceId: "utterance-A", origin: .modelCall, generation: generationA, latency: LatencyHandle())
         let lateAResponse = await executor.execute(lateA)
         XCTAssertEqual(lateAResponse, .silent, "the delayed duplicate renders nothing")
         XCTAssertFalse(
@@ -203,8 +196,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         _ = await executor.execute(CloudRouteIntent(
             request: "what did they say",
             tier: .unknown,
-            generation: oldGeneration
-        ))
+            generation: oldGeneration, latency: LatencyHandle()))
 
         XCTAssertEqual(
             gracePeriodSignal.currentGeneration(), newGeneration,
@@ -227,8 +219,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         _ = await executor.execute(CloudRouteIntent(
             request: "what did they say",
             tier: .unknown,
-            origin: .routingFailure
-        ))
+            origin: .routingFailure, latency: LatencyHandle()))
 
         XCTAssertTrue(mockCloudRouteSink.routeToCloudCalled, "the dispatch itself still happened")
         XCTAssertFalse(
@@ -253,8 +244,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         _ = await executor.execute(CloudRouteIntent(
             request: "what did they say",
             tier: .unknown,
-            generation: generation
-        ))
+            generation: generation, latency: LatencyHandle()))
 
         XCTAssertFalse(gracePeriodSignal.windowIsRenewedForTesting(),
                        "a spoken cloud error was treated as a completed turn")
@@ -274,8 +264,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         _ = await executor.execute(CloudRouteIntent(
             request: "what did they say",
             tier: .unknown,
-            generation: generation
-        ))
+            generation: generation, latency: LatencyHandle()))
 
         XCTAssertFalse(gracePeriodSignal.windowIsRenewedForTesting(),
                        "the coming-soon refusal was recorded as a completed cloud turn")
@@ -295,8 +284,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         _ = await executor.execute(CloudRouteIntent(
             request: "what did they say",
             tier: .unknown,
-            generation: generation
-        ))
+            generation: generation, latency: LatencyHandle()))
 
         XCTAssertEqual(
             mockCloudRouteSink.lastOrigin, generation,
@@ -316,8 +304,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         _ = await executor.execute(CloudRouteIntent(
             request: "what should I listen to",
             tier: .unknown,
-            generation: generation
-        ))
+            generation: generation, latency: LatencyHandle()))
 
         XCTAssertTrue(
             mockCloudRouteSink.routeToCloudCalled,
@@ -346,8 +333,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
             request: "and then",
             tier: .unknown,
             generation: generation,
-            selection: .followUp
-        ))
+            selection: .followUp, latency: LatencyHandle()))
 
         XCTAssertEqual(
             mockCloudRouteSink.lastSelection, .followUp,
@@ -367,7 +353,9 @@ final class VoiceIntentExecutorTests: XCTestCase {
     }
 
     func test_execute_nextEpisode_returnsSpokenWithTitle() async {
-        mockPlaybackSink.nextEpisodeResponse = .spoken("Playing The Daily")
+        // The mock builds its spoken text from the skip's returned title — the
+        // same single-result seam the real sink uses.
+        mockPlaybackSink.skipResult = "The Daily"
         let response = await executor.execute(PlaybackIntent.nextEpisode)
         if case .spoken(let text) = response {
             XCTAssertTrue(text.contains("The Daily"))
@@ -438,7 +426,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
             previousReferencePositionMs: 3_000
         )
         mockPlaybackContextProvider.context = context
-        let intent = CloudRouteIntent(request: "find similar", tier: .premium)
+        let intent = CloudRouteIntent(request: "find similar", tier: .premium, latency: LatencyHandle())
         _ = await executor.execute(intent)
         XCTAssertTrue(mockCloudRouteSink.routeToCloudCalled)
         XCTAssertEqual(mockCloudRouteSink.lastRequest, "find similar")
@@ -462,6 +450,23 @@ final class VoiceIntentExecutorTests: XCTestCase {
         DispatchQueue.main.async { mainQueueDrained.fulfill() }
         await fulfillment(of: [mainQueueDrained], timeout: 2)
         XCTAssertTrue(gracePeriodSignal.isActive)
+    }
+
+    /// regression control: the verdict path must ride the ONE shared execution
+    /// path — the first cut duplicated the dispatch switch and silently skipped the shared
+    /// post-execute effects (analytics.recordCommand, grace restore). The grace effect is the
+    /// observable half asserted here; the verdict must not cost the turn its side effects.
+    func test_executeWithVerdict_preservesTheSharedGraceEffect() async {
+        XCTAssertFalse(gracePeriodSignal.isActive)
+        _ = await executor.executeWithVerdict(PlaybackIntent.pause)
+        // GracePeriodSignal.startOrReset hops to the main queue (Timer must bind
+        // to the main run loop), so activation lands asynchronously. Drain the
+        // main queue before asserting, otherwise this test races the hop.
+        let mainQueueDrained = expectation(description: "main queue drained")
+        DispatchQueue.main.async { mainQueueDrained.fulfill() }
+        await fulfillment(of: [mainQueueDrained], timeout: 2)
+        XCTAssertTrue(gracePeriodSignal.isActive,
+                      "the verdict path must preserve the shared grace restore")
     }
 
     func test_runtimePlaybackContextProvider_populatesPlaybackAndReferenceContext() {
@@ -530,7 +535,26 @@ private final class MockPlaybackSink: VoicePlaybackSink {
     var lastSeekToPosition: Int?
     var nextEpisodeResponse: VoiceResponse = .earcon(.nextEpisode)
 
+    /// Pause is idempotent success: the fact is completed in both worlds —
+    /// stated at the sink, not inferred from the earcon.
     func pause() -> VoiceResponse { pauseCalled = true; return .earcon(.success) }
+    func pauseWithFact() -> (response: VoiceResponse, fact: SinkActionFact?) {
+        pauseCalled = true
+        return (.earcon(.success), SinkActionFact(state: "completed", reason: nil))
+    }
+    /// The skip's fact mirrors the REAL sink's outcome seam: it follows the
+    /// action's own decision (`skipResult` non-nil models the manager's
+    /// `.played` outcome; nil models `.declined`). The real manager contract —
+    /// earlier candidate title vs declined action, shuffle attribution — is
+    /// pinned separately in PlaybackManagerSinkTests.
+    var skipResult: String? = "Episode A"
+    func nextEpisode() -> VoiceResponse { nextEpisodeWithFact().response }
+    func nextEpisodeWithFact() -> (response: VoiceResponse, fact: SinkActionFact?) {
+        let response = VoiceResponse.spoken("Playback: \(skipResult ?? "next episode")")
+        return skipResult != nil
+            ? (response, SinkActionFact(state: "completed", reason: nil))
+            : (response, SinkActionFact(state: "not_run", reason: "precondition_failed"))
+    }
     func resume() -> VoiceResponse { .silent }
     func seekRelative(deltaSeconds: Int?, direction: SeekDirection) -> VoiceResponse {
         lastSeekRelativeDelta = deltaSeconds
@@ -542,7 +566,6 @@ private final class MockPlaybackSink: VoicePlaybackSink {
         lastSeekToPosition = positionSeconds
         return .silent
     }
-    func nextEpisode() -> VoiceResponse { nextEpisodeResponse }
 }
 
 private final class MockEffectsSink: VoiceEffectsSink {
@@ -552,7 +575,10 @@ private final class MockEffectsSink: VoiceEffectsSink {
     var lastVolumeBoostEnabled: Bool?
 
     func setSpeed(_ speed: Double) -> VoiceResponse { lastSetSpeed = speed; return .silent }
-    func adjustSpeed(delta: Double) -> VoiceResponse { lastDelta = delta; return .silent }
+    var nextAdjustResponse: VoiceResponse?
+    func adjustSpeed(delta: Double) -> VoiceResponse {
+        lastDelta = delta; return nextAdjustResponse ?? .silent
+    }
     func setTrimMode(_ mode: TrimMode) -> VoiceResponse { lastTrimMode = mode; return .earcon(.success) }
     func setVolumeBoost(enabled: Bool) -> VoiceResponse { lastVolumeBoostEnabled = enabled; return .earcon(.success) }
     func queryEffects() -> VoiceResponse { .spoken("Speed is 1x") }
@@ -570,6 +596,9 @@ private final class MockVolumeSink: VoiceVolumeSink {
 private final class MockSleepSink: VoiceSleepSink {
     var setCalled = false
     var lastMinutes: Int?
+    /// The structured fact a sink-side verdict channel must carry: whether the timer actually
+    /// armed. The presentation is identical in both worlds (see the discriminating control).
+    var armedFact = true
 
     func set(minutes: Int) -> VoiceResponse { setCalled = true; lastMinutes = minutes; return .earcon(.success) }
     func endOfEpisode() -> VoiceResponse { .earcon(.success) }
@@ -664,6 +693,9 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
     /// The selection the executor captured, so a case can assert the turn carries what selected
     /// it rather than whatever the window looks like later.
     var lastSelection: CloudConversationSelection?
+    /// The turn's timing object, so a case can assert the executor forwards the one the turn was
+    /// admitted with rather than minting a fresh one.
+    var lastLatency: LatencyHandle?
     /// The request ids a retry named, in order.
     var retriedRequestIds: [String] = []
 
@@ -673,9 +705,11 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
         utteranceId: String?,
         preparedObserver: CloudRouteSink.PreparedObserver?,
         sourceTranscript: String?, sourceLanguage: String?,
+        latency: LatencyHandle,
         ownership: CloudDispatchOwnership?
     ) async -> CloudRouteResult {
         routeToCloudCalled = true
+        lastLatency = latency
         dispatchInProgress = true
         lastRequest = request
         lastContext = context

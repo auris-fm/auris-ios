@@ -10,7 +10,11 @@ final class MockPlaybackManager: PlaybackManagerProtocol {
     var capturedSeekTime: TimeInterval?
     var durationValue: TimeInterval = 0
     var currentTimeValue: TimeInterval = 0
-    var skipResult: String? = nil
+    /// Models the REAL manager contract: `presentationTitle` is the pre-read
+    /// top-of-queue candidate (exists even when the action declines);
+    /// `skipOutcome` is the decision returned at the action's own branches.
+    var presentationTitle: String? = nil
+    var skipOutcome: PlaybackManager.NextEpisodeSkipOutcome = .declined
     var isPlaying = false
 
     func duration() -> TimeInterval { durationValue }
@@ -18,20 +22,60 @@ final class MockPlaybackManager: PlaybackManagerProtocol {
     func seekTo(time: TimeInterval) { capturedSeekTime = time }
     func pause() {}
     func play() {}
-    func skipToNextUpNextEpisode() -> String? { skipResult }
+    func skipToNextUpNextEpisode() -> String? { skipToNextUpNextEpisodeWithFact().presentationTitle }
+    func skipToNextUpNextEpisodeWithFact() -> (presentationTitle: String?, outcome: PlaybackManager.NextEpisodeSkipOutcome) {
+        (presentationTitle, skipOutcome)
+    }
 }
 
 final class PlaybackManagerSinkTests: XCTestCase {
 
     func test_pause_setsVoiceCommandsSource() {
-        // Setting the analytics source before pause is the responsibility of the sink
-        AnalyticsPlaybackHelper.shared.currentSource = .voiceCommands
+        // The SINK must set the analytics source: assert on the real sink's effect, not on a
+        // value the test set itself (the old form passed without touching the sink).
+        let mock = MockPlaybackManager()
+        let sink = PlaybackManagerSink(playbackManager: mock)
+        AnalyticsPlaybackHelper.shared.currentSource = .bookmark
+        _ = sink.pause()
         XCTAssertEqual(AnalyticsPlaybackHelper.shared.currentSource, .voiceCommands)
     }
 
     func test_resume_setsVoiceCommandsSource() {
-        AnalyticsPlaybackHelper.shared.currentSource = .voiceCommands
+        let mock = MockPlaybackManager()
+        let sink = PlaybackManagerSink(playbackManager: mock)
+        AnalyticsPlaybackHelper.shared.currentSource = .bookmark
+        _ = sink.resume()
         XCTAssertEqual(AnalyticsPlaybackHelper.shared.currentSource, .voiceCommands)
+    }
+
+    /// The REAL manager contract through the sink: a success-shaped response
+    /// (the earlier candidate title is spoken, unchanged behavior) while the
+    /// action itself DECLINED — the fact must say not_run, not completed.
+    func test_nextEpisode_earlierTitlePresentButActionDeclined_factIsNotRun() {
+        let manager = MockPlaybackManager()
+        manager.presentationTitle = "First Up"
+        manager.skipOutcome = .declined
+        let sink = PlaybackManagerSink(playbackManager: manager)
+        let (response, fact) = sink.nextEpisodeWithFact()
+        if case .spoken(let text) = response {
+            XCTAssertTrue(text.contains("First Up"), "presentation keeps the historical template")
+        } else {
+            XCTFail("expected the unchanged success-shaped template")
+        }
+        XCTAssertEqual(fact?.state, "not_run")
+        XCTAssertEqual(fact?.reason, "precondition_failed")
+    }
+
+    /// Shuffle attribution: the action played a DIFFERENT episode than the
+    /// top-of-queue candidate; the fact follows the action's played outcome.
+    func test_nextEpisode_shufflePicksAnotherEpisode_factFollowsThePlayedOutcome() {
+        let manager = MockPlaybackManager()
+        manager.presentationTitle = "First Up"
+        manager.skipOutcome = .played(title: "Shuffled Pick")
+        let sink = PlaybackManagerSink(playbackManager: manager)
+        let (_, fact) = sink.nextEpisodeWithFact()
+        XCTAssertEqual(fact?.state, "completed")
+        XCTAssertNil(fact?.reason)
     }
 
     func test_sink_initialization_doesNotCrash() {

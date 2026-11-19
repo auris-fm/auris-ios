@@ -20,7 +20,7 @@ final class BackendReadyRetryTests: XCTestCase {
         }
 
         var capabilities: AsrCapabilities {
-            AsrCapabilities(languages: ["en"], canTranslateToEnglish: false, requiresHardwareAccel: false)
+            AsrCapabilities(canTranslateToEnglish: false)
         }
 
         func ensureReady() async -> Result<Void, Error> {

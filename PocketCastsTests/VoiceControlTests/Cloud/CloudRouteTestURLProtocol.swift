@@ -308,7 +308,6 @@ func testTurnEnvelope(
     CloudTurnEnvelope.make(
         capabilities: [],
         routeHint: nil,
-        recentConversation: [],
         conversation: CloudPreparedConversation(
             requestId: requestId,
             conversationId: conversationId,
@@ -359,7 +358,6 @@ extension CloudRouteClient {
     /// against; only the transport under it changed.
     static func stubbed(
         baseURL: String = "https://cloud.test",
-        userId: String = "user_test",
         token: String? = "test_token",
         fixture: String,
         /// OPT-IN binary audio. The transport delivers audio as `.data` frames
@@ -392,7 +390,6 @@ extension CloudRouteClient {
         prepareTask(task)
         let client = CloudRouteClient(
             baseURL: baseURL,
-            userId: userId,
             requestTimeoutSeconds: 15,
             tokenProvider: tokenProvider ?? StubTokenProvider(token: token),
             webSocketTaskFactory: { _ in task }
@@ -479,7 +476,9 @@ final class Promise<Value>: @unchecked Sendable {
 final class HoldLatch: @unchecked Sendable {
     private let lock = NSLock()
     private var open = false
-    private var resume: (() -> Void)?
+    // Every parked waiter, not one. A single stored continuation would let a second `wait` on the
+    // same latch displace the first's, leaking it and leaving its task suspended forever.
+    private var resumes: [() -> Void] = []
 
     /// True once `release()` has run — the still-held probe for controls.
     var released: Bool {
@@ -496,7 +495,7 @@ final class HoldLatch: @unchecked Sendable {
                 lock.unlock()
                 cont.resume()
             } else {
-                resume = cont.resume
+                resumes.append(cont.resume)
                 lock.unlock()
             }
         }
@@ -523,7 +522,7 @@ final class HoldLatch: @unchecked Sendable {
                 lock.unlock()
                 cont.resume()
             } else {
-                resume = cont.resume
+                resumes.append(cont.resume)
                 lock.unlock()
             }
         }
@@ -536,10 +535,10 @@ final class HoldLatch: @unchecked Sendable {
         guard !open else { lock.unlock(); return }
         open = true
         openedByRetirement = true
-        let r = resume
-        resume = nil
+        let r = resumes
+        resumes = []
         lock.unlock()
-        r?()
+        r.forEach { $0() }
     }
 
     private var retiredCheck: (@Sendable () -> Bool)?
@@ -556,10 +555,10 @@ final class HoldLatch: @unchecked Sendable {
     func release() {
         lock.lock()
         open = true
-        let r = resume
-        resume = nil
+        let r = resumes
+        resumes = []
         lock.unlock()
-        r?()
+        r.forEach { $0() }
     }
 }
 
@@ -796,6 +795,7 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
         return next
     }
 
+
     convenience init(textFrames: [String]) {
         self.init(textFrames.map { .string($0) })
     }
@@ -819,9 +819,9 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
     /// side, which is the only side that can distinguish "dispatched elsewhere" from "never sent".
     static var onSendObservation: (@Sendable (String, String?) -> Void)?
 
+
     func send(_ message: URLSessionWebSocketTask.Message) async throws {
         if throwsBeforeRecording { throw URLError(.notConnectedToInternet) }
-        sent.append(message)
         if let observe = Self.onSendObservation {
             var kind: String?
             if case let .string(text) = message,
@@ -1015,7 +1015,8 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
 
     /// The JSON payloads the client sent, decoded for assertions.
     var sentTextFrames: [String] {
-        sent.compactMap { message in
+        scriptLock.lock(); let snapshot = sent; scriptLock.unlock()
+        return snapshot.compactMap { message in
             if case let .string(text) = message { return text }
             return nil
         }

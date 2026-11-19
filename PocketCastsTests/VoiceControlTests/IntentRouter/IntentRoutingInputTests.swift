@@ -472,7 +472,7 @@ private final class StubAsrBackend: AsrBackend {
     }
 
     var capabilities: AsrCapabilities {
-        AsrCapabilities(languages: ["zh", "en", "de"], canTranslateToEnglish: canTranslate, requiresHardwareAccel: false)
+        AsrCapabilities(canTranslateToEnglish: canTranslate)
     }
 
     func ensureReady() async -> Result<Void, Error> { .success(()) }
@@ -493,7 +493,7 @@ private final class QueueingAsrBackend: AsrBackend {
     var requiredModel: ModelSpec { ModelSpec(id: "queueing", files: [], targetDir: "queueing") }
 
     var capabilities: AsrCapabilities {
-        AsrCapabilities(languages: ["zh", "en"], canTranslateToEnglish: false, requiresHardwareAccel: false)
+        AsrCapabilities(canTranslateToEnglish: false)
     }
 
     func ensureReady() async -> Result<Void, Error> { .success(()) }

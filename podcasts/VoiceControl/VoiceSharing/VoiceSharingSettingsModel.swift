@@ -1,0 +1,764 @@
+import Foundation
+import Combine
+import PocketCastsUtils
+
+/// The Voice Sharing settings surface, BUILT disabled (round 69).
+///
+/// What this exists to make impossible: a settings screen that can turn collection on by itself.
+/// Every control here is either a local, non-authorizing preference or a read-only projection of
+/// the live sharing decision. Specifically:
+///
+/// - There is NO path from this view to `permitsCollection`. The sharing decision — the user's
+/// sharing choice for the signed-in account, read only through the injected authority closures —
+/// remains the only input to that decision, so a user toggling anything here cannot enable
+/// collection.
+/// - The delete control goes through the queue's owner-wide purge (the same fail-explicit path
+/// consent loss uses), so "delete my contributions" cannot silently succeed while storage is
+/// unreconciled — the outcome is reported back, not swallowed.
+/// - The section is gated on a compiled constant that is `false`: nothing here renders in
+/// production until the owner approves activation, and flipping it is a deliberate source change
+/// reviewed like any other.
+///
+/// Numeric limits shown here are the COMPILED bounds, labelled as such; they are not activation
+/// values and are not editable.
+final class VoiceSharingSettingsModel {
+    /// Compiled switch. `false` in every shipped build until the owner approves activation.
+    /// STAGING/DEBUG builds only (scope / +
+    /// ec6b2151): the consented-recording staging verification needs the disclosure/opt-in
+    /// surface, gated on the SAME `-D STAGING` condition the sync staging endpoints use —
+    /// release/production builds compile `false` with no flip-back step to remember.
+    /// Explicit opt-in and every policy/enrollment/allowance/headset check stay intact.
+    static let surfaceEnabled: Bool = {
+        #if STAGING
+            return true
+        #else
+            return false
+        #endif
+    }()
+
+    struct ContributionStatus: Equatable {
+        /// Whether the queue's own state could be DETERMINED. `unknown` is a first-class state, not
+        /// a zero count: an unreadable or unreconciled owner has stored items we cannot count.
+        enum Storage: Equatable {
+            /// Known ready-to-upload count (queue coverage is known and the owner is not held).
+            case knownReady(Int)
+            /// Could not DETERMINE the count (listing/stat/read/durability failure).
+            case unknown
+        }
+        let storage: Storage
+        /// True when the live sharing decision currently permits collection. Read-only projection.
+        let collectionPermitted: Bool
+    }
+
+    /// The outcome of a LOCAL deletion, carrying the queue's typed purge result through unchanged.
+    /// Nothing here may be flattened into "success" — the spec's rule is that local removal never
+    /// stands for server completion, and the purge's own three states must remain distinguishable.
+    struct DeleteResult: Equatable {
+        enum Disposition: Equatable {
+            /// Every retained entry was removed or is durably disqualified; nothing is pending.
+            case reconciled(removed: Int, durablyDisqualified: Int)
+            /// Some survivors could not be CONFIRMED revoked; they stay on this device.
+            case incomplete(removed: Int, survivorsUnknown: Int)
+            /// The purge could not even enumerate storage; nothing was attempted or proven.
+            case refused
+        }
+        let disposition: Disposition
+
+        /// The user-facing summary. It lives HERE, not in the view, so the sentence can be tested
+        /// against the disposition it describes: a surface that over-states what a purge achieved is
+        /// a consent problem, not a formatting one. Every branch states only what is known.
+        var summary: String {
+            switch disposition {
+            case .reconciled(let removed, let remaining):
+                var text = "Removed \(removed) recording\(removed == 1 ? "" : "s") from this device."
+                if remaining > 0 {
+                    // Survivors are ordinary queue entries: they were NOT durably disqualified, so
+                    // they remain eligible and a later drain may still upload them. Saying they
+                    // "will never be uploaded" would promise something the code does not do.
+                    text += " \(remaining) could not be deleted and \(remaining == 1 ? "is" : "are") still "
+                        + "queued on this device."
+                }
+                return text
+            case .incomplete(let removed, let survivorsUnknown):
+                return "Removed \(removed). \(survivorsUnknown) could not be confirmed as revoked and "
+                    + "are still on this device — try again while connected."
+            case .refused:
+                return "Could not check this device's stored recordings, so nothing was deleted. "
+                    + "Please try again."
+            }
+        }
+
+        /// True only when storage was fully enumerated AND no survivor remains unconfirmed.
+        var isFullyResolvedLocally: Bool {
+            switch disposition {
+            case .reconciled(_, let durablyDisqualified):
+                // A deletion that left recordings behind is NOT resolved locally: those bytes are
+                // still on the device, and saying otherwise would tell the user they are gone.
+                return durablyDisqualified == 0
+            case .incomplete, .refused:
+                return false
+            }
+        }
+    }
+
+    private let queue: VoiceSharingQueue
+    private let isCollectionPermitted: () -> Bool?
+
+    private let isEnrolled: () -> Bool?
+    private let isOptedIn: () -> Bool?
+    private let coherenceAccount: () -> String?
+    private let coherenceGeneration: () -> Int?
+    private let coherenceVersion: () -> String?
+
+    /// `nil`-returning reads are REQUIRED: a wiring that cannot determine enrollment or opt-in must
+    /// report `unknown`, not `false`. Passing a constant `false` closure would invent an opt-out.
+    init(queue: VoiceSharingQueue,
+         isCollectionPermitted: @escaping () -> Bool?,
+         isAccountEnrolled: @escaping () -> Bool?,
+         isLocallyOptedIn: @escaping () -> Bool?,
+         coherenceAccount: @escaping () -> String? = { nil },
+         coherenceGeneration: @escaping () -> Int? = { 0 },
+         coherenceVersion: @escaping () -> String? = { nil }) {
+        self.queue = queue
+        self.isCollectionPermitted = isCollectionPermitted
+        self.isEnrolled = isAccountEnrolled
+        self.isOptedIn = isLocallyOptedIn
+        self.coherenceAccount = coherenceAccount
+        self.coherenceGeneration = coherenceGeneration
+        self.coherenceVersion = coherenceVersion
+    }
+
+    var isSurfaceEnabled: Bool { Self.surfaceEnabled }
+
+    /// Read-only projection. "Could not determine" is reported as `.unknown`, never as a zero
+    /// count — the reviewer's point that a held owner must not render "Stored contributions: 0".
+    func status() async -> ContributionStatus {
+        // Folders are the only queue state, so the count is the count. The one distinction worth
+        // keeping is readability: a folder we cannot list is unknown, never an empty device.
+        guard await queue.isReadable else {
+            return ContributionStatus(storage: .unknown,
+                                      collectionPermitted: isCollectionPermitted() ?? false)
+        }
+        return ContributionStatus(storage: .knownReady(await queue.count()),
+                                  collectionPermitted: isCollectionPermitted() ?? false)
+    }
+
+    /// Deletes all retained contributions through the owner-wide purge. Never claims success it
+    /// cannot prove: a refused or held purge reports `fullyRevoked == false`.
+    /// LOCAL scope, stated in the name: this deletes recordings held ON THIS device. It is not
+    /// account-wide deletion — accepted data on the server is a separate operation the client does
+    /// not perform here (spec: local removal never stands for server completion).
+    func deletePendingRecordingsOnThisDevice() async -> DeleteResult {
+        // An unreadable queue CANNOT be enumerated, so a count of 0 would mean "could not look",
+        // not "nothing there". Reporting that as `.reconciled(removed: 0)` would tell the user their
+        // recordings are gone (or that none existed) on the strength of a failed read.
+        guard await queue.isReadable else {
+            return DeleteResult(disposition: .refused)
+        }
+        let before = await queue.count()
+        await queue.deleteAll(reason: "user-request")
+        // A delete can fail (a file system that refuses removal). Whatever survives is reported
+        // rather than assumed gone: claiming removal we did not achieve would tell the user their
+        // recordings are gone while they are still on disk.
+        let surviving = await queue.count()
+        let result = DeleteResult(disposition: .reconciled(
+            removed: before - surviving, durablyDisqualified: surviving))
+        // Subscribers hold a snapshot taken before the purge; without this they would keep showing
+        // the pre-delete count and the user would see their deletion do nothing.
+        await refreshLiveState()
+        return result
+    }
+
+
+    /// The compiled bounds, for a read-only "what the app will do" line. Not editable, not
+    /// activation values.
+    /// Explicitly LOCAL wording, so the surface can never imply account/server deletion.
+    var deletionScopeDescription: String {
+        "Deletes voice recordings still waiting to upload on this device. "
+            + "It does not delete contributions already accepted by the service."
+    }
+
+    var compiledBoundsDescription: String {
+        let days = Int(VoiceSharingQueue.maximumAge / (24 * 60 * 60))
+        return "At most \(VoiceSharingQueue.capacity) recordings, "
+            + "retained for at most \(days) \(days == 1 ? "day" : "days")."
+    }
+    // MARK: - Recovery / stopped state
+
+    /// Live-state dependencies the surface cannot guess.
+    ///
+    /// The previous version took plain Bools with `false` defaults, which silently INVENTED "the
+    /// user turned it off" whenever a caller didn't wire them. These are now explicit: `nil` means
+    /// the caller cannot determine it, and an undeterminable reason renders as `.unknown` rather
+    /// than as an accusation or an invented pause.
+    struct LiveState: Equatable {
+        /// Whether the live sharing decision currently permits collection. `nil` = unknown.
+        var policyPermits: Bool?
+        /// Server-authoritative enrollment. `nil` = not read yet/unknown.
+        var enrolled: Bool?
+        /// The user's own opt-in gesture on this device. `nil` = unknown.
+        var localOptIn: Bool?
+        /// Ready-to-upload count from the same coherent read. `nil` when coverage was unknown,
+        /// so a count can never be invented from a second read.
+        var knownReadyCount: Int?
+        /// The account+generation stamps all three reads were taken under. When the
+        /// stamps disagree the reads were not coherent, and every derived conclusion is unknown
+        /// rather than a mix of two moments.
+        var coherence: Coherence = .incoherent
+
+        enum Coherence: Equatable {
+            /// Every read was taken under the same account and enrollment generation.
+            case coherent(account: String?, generation: Int, version: String?)
+            /// At least one read had no stamp, or the stamps disagree.
+            case incoherent
+        }
+
+        /// A snapshot may only support a conclusion about WHY sharing is stopped when its reads
+        /// were mutually coherent. Otherwise the honest answer is `.unknown`.
+        var isCoherent: Bool {
+            if case .coherent = coherence { return true }
+            return false
+        }
+    }
+
+    /// Why collection is not running. Every case is derived from `LiveState` — the surface reports
+    /// what the app can actually verify, and `unknown` is reachable by construction.
+    enum StoppedReason: Equatable {
+        /// The live sharing decision permits collection and no other blocker applies.
+        case notStopped
+        /// The live sharing decision does not currently permit collection. No user action is
+        /// offered here: the choice lives in the user's sharing decision for the signed-in
+        /// account, not in this surface.
+        case notPermitted
+        /// Server membership is withdrawn or the account is not enrolled.
+        case notEnrolled
+        /// The user turned sharing off on this device.
+        case turnedOffLocally
+        /// Could not determine; never presented as a user action.
+        case unknown
+    }
+
+    struct RecoveryGuidance: Equatable {
+        let reason: StoppedReason
+        /// What will make sharing work again. `nil` when nothing is required or nothing is claimed.
+        let action: String?
+    }
+
+    // MARK: - The single published view state
+
+    /// Everything the surface displays, derived from ONE coherent snapshot. The two UI parts cannot
+    /// disagree because they read the same value, and a listener cannot be called with values from
+    /// two different moments.
+    struct PublishedViewState: Equatable {
+        let live: LiveState
+        let storage: ContributionStatus.Storage
+        let guidance: RecoveryGuidance
+    }
+
+    func publishedViewState(for live: LiveState) -> PublishedViewState {
+        PublishedViewState(live: live,
+                           storage: storage(for: live),
+                           guidance: recoveryGuidance(for: live))
+    }
+
+    /// Storage projection FROM the snapshot (not a second read of the queue).
+    private func storage(for live: LiveState) -> ContributionStatus.Storage {
+        switch live.knownReadyCount {
+        case .some(let count): return .knownReady(count)
+        case .none: return .unknown
+        }
+    }
+
+    // MARK: - Change subscription
+
+    private var changeObservers: [UUID: (SentLiveState) -> Void] = [:]
+    private let changeLock = NSLock()
+    private var readSequence = 0
+    private var lastPublishedSequence = -1
+    private var currentSequence = 0
+
+    /// Registers a listener for state changes. The returned token must be removed on teardown.
+    /// The delivery carries the sequence it was read at, so a consumer can reject an older one.
+    /// Delivers `state` to the registered listeners, outside the change lock.
+    ///
+    /// Exposed so a control can assert the re-entrancy property directly: a listener that calls back
+    /// into the model must not deadlock, which is only true if delivery happens off the lock.
+    func deliverForTesting(_ state: SentLiveState) {
+        changeLock.lock()
+        let bodies = Array(changeObservers.values)
+        changeLock.unlock()
+        for body in bodies { body(state) }
+    }
+
+    func addStateObserver(_ body: @escaping (SentLiveState) -> Void) -> UUID {
+        changeLock.lock(); defer { changeLock.unlock() }
+        let id = UUID()
+        changeObservers[id] = body
+        return id
+    }
+
+    func removeStateObserver(_ id: UUID) {
+        changeLock.lock(); changeObservers.removeValue(forKey: id); changeLock.unlock()
+    }
+
+    /// Re-reads live state and notifies listeners only when it actually changed. Called from the
+    /// production update paths (enrollment store mutations, queue purges) — a snapshot per render
+    /// is not a subscription, and pretending otherwise was the reviewer's point.
+    /// A published snapshot tagged with the sequence it was taken at. Consumers keep the highest
+    /// sequence they have applied, so a delivery that arrives late cannot overwrite a newer one.
+    struct SentLiveState: Equatable {
+        let sequence: Int
+        let state: LiveState
+    }
+
+    /// Test seam: invoked INSIDE a refresh, right after its read and before the commit, so a
+    /// control can hold an older read open while a newer one completes.
+    var afterReadBeforeCommitForTesting: (() -> Void)?
+
+    func refreshLiveState() async {
+        // SERIALIZED: the comparison AND the commit of `lastPublishedState` happen under the same
+        // lock as the observer list, so two concurrent refreshes cannot both decide to publish, and
+        // an out-of-order snapshot cannot overwrite a newer one. Observers are
+        // called OUTSIDE the lock, so a listener that re-enters cannot deadlock.
+        changeLock.lock()
+        readSequence &+= 1
+        let sequence = readSequence
+        changeLock.unlock()
+
+        let state = await liveState()
+        afterReadBeforeCommitForTesting?()
+
+        // LAST writer wins: a refresh whose read is OLDER than one already published is obsolete —
+        // it must not deliver, even if its read finished later. Ordering is by
+        // the read that produced the state, not by the order callbacks happen to run.
+        changeLock.lock()
+        // THE watermark advances on every completed read, CHANGE or not: a
+        // refresh that found nothing new still proves every EARLIER read is obsolete, so a slow
+        // older read must not publish afterwards. Advancing only when the state differed let a
+        // stale read slip through behind an unchanged newer one.
+        guard sequence > lastPublishedSequence else {
+            changeLock.unlock()
+            return
+        }
+        lastPublishedSequence = sequence
+        guard state != lastPublishedState else { changeLock.unlock(); return }
+        lastPublishedState = state
+        currentSequence = sequence
+        let observers = Array(changeObservers.values)
+        changeLock.unlock()
+
+        let sent = SentLiveState(sequence: sequence, state: state)
+        for observer in observers { observer(sent) }
+    }
+
+    /// The sequence of the most recently committed publication; seeded on subscribe so a new
+    /// listener cannot apply a delivery older than the state it already seeded from.
+    var publicationSequence: Int { changeLock.lock(); defer { changeLock.unlock() }; return currentSequence }
+
+    private var lastPublishedState: LiveState?
+
+    /// The model's ONE live snapshot: queue coverage plus whatever the two injected reads return.
+    /// `nil` from a read is preserved as `unknown` — never coerced to `false`, which would accuse
+    /// the user of opting out.
+    func liveState() async -> LiveState {
+        // Stamp before and after every read, INCLUDING the queue read: an account/enrollment move
+        // between the queue coverage read and the first stamp used to be invisible. No read happens
+        // outside the interval.
+        let before = coherenceStamp()
+        // The count is a direct read of the directory — but only when it CAN be read: an
+        // unlistable root reports `nil` (unknown), never a zero that would show "Waiting 0".
+        let readyCount: Int? = await queue.isReadable ? await queue.count() : nil
+        let permits = isCollectionPermitted()
+        let enrolled = isEnrolled()
+        let optedIn = isOptedIn()
+        let after = coherenceStamp()
+        let coherence: LiveState.Coherence
+        if let before, let after, before == after {
+            coherence = .coherent(account: before.account,
+                                  generation: before.generation,
+                                  version: before.version)
+        } else {
+            coherence = .incoherent
+        }
+        return LiveState(policyPermits: permits,
+                         enrolled: enrolled,
+                         localOptIn: optedIn,
+                         knownReadyCount: readyCount,
+                         coherence: coherence)
+    }
+
+    /// Account + enrollment generation + epoch version, read atomically enough to detect a move
+    /// between two calls. `nil` when the caller cannot answer — which makes the snapshot
+    /// incoherent rather than silently trusting a half-known world.
+    private func coherenceStamp() -> CoherenceStamp? {
+        // Account and generation are required: without them there is nothing to prove the reads
+        // belong together. The version is informative only and may legitimately be nil.
+        guard let account = coherenceAccount(),
+              let generation = coherenceGeneration() else { return nil }
+        return CoherenceStamp(account: account,
+                              generation: generation,
+                              version: coherenceVersion())
+    }
+
+    struct CoherenceStamp: Equatable {
+        let account: String?
+        let generation: Int
+        let version: String?
+    }
+
+    /// Projection over explicit live state. Pure: no reads, no writes, no cached mixing.
+    func recoveryGuidance(for live: LiveState) -> RecoveryGuidance {
+        guard live.isCoherent else {
+            // Reads from two different moments (or an unstamped read) cannot name a reason.
+            return RecoveryGuidance(reason: .unknown, action: nil)
+        }
+        guard let permits = live.policyPermits,
+              let enrolled = live.enrolled,
+              let optedIn = live.localOptIn else {
+            return RecoveryGuidance(reason: .unknown, action: nil)
+        }
+        if permits && enrolled && optedIn {
+            return RecoveryGuidance(reason: .notStopped, action: nil)
+        }
+        if !optedIn {
+            return RecoveryGuidance(reason: .turnedOffLocally,
+                                    action: L10n.voiceSharingRecoveryTurnedOff)
+        }
+        if !enrolled {
+            return RecoveryGuidance(reason: .notEnrolled,
+                                    action: L10n.voiceSharingRecoveryNotEnrolled)
+        }
+        return RecoveryGuidance(reason: .notPermitted,
+                                action: L10n.voiceSharingRecoveryPaused)
+    }
+}
+
+/// Account operations for the sharing screen. Local consent and server acknowledgement stay separate.
+@MainActor
+final class VoiceSharingAccountModel: ObservableObject {
+    enum MembershipStatus: Equatable {
+        case idle, loading, disclosureUnavailable, confirmationRequired, unavailable, conflict, unauthorized
+        case refused(VoiceSharingMutationOutcome.RefusalReason)
+        case enrolled, withdrawnServerConfirmed, withdrawalUnconfirmed
+    }
+    enum DeletionStatus: Equatable {
+        case idle, sending, unavailable, unauthorized
+        case refused(VoiceSharingMutationOutcome.RefusalReason)
+        /// The server deleted account data synchronously and said so with an empty `204`.
+        case deleted
+    }
+    @Published private(set) var membershipStatus: MembershipStatus = .idle
+    @Published private(set) var deletionStatus: DeletionStatus = .idle
+    @Published private(set) var localCleanup: VoiceSharingSettingsModel.DeleteResult?
+    @Published private(set) var cleanupAttempted = false
+    var localCleanupUnavailable: Bool { cleanupAttempted && localCleanup == nil }
+    @Published private(set) var membership: VoiceSharingMembership?
+    @Published private(set) var locallyOptedIn: Bool?
+    @Published private(set) var refreshUnavailable = false
+    @Published private(set) var busy = false
+    var enrollmentAvailable: Bool { disclosureVersion != nil }
+    var accountControlsAvailable: Bool { account != nil && account == session() }
+    var accountActionSession: String? { accountControlsAvailable ? account : nil }
+    func canAct(in originatingSession: String?) -> Bool {
+        originatingSession != nil && originatingSession == account && originatingSession == session()
+    }
+
+    private let store: VoiceSharingEnrollmentStore
+    private let client: VoiceSharingAccountClient
+    private let disclosureVersion: String?
+    private let session: () -> String?
+    private let purgeLocal: (() async -> VoiceSharingSettingsModel.DeleteResult)?
+    private var observer: UUID?
+    private var account: String?
+    private var serial = 0
+    private var stamp: Stamp?
+    private var mutation: VoiceSharingAccountClient.MutationOperation?
+    private var deletion: VoiceSharingAccountClient.DeletionOperation?
+    private var withdrawing = false
+    private struct Stamp: Equatable {
+        let serial: Int
+        let token: VoiceSharingEnrollmentStore.ProjectionToken
+    }
+
+    init(store: VoiceSharingEnrollmentStore = .shared,
+         client: VoiceSharingAccountClient,
+         disclosureVersion: String? = nil,
+         session: @escaping () -> String? = VoiceSharingEnrollmentStore.currentSessionOwner,
+         purgeLocal: (() async -> VoiceSharingSettingsModel.DeleteResult)? = nil) {
+        self.store = store
+        self.client = client
+        self.disclosureVersion = disclosureVersion.flatMap { $0.isEmpty ? nil : $0 }
+        self.session = session
+        self.purgeLocal = purgeLocal
+        account = session()
+        observer = store.addObserver { [weak self] _ in
+            Task { @MainActor [weak self] in self?.storeChanged() }
+        }
+        updateMembership()
+    }
+
+    private func updateMembership() {
+        let state = store.currentAuthoritativeState
+        membership = state?.membership
+        locallyOptedIn = state?.localOptIn
+    }
+
+    private func storeChanged() {
+        if account != session() {
+            account = session()
+            serial += 1
+            stamp = nil
+            mutation = nil
+            deletion = nil
+            withdrawing = false
+            busy = false
+            localCleanup = nil
+            cleanupAttempted = false
+            membershipStatus = .idle
+            deletionStatus = .idle
+            refreshUnavailable = false
+        } else if let stamp, store.projectionToken() != stamp.token {
+            serial += 1
+            self.stamp = nil
+            mutation = nil
+            busy = false
+            membershipStatus = .idle
+        }
+        updateMembership()
+    }
+
+    private func begin() -> Stamp? {
+        storeChanged()
+        serial += 1
+        stamp = nil
+        busy = false
+        guard let token = store.projectionToken(), token.lifecycleGeneration == session() else { return nil }
+        let next = Stamp(serial: serial, token: token)
+        stamp = next
+        busy = true
+        return next
+    }
+
+    private func current(_ sent: Stamp) -> Bool {
+        sent == stamp && sent.token == store.projectionToken() && sent.token.lifecycleGeneration == session()
+    }
+
+    func refresh() async {
+        guard let sent = begin() else { membershipStatus = .unavailable; return }
+        membershipStatus = .loading
+        let result = await refreshProjection(under: sent)
+        guard current(sent) else { storeChanged(); return }
+        busy = false
+        membershipStatus = result == .success ? .idle : .unavailable
+    }
+
+    /// Reads the projection as a PRECONDITION for a pending mutation, under the caller's fences.
+    ///
+    /// Distinct from `refresh`: this does not publish `.loading`, does not overwrite the caller's
+    /// status on success, and leaves a failure visible to the caller as `false` so it can decide. It
+    /// reuses `begin`/`current(_:)`, so an account change or a newer intent landing mid-read discards
+    /// the reply exactly as it would for any other operation, and the mutation is then abandoned rather
+    /// than sent against an unknown state.
+    private func readProjectionForMutation() async -> Bool {
+        guard let sent = begin() else { membershipStatus = .unavailable; return false }
+        let result = await refreshProjection(under: sent)
+        guard current(sent) else { storeChanged(); return false }
+        if result == .success {
+            // The caller now has the server state; it continues with its own operation.
+            busy = false
+            return true
+        }
+        busy = false
+        membershipStatus = .unavailable
+        return false
+    }
+
+    private enum RefreshResult { case success, failure, stale }
+    private func refreshProjection(under sent: Stamp) async -> RefreshResult {
+        guard current(sent) else { return .stale }
+        guard let result = await client.fetchProjection() else {
+            guard current(sent) else { return .stale }
+            refreshUnavailable = true
+            return .failure
+        }
+        guard current(sent), result.issuedUnder == sent.token,
+              store.apply(authoritative: result.membership, readUnder: result.issuedUnder) else { return .stale }
+        refreshUnavailable = false
+        updateMembership()
+        return .success
+    }
+
+    func enroll(disclosureConfirmed: Bool) async {
+        storeChanged()
+        guard disclosureConfirmed else { membershipStatus = .confirmationRequired; return }
+        guard let disclosureVersion else { membershipStatus = .disclosureUnavailable; return }
+        guard !busy else { membershipStatus = .unavailable; return }
+        // No read-before-write: the body is the desired state, and the server issues no revision to
+        // precondition on. One request takes the user from here to enrolled.
+        store.setLocalOptIn(true)
+        guard let sent = begin(), let operation = client.beginMembership(
+            enrolled: true, acceptedDisclosureVersion: disclosureVersion) else {
+            // Diagnostic: name WHY enrollment could not begin — the two guards above
+            // are silent, and "unsupported_disclosure" from the server is indistinguishable from a
+            // local precondition failure without this line.
+            FileLog.shared.addMessage("[VoiceSharing] enrollment not begun: disclosureVersion=\(disclosureVersion)")
+            membershipStatus = .unavailable
+            busy = false
+            return
+        }
+        withdrawing = false
+        mutation = operation
+        await performMutation(operation, under: sent)
+    }
+
+    /// Never blocked by an enrollment/fetch in flight. Capture server preconditions before local stop.
+    func withdraw() async {
+        storeChanged()
+        // The body states the desired state, and the server derives the epoch transition from it.
+        serial += 1
+        stamp = nil
+        mutation = nil
+        withdrawing = true
+        _ = store.withdrawLocally(acceptedServerProjectionAfterward: false)
+        cleanupAttempted = true
+        localCleanup = await purgeLocal?()
+        updateMembership()
+        membershipStatus = .withdrawalUnconfirmed
+        guard let sent = begin() else { busy = false; return }
+        // GET-before-PUT for a withdrawal too. LOCAL stop already happened
+        // above and is never undone by a failed read: collection has stopped and the pending bytes are
+        // purged, so the user's privacy decision holds regardless of what the server says next. What a
+        // failed read costs is only the CONFIRMATION, which the status already reports as unconfirmed.
+        guard let operation = client.beginMembership(
+            enrolled: false, acceptedDisclosureVersion: nil) else {
+            busy = false
+            membershipStatus = .withdrawalUnconfirmed
+            return
+        }
+        mutation = operation
+        await performMutation(operation, under: sent)
+    }
+
+    func retryMembership() async {
+        storeChanged() // Retire stale operations before capturing an immutable retry.
+        guard !busy else { return }
+        if let operation = mutation {
+            guard operation.issuedUnder == store.projectionToken() else {
+                mutation = nil
+                membershipStatus = .unavailable
+                return
+            }
+            guard let sent = begin() else { return }
+            guard operation.issuedUnder == sent.token else {
+                if stamp == sent { mutation = nil; busy = false; membershipStatus = .unavailable }
+                return
+            }
+            // NO PREFLIGHT. `VoiceSharingAccountClient` already acquires the
+            // credential inside request construction, dials nothing when it is unavailable, reports
+            // that case as `.unavailableBackend`, and fences the account around its own await. A
+            // separate check here duplicated that decision, and a separate one I wrote EARLIER also
+            // gated on `refreshUnavailable` — a flag that records a failed read, not credential
+            // validity, which blocked retries after the network had recovered. The operation is
+            // handed over unchanged, so its request identity survives; the completion is fenced.
+            await performMutation(operation, under: sent)
+        } else if withdrawing {
+            guard let sent = begin() else { return }
+            let refreshed = await refreshProjection(under: sent)
+            guard current(sent) else { storeChanged(); return }
+            busy = false
+            guard refreshed == .success else { membershipStatus = .withdrawalUnconfirmed; return }
+            await withdraw()
+        }
+    }
+
+    func retryLocalCleanup() async { cleanupAttempted = true; localCleanup = await purgeLocal?() }
+
+    private func performMutation(_ operation: VoiceSharingAccountClient.MutationOperation, under sent: Stamp) async {
+        let result = await client.perform(operation)
+        guard current(sent) else { storeChanged(); return }
+        switch result {
+        case .applied(let projection, let issuedUnder):
+            guard issuedUnder == sent.token, store.apply(authoritative: projection, readUnder: issuedUnder) else {
+                busy = false; membershipStatus = .unavailable; return
+            }
+            mutation = nil
+            if withdrawing {
+                membershipStatus = projection.voiceSharingEnrolled ? .withdrawalUnconfirmed : .withdrawnServerConfirmed
+            } else {
+                membershipStatus = store.currentEffectiveEnrolled ? .enrolled : .unavailable
+            }
+        case .conflict(let projection, let issuedUnder):
+            guard issuedUnder == sent.token else { busy = false; membershipStatus = .unavailable; return }
+            store.applyConflict(current: projection, readUnder: issuedUnder)
+            mutation = nil // Never replay a conflicted opt-in; renewed opt-in needs fresh user intent.
+            membershipStatus = .conflict
+        case .unauthorized:
+            // INCIDENT: a refused mutation used to keep `mutation`
+            // alive, so any later resume re-sent it — under whatever credential existed then.
+            // A refused intent is DROPPED: the user's next attempt begins a NEW operation.
+            mutation = nil
+            membershipStatus = .unauthorized
+        case .refused(let reason):
+            FileLog.shared.addMessage("[VoiceSharing] enrollment refused by server: \(reason)")
+            mutation = nil; membershipStatus = .refused(reason)
+        case .unavailableBackend: membershipStatus = withdrawing ? .withdrawalUnconfirmed : .unavailable
+        case .refusedStaleSession:
+            storeChanged()
+            if stamp == sent { busy = false; membershipStatus = .unavailable }
+            return
+        }
+        updateMembership()
+        _ = await refreshProjection(under: sent)
+        guard current(sent) else { storeChanged(); return }
+        busy = false
+    }
+
+    func deleteAcceptedData(confirmed: Bool) async {
+        storeChanged()
+        guard confirmed, deletionStatus != .sending, let operation = client.beginDeletion() else { return }
+        deletion = operation
+        await performDeletion(operation)
+    }
+
+    func retryDeletion() async {
+        storeChanged()
+        guard deletionStatus != .sending, let operation = deletion else { return }
+        // The operation is handed to the client unchanged, so its request ID and cutoff are
+        // preserved by construction. `performDeletion` fences on ownership after its credential
+        // await and reports a missing credential as `.unavailableBackend`, which keeps the
+        // operation pending for an identical retry instead of clearing it.
+        await performDeletion(operation)
+    }
+
+    private func performDeletion(_ operation: VoiceSharingAccountClient.DeletionOperation) async {
+        guard session() == operation.originatingGeneration else { return }
+        deletionStatus = .sending
+        let result = await client.performDeletion(operation)
+        // FENCE every branch: `performDeletion` awaited a credential inside the
+        // client, and a NEWER deletion may have replaced this one meanwhile. A stale completion must
+        // not write status for an operation that is no longer current.
+        guard session() == operation.originatingGeneration else { storeChanged(); return }
+        guard deletion == operation else { return }
+        switch result {
+        case .deleted: deletion = nil; deletionStatus = .deleted
+        case .unauthorized: deletion = nil; deletionStatus = .unauthorized
+        case .refused(let reason): deletion = nil; deletionStatus = .refused(reason)
+        // Temporary: the operation is RETAINED so an identical retry can be sent later.
+        case .unavailableBackend: deletionStatus = .unavailable
+        }
+    }
+
+    // MARK: - Control accessors
+    //
+    // A READ-only view of retry state, so a control can observe identity preservation and
+    // stale-completion fencing without asserting on private storage. There is deliberately NO
+    // state-setting helper: an earlier `beginDeletionForTesting` manufactured
+    // `pending`/`unavailable` state directly and bypassed the public action's `.sending` guard, so a
+    // control could replace an in-flight deletion the real button would refuse. Controls now drive
+    // the public entry points only.
+
+    /// Whether a deletion operation is still awaiting a definitive answer.
+    var hasPendingDeletionForTesting: Bool { deletion != nil }
+
+    deinit { if let observer { store.removeObserver(observer) } }
+}

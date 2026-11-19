@@ -13,7 +13,8 @@ rules, so nothing reaches review unlinted.
 ## Building and Running
 
 ```bash
-make build_staging        # trustworthy build (what verification before a PR should use)
+make build                # the Debug build against the staging gateway — what verification
+                          # before a PR should use (build_staging is an alias for it)
 make build_fast           # local iteration: no dSYM, no code signing, no lint, no package re-resolution
 ```
 
@@ -45,26 +46,26 @@ make clean
 ## Running Tests
 
 ```bash
-make test_staging
+make test
 ```
 
 ### Running a Single Test
 
 ```bash
-make test_staging ONLY_TESTING=PocketCastsTests/YourTestClass/testMethodName
+make test ONLY_TESTING=PocketCastsTests/YourTestClass/testMethodName
 ```
 
 ### Running Module Tests
 
 ```bash
 # DataModel module tests
-make test_staging ONLY_TESTING=PocketCastsDataModelTests
+make test ONLY_TESTING=PocketCastsDataModelTests
 
 # Server module tests
-make test_staging ONLY_TESTING=PocketCastsServerTests
+make test ONLY_TESTING=PocketCastsServerTests
 
 # Utils module tests
-make test_staging ONLY_TESTING=PocketCastsUtilsTests
+make test ONLY_TESTING=PocketCastsUtilsTests
 ```
 
 ## Build and test invocation discipline
@@ -225,7 +226,7 @@ Applies to all Auris repos; canonical text lives in core's `CLAUDE.md`.
 
 ## PR review discipline
 
-Before any PR merges, **every review comment on it must be addressed** — either fixed in code or rejected with a written reason. Deferral to follow-up tickets is only for comments irrelevant to the PR's changes; anything relevant is handled or rejected-with-reason, never parked. No comment is skipped silently. Addressing comments is **continuous while the PR is open**: keep checking for new comments and handle each as it lands — not a single round. Applies to all Auris repos; canonical text lives in core's CLAUDE.md. The final merge decision is always the owner's (@merlinran).
+Before any PR merges, **every review comment on it must be addressed** — either fixed in code or rejected with a written reason. Deferral to follow-up tickets is only for comments irrelevant to the PR's changes; anything relevant is handled or rejected-with-reason, never parked. No comment is skipped silently. Addressing comments is **continuous while the PR is open**: keep checking for new comments and handle each as it lands — not a single round. Applies to all Auris repos; canonical text lives in core's CLAUDE.md. The final merge decision is always the owner's.
 
 ## Task workspace naming
 

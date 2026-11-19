@@ -21,6 +21,7 @@ final class FakeLfmInference: LfmInference {
     var lastErrorMessage = ""
     var classifyLabel: String? = "playback:pause"
     var generateResult: String? = "<|tool_call_start|>[playback(action='pause')]<|tool_call_end|>"
+    var onTokenize: (() -> Void)?
     var tokenizeThrows: Error?
     var classifyCount = 0
     var resetCount = 0
@@ -39,6 +40,7 @@ final class FakeLfmInference: LfmInference {
     }
 
     func tokenize(_ text: String, addBos: Bool) throws -> [Int] {
+        onTokenize?()
         if let tokenizeThrows { throw tokenizeThrows }
         if text == "pause" {
             return [10]
@@ -77,7 +79,7 @@ final class FakeAsrBackend: AsrBackend {
     private(set) var released = false
     var requiredModel: ModelSpec { ModelSpec(id: "fake", files: [], targetDir: "fake") }
     var capabilities: AsrCapabilities {
-        AsrCapabilities(languages: ["en"], canTranslateToEnglish: false, requiresHardwareAccel: false)
+        AsrCapabilities(canTranslateToEnglish: false)
     }
     func ensureReady() async -> Result<Void, Error> {
         ensureReadyCount += 1
