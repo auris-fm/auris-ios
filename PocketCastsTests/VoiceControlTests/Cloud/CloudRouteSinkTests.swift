@@ -10303,13 +10303,6 @@ private final class NoOpCloudPlaybackQuerySink: VoicePlaybackQuerySink {
     func episodeTitle() -> VoiceResponse { .silent }
 }
 
-private final class ProbeCompletionFlag: @unchecked Sendable {
-    private let lock = NSLock()
-    private var done = false
-    func set() { lock.lock(); done = true; lock.unlock() }
-    var isSet: Bool { lock.lock(); let d = done; lock.unlock(); return d }
-}
-
 private final class ExpiredTurnAnalytics: AnalyticsService {
     private(set) var turnOutcomes: [String] = []
     func track(_ event: String, properties: [String: Any]) {
