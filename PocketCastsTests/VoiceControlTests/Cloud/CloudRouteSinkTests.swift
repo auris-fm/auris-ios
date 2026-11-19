@@ -3452,7 +3452,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         // the watcher samples while the turn runs, and release then lets it proceed.
         let socketWatcher = Task {
             for _ in 0..<500 {
-                if await MainActor.run({ sink.activeResultSocketForTesting != nil }) { return true }
+                if (await MainActor.run { sink.activeResultSocketForTesting != nil }) { return true }
                 try? await Task.sleep(nanoseconds: 5_000_000)
             }
             return false
