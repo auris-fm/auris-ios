@@ -6380,7 +6380,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         let seekFixture = { (positionMs: Int) in
             """
             event: action
-            data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":\(positionMs)}}
+            data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":\(positionMs)},"precondition":{"episode_id":"\(CloudRouteSinkTests.testEpisodeId)"}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -8058,8 +8058,14 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             playbackSink: playback,
             fingerprintMapper: mapper,
             playbackPositionMs: { self.playback.positionMs },
+            currentEpisodeIdProvider: { CloudRouteSinkTests.testEpisodeId },
             cloudPlaybackContextState: CloudPlaybackContextState(),
             analytics: VoiceAnalytics(analytics: analytics),
+            // The identity injector makes these fixtures identified v1 operations, which execute
+            // only with a durable record, an advertised manifest and a provable current target.
+            // Without these the injected action refused before any effect and the seek-based
+            // controls measured a refusal instead of the ordering they name.
+            operationJournal: OperationJournal(store: InMemoryOperationRecordStore()),
             conversationManager: conversationManager ?? testConversationManager(),
             interruptionState: interruptionState,
             onGracePlaybackHoldBegin: withHoldCounters ? { origin in
@@ -8068,7 +8074,10 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             } : nil,
             onGracePlaybackHoldEnd: withHoldCounters ? { _ in
                 self.holdCounters?.end.bump()
-            } : nil
+            } : nil,
+            appOperationSupportProvider: {
+                CloudAppOperationSupport(operations: ["playback.seek_to", "playback.pause", "playback.resume"])
+            }
         )
         return built
     }
@@ -8280,7 +8289,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// An action followed by a terminal event: the action is the late output under test.
     static let actionThenDoneFixture = """
         event: action
-        data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":100000}}
+        data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":100000},"precondition":{"episode_id":"\(CloudRouteSinkTests.testEpisodeId)"}}
 
         event: done
         data: {"usage":{"input_tokens":1,"output_tokens":0}}

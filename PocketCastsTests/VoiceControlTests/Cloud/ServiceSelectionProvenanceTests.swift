@@ -1034,9 +1034,21 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             "what did the host mean by that remark",
             "the submitted frame must carry the routed transcript verbatim"
         )
-        XCTAssertNil(
-            body["capabilities"],
-            "no renderer is advertised here, so capabilities must be omitted"
+        // The assembly declares its app-operation manifest, so the frame advertises exactly
+        // `app_operations_v1` WITH the paired support object — and no renderer capability,
+        // because no structured-results renderer is wired here.
+        XCTAssertEqual(
+            body["capabilities"] as? [String], [CloudClientCapabilities.appOperationsV1],
+            "the frame advertises the declared app-operation capability and no renderer"
+        )
+        let support = try XCTUnwrap(
+            body["app_operation_support"] as? [String: Any],
+            "the capability token must ride with its support manifest"
+        )
+        XCTAssertEqual(
+            support["operations"] as? [String],
+            VoiceControlAssembly.declaredAppOperations?.operations,
+            "the manifest on the wire is the assembly's declaration"
         )
     }
 
