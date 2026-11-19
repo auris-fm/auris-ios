@@ -42,7 +42,6 @@ final class PlaybackSnapshotControls: XCTestCase {
             turn: CloudTurnEnvelope.make(
                 capabilities: [],
                 routeHint: nil,
-                recentConversation: [],
                 conversation: CloudPreparedConversation(
                     requestId: requestId, conversationId: "conv-1", mode: "create"
                 )
@@ -59,7 +58,7 @@ final class PlaybackSnapshotControls: XCTestCase {
         let segmenter = NativeVadSegmenter(silenceTimeoutMs: -1)
         var events: [String] = []
         segmenter.onSpeechStart = { events.append("start") }
-        segmenter.onUtterance = { _, _ in events.append("emit") }
+        segmenter.onUtterance = { _, _, _, _, _ in events.append("emit") }
 
         let frame = [Float](repeating: 0.5, count: 320)
         // 5+ energetic frames confirm speech; one sub-threshold frame closes (timeout -1).
@@ -347,7 +346,7 @@ private final class GatedAsrBackend: AsrBackend {
 
     var requiredModel: ModelSpec { ModelSpec(id: "gated", files: [], targetDir: "gated") }
     var capabilities: AsrCapabilities {
-        AsrCapabilities(languages: ["en"], canTranslateToEnglish: false, requiresHardwareAccel: false)
+        AsrCapabilities(canTranslateToEnglish: false)
     }
     func ensureReady() async -> Result<Void, Error> { .success(()) }
     func release() {}
@@ -423,7 +422,7 @@ private final class StubAsrBackend: AsrBackend {
     }
 
     var capabilities: AsrCapabilities {
-        AsrCapabilities(languages: ["zh", "en", "de"], canTranslateToEnglish: canTranslate, requiresHardwareAccel: false)
+        AsrCapabilities(canTranslateToEnglish: canTranslate)
     }
 
     func ensureReady() async -> Result<Void, Error> { .success(()) }
