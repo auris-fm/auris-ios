@@ -247,12 +247,16 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
     /// callback is the same seam `ColdAsrEligibilityProductionTests` uses, and it is the seam the
     /// engine actually calls.
     @discardableResult
-    private func speak(_ service: VoiceControlService, _ transcript: String, _ utteranceId: String) -> Bool {
+    private func speak(
+        _ service: VoiceControlService, _ transcript: String, _ utteranceId: String,
+        snapshot: PlaybackContext? = nil
+    ) -> Bool {
         service.gracePeriodSignalForTesting.onWakeWordDetected()
         let input = IntentRoutingInput.english(
             transcript: transcript,
             selection: .wakeWord,
-            utteranceId: utteranceId
+            utteranceId: utteranceId,
+            playbackContext: snapshot
         )
         guard let routing = asr?.onRoutingInput else {
             XCTFail("the service must install onRoutingInput; without it no turn can be admitted")
@@ -494,6 +498,52 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
             interruptFrames().count, 1,
             "exactly one interrupt for one barge-in; frames=\(allFrames())"
         )
+    }
+
+    /// THE RETAINED FOLLOW-UP DISPATCHES ITS ADMISSION SNAPSHOT VERBATIM. The barge-in utterance
+    /// froze its playback context when the user spoke; the resubmission after the acknowledgement
+    /// must carry THAT value on the wire — not a resample of whatever is playing when the prior
+    /// turn finally settles. Observed on the dispatched request's serialized context.
+    func testTheResubmittedFollowUpDispatchesItsAdmissionSnapshot() async throws {
+        let service = try await readyService(fixture: { self.doneFixture })
+        let sink = service.executorForTesting.cloudRouteSinkForTesting
+        let state = sink.interruptionStateForTesting
+
+        let admissionSnapshot = PlaybackContext(
+            episodeId: "ep-at-barge", podcastId: "pod-a",
+            referencePositionMs: 42_000, clientPositionMs: 43_500,
+            recentReferencePositions: [41_000, 42_000], previousReferencePositionMs: 41_000
+        )
+
+        speak(service, "first question", "u-prior")
+        let priorLive = await waitUntil(timeout: 15) {
+            await MainActor.run { sink.activeResultSocketForTesting?.requestId == "u-prior" }
+        }
+        XCTAssertTrue(priorLive, "premise: turn 1 must be in flight")
+
+        speak(service, "play the next one", "u-barge", snapshot: admissionSnapshot)
+        let held = await waitUntil(timeout: 15) {
+            await MainActor.run { state.heldFollowUpForTesting?.utteranceId == "u-barge" }
+        }
+        XCTAssertTrue(held, "premise: the follow-up must be retained before the acknowledgement")
+
+        // Playback moves on while the follow-up waits: a dispatch-time resample would read THIS.
+        // (The service's live provider reads the real PlaybackManager; the discriminator is the
+        // wire value below — it must be the admission snapshot regardless of live state.)
+
+        firstTurnLatch.release()
+        let submitted = await waitUntil(timeout: 20) { !self.authFrames(for: "u-barge").isEmpty }
+        XCTAssertTrue(submitted, "the follow-up must be submitted after the acknowledgement")
+
+        let frame = try XCTUnwrap(
+            recorder.all.compactMap({ $0.sentAuthFrame }).first { ($0["request_id"] as? String) == "u-barge" },
+            "the follow-up's own authenticate frame"
+        )
+        let context = try XCTUnwrap(frame["context"] as? [String: Any], "the frame carries a context")
+        XCTAssertEqual(context["episode_id"] as? String, "ep-at-barge",
+                       "the resubmitted turn dispatches the ADMISSION snapshot, not live playback")
+        XCTAssertEqual((context["reference_position_ms"] as? NSNumber)?.int64Value, 42_000)
+        XCTAssertEqual((context["client_position_ms"] as? NSNumber)?.int64Value, 43_500)
     }
 
     // SinglePredecessorInterruptionControl covers final zero-auth disposal with one A/B pair.
