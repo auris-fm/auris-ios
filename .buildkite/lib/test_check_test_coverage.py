@@ -172,13 +172,6 @@ def main():
     # Take a test that ran and make it skip for a missing keychain entitlement.
     # It has to be one that was not skipping already, or the case would only
     # re-test what the run did rather than what the guard decides.
-    # A PocketCastsTests case: the guard reads expectations per bundle, so a test
-    # from another bundle would not be looked up at all.
-    pocket_cases = {
-        node.get("nodeIdentifier")
-        for node in check.walk_test_cases(base)
-        if node.get("result") != "Skipped"
-    }
     suite_names = set()
 
     def collect(node, bundle=None):
@@ -308,6 +301,11 @@ def main():
         # reported has to be the one that happened, and the run still fails. This
         # is what stops the tolerated list from becoming a way to hide a hang.
         victim = timed_out[0]
+        # The victim may itself be a listed intermittent; overwrite it in place
+        # and restore whatever was there, so nothing leaks into the cases below
+        # (a deleted real entry would silently skip them on exactly the run
+        # where a flake hung).
+        saved_victim = check.FLAKY_TESTS.get(victim)
         check.FLAKY_TESTS[victim] = "added by this case"
         outcome = check.intermittent_outcome(
             victim, reported | {victim}, check.executed_tests(base)
@@ -315,7 +313,10 @@ def main():
         still_fails = bool(
             check.check_failures(reported | {victim}, timed_out={victim})
         )
-        del check.FLAKY_TESTS[victim]
+        if saved_victim is None:
+            del check.FLAKY_TESTS[victim]
+        else:
+            check.FLAKY_TESTS[victim] = saved_victim
         reports_failed = outcome == "failed" and still_fails
         print(f"{'PASS' if reports_failed else 'FAIL'}  "
               "a timed-out test reports failed, not passed or never run, and the "
