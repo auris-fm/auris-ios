@@ -63,6 +63,7 @@ step_result() {
   echo "grants self-test exit: $GRANTS_SELFTEST_STATUS"
   echo "live-log filter self-test exit: $FILTER_SELFTEST_STATUS"
   echo "step-verdict self-test exit: $VERDICT_SELFTEST_STATUS"
+  echo "beta-upload self-test exit: $BETA_UPLOAD_SELFTEST_STATUS"
   # The verdict is decided in one place, tests_verdict above: a red xcodebuild
   # passes only beside a guard 10. No gate on the raw status exists outside it,
   # so a known-only run cannot exit red here however the lines are ordered.
@@ -78,6 +79,7 @@ step_result() {
   [ "$GRANTS_SELFTEST_STATUS" -eq 0 ] || { echo "the grants step did not prove it retries a not-ready privacy service"; exit "$GRANTS_SELFTEST_STATUS"; }
   [ "$FILTER_SELFTEST_STATUS" -eq 0 ] || { echo "the live log would lose a failure's detail"; exit "$FILTER_SELFTEST_STATUS"; }
   [ "$VERDICT_SELFTEST_STATUS" -eq 0 ] || { echo "the step verdict did not prove it trusts the guard"; exit "$VERDICT_SELFTEST_STATUS"; }
+  [ "$BETA_UPLOAD_SELFTEST_STATUS" -eq 0 ] || { echo "the beta-upload step did not prove it refuses a misconfigured agent"; exit "$BETA_UPLOAD_SELFTEST_STATUS"; }
   [ "$TESTS_VERDICT" -eq 0 ] || exit "$TESTS_VERDICT"
   [ "$IB_CLEANUP_STATUS" -eq 0 ] || { echo "this build's Interface Builder processes could not all be stopped"; exit "$IB_CLEANUP_STATUS"; }
   echo "Build and full plan passed."
