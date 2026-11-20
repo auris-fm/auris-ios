@@ -1,0 +1,330 @@
+#!/usr/bin/env bash
+# Runs the security scanners over this repository and writes one Markdown report.
+#
+#   security-audit.sh pr <base-commit>   only what the checked-out tree adds on top of <base-commit>
+#   security-audit.sh full               everything: the whole tree and the whole history
+#
+# Scanners, each needed on PATH along with git and jq:
+#   gitleaks      credentials committed to the repository
+#   osv-scanner   dependencies with a published vulnerability (reads the lockfiles)
+#   semgrep       risky code patterns
+#   zizmor        unsafe GitHub Actions workflows
+#
+# Environment (all optional):
+#   AUDIT_OUT              directory for the report and the raw scanner output (default: a temp dir)
+#   AUDIT_SCANNERS         which of "secrets deps code workflows" to run (default: all four)
+#   AUDIT_ENFORCE          "true" makes high-severity findings from deps, code and workflows
+#                          fail a `pr` run. A leaked secret fails a `pr` run regardless.
+#   AUDIT_QUIET            "true" prints the count per scanner and not the findings, for a run
+#                          whose log is public. The full report is still written to AUDIT_OUT.
+#   AUDIT_HISTORY_SINCE    `full` only: scan history after this commit instead of all of it
+#   AUDIT_CODE_TARGETS     `full` only: file listing the paths semgrep scans, one per line
+#   AUDIT_GITHUB_TOKEN     read-only token for zizmor, which looks up the actions a workflow
+#                          references. No other scanner is given it.
+#
+# Exit status: 0 nothing blocks, 1 a blocking finding in a `pr` run, 2 the audit could not be
+# completed. A scanner that fails, skips an input or is handed a bad argument exits 2: a scan
+# that did not happen must never read as "no findings". A `full` run never exits 1: it is an
+# inventory, and the caller publishes the report.
+#
+# The same file lives in `core`, `auris-ios` and `auris-android`; keep the three identical.
+
+set -Eeuo pipefail
+
+die() {
+  echo "security-audit: $*" >&2
+  exit 2
+}
+# Anything that fails outside an explicit check is also "could not be completed".
+trap 'die "failed at line $LINENO"' ERR
+
+mode=${1:-}
+base=${2:-}
+case "$mode" in
+  pr) [ -n "$base" ] || die "pr mode needs the base commit" ;;
+  full) ;;
+  *) die "usage: security-audit.sh pr <base-commit> | full" ;;
+esac
+
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+out=${AUDIT_OUT:-$(mktemp -d)}
+mkdir -p "$out"
+scanners=${AUDIT_SCANNERS:-secrets deps code workflows}
+tab=$(printf '\t')
+enabled() { case " $scanners " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+# A `pr` run compares against the base commit's tree for the two scanners that cannot do it
+# themselves (osv-scanner, zizmor). gitleaks takes a commit range and semgrep a baseline commit.
+base_tree=""
+if [ "$mode" = pr ]; then
+  base=$(git rev-parse --verify --quiet "$base^{commit}") || die "base commit not found"
+  if enabled deps || enabled workflows; then
+    base_tree="$out/base"
+    git worktree add --quiet --detach "$base_tree" "$base"
+    trap 'git worktree remove --force "$base_tree" 2>/dev/null || true' EXIT
+  fi
+fi
+
+# Every scanner ends as rows of `key<TAB>severity<TAB>Markdown line`. The key identifies a finding
+# without its line number, so a finding that only moved is not new. `severity` is "high" or "-".
+
+# Rows from a SARIF file, for the scanners whose findings sit at a place in a file. A result
+# that states no level of its own has its rule's default level (semgrep writes them that way).
+sarif_rows() {
+  jq -r '
+    .runs[]
+    | ((.tool.driver.rules // [])
+       | map({ key: .id, value: (.defaultConfiguration.level // "warning") }) | from_entries) as $default
+    | .results[]
+    | (.level // $default[.ruleId] // "warning") as $level
+    | (.locations[0].physicalLocation // {}) as $at
+    | ($at.artifactLocation.uri // "?") as $file
+    | ((.message.text // "") | split("\n")[0] // "" | gsub("\t"; " ") | .[0:240]) as $message
+    | [ ([.ruleId, $file, $message, ($at.region.snippet.text // "")] | @json),
+        (if $level == "error" then "high" else "-" end),
+        "- `\(.ruleId)` at `\($file):\($at.region.startLine // 1)`: \($message)"
+      ] | @tsv' "$1"
+}
+
+# Two identical findings in one file share a key; number them so that adding a second one to a
+# file that already had one still counts as new.
+number_repeats() {
+  awk -F'\t' 'BEGIN { OFS = "\t" } { n[$1]++; print $1 "#" n[$1], $2, $3 }'
+}
+
+# Rows of the second file whose key is absent from the first. The first file is told apart
+# by name, not by `NR == FNR`: that test stays true through the second file when the first is
+# empty, and every row of a pull request against a clean base would then be dropped.
+only_new() {
+  awk -F'\t' 'FILENAME == ARGV[1] { seen[$1] = 1; next } !($1 in seen)' "$1" "$2"
+}
+
+scan_secrets() {
+  local range=HEAD report="$out/gitleaks.sarif" log="$out/gitleaks.log"
+  if [ "$mode" = pr ]; then
+    # Every commit the pull request adds, including one that a later commit reverts: a
+    # credential that was pushed is exposed whether or not it survives to the final tree.
+    range="--no-merges $base..HEAD"
+  elif [ -n "${AUDIT_HISTORY_SINCE:-}" ]; then
+    git rev-parse --verify --quiet "$AUDIT_HISTORY_SINCE^{commit}" > /dev/null ||
+      die "AUDIT_HISTORY_SINCE is not a commit: $AUDIT_HISTORY_SINCE"
+    range="$AUDIT_HISTORY_SINCE..HEAD"
+  fi
+  gitleaks git --no-banner --no-color --redact --exit-code 0 --log-opts="$range" \
+    --report-format sarif --report-path "$report" . 2> "$log" || {
+    cat "$log" >&2
+    die "gitleaks failed"
+  }
+  cat "$log" >&2
+  # gitleaks exits 0 when the `git log` it reads from fails, having scanned nothing.
+  if grep -q ' ERR ' "$log"; then die "gitleaks reported an error"; fi
+  # One row per rule and file. gitleaks reports a value again for every commit that touches
+  # its line, and all of those are one leak.
+  jq -r '
+    [ .runs[].results[]
+      | { rule: .ruleId,
+          file: (.locations[0].physicalLocation.artifactLocation.uri // "?"),
+          commit: (.partialFingerprints.commitSha // "") } ]
+    | group_by([.rule, .file])[]
+    | [ ([.[0].rule, .[0].file] | @json), "high",
+        "- `\(.[0].rule)` in `\(.[0].file)` (\(length) occurrence\(if length == 1 then "" else "s" end), e.g. in commit \(.[0].commit[0:8]))"
+      ] | @tsv' "$report" > "$out/secrets.tsv"
+}
+
+# One row per package and advisory, so that an upgrade which keeps a known advisory is not new
+# but one that brings in another is. An advisory is high at a CVSS score of 7 or more, or when
+# it marks the package itself as malicious (`MAL-`); one with no score is listed, not high.
+osv_rows() {
+  local tree json=$2 log="$2.log" status=0
+  tree=$(cd "$1" && pwd -P) # the path osv-scanner prints, with symlinks resolved
+  # Twice: the advisories come from osv.dev at scan time, and one dropped connection should
+  # not fail a pull request.
+  for _ in 1 2; do
+    status=0
+    osv-scanner scan source --recursive --format json --output-file "$json" "$tree" > "$log" 2>&1 ||
+      status=$?
+    cat "$log" >&2
+    case "$status" in 0 | 1 | 128) break ;; esac
+  done
+  case "$status" in
+    0 | 1) ;;                               # 1: vulnerabilities found
+    128) echo '{"results":[]}' > "$json" ;; # no lockfile at all
+    *) die "osv-scanner failed with status $status" ;;
+  esac
+  # A lockfile it cannot parse is logged and left out, and the status stays 0 or 1.
+  if grep -q 'Error during extraction' "$log"; then die "osv-scanner left a lockfile out"; fi
+  jq -r --arg tree "$tree/" '
+    .results[]
+    | (.source.path | ltrimstr($tree)) as $lock
+    | .packages[]
+    | "`\(.package.name)@\(.package.version)` in `\($lock)`" as $package
+    | .package.name as $name
+    | .groups[]
+    | ((.max_severity // "") | if . == "" then 0 else tonumber end) as $score
+    | [ ([$lock, $name, .ids[0]] | @json),
+        (if $score >= 7 or any(.ids[]; startswith("MAL-")) then "high" else "-" end),
+        $package, .ids[0] ] | @tsv' "$json"
+}
+
+# One Markdown line per package from its advisory rows, high ones named first.
+package_lines() {
+  sort -t "$tab" -k2,2r -k4,4 "$1" | awk -F'\t' '
+    { n[$3]++
+      if ($2 == "high") high[$3]++
+      if (n[$3] <= 3) ids[$3] = ids[$3] (n[$3] > 1 ? ", " : "") $4 }
+    END {
+      for (p in n)
+        printf "%s\t%s\t- %s: %d advisor%s%s (%s%s)\n", p, (high[p] ? "high" : "-"), p, n[p],
+          (n[p] == 1 ? "y" : "ies"), (high[p] ? ", " high[p] " high severity" : ""),
+          ids[p], (n[p] > 3 ? ", ..." : "")
+    }'
+}
+
+scan_deps() {
+  osv_rows "$root" "$out/osv.json" > "$out/deps.all.tsv"
+  if [ "$mode" = pr ]; then
+    osv_rows "$base_tree" "$out/osv.base.json" > "$out/deps.base.tsv"
+    only_new "$out/deps.base.tsv" "$out/deps.all.tsv" > "$out/deps.new.tsv"
+    package_lines "$out/deps.new.tsv" > "$out/deps.tsv"
+  else
+    package_lines "$out/deps.all.tsv" > "$out/deps.tsv"
+  fi
+}
+
+scan_code() {
+  local report="$out/semgrep.sarif" targets=0 path
+  set -- --metrics=off --quiet --config p/default --sarif-output "$report"
+  if [ "$mode" = pr ]; then
+    set -- "$@" --baseline-commit "$base" .
+  elif [ -n "${AUDIT_CODE_TARGETS:-}" ]; then
+    # A scoped full scan: only the listed files that still exist.
+    [ -r "$AUDIT_CODE_TARGETS" ] || die "AUDIT_CODE_TARGETS is not readable: $AUDIT_CODE_TARGETS"
+    while IFS= read -r path || [ -n "$path" ]; do
+      if [ -f "$path" ]; then
+        set -- "$@" "$path"
+        targets=$((targets + 1))
+      fi
+    done < "$AUDIT_CODE_TARGETS"
+    # With no target semgrep scans the whole repository, which is the opposite of the scope.
+    if [ "$targets" -eq 0 ]; then
+      : > "$out/code.tsv"
+      return
+    fi
+  else
+    set -- "$@" .
+  fi
+  # semgrep prints each finding on stdout as well as writing the report; errors go to stderr.
+  semgrep scan "$@" > /dev/null || die "semgrep failed"
+  sarif_rows "$report" | number_repeats > "$out/code.tsv"
+}
+
+zizmor_rows() {
+  local status=0
+  # --strict-collection: a workflow zizmor cannot parse is an error, not a file to skip.
+  (
+    cd "$1"
+    if [ -n "${AUDIT_GITHUB_TOKEN:-}" ]; then export GH_TOKEN="$AUDIT_GITHUB_TOKEN"; fi
+    zizmor --format sarif --no-exit-codes --strict-collection .
+  ) > "$2" || status=$?
+  case "$status" in
+    0) sarif_rows "$2" | number_repeats ;;
+    3) ;; # nothing to audit: the tree has no workflow
+    *) die "zizmor failed with status $status" ;;
+  esac
+}
+
+scan_workflows() {
+  zizmor_rows "$root" "$out/zizmor.sarif" > "$out/workflows.all.tsv"
+  if [ "$mode" = pr ]; then
+    zizmor_rows "$base_tree" "$out/zizmor.base.sarif" > "$out/workflows.base.tsv"
+    only_new "$out/workflows.base.tsv" "$out/workflows.all.tsv" > "$out/workflows.tsv"
+  else
+    mv "$out/workflows.all.tsv" "$out/workflows.tsv"
+  fi
+}
+
+total=0
+blocking=0
+: > "$out/sections.md"
+: > "$out/counts.md"
+
+# Appends one scanner's section and adds its counts to the totals.
+report() {
+  local name=$1 title=$2 rows="$out/$1.tsv" count high
+  # The Markdown lines, each once, high severity first.
+  cut -f2,3 "$rows" | sort -u | sort -t "$tab" -k1,1r -k2,2 > "$out/$name.lines"
+  count=$(wc -l < "$out/$name.lines" | tr -d ' ')
+  high=$(grep -c "^high$tab" "$out/$name.lines" || true)
+  total=$((total + count))
+  if [ "$name" = secrets ] || [ "${AUDIT_ENFORCE:-false}" = true ]; then
+    blocking=$((blocking + high))
+  fi
+  echo "- $title: $count" >> "$out/counts.md"
+  {
+    echo "### $title: $count"
+    echo
+    if [ "$count" -eq 0 ]; then
+      echo "None."
+    else
+      if [ "$high" -gt 0 ]; then
+        echo "$high high severity, listed first."
+        echo
+      fi
+      # The rows were written by jq's @tsv, which doubles a backslash.
+      cut -f2 "$out/$name.lines" | sed 's/\\\\/\\/g'
+    fi
+    echo
+  } >> "$out/sections.md"
+}
+
+# Each scan is its own statement, not the left side of `&&`: bash ignores `set -e` inside a
+# function called that way, and a scanner that failed halfway would then report "None."
+if enabled secrets; then
+  scan_secrets
+  report secrets "Leaked secrets (gitleaks)"
+fi
+if enabled deps; then
+  scan_deps
+  report deps "Vulnerable dependencies (osv-scanner)"
+fi
+if enabled code; then
+  scan_code
+  report code "Risky code patterns (semgrep)"
+fi
+if enabled workflows; then
+  scan_workflows
+  report workflows "Unsafe workflows (zizmor)"
+fi
+
+if [ "$mode" = pr ]; then
+  heading="## Security audit: $total new finding$([ "$total" -eq 1 ] || echo s) in this pull request"
+else
+  heading="## Security audit: $total finding$([ "$total" -eq 1 ] || echo s) at $(git rev-parse --short HEAD)"
+fi
+{
+  echo "$heading"
+  echo
+  cat "$out/sections.md"
+} > "$out/report.md"
+
+shown="$out/report.md"
+if [ "${AUDIT_QUIET:-false}" = true ]; then
+  shown="$out/shown.md"
+  {
+    echo "$heading"
+    echo
+    cat "$out/counts.md"
+  } > "$shown"
+fi
+cat "$shown"
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then cat "$shown" >> "$GITHUB_STEP_SUMMARY"; fi
+if [ -n "${GITHUB_OUTPUT:-}" ]; then echo "findings=$total" >> "$GITHUB_OUTPUT"; fi
+
+if [ "$mode" = pr ] && [ "$blocking" -gt 0 ]; then
+  echo "::error::Security audit: $blocking blocking finding(s). See the job summary."
+  exit 1
+fi
+if [ "$mode" = pr ] && [ "$total" -gt 0 ]; then
+  echo "::warning::Security audit: $total new finding(s), none blocking. See the job summary."
+fi
