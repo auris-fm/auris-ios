@@ -275,7 +275,7 @@ run_build_step() {
 BUILD_STATUS=0
 # A verdict from an earlier attempt must never be mistaken for this one's.
 rm -f "$LOG_DIR/build-watchdog-verdict"
-xcodebuild -scmProvider system build-for-testing \
+xcodebuild build-for-testing -scmProvider system \
   -project podcasts.xcodeproj \
   -scheme pocketcasts \
   -testPlan UnitTests \
@@ -552,7 +552,7 @@ set +e
 # The scheme lives in the package, not in podcasts.xcodeproj: run from inside
 # the package directory or xcodebuild resolves the app project and finds no
 # ModulesMacros scheme.
-{ (cd ModulesMacros && xcodebuild -scmProvider system test -scheme ModulesMacros -destination 'platform=macOS' \
+{ (cd ModulesMacros && xcodebuild test -scmProvider system -scheme ModulesMacros -destination 'platform=macOS' \
     -derivedDataPath "${MACRO_DERIVED_DATA:-$DERIVED/macros-host}" \
     -clonedSourcePackagesDirPath "$DERIVED/SourcePackages" \
     -disableAutomaticPackageResolution \
@@ -604,7 +604,7 @@ TEST_PROGRESS_DEADLINE="${BUILDKITE_AURIS_TEST_PROGRESS_DEADLINE:-300}"
 TEST_TOTAL_DEADLINE="${BUILDKITE_AURIS_TEST_TOTAL_DEADLINE:-3600}"
 
 set +e
-xcodebuild -scmProvider system test-without-building \
+xcodebuild test-without-building -scmProvider system \
   -project podcasts.xcodeproj \
   -scheme pocketcasts \
   -testPlan UnitTests \
