@@ -186,7 +186,7 @@ echo "--- :swift: Resolving packages"
 # Resolution is a separate step so a network or pin failure is reported as
 # itself. The test invocation below disables automatic resolution: re-resolving
 # on every invocation costs minutes and can change versions mid-run.
-{ xcodebuild -resolvePackageDependencies \
+{ xcodebuild -scmProvider system -resolvePackageDependencies \
   -project podcasts.xcodeproj \
   -scheme pocketcasts \
   -derivedDataPath "$DERIVED" \
@@ -275,7 +275,7 @@ run_build_step() {
 BUILD_STATUS=0
 # A verdict from an earlier attempt must never be mistaken for this one's.
 rm -f "$LOG_DIR/build-watchdog-verdict"
-xcodebuild build-for-testing \
+xcodebuild -scmProvider system build-for-testing \
   -project podcasts.xcodeproj \
   -scheme pocketcasts \
   -testPlan UnitTests \
@@ -549,7 +549,7 @@ rm -rf "$RESULT_BUNDLE"
 PACKAGE_BUNDLE="$LOG_DIR/modules-macros-${BUILDKITE_BUILD_NUMBER:-local}-${BUILDKITE_JOB_ID:-job}.xcresult"
 rm -rf "$PACKAGE_BUNDLE"
 set +e
-{ xcodebuild test -scheme ModulesMacros -destination 'platform=macOS' \
+{ xcodebuild -scmProvider system test -scheme ModulesMacros -destination 'platform=macOS' \
     -derivedDataPath "${MACRO_DERIVED_DATA:-$DERIVED/macros-host}" \
     -clonedSourcePackagesDirPath "$DERIVED/SourcePackages" \
     -disableAutomaticPackageResolution \
@@ -601,7 +601,7 @@ TEST_PROGRESS_DEADLINE="${BUILDKITE_AURIS_TEST_PROGRESS_DEADLINE:-300}"
 TEST_TOTAL_DEADLINE="${BUILDKITE_AURIS_TEST_TOTAL_DEADLINE:-3600}"
 
 set +e
-xcodebuild test-without-building \
+xcodebuild -scmProvider system test-without-building \
   -project podcasts.xcodeproj \
   -scheme pocketcasts \
   -testPlan UnitTests \
