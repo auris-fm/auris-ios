@@ -199,11 +199,13 @@ final class CloudReferenceDecouplingTests: XCTestCase {
         await waitForPass(manager)
         XCTAssertEqual(manager.state.analyticsName, "active")
 
-        // Both sources now fail: the resolver must go looking (visible as
-        // further gateway traffic) rather than decoding the context payload.
+        // Both sources now fail terminally: the resolver must go looking
+        // (visible as further gateway traffic) rather than decoding the context
+        // payload. 403, not 500 — a server error would put the retriever into
+        // its 2s/4s retry sleeps and stretch the resolve toward the CI kill.
         CloudRouteTestURLProtocol.reset()
         CloudRouteTestURLProtocol.requestHandler = { _ in
-            .complete(status: 500, headers: [:], body: Data())
+            .complete(status: 403, headers: [:], body: Data())
         }
         let before = CloudRouteTestURLProtocol.requestCount
         let result = await manager.resolveBookmarkPlaybackTime(
