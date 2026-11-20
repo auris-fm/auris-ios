@@ -85,6 +85,10 @@ final class CloudInterruptionState: @unchecked Sendable {
         /// Without it the resubmitted turn writes a record with no start: its measurement would be
         /// absent for exactly the turns that were spoken over a playing answer.
         let latency: LatencyHandle
+        /// The playback snapshot frozen when this utterance was admitted. The resubmission
+        /// dispatches THIS value verbatim; reading live playback at submission time would
+        /// resample state the user never spoke about.
+        let playbackContext: PlaybackContext?
         /// The INTERRUPTED turn this follow-up was addressed to — the subject of the pending
         /// report and, with the release, the whole authority to submit.
         let interruptedRequestId: String
@@ -99,6 +103,7 @@ final class CloudInterruptionState: @unchecked Sendable {
         let utteranceId: String
         let origin: Int?
         let latency: LatencyHandle
+        let playbackContext: PlaybackContext?
         /// The turn this utterance interrupts. Bound at hold time; a terminal for any other turn
         /// must not resolve it.
         let interruptedRequestId: String
@@ -151,6 +156,7 @@ final class CloudInterruptionState: @unchecked Sendable {
         sourceLanguage: String? = nil,
         translationKind: TranslationKind? = nil,
         latency: LatencyHandle = LatencyHandle(),
+        playbackContext: PlaybackContext? = nil,
         forRequestId interruptedRequestId: String
     ) -> Bool {
         lock.lock(); defer { lock.unlock() }
@@ -165,6 +171,7 @@ final class CloudInterruptionState: @unchecked Sendable {
             utteranceId: utteranceId,
             origin: origin,
             latency: latency,
+            playbackContext: playbackContext,
             interruptedRequestId: interruptedRequestId
         )
         return true
@@ -198,6 +205,7 @@ final class CloudInterruptionState: @unchecked Sendable {
             sourceLanguage: held.sourceLanguage,
             translationKind: held.translationKind,
             latency: LatencyHandle(latencyContext),
+            playbackContext: held.playbackContext,
             interruptedRequestId: requestId
         )
     }

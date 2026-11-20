@@ -225,6 +225,9 @@ struct CloudRouteContext: Equatable, Encodable {
     let clientPositionMs: Int64?
     let recentReferencePositions: [Int64]
     let previousReferencePositionMs: Int64?
+    /// PROVENANCE: present only when a mapped position exists; nil is
+    /// OMITTED on the wire — unknown provenance never blocks the turn.
+    let referenceAssetVersion: String?
 
     enum CodingKeys: String, CodingKey {
         case episodeId = "episode_id"
@@ -233,6 +236,7 @@ struct CloudRouteContext: Equatable, Encodable {
         case clientPositionMs = "client_position_ms"
         case recentReferencePositions = "recent_reference_positions"
         case previousReferencePositionMs = "previous_reference_position_ms"
+        case referenceAssetVersion = "reference_asset_version"
     }
 
     init(from playback: PlaybackContext) {
@@ -242,6 +246,7 @@ struct CloudRouteContext: Equatable, Encodable {
         clientPositionMs = playback.clientPositionMs
         recentReferencePositions = playback.recentReferencePositions
         previousReferencePositionMs = playback.previousReferencePositionMs
+        referenceAssetVersion = playback.referenceAssetVersion
     }
 
     init(
@@ -250,7 +255,8 @@ struct CloudRouteContext: Equatable, Encodable {
         referencePositionMs: Int64? = nil,
         clientPositionMs: Int64?,
         recentReferencePositions: [Int64] = [],
-        previousReferencePositionMs: Int64? = nil
+        previousReferencePositionMs: Int64? = nil,
+        referenceAssetVersion: String? = nil
     ) {
         self.episodeId = episodeId
         self.podcastId = podcastId
@@ -258,5 +264,6 @@ struct CloudRouteContext: Equatable, Encodable {
         self.clientPositionMs = clientPositionMs
         self.recentReferencePositions = recentReferencePositions
         self.previousReferencePositionMs = previousReferencePositionMs
+        self.referenceAssetVersion = referenceAssetVersion
     }
 }

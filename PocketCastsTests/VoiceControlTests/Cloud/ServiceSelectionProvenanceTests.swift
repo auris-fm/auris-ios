@@ -562,8 +562,16 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             "<|tool_call_start|>[dialog_control(action='new_command', value='what did the host say about the merger')]<|tool_call_end|>"
         let bId = "8a2bf59d-6c31-4e08-b7d4-5c91f0e37a26"
 
+        let bSnapshot = PlaybackContext(
+            episodeId: "ep-at-b", podcastId: "pod-b",
+            referencePositionMs: 77_000, clientPositionMs: 78_000,
+            recentReferencePositions: [76_000, 77_000], previousReferencePositionMs: 76_000
+        )
         await service.handleRoutingInput(
-            IntentRoutingInput.english(transcript: "actually, what did the host say about the merger", selection: .followUp, utteranceId: bId),
+            IntentRoutingInput.english(
+                transcript: "actually, what did the host say about the merger",
+                selection: .followUp, utteranceId: bId, playbackContext: bSnapshot
+            ),
             origin: generation
         )
 
@@ -600,6 +608,14 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             body["conversation_id"] as? String, warmConversationId,
             "the resumed dispatch is bound to the conversation the window opened"
         )
+        // THE REPROCESSED VALUE IS THE SAME UTTERANCE: it dispatches B's admission snapshot
+        // verbatim, never a resample of live playback at reprocess time.
+        let reprocessedContext = try XCTUnwrap(body["context"] as? [String: Any], "the frame carries a context")
+        XCTAssertEqual(
+            reprocessedContext["episode_id"] as? String, "ep-at-b",
+            "the reprocessed dispatch carries the completing capture's admission snapshot"
+        )
+        XCTAssertEqual((reprocessedContext["reference_position_ms"] as? NSNumber)?.int64Value, 77_000)
     }
 
     /// ROUTER LOAD LIFECYCLE (spec 6b45a5d2, reviewer 0b5b4222): the LFM router load is armed at

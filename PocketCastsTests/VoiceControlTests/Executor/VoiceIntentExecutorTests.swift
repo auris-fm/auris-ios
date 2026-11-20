@@ -75,6 +75,68 @@ final class VoiceIntentExecutorTests: XCTestCase {
         )
     }
 
+    /// CONTROL: a captured ABSENCE is a PRESENT snapshot. The
+    /// episode the provider would return now did not exist at speech start; the executor must
+    /// dispatch the captured absence verbatim and never resample.
+    func test_execute_capturedAbsence_survivesLaterPlaybackStart() async {
+        mockPlaybackContextProvider.context = PlaybackContext(
+            episodeId: "ep-started-later", podcastId: "pod-x",
+            referencePositionMs: 10_000, clientPositionMs: 10_000,
+            recentReferencePositions: [], previousReferencePositionMs: nil
+        )
+
+        _ = await executor.execute(CloudRouteIntent(
+            request: "what is this",
+            tier: .unknown,
+            context: PlaybackContext.absent,
+            origin: .routingFailure, latency: LatencyHandle()
+        ))
+
+        XCTAssertTrue(mockCloudRouteSink.routeToCloudCalled)
+        XCTAssertEqual(mockCloudRouteSink.lastContext, PlaybackContext.absent,
+                       "the dispatch carries the captured absence, not the later episode")
+        XCTAssertEqual(mockPlaybackContextProvider.consultCount, 0,
+                       "a present snapshot (even an absence) never triggers a resample")
+    }
+
+    /// SNAPSHOT CONTROL: when the intent
+    /// carries the utterance-start snapshot, the executor dispatches EXACTLY that context and
+    /// does NOT consult the live provider at dispatch time — a provider consult here would be
+    /// the resample the spec forbids. Playback advanced between utterance start and dispatch
+    /// is simulated by provider context ≠ snapshot context.
+    func test_execute_snapshotContextIsDispatchedVerbatim_andProviderIsNotResampled() async {
+        let snapshot = PlaybackContext(
+            episodeId: "ep-at-utterance",
+            podcastId: "pod-at-utterance",
+            referencePositionMs: 1_000,
+            clientPositionMs: 1_000,
+            recentReferencePositions: [900, 1_000],
+            previousReferencePositionMs: 900
+        )
+        // Live playback moved on after the utterance: different episode, position advanced.
+        mockPlaybackContextProvider.context = PlaybackContext(
+            episodeId: "ep-later",
+            podcastId: "pod-later",
+            referencePositionMs: 45_000,
+            clientPositionMs: 45_000,
+            recentReferencePositions: [44_000, 45_000],
+            previousReferencePositionMs: 44_000
+        )
+
+        _ = await executor.execute(CloudRouteIntent(
+            request: "what did they say",
+            tier: .unknown,
+            context: snapshot,
+            origin: .routingFailure, latency: LatencyHandle()
+        ))
+
+        XCTAssertTrue(mockCloudRouteSink.routeToCloudCalled, "the turn still dispatches")
+        XCTAssertEqual(mockCloudRouteSink.lastContext, snapshot,
+                       "the dispatch carries the UTTERANCE-START snapshot, not live playback")
+        XCTAssertEqual(mockPlaybackContextProvider.consultCount, 0,
+                       "the executor must not resample playback at dispatch time")
+    }
+
     func test_execute_modelChosenCloudRouteRenewsTheWindow() async {
         mockPlaybackContextProvider.context = Self.context
         gracePeriodSignal.onWakeWordDetected()
@@ -100,7 +162,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
     /// it was issued under. Completing after a privacy close and a new wake must
     /// not reset whatever window is current — that would re-arm a session this
     /// turn never belonged to.
-    /// QUIET DUPLICATES (reviewer 0c546ce5 item 4): a duplicate of an utterance the executor
+    /// QUIET DUPLICATES: a duplicate of an utterance the executor
     /// already completed — the joined or settled copy the sink hands back — observes completion
     /// WITHOUT repeating the owner's effects. The grace renewal happens exactly once (the
     /// duplicate cannot restore a spent allowance), the duplicate's response renders nothing,
@@ -143,7 +205,7 @@ final class VoiceIntentExecutorTests: XCTestCase {
         )
     }
 
-    /// CROSS-GENERATION INTERLEAVING (reviewer 39beabc7): completions can interleave — A(gen1)
+    /// CROSS-GENERATION INTERLEAVING: completions can interleave — A(gen1)
     /// completes, B(gen2) completes, then a DELAYED A duplicate completes. Effects are granted
     /// by the request owner at dispatch, not inferred from a generation change, so A's late
     /// duplicate cannot replay A's effects, and it cannot disturb B's.
@@ -717,7 +779,7 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
     /// (stand-in for the real sink's once-per-utterance claim), with `effectOwnerForTesting`
     /// overriding for the duplicate controls.
     var effectOwnerForTesting: ((String?) -> Bool)?
-    /// ORDER EVIDENCE (reviewer 39beabc7): was the effect claim taken BEFORE the dispatch began?
+    /// ORDER EVIDENCE: was the effect claim taken BEFORE the dispatch began?
     /// Effects must be granted by the owner at dispatch time, not after the await — otherwise a
     /// joiner the dispatch awaits can win them. The claim records whether routeToCloud had
     /// already run; the control asserts this stayed true.
@@ -740,9 +802,13 @@ private final class MockCloudRouteSink: VoiceCloudRouteSink {
 
 private final class MockPlaybackContextProvider: PlaybackContextProvider {
     var context: PlaybackContext?
+    ///  a dispatch-time consult is a forbidden resample. Counted so the
+    /// snapshot control can prove the provider was never read at dispatch.
+    private(set) var consultCount = 0
 
     func current() -> PlaybackContext? {
-        context
+        consultCount += 1
+        return context
     }
 }
 

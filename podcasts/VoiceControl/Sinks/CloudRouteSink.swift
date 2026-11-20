@@ -1126,6 +1126,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 utteranceId: utteranceId,
                 origin: origin,
                 latency: latency,
+                playbackContext: context,
                 forRequestId: priorRequestId
             )
             if await sendInterruptOnPriorSocket(forRequestId: priorRequestId) == .undelivered {
@@ -2378,6 +2379,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         sourceLanguage: String? = nil,
         translationKind: TranslationKind? = nil,
         latency: LatencyHandle = LatencyHandle(),
+        playbackContext: PlaybackContext? = nil,
         validatingEpoch: UInt64? = nil,
         isEpochStillCurrent: (@Sendable (UInt64) -> Bool)? = nil
     ) async -> String? {
@@ -2413,6 +2415,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             sourceLanguage: sourceLanguage,
             translationKind: translationKind,
             latency: latency,
+            playbackContext: playbackContext,
             forRequestId: priorRequestId
         ) else {
             // A different turn is already holding a follow-up: the contract allows exactly one

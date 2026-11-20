@@ -74,7 +74,7 @@ class VoiceControlAssembly {
         let playbackManager = PlaybackManager.shared
         // REAL playback context (an eligible episode exists, playing or paused) — the independent
         // source both the gate's context and the grace signal's backgrounding decision consult.
-        // A cloud/grace hold is never a context source (spec 3893cd55).
+        // A cloud/grace hold is never a context source.
         let playbackContextAvailable: () -> Bool = { [weak playbackManager] in
             guard let playbackManager else { return false }
             let context = DefaultPlaybackContextProvider(
@@ -340,6 +340,17 @@ class VoiceControlAssembly {
             fingerprintMapper: FingerprintTimingManager.shared,
             cloudPlaybackContextState: cloudPlaybackContextState
         )
+        // SNAPSHOT: the engine freezes the playback context ONCE per utterance, at
+        // admission — the same provider the executor used to resample at dispatch time. The
+        // executor now dispatches the frozen value verbatim.
+        asrEngine.playbackContextSnapshot = { [weak playbackManager] in
+            guard let playbackManager else { return nil }
+            return DefaultPlaybackContextProvider(
+                playbackState: playbackManager,
+                fingerprintMapper: FingerprintTimingManager.shared,
+                cloudPlaybackContextState: cloudPlaybackContextState
+            ).current()
+        }
 
         // Test-only injection: a control that must observe ACTUAL local execution (e.g. a pause
         // the router classified from an English utterance) supplies a recording sink. Nil in

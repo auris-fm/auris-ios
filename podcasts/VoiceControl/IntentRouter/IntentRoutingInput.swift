@@ -14,6 +14,11 @@ struct IntentRoutingInput: Equatable {
     /// has its own id and dispatches its own request, even inside one grace window.
     let utteranceId: String
 
+    /// The playback snapshot taken at speech start for this utterance, dispatched verbatim.
+    /// A present `.absent` means capture ran and nothing was playing; `nil` means no capture
+    /// was wired for the utterance.
+    let playbackContext: PlaybackContext?
+
     /// The turn's own latency bookkeeping, created when the capture was admitted. Carried here
     /// because this envelope is the one object that spans admission → routing → dispatch, so the
     /// instants recorded at admission reach the cloud request without a side table keyed by
@@ -28,6 +33,7 @@ struct IntentRoutingInput: Equatable {
         translationKind: TranslationKind,
         selection: CloudConversationSelection?,
         utteranceId: String,
+        playbackContext: PlaybackContext? = nil,
         latency: LatencyHandle = LatencyHandle()
     ) {
         self.sourceTranscript = sourceTranscript
@@ -36,6 +42,7 @@ struct IntentRoutingInput: Equatable {
         self.translationKind = translationKind
         self.selection = selection
         self.utteranceId = utteranceId
+        self.playbackContext = playbackContext
         self.latency = latency
     }
 
@@ -54,6 +61,7 @@ struct IntentRoutingInput: Equatable {
         language: String? = nil,
         selection: CloudConversationSelection? = nil,
         utteranceId: String,
+        playbackContext: PlaybackContext? = nil,
         latency: LatencyHandle = LatencyHandle()
     ) -> IntentRoutingInput {
         IntentRoutingInput(
@@ -63,6 +71,7 @@ struct IntentRoutingInput: Equatable {
             translationKind: .none,
             selection: selection,
             utteranceId: utteranceId,
+            playbackContext: playbackContext,
             latency: latency
         )
     }

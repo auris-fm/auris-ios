@@ -135,6 +135,12 @@ class NativeVadSegmenter {
     /// too late to wait for another onset. Without this it would wait for an event that has
     /// already happened and never open at all.
     var isInTrailingSilence: Bool { speechActive && silenceStart != nil }
+    /// SNAPSHOT: fired at the SPEECH-START boundary — the frame
+    /// that confirms speech, after the pre-roll merge settles the true utterance start — NOT
+    /// at `emitUtterance`. Consumers that must describe the moment the utterance BEGAN (e.g.
+    /// the playback snapshot) read here; by emission time the user may already have spoken a
+    /// sentence and playback has moved on.
+    var onSpeechStart: (() -> Void)?
 
     /// Called when continuously-classified speech reaches the supported duration ceiling.
     ///
@@ -339,6 +345,7 @@ class NativeVadSegmenter {
                     preRollInstants.removeAll()
                     preRollCapturedAt = nil
                 }
+                onSpeechStart?()
             } else if !speechActive, !preRoll.isEmpty || preRollCapturedAt == nil {
                 // Still unconfirmed: keep holding this frame with the earlier ones so ordering
                 // is preserved, and let the buffer stay empty until confirmation.

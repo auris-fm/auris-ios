@@ -240,7 +240,11 @@ final class LfmIntentRouter: IntentClassifying {
                     selection: input.selection,
                     // REQUEST ownership: trimming is a view of the SAME utterance, so the id
                     // travels — a duplicate callback joins the same request, not a new one.
-                    utteranceId: input.utteranceId
+                    utteranceId: input.utteranceId,
+                    // Same-utterance view: the admission snapshot and latency travel too, so
+                    // this copy can never become a path that silently drops them.
+                    playbackContext: input.playbackContext,
+                    latency: input.latency
                 )
             )
             let prompt = LfmPrompt.render(transcript: routingInput, history: history)
