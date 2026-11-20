@@ -199,15 +199,21 @@ final class CloudReferenceDecouplingTests: XCTestCase {
         await waitForPass(manager)
         XCTAssertEqual(manager.state.analyticsName, "active")
 
-        // Both sources now fail terminally: the resolver must go looking
-        // (visible as further gateway traffic) rather than decoding the context
-        // payload. 403, not 500 — a server error would put the retriever into
-        // its 2s/4s retry sleeps and stretch the resolve toward the CI kill.
+        // Both sources now fail terminally: the resolver must go looking for
+        // THIS episode's transcript-sync reference rather than decoding the
+        // context payload. 403, not 500 — a terminal response removes the
+        // retriever's retry sleeps.
         CloudRouteTestURLProtocol.reset()
         CloudRouteTestURLProtocol.requestHandler = { _ in
             .complete(status: 403, headers: [:], body: Data())
         }
-        let before = CloudRouteTestURLProtocol.requestCount
+        let fingerprintPath = "/generated_transcripts/\(fixture.episode.parentIdentifier())/\(fixture.episode.uuid)-fingerprints.json.gz"
+        let observed = ObservationBox()
+        CloudRouteTestURLProtocol.onRequest = { request, _ in
+            if request.url?.path == fingerprintPath {
+                observed.mark()
+            }
+        }
         let result = await manager.resolveBookmarkPlaybackTime(
             forReferenceTime: Self.episodeDuration / 2,
             episode: fixture.episode
@@ -217,11 +223,26 @@ final class CloudReferenceDecouplingTests: XCTestCase {
             XCTFail("expected unresolved from a cloud context with no transcript-sync reference, got \(result)")
             return
         }
-        XCTAssertGreaterThan(
-            CloudRouteTestURLProtocol.requestCount,
-            before,
-            "the resolve must consult the transcript-sync sources, not the context's Auris payload"
+        XCTAssertTrue(
+            observed.value,
+            "the resolve must fetch this episode's transcript-sync fingerprint request, not consume the context's Auris payload"
         )
+    }
+
+    /// Thread-safe observation flag for the stub's onRequest callback.
+    private final class ObservationBox {
+        private let lock = NSLock()
+        private var seen = false
+        func mark() {
+            lock.lock()
+            seen = true
+            lock.unlock()
+        }
+        var value: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return seen
+        }
     }
 
     /// A decodable Pocket Casts reference with NO usable checkpoints must not
