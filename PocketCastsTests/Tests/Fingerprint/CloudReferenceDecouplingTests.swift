@@ -187,6 +187,41 @@ final class CloudReferenceDecouplingTests: XCTestCase {
         )
     }
 
+    /// On a cloud-built context the one-shot resolvers must NOT feed the
+    /// context's `referenceData` (the Auris payload) to the Rust decoder — the
+    /// decode could only fail and fall back to the unaligned time. The
+    /// observable pin: the resolve goes to the transcript-sync sources
+    /// (network request visible) instead of silently consuming the context.
+    func testOneShotResolveOnACloudContextSkipsTheAurisPayload() async throws {
+        try prepareFixture()
+        stubHosts(pocketCasts: .complete(status: 403, headers: [:], body: Data()))
+        manager.prepareForCurrentEpisode()
+        await waitForPass(manager)
+        XCTAssertEqual(manager.state.analyticsName, "active")
+
+        // Both sources now fail: the resolver must go looking (visible as
+        // further gateway traffic) rather than decoding the context payload.
+        CloudRouteTestURLProtocol.reset()
+        CloudRouteTestURLProtocol.requestHandler = { _ in
+            .complete(status: 500, headers: [:], body: Data())
+        }
+        let before = CloudRouteTestURLProtocol.requestCount
+        let result = await manager.resolveBookmarkPlaybackTime(
+            forReferenceTime: Self.episodeDuration / 2,
+            episode: fixture.episode
+        )
+
+        guard case .unresolved = result else {
+            XCTFail("expected unresolved from a cloud context with no transcript-sync reference, got \(result)")
+            return
+        }
+        XCTAssertGreaterThan(
+            CloudRouteTestURLProtocol.requestCount,
+            before,
+            "the resolve must consult the transcript-sync sources, not the context's Auris payload"
+        )
+    }
+
     // MARK: - Fixture
 
     private func prepareFixture() throws {

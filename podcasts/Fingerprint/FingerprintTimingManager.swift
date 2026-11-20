@@ -62,6 +62,12 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         /// a late-arriving matcher is visible to the already-running stream
         /// (PR #14 wave-2 review: a value snapshot stayed nil forever).
         let cloudMatcherProvider: () -> CloudReferenceMatcher?
+        /// True when `referenceData` holds the AURIS payload rather than a
+        /// transcript-sync reference. The one-shot chapter/bookmark resolvers
+        /// feed `referenceData` to the Rust decoder, which cannot parse
+        /// Go-scheme bytes — they must skip a cloud-built context's data and
+        /// resolve from disk/server instead.
+        let referenceDataIsCloudOwned: Bool
         /// Raw bytes of the reference fingerprint JSON, used to validate the
         /// persistent mapping cache via SHA-256.
         let referenceData: Data
@@ -307,6 +313,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
             duration: ctx.duration,
             matcher: ctx.matcher,
             cloudMatcherProvider: ctx.cloudMatcherProvider,
+            referenceDataIsCloudOwned: ctx.referenceDataIsCloudOwned,
             referenceData: ctx.referenceData,
             referenceFilePath: ctx.referenceFilePath,
             referenceDuration: ctx.referenceDuration,
@@ -517,7 +524,8 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         // disk/network, and the existing mapping estimates the ad offset at the
         // target so we can tighten the search window.
         let prior: (referenceData: Data?, estimatedPlayback: Double?) = queue.sync {
-            guard let ctx = context, ctx.episodeUuid == episodeUuid else { return (nil, nil) }
+            guard let ctx = context, ctx.episodeUuid == episodeUuid,
+                  !ctx.referenceDataIsCloudOwned else { return (nil, nil) }
             let estimate = Self.interpolate(
                 time: referenceTime,
                 in: main.referenceToPlayback,
@@ -527,7 +535,9 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
             return (ctx.referenceData, estimate)
         }
 
-        // Resolve reference data: warm context → disk → server.
+        // Resolve reference data: warm context → disk → server. A cloud-built
+        // context's data is the Auris payload, which the Rust decoder cannot
+        // parse — skip it and resolve from the transcript-sync sources.
         var referenceData = prior.referenceData ?? loadReference(for: episode)?.data
         if referenceData == nil {
             referenceData = await FingerprintReferenceRetriever.shared.fetchReferenceData(
@@ -745,9 +755,12 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         }
         defer { timeoutTask.cancel() }
 
-        // Resolve reference data: warm context → disk → server.
-        var referenceData: Data? = queue.sync {
-            guard let ctx = context, ctx.episodeUuid == episodeUuid else { return nil }
+        // Resolve reference data: warm context → disk → server. A cloud-built
+        // context's data is the Auris payload, which the Rust decoder cannot
+        // parse — skip it and resolve from the transcript-sync sources.
+        var referenceData: Data? = queue.sync { () -> Data? in
+            guard let ctx = context, ctx.episodeUuid == episodeUuid,
+                  !ctx.referenceDataIsCloudOwned else { return nil }
             return ctx.referenceData
         }
         referenceData = referenceData ?? loadReference(for: episode)?.data
@@ -943,25 +956,28 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         cloudMatcher = nil
 
         if let loaded = loadReference(for: episode) {
-            // Transcript-sync configuration runs immediately — the cloud fetch
-            // is purely additive and must not gate local preparation (a slow
-            // gateway used to delay the context build by up to the full cloud
-            // client timeout). The matcher lands async and becomes live via
-            // the context's matcher provider.
-            configureForReference(loaded.reference, referenceData: loaded.data, episode: episode)
-            let flag = cancellationFlag
-            fetchTask = Task { [weak self] in
-                guard let self, !flag.isCancelled else { return }
-                let fetched = await self.fetchCloudReference(uuid: uuid, podcastUuid: episode.parentIdentifier())
-                self.queue.async { [weak self] in
+            if configureForReference(loaded.reference, referenceData: loaded.data, episode: episode) {
+                // Transcript-sync configuration runs immediately — the cloud fetch
+                // is purely additive and must not gate local preparation (a slow
+                // gateway used to delay the context build by up to the full cloud
+                // client timeout). The matcher lands async and becomes live via
+                // the context's matcher provider.
+                let flag = cancellationFlag
+                fetchTask = Task { [weak self] in
                     guard let self, !flag.isCancelled else { return }
-                    // The running stream reads the matcher through the
-                    // context's provider, so this assignment alone makes the
-                    // late-arriving reference live immediately.
-                    self.cloudMatcher = fetched?.matcher
+                    let fetched = await self.fetchCloudReference(uuid: uuid, podcastUuid: episode.parentIdentifier())
+                    self.queue.async { [weak self] in
+                        guard let self, !flag.isCancelled else { return }
+                        // The running stream reads the matcher through the
+                        // context's provider, so this assignment alone makes the
+                        // late-arriving reference live immediately.
+                        self.cloudMatcher = fetched?.matcher
+                    }
                 }
+                return
             }
-            return
+            // The transcript-sync reference is unusable (no checkpoints, no
+            // duration). Fall through: the Auris reference is independent.
         }
 
         // No Pocket Casts reference on disk. A persisted Auris reference from
@@ -1003,9 +1019,9 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
 
                 self.cloudMatcher = fetched?.matcher
 
-                if let data, let reference = ReferenceFingerprint.decode(from: data) {
+                if let data, let reference = ReferenceFingerprint.decode(from: data),
+                    self.configureForReference(reference, referenceData: data, episode: episode) {
                     self.saveReferenceData(data, for: episode)
-                    self.configureForReference(reference, referenceData: data, episode: episode)
                     return
                 }
 
@@ -1025,11 +1041,16 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         }
     }
 
+    /// Configures preparation from the Pocket Casts transcript-sync
+    /// reference. Returns false when the reference is unusable (no duration,
+    /// no decodable checkpoints) WITHOUT changing state, so the caller can
+    /// fall through to the independent Auris cloud reference.
+    @discardableResult
     private func configureForReference(
         _ reference: ReferenceFingerprint,
         referenceData: Data,
         episode: BaseEpisode
-    ) {
+    ) -> Bool {
         let uuid = episode.uuid
 
         let source = resolveAudioSource(for: episode)
@@ -1046,9 +1067,8 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
 
         let duration = episode.duration
         guard duration > 0 else {
-            updateState(.unavailable)
-            track(.syncedTranscriptsUnavailable, properties: ["reason": "invalid_duration"])
-            return
+            FileLog.shared.addMessage("FingerprintTimingManager: transcript-sync reference unusable for \(uuid) — no duration")
+            return false
         }
 
         guard let (matcher, checkpointCount) = buildMatcher(
@@ -1056,10 +1076,8 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
             episodeUuid: uuid,
             audioDuration: duration
         ) else {
-            updateState(.unavailable)
-            track(.syncedTranscriptsUnavailable, properties: ["reason": "no_reference"])
             FileLog.shared.addMessage("FingerprintTimingManager: reference for \(uuid) has no usable checkpoints")
-            return
+            return false
         }
 
         let flag = cancellationFlag
@@ -1072,6 +1090,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
             duration: duration,
             matcher: matcher,
             cloudMatcherProvider: { [weak self] in self?.cloudMatcher },
+            referenceDataIsCloudOwned: false,
             referenceData: referenceData,
             referenceFilePath: refPath,
             referenceDuration: reference.totalDuration,
@@ -1129,7 +1148,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
                 FileLog.shared.addMessage(
                     "FingerprintTimingManager: skipping stream — full mapping loaded from cache for \(uuid)"
                 )
-                return
+                return true
             }
 
             FileLog.shared.addMessage(
@@ -1139,6 +1158,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         }
 
         startStream(context: newContext, fromPosition: currentTime)
+        return true
     }
 
     /// Configures preparation from the Auris cloud reference alone (the Pocket
@@ -1186,6 +1206,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
             duration: duration,
             matcher: CheckpointMatcher(),
             cloudMatcherProvider: { [weak self] in self?.cloudMatcher },
+            referenceDataIsCloudOwned: true,
             referenceData: fetched.data,
             referenceFilePath: refPath,
             referenceDuration: fetched.reference.totalDuration,
