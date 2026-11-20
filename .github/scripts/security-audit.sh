@@ -19,13 +19,17 @@
 #                          whose log is public. The full report is still written to AUDIT_OUT.
 #   AUDIT_HISTORY_SINCE    `full` only: scan history after this commit instead of all of it
 #   AUDIT_CODE_TARGETS     `full` only: file listing the paths semgrep scans, one per line
-#   AUDIT_GITHUB_TOKEN     read-only token for zizmor, which looks up the actions a workflow
-#                          references. No other scanner is given it.
+#   AUDIT_GITHUB_TOKEN     token for zizmor, which looks up the actions a workflow references.
+#                          It is removed from the environment before any scanner starts and
+#                          handed to zizmor alone. Run this from a job whose token is read-only.
+#   AUDIT_CODE_RULES       semgrep configuration (default: the registry's `p/default`)
 #
 # Exit status: 0 nothing blocks, 1 a blocking finding in a `pr` run, 2 the audit could not be
-# completed. A scanner that fails, skips an input or is handed a bad argument exits 2: a scan
-# that did not happen must never read as "no findings". A `full` run never exits 1: it is an
-# inventory, and the caller publishes the report.
+# completed. A scanner that fails, a workflow or lockfile that cannot be read and a bad
+# argument all exit 2: a scan that did not happen must never read as "no findings". The one
+# partial result that does not stop the run is semgrep failing to parse or finish a file;
+# those files are listed in the report under "Not fully scanned". A `full` run never exits 1:
+# it is an inventory, and the caller publishes the report.
 #
 # The same file lives in `core`, `auris-ios` and `auris-android`; keep the three identical.
 
@@ -53,6 +57,23 @@ mkdir -p "$out"
 scanners=${AUDIT_SCANNERS:-secrets deps code workflows}
 tab=$(printf '\t')
 enabled() { case " $scanners " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+# A misspelt name would otherwise switch its scanner off and the run would report 0 findings.
+[ -n "${scanners// /}" ] || die "AUDIT_SCANNERS names no scanner"
+for name in $scanners; do
+  case "$name" in
+    secrets | deps | code | workflows) ;;
+    *) die "AUDIT_SCANNERS: unknown scanner '$name'" ;;
+  esac
+done
+
+# Out of the environment before anything else runs, so that no scanner but zizmor inherits it.
+lookup_token=${AUDIT_GITHUB_TOKEN:-}
+unset AUDIT_GITHUB_TOKEN
+
+# A SARIF file with no result, for a scanner that had nothing to scan.
+empty_sarif() {
+  printf '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"%s","rules":[]}},"results":[]}]}\n' "$1" > "$2"
+}
 
 # A `pr` run compares against the base commit's tree for the two scanners that cannot do it
 # themselves (osv-scanner, zizmor). gitleaks takes a commit range and semgrep a baseline commit.
@@ -105,13 +126,16 @@ scan_secrets() {
   if [ "$mode" = pr ]; then
     # Every commit the pull request adds, including one that a later commit reverts: a
     # credential that was pushed is exposed whether or not it survives to the final tree.
-    range="--no-merges $base..HEAD"
+    range="$base..HEAD"
   elif [ -n "${AUDIT_HISTORY_SINCE:-}" ]; then
     git rev-parse --verify --quiet "$AUDIT_HISTORY_SINCE^{commit}" > /dev/null ||
       die "AUDIT_HISTORY_SINCE is not a commit: $AUDIT_HISTORY_SINCE"
     range="$AUDIT_HISTORY_SINCE..HEAD"
   fi
-  gitleaks git --no-banner --no-color --redact --exit-code 0 --log-opts="$range" \
+  # --remerge-diff: `git log -p` shows no diff for a merge commit, so what a conflict
+  # resolution adds would not be scanned. This shows a merge as the difference between
+  # merging its parents mechanically and what was committed, which is exactly that addition.
+  gitleaks git --no-banner --no-color --redact --exit-code 0 --log-opts="--remerge-diff $range" \
     --report-format sarif --report-path "$report" . 2> "$log" || {
     cat "$log" >&2
     die "gitleaks failed"
@@ -193,8 +217,10 @@ scan_deps() {
 }
 
 scan_code() {
-  local report="$out/semgrep.sarif" targets=0 path
-  set -- --metrics=off --quiet --config p/default --sarif-output "$report"
+  local report="$out/semgrep.sarif" errors="$out/semgrep.json" targets=0 path
+  : > "$out/unscanned.lines"
+  set -- --metrics=off --quiet --config "${AUDIT_CODE_RULES:-p/default}" \
+    --sarif-output "$report" --json-output "$errors"
   if [ "$mode" = pr ]; then
     set -- "$@" --baseline-commit "$base" .
   elif [ -n "${AUDIT_CODE_TARGETS:-}" ]; then
@@ -208,6 +234,7 @@ scan_code() {
     done < "$AUDIT_CODE_TARGETS"
     # With no target semgrep scans the whole repository, which is the opposite of the scope.
     if [ "$targets" -eq 0 ]; then
+      empty_sarif "Semgrep OSS" "$report"
       : > "$out/code.tsv"
       return
     fi
@@ -217,6 +244,18 @@ scan_code() {
   # semgrep prints each finding on stdout as well as writing the report; errors go to stderr.
   semgrep scan "$@" > /dev/null || die "semgrep failed"
   sarif_rows "$report" | number_repeats > "$out/code.tsv"
+  # semgrep exits 0 when it could not parse a file or gave up on it, and its `--strict` would
+  # fail every run here: the registry rules themselves produce such warnings on files this
+  # size. So the gaps are reported instead: one line per file, and one per rule that failed.
+  jq -r '
+    [ .errors[]
+      | { kind: (.type | if type == "array" then .[0] else . end),
+          path: (.path // "?"), rule: (.rule_id // "") } ] as $all
+    | ( $all | map(select(.kind != "Internal matching error")) | group_by(.path)[]
+        | "- `\(.[0].path)`: \([.[].kind] | unique | join(", "))" ),
+      ( $all | map(select(.kind == "Internal matching error")) | group_by(.rule)[]
+        | "- rule `\(.[0].rule)` failed on \(length) file\(if length == 1 then "" else "s" end)" )
+  ' "$errors" > "$out/unscanned.lines"
 }
 
 zizmor_rows() {
@@ -224,12 +263,12 @@ zizmor_rows() {
   # --strict-collection: a workflow zizmor cannot parse is an error, not a file to skip.
   (
     cd "$1"
-    if [ -n "${AUDIT_GITHUB_TOKEN:-}" ]; then export GH_TOKEN="$AUDIT_GITHUB_TOKEN"; fi
+    if [ -n "$lookup_token" ]; then export GH_TOKEN="$lookup_token"; fi
     zizmor --format sarif --no-exit-codes --strict-collection .
   ) > "$2" || status=$?
   case "$status" in
     0) sarif_rows "$2" | number_repeats ;;
-    3) ;; # nothing to audit: the tree has no workflow
+    3) empty_sarif zizmor "$2" ;; # nothing to audit: the tree has no workflow
     *) die "zizmor failed with status $status" ;;
   esac
 }
@@ -291,6 +330,18 @@ fi
 if enabled code; then
   scan_code
   report code "Risky code patterns (semgrep)"
+  unscanned=$(wc -l < "$out/unscanned.lines" | tr -d ' ')
+  if [ "$unscanned" -gt 0 ]; then
+    echo "- Not fully scanned (semgrep): $unscanned" >> "$out/counts.md"
+    {
+      echo "### Not fully scanned (semgrep): $unscanned"
+      echo
+      echo "semgrep could not parse these files completely, or gave up on them, so a finding in them may be missing."
+      echo
+      sort "$out/unscanned.lines"
+      echo
+    } >> "$out/sections.md"
+  fi
 fi
 if enabled workflows; then
   scan_workflows

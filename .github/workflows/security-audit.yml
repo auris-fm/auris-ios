@@ -15,10 +15,11 @@
 # This repository is a public fork of Pocket Casts, and that decides three things:
 #
 #   - **Scope.** The audit covers what Auris adds or changes, not upstream's code. A pull
-#     request run sees the pull request's own changes, and skips the `upstream-sync/*`
-#     branches that merge an upstream release. The weekly run scans the files that differ
-#     from the upstream release last merged, and the history since it. Workflows are scanned
-#     whole in both: every workflow here runs with this repository's secrets, whoever wrote it.
+#     request run sees the pull request's own changes; for an `upstream-sync/*` branch,
+#     which merges an upstream release, that is the workflow changes only. The weekly run
+#     scans the files that differ from the upstream release last merged, and the history
+#     since it. Workflows are always scanned, upstream's included: every workflow here runs
+#     with this repository's secrets, whoever wrote it.
 #   - **Where findings go.** The weekly run uploads to the Security tab, which only people
 #     with write access can read, and prints counts only, because the job log and summary of
 #     a public repository are public. A pull request run lists its findings: they are about
@@ -46,13 +47,7 @@ jobs:
   pull-request:
     # A draft is skipped: the audit runs when the pull request is marked ready and on every
     # push after that, so nothing merges unaudited and work in progress does not spend minutes.
-    #
-    # An upstream release merge is skipped only when its branch is in this repository. A
-    # fork can name a branch anything, so the name alone must not switch the audit off.
-    if: >-
-      github.event_name == 'pull_request' && !github.event.pull_request.draft &&
-      !(github.event.pull_request.head.repo.full_name == github.repository &&
-      startsWith(github.head_ref, 'upstream-sync/'))
+    if: github.event_name == 'pull_request' && !github.event.pull_request.draft
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -70,12 +65,24 @@ jobs:
       - name: Install the scanners
         run: .github/scripts/security-audit-install.sh
 
+      # Before the script is trusted with this pull request: known cases with known answers,
+      # each a way the audit could report clean when it should not.
+      - name: Check the audit script against known cases
+        run: .github/scripts/security-audit-selftest.sh
+
       - name: Audit what the pull request adds
         env:
-          # Read-only, and handed to zizmor alone, which looks up the actions a workflow
-          # references.
+          # Read-only in this job, and handed to zizmor alone, which looks up the actions
+          # a workflow references.
           AUDIT_GITHUB_TOKEN: ${{ github.token }}
-          AUDIT_SCANNERS: secrets code workflows
+          # An upstream release merge brings in upstream's commits and code, which are not
+          # Auris's to answer for, but any workflow it changes will run here with this
+          # repository's secrets. The narrowing applies only to a branch in this
+          # repository: a fork can name a branch anything.
+          AUDIT_SCANNERS: >-
+            ${{ (github.event.pull_request.head.repo.full_name == github.repository &&
+            startsWith(github.head_ref, 'upstream-sync/')) && 'workflows' ||
+            'secrets code workflows' }}
           # "true" makes a new high-severity code or workflow finding fail the check as a
           # leaked secret already does. Off while the first weeks of results show which rules
           # are noise here; review on 2026-12-04.
@@ -89,13 +96,24 @@ jobs:
           fi
           .github/scripts/security-audit.sh pr 'HEAD^1'
 
-  weekly:
-    if: github.event_name != 'pull_request'
+  # The weekly run is two jobs so that nothing which scans can also publish. The scanners,
+  # and whatever they download, run under a read-only token; the job that can write to the
+  # Security tab runs no scanner and no script from the repository.
+  #
+  # Both are tied to the default branch. A manual run on any other branch would otherwise be
+  # handed the same write permission to report on code that is not on `main`.
+  weekly-scan:
+    if: >-
+      github.event_name != 'pull_request' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
       contents: read
-      security-events: write
+    outputs:
+      gitleaks: ${{ steps.results.outputs.gitleaks }}
+      semgrep: ${{ steps.results.outputs.semgrep }}
+      zizmor: ${{ steps.results.outputs.zizmor }}
     steps:
       - name: Checkout with full history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -123,6 +141,7 @@ jobs:
 
       - name: Audit what Auris changed
         env:
+          # Read-only in this job, and handed to zizmor alone.
           AUDIT_GITHUB_TOKEN: ${{ github.token }}
           AUDIT_OUT: ${{ runner.temp }}/security-audit
           AUDIT_SCANNERS: secrets code workflows
@@ -130,6 +149,47 @@ jobs:
           AUDIT_HISTORY_SINCE: ${{ steps.upstream.outputs.base }}
           AUDIT_CODE_TARGETS: ${{ runner.temp }}/security-audit-scope.txt
         run: .github/scripts/security-audit.sh full
+
+      # As job outputs, not as an artifact: anyone can download an artifact of a public
+      # repository, and these are the findings. Each file is cut down to the rules that have
+      # a result (semgrep lists every rule it loaded, several megabytes), compressed and
+      # base64-encoded, which keeps it far below the one megabyte an output may hold.
+      - name: Hand the results to the publishing job
+        id: results
+        env:
+          AUDIT_OUT: ${{ runner.temp }}/security-audit
+        run: |
+          set -o pipefail
+          for tool in gitleaks semgrep zizmor; do
+            packed=$(jq -c '
+              ([.runs[].results[].ruleId] | unique) as $used
+              | .runs[].tool.driver.rules |= map(select(.id as $id | $used | index($id)))
+            ' "$AUDIT_OUT/$tool.sarif" | gzip -9 | base64 -w 0)
+            echo "$tool: ${#packed} characters"
+            echo "$tool=$packed" >> "$GITHUB_OUTPUT"
+          done
+
+  weekly-publish:
+    needs: weekly-scan
+    if: >-
+      github.event_name != 'pull_request' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      security-events: write
+    steps:
+      - name: Unpack the results
+        env:
+          GITLEAKS: ${{ needs.weekly-scan.outputs.gitleaks }}
+          SEMGREP: ${{ needs.weekly-scan.outputs.semgrep }}
+          ZIZMOR: ${{ needs.weekly-scan.outputs.zizmor }}
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/security-audit"
+          printf '%s' "$GITLEAKS" | base64 -d | gunzip > "$RUNNER_TEMP/security-audit/gitleaks.sarif"
+          printf '%s' "$SEMGREP" | base64 -d | gunzip > "$RUNNER_TEMP/security-audit/semgrep.sarif"
+          printf '%s' "$ZIZMOR" | base64 -d | gunzip > "$RUNNER_TEMP/security-audit/zizmor.sarif"
 
       # One upload per scanner, each under its own category, so that a later run replaces
       # that scanner's results and nothing else's. An alert closes itself when a run no
