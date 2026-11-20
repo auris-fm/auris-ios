@@ -1,0 +1,281 @@
+# Security audit: leaked secrets, risky code patterns and unsafe workflows.
+#
+# Three scanners sit behind one script, `.github/scripts/security-audit.sh`, which runs in two
+# modes:
+#
+#   - **On a pull request** it reports only what the pull request adds, so every finding is
+#     the author's to answer. A leaked secret fails the check. The other findings are listed
+#     in the job summary and do not fail it yet (see `AUDIT_ENFORCE` below).
+#   - **Every Monday** it scans what Auris has added to the default branch and uploads the
+#     result to the Security tab.
+#
+# It does not run on pushes to `main`. Everything reaches `main` through a pull request, so
+# that run would rescan what the pull request run already covered.
+#
+# This repository is a public fork of Pocket Casts, and that decides three things:
+#
+#   - **Scope.** The audit covers what Auris adds or changes, not upstream's code. A pull
+#     request run sees the pull request's own changes; for an `upstream-sync/*` branch,
+#     which merges an upstream release, that is the workflow changes only. The weekly run
+#     scans the files that differ from the upstream release last merged, and the history
+#     since it. Workflows are always scanned, upstream's included: every workflow here runs
+#     with this repository's secrets, whoever wrote it.
+#   - **Where findings go.** The weekly run uploads to the Security tab, which only people
+#     with write access can read, and prints counts only, because the job log and summary of
+#     a public repository are public. For the same reason the results are encrypted on their
+#     way from the job that scans to the job that uploads, with the repository secret
+#     `SECURITY_AUDIT_HANDOFF_KEY` (any long random string; nothing else uses it). A pull
+#     request run lists its findings: they are about code that is already public in that
+#     pull request.
+#   - **Dependencies.** Not scanned here. osv-scanner does not read Swift Package Manager's
+#     `Package.resolved`; Dependabot alerts cover it and the Ruby tooling in `Gemfile.lock`.
+
+name: Security audit
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  schedule:
+    - cron: "0 1 * * 1" # Mondays 01:00 UTC (09:00 UTC+8)
+  workflow_dispatch:
+
+# Each job asks for what it needs.
+permissions: {}
+
+concurrency:
+  group: security-audit-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pull-request:
+    # A draft is skipped: the audit runs when the pull request is marked ready and on every
+    # push after that, so nothing merges unaudited and work in progress does not spend minutes.
+    if: github.event_name == 'pull_request' && !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      # The default ref for a pull request is its merge result, whose first parent is the
+      # tip of the base branch. Full history, because the secrets scan reads every commit
+      # between the two.
+      - name: Checkout the merge result with its history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install the scanners
+        run: .github/scripts/security-audit-install.sh
+
+      # Before the script is trusted with this pull request: known cases with known answers,
+      # each a way the audit could report clean when it should not.
+      - name: Check the audit script against known cases
+        run: .github/scripts/security-audit-selftest.sh
+
+      - name: Audit what the pull request adds
+        env:
+          # Read-only in this job, and handed to zizmor alone, which looks up the actions
+          # a workflow references.
+          AUDIT_GITHUB_TOKEN: ${{ github.token }}
+          # An upstream release merge brings in upstream's commits and code, which are not
+          # Auris's to answer for, but any workflow it changes will run here with this
+          # repository's secrets. The narrowing applies only to a branch in this
+          # repository: a fork can name a branch anything.
+          AUDIT_SCANNERS: >-
+            ${{ (github.event.pull_request.head.repo.full_name == github.repository &&
+            startsWith(github.head_ref, 'upstream-sync/')) && 'workflows' ||
+            'secrets code workflows' }}
+          # "true" makes a new high-severity code or workflow finding fail the check as a
+          # leaked secret already does. Off while the first weeks of results show which rules
+          # are noise here; review on 2026-12-04.
+          AUDIT_ENFORCE: "false"
+        run: |
+          # On any other commit `HEAD^1` is just the previous commit, and the audit would
+          # cover the last commit of the pull request instead of all of it.
+          if ! git rev-parse --verify --quiet 'HEAD^2' > /dev/null; then
+            echo "::error::Expected the pull request's merge commit to be checked out."
+            exit 2
+          fi
+          .github/scripts/security-audit.sh pr 'HEAD^1'
+
+  # The weekly run is two jobs so that nothing which scans can also publish. The scanners,
+  # and whatever they download, run under a read-only token; the job that can write to the
+  # Security tab runs no scanner and no script from the repository.
+  #
+  # Both are tied to the default branch. A manual run on any other branch would otherwise be
+  # handed the same write permission to report on code that is not on `main`.
+  weekly-scan:
+    if: >-
+      github.event_name != 'pull_request' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      security-events: read
+    outputs:
+      unverified: ${{ steps.audit.outputs.unverified }}
+    steps:
+      - name: Checkout with full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install the scanners
+        run: .github/scripts/security-audit-install.sh
+
+      # No fallback when upstream cannot be fetched: the step fails and so does the run. An
+      # audit that quietly widened to all of upstream's code would flood the Security tab,
+      # and one that quietly narrowed would report less than it claims.
+      - name: Find the upstream release last merged and what differs from it
+        id: upstream
+        env:
+          SCOPE: ${{ runner.temp }}/security-audit-scope.txt
+        run: |
+          git remote add upstream https://github.com/Automattic/pocket-casts-ios.git
+          git fetch -q --no-tags upstream '+refs/tags/*:refs/tags/upstream/*'
+          base=$(git describe --tags --abbrev=0 --match 'upstream/*' HEAD)
+          git -c core.quotePath=false diff --name-only --no-renames --diff-filter=d "$base" HEAD > "$SCOPE"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "$(wc -l < "$SCOPE") files differ from upstream release ${base#upstream/}"
+
+      # An upload replaces a scanner's previous results, and an alert that is no longer
+      # reported closes as fixed. gitleaks and zizmor either finish or fail the scan, so
+      # their silence means something. semgrep can finish having given up on a file, and
+      # its silence about that file means nothing. So the script is told which semgrep
+      # alerts are open now, and reports how many of them this run could not have confirmed:
+      # every one in a file it did not finish, or from a rule that failed on that file. A
+      # result at the same place does not confirm an alert: it may be a different finding,
+      # which GitHub can tell and this list cannot. A complete scan, and one whose gaps
+      # touch no open alert, publish as usual.
+      - name: List the code alerts that are open
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPEN: ${{ runner.temp }}/security-audit-open.tsv
+        run: |
+          set -o pipefail
+          # `path<TAB>rule` for each open semgrep alert on this branch.
+          if ! gh api --paginate \
+            "repos/$GITHUB_REPOSITORY/code-scanning/alerts?state=open&ref=$GITHUB_REF&per_page=100" \
+            --jq '.[] | select(.most_recent_instance.category == "semgrep")
+                  | [.most_recent_instance.location.path, .rule.id] | @tsv' > "$OPEN" 2> "$RUNNER_TEMP/api.err"; then
+            # Before the first upload there is no analysis, and so no alert to lose.
+            if ! grep -q "no analysis found" "$RUNNER_TEMP/api.err"; then
+              cat "$RUNNER_TEMP/api.err"
+              exit 1
+            fi
+            : > "$OPEN"
+          fi
+          echo "$(wc -l < "$OPEN") open semgrep alerts"
+
+      - name: Audit what Auris changed
+        id: audit
+        env:
+          # Read-only in this job, and handed to zizmor alone.
+          AUDIT_GITHUB_TOKEN: ${{ github.token }}
+          AUDIT_OUT: ${{ runner.temp }}/security-audit
+          AUDIT_SCANNERS: secrets code workflows
+          AUDIT_QUIET: "true"
+          AUDIT_HISTORY_SINCE: ${{ steps.upstream.outputs.base }}
+          AUDIT_CODE_TARGETS: ${{ runner.temp }}/security-audit-scope.txt
+          AUDIT_PREVIOUS: ${{ runner.temp }}/security-audit-open.tsv
+        run: .github/scripts/security-audit.sh full
+
+      # The results cross to the publishing job as an encrypted file. Nothing between two
+      # jobs of a public repository is private: anyone can download an artifact, and a job
+      # output is printed in the log of the step that receives it. So what crosses is
+      # ciphertext, and the key is a secret, which the log masks.
+      #
+      # Each result file is first cut down to the rules that have a result: semgrep lists
+      # every rule it loaded, several megabytes.
+      - name: Encrypt the results for the publishing job
+        env:
+          AUDIT_OUT: ${{ runner.temp }}/security-audit
+          HANDOFF_KEY: ${{ secrets.SECURITY_AUDIT_HANDOFF_KEY }}
+        run: |
+          set -o pipefail
+          if [ -z "$HANDOFF_KEY" ]; then
+            echo "::error::The repository secret SECURITY_AUDIT_HANDOFF_KEY must be configured."
+            exit 1
+          fi
+          cd "$AUDIT_OUT"
+          mkdir handoff
+          for tool in gitleaks semgrep zizmor; do
+            jq -c '
+              ([.runs[].results[].ruleId] | unique) as $used
+              | .runs[].tool.driver.rules |= map(select(.id as $id | $used | index($id)))
+            ' "$tool.sarif" > "handoff/$tool.sarif"
+          done
+          tar -C handoff -cf - . | gzip -9 \
+            | openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:HANDOFF_KEY \
+            > "$RUNNER_TEMP/security-audit-results.enc"
+
+      - name: Hand the encrypted results to the publishing job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: security-audit-results
+          path: ${{ runner.temp }}/security-audit-results.enc
+          if-no-files-found: error
+          retention-days: 1
+
+  weekly-publish:
+    needs: weekly-scan
+    if: >-
+      github.event_name != 'pull_request' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      security-events: write
+    steps:
+      - name: Fetch the encrypted results
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: security-audit-results
+          path: ${{ runner.temp }}/handoff
+
+      - name: Decrypt the results
+        env:
+          HANDOFF_KEY: ${{ secrets.SECURITY_AUDIT_HANDOFF_KEY }}
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/security-audit"
+          openssl enc -d -aes-256-cbc -pbkdf2 -pass env:HANDOFF_KEY \
+            -in "$RUNNER_TEMP/handoff/security-audit-results.enc" | gunzip \
+            | tar -C "$RUNNER_TEMP/security-audit" -xf -
+
+      # One upload per scanner, each under its own category, so that a later run replaces
+      # that scanner's results and nothing else's. An alert closes itself when a run no
+      # longer reports it.
+      - name: Upload the secrets findings to the Security tab
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: ${{ runner.temp }}/security-audit/gitleaks.sarif
+          category: gitleaks
+
+      # Skipped when it would close an alert on no evidence: when an alert that is open now
+      # sits in a file semgrep did not finish this time. The previous results then stay as
+      # they are, and the last step fails the run so that someone looks. The scan job made
+      # the count, with the script the self-test covers.
+      - name: Upload the code findings to the Security tab
+        if: needs.weekly-scan.outputs.unverified == '0'
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: ${{ runner.temp }}/security-audit/semgrep.sarif
+          category: semgrep
+
+      - name: Upload the workflow findings to the Security tab
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: ${{ runner.temp }}/security-audit/zizmor.sarif
+          category: zizmor
+
+      - name: Fail when the code findings were held back
+        if: needs.weekly-scan.outputs.unverified != '0'
+        env:
+          UNVERIFIED: ${{ needs.weekly-scan.outputs.unverified }}
+        run: |
+          echo "::error::semgrep did not finish a file or rule behind $UNVERIFIED open alert(s). Its previous results are kept and this run's code findings are not published. Fix what stops the scan, or dismiss those alerts, and run again."
+          exit 1
