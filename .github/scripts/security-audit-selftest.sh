@@ -177,13 +177,19 @@ check_published() {
     failures=$((failures + 1))
   fi
 }
-# fake_result <path> <line, or "" for a result that states none> [message] [column]: one
-# `selftest-eval` result as semgrep writes it.
+# fake_result <path> <line, or "" for a result that states none> [message] [fingerprint]:
+# one `selftest-eval` result, with the fingerprint that tells GitHub which alert it is.
 fake_result() {
-  local region=""
-  if [ -n "$2" ]; then region=$(printf ',"region":{"startLine":%s,"startColumn":%s}' "$2" "${4:-5}"); fi
-  printf '{"ruleId":"selftest-eval","level":"error","message":{"text":"%s"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"%s"}%s}}]}' \
-    "${3:-eval of a dynamic value}" "$1" "$region"
+  local region="" fingerprint=""
+  if [ -n "$2" ]; then region=$(printf ',"region":{"startLine":%s,"startColumn":5}' "$2"); fi
+  if [ -n "${4:-}" ]; then fingerprint=$(printf ',"partialFingerprints":{"primaryLocationLineHash":"%s"}' "$4"); fi
+  printf '{"ruleId":"selftest-eval","level":"error","message":{"text":"%s"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"%s"}%s}}]%s}' \
+    "${3:-eval of a dynamic value}" "$1" "$region" "$fingerprint"
+}
+# Lists `path:line=fingerprint` of each result in the file the run leaves for publishing.
+published_fingerprints() {
+  jq -r '.runs[].results[] | "\(.locations[0].physicalLocation | "\(.artifactLocation.uri):\(.region.startLine // "")")=\(.partialFingerprints.primaryLocationLineHash // "")"' \
+    "$last_out/semgrep.sarif" | sort | tr '\n' ' '
 }
 # sarif <results, comma separated>: a SARIF file with those results, as the last run
 # published them.
@@ -193,6 +199,31 @@ sarif() {
 
 echo "x = 1" > gone.py
 commit_all "a file with nothing to report"
+
+# Each result of a full run has a fingerprint made from the code it matched. Two matches of
+# the same code in one file are told apart by a count, and moving the code changes nothing.
+printf 'def twice(text):\n    eval(text)\n    eval(text)\n' > twice.py
+commit_all "the same call twice"
+expect "a full run fingerprints its results" 0 "" \
+  AUDIT_SCANNERS=code AUDIT_CODE_RULES="$work/rules.yml" bash "$audit" full
+before=$(published_fingerprints | tr ' ' '\n' | sed 's/^[^=]*=//' | sort | tr '\n' ' ')
+if ! printf '%s' "$before" | grep -qE '^([0-9a-f]{40}_[01] ){3}$' ||
+  [ "$(printf '%s' "$before" | tr ' ' '\n' | grep -c '_1$')" -ne 1 ] ||
+  [ "$(printf '%s' "$before" | tr ' ' '\n' | sed 's/_[0-9]*$//' | sort -u | grep -c .)" -ne 2 ]; then
+  echo "FAIL the fingerprints of three results, two of them of the same code, are: $before"
+  failures=$((failures + 1))
+fi
+printf '# a comment\n\ndef twice(text):\n        eval(text)\n        eval(text)\n' > twice.py
+commit_all "move the calls and indent them"
+expect "a full run fingerprints moved code" 0 "" \
+  AUDIT_SCANNERS=code AUDIT_CODE_RULES="$work/rules.yml" bash "$audit" full
+after=$(published_fingerprints | tr ' ' '\n' | sed 's/^[^=]*=//' | sort | tr '\n' ' ')
+if [ "$before" != "$after" ]; then
+  echo "FAIL moving code changed its fingerprints: $before became $after"
+  failures=$((failures + 1))
+fi
+git rm -q twice.py
+commit_all "remove it again"
 
 # First with the last results given as SARIF, as a caller that publishes SARIF has them.
 sarif "$(fake_result risky.py 2),$(fake_result gone.py 1),$(fake_result unparsable.py 2)" > "$work/previous.sarif"
@@ -273,29 +304,46 @@ check_unverified "all three are unverified" "gone.py:1 risky.py:2 unparsable.py:
 # reported findings there, and this run reports something in that file. A previous finding
 # is let go only when this run reports that very finding; in every other case it is kept.
 
-# One previous result, and a result of the same rule at the same line that is not the same
-# result: it starts at another column. It may be another finding. Both are published.
-sarif "$(fake_result long.py 2)" > "$work/one.sarif"
-expect "a different result at its line does not replace a previous result" 0 "Not verified this run (semgrep): 1" \
-  "${gave_up[@]}" FAKE_RESULTS="$(fake_result long.py 2 "" 9)" AUDIT_PREVIOUS_SARIF="$work/one.sarif" bash "$audit" full
+# One previous result, and a result that looks the same in every way (rule, file, place,
+# message) but has another fingerprint: to GitHub it is another alert. Both are published,
+# the previous one with the fingerprint it had.
+sarif "$(fake_result long.py 2 "" aaa_0)" > "$work/one.sarif"
+expect "a result with another fingerprint does not replace a previous result" 0 "Not verified this run (semgrep): 1" \
+  "${gave_up[@]}" FAKE_RESULTS="$(fake_result long.py 2 "" bbb_0)" AUDIT_PREVIOUS_SARIF="$work/one.sarif" bash "$audit" full
 check_unverified "the previous result is kept" "long.py:2 "
-check_published "both results are published" "long.py:2 long.py:2 "
+if [ "$(published_fingerprints)" != "long.py:2=aaa_0 long.py:2=bbb_0 " ]; then
+  echo "FAIL both results should be published with their fingerprints, not: $(published_fingerprints)"
+  failures=$((failures + 1))
+fi
 
-# The same for a result at the very same place with another message.
-expect "a result with another message does not replace a previous result" 0 "Not verified this run (semgrep): 1" \
-  "${gave_up[@]}" FAKE_RESULTS="$(fake_result long.py 2 "exec of a dynamic value")" AUDIT_PREVIOUS_SARIF="$work/one.sarif" bash "$audit" full
+# The result with the same fingerprint is the previous result reported again, wherever it
+# is now. It is published once, at its new place.
+expect "a result with its fingerprint is a previous result reported again" 0 "" \
+  "${gave_up[@]}" FAKE_RESULTS="$(fake_result long.py 7 "" aaa_0)" AUDIT_PREVIOUS_SARIF="$work/one.sarif" bash "$audit" full
+check_unverified "nothing is unverified" ""
+if [ "$(published_fingerprints)" != "long.py:7=aaa_0 " ]; then
+  echo "FAIL the result should be published once at its new place, not: $(published_fingerprints)"
+  failures=$((failures + 1))
+fi
+
+# A previous result that was published without a fingerprint cannot be shown to be any
+# result of this run, however alike the two look. It is kept.
+sarif "$(fake_result long.py 2)" > "$work/bare.sarif"
+expect "a previous result without a fingerprint is never taken for reported again" 0 "Not verified this run (semgrep): 1" \
+  "${gave_up[@]}" FAKE_RESULTS="$(fake_result long.py 2 "" aaa_0)" AUDIT_PREVIOUS_SARIF="$work/bare.sarif" bash "$audit" full
+if [ "$(published_fingerprints)" != "long.py:2= long.py:2=aaa_0 " ]; then
+  echo "FAIL both results should be published, not: $(published_fingerprints)"
+  failures=$((failures + 1))
+fi
+# Nor can a result of this run that has none stand for a previous one.
+expect "a result without a fingerprint does not replace a previous result" 0 "Not verified this run (semgrep): 1" \
+  "${gave_up[@]}" FAKE_RESULTS="$(fake_result long.py 2)" AUDIT_PREVIOUS_SARIF="$work/one.sarif" bash "$audit" full
 check_published "both results at that place are published" "long.py:2 long.py:2 "
 
-# The identical result is the previous result reported again, and is published once.
-expect "the identical result is a previous result reported again" 0 "" \
-  "${gave_up[@]}" FAKE_RESULTS="$(fake_result long.py 2)" AUDIT_PREVIOUS_SARIF="$work/one.sarif" bash "$audit" full
-check_unverified "nothing is unverified" ""
-check_published "the result is published once" "long.py:2 "
-
 # Two previous results from one rule, one of them reported again: the other is kept.
-sarif "$(fake_result long.py 2),$(fake_result long.py 9)" > "$work/two.sarif"
+sarif "$(fake_result long.py 2 "" aaa_0),$(fake_result long.py 9 "" aaa_1)" > "$work/two.sarif"
 expect "one result does not stand in for two previous results" 0 "Not verified this run (semgrep): 1" \
-  "${gave_up[@]}" FAKE_RESULTS="$(fake_result long.py 2)" AUDIT_PREVIOUS_SARIF="$work/two.sarif" bash "$audit" full
+  "${gave_up[@]}" FAKE_RESULTS="$(fake_result long.py 2 "" aaa_0)" AUDIT_PREVIOUS_SARIF="$work/two.sarif" bash "$audit" full
 check_unverified "the result that was not reported again is kept" "long.py:9 "
 check_published "both are published" "long.py:2 long.py:9 "
 
@@ -308,20 +356,20 @@ check_published "both are published a second time" "long.py:2 long.py:9 "
 
 # A previous result as GitHub hands it back: with the alert it belongs to and positions in
 # the lists of the file it was stored in, and under a rule this run did not load. It is
-# published as a plain result, with its rule.
+# published as a plain result, with its rule and its fingerprint.
 cat > "$work/stored.sarif" << 'SARIF'
 {"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Semgrep OSS","rules":[
   {"id":"selftest-unrelated","name":"unrelated"},{"id":"selftest-stored","name":"stored"}]}},
  "artifacts":[{"location":{"uri":"long.py"}}],
  "results":[{"ruleId":"selftest-stored","rule":{"id":"selftest-stored","index":1},"level":"warning",
   "correlationGuid":"00000000-0000-0000-0000-000000000000","message":{"text":"stored finding"},
-  "partialFingerprints":{"primaryLocationLineHash":""},"properties":{"github/alertNumber":7},
+  "partialFingerprints":{"primaryLocationLineHash":"ccc_0"},"properties":{"github/alertNumber":7},
   "locations":[{"physicalLocation":{"artifactLocation":{"uri":"long.py","index":0},
    "region":{"startLine":4,"startColumn":1,"endLine":4,"endColumn":9}}}]}]}]}
 SARIF
 expect "a stored result is kept with its rule" 0 "at \`long.py:4\`: stored finding" \
   "${gave_up[@]}" FAKE_RESULTS="$(fake_result long.py 2)" AUDIT_PREVIOUS_SARIF="$work/stored.sarif" bash "$audit" full
-want='{"level":"warning","locations":[{"physicalLocation":{"artifactLocation":{"uri":"long.py"},"region":{"endColumn":9,"endLine":4,"startColumn":1,"startLine":4}}}],"message":{"text":"stored finding"},"ruleId":"selftest-stored"}'
+want='{"level":"warning","locations":[{"physicalLocation":{"artifactLocation":{"uri":"long.py"},"region":{"endColumn":9,"endLine":4,"startColumn":1,"startLine":4}}}],"message":{"text":"stored finding"},"partialFingerprints":{"primaryLocationLineHash":"ccc_0"},"ruleId":"selftest-stored"}'
 got=$(jq -cS '.runs[0].results[] | select(.ruleId == "selftest-stored")' "$last_out/semgrep.sarif")
 if [ "$got" != "$want" ]; then
   echo "FAIL the stored result is published as: $got"
@@ -371,7 +419,7 @@ check_unverified "nothing is unverified when both are reported" ""
 # Two results fit one listed finding: the report would show them as one line, so there is
 # no telling how many findings its line stood for.
 expect "two results that fit one listed finding do not confirm it" 0 "Not verified this run (semgrep): 1" \
-  "${gave_up[@]}" FAKE_RESULTS="$(fake_result long.py 2),$(fake_result long.py 2 "" 9),$(fake_result long.py 9)" \
+  "${gave_up[@]}" FAKE_RESULTS="$(fake_result long.py 2),$(fake_result long.py 2 "" other),$(fake_result long.py 9)" \
   AUDIT_PREVIOUS_REPORT="$work/two.md" bash "$audit" full
 check_unverified "the listed finding at that line is kept" "long.py:2 "
 
