@@ -26,13 +26,15 @@
 #                          handed to zizmor alone. Run this from a job whose token is read-only.
 #   AUDIT_CODE_RULES       semgrep configuration (default: the registry's `p/default`)
 #   AUDIT_PREVIOUS         `full` only: the semgrep findings the last published run left open,
-#                          one `path<TAB>rule` per line
+#                          one `path<TAB>rule<TAB>line` per line
 #   AUDIT_PREVIOUS_REPORT  `full` only: the same, given as the last report this script wrote
 #
 # A `full` run that is told what the last run reported checks each of those findings against
-# what semgrep did not finish this time. One that sits in an unfinished file, and is not
-# reported again, has not been shown to be fixed: it goes to `unverified.tsv` and into the
-# report under "Not verified this run", for the caller to keep instead of dropping.
+# what semgrep did not finish this time. One that sits in an unfinished file has not been
+# shown to be fixed, unless this run reports that very finding again: the same rule at the
+# same line. It goes to `unverified.tsv` and into the report under "Not verified this run",
+# for the caller to keep instead of dropping. Another finding of the same rule in the same
+# file does not stand in for it.
 #
 # Exit status: 0 nothing blocks, 1 a blocking finding in a `pr` run, 2 the audit could not be
 # completed. A scanner that fails, a workflow or lockfile that cannot be read and a bad
@@ -281,11 +283,13 @@ scan_code() {
   if [ "$mode" = full ]; then unverified_code_findings "$report"; fi
 }
 
-# What the last published run reported from semgrep, as `path<TAB>rule<TAB>Markdown line`.
+# What the last published run reported from semgrep, as
+# `path<TAB>rule<TAB>line<TAB>Markdown line`.
 previous_code_findings() {
   if [ -n "${AUDIT_PREVIOUS:-}" ]; then
     [ -r "$AUDIT_PREVIOUS" ] || die "AUDIT_PREVIOUS is not readable: $AUDIT_PREVIOUS"
-    awk -F'\t' 'BEGIN { OFS = "\t" } NF >= 2 { print $1, $2, "- `" $2 "` at `" $1 "`" }' "$AUDIT_PREVIOUS"
+    awk -F'\t' 'BEGIN { OFS = "\t" }
+      NF >= 2 { print $1, $2, $3, "- `" $2 "` at `" $1 ($3 == "" ? "" : ":" $3) "`" }' "$AUDIT_PREVIOUS"
   elif [ -n "${AUDIT_PREVIOUS_REPORT:-}" ]; then
     [ -r "$AUDIT_PREVIOUS_REPORT" ] ||
       die "AUDIT_PREVIOUS_REPORT is not readable: $AUDIT_PREVIOUS_REPORT"
@@ -294,25 +298,38 @@ previous_code_findings() {
       /^### / { inside = ($0 ~ /^### (Risky code patterns|Not verified this run) \(semgrep\)/); next }
       inside && /^- `[^`]+` at `[^`]+:[0-9]+`/ {
         rule = $0; sub(/^- `/, "", rule); sub(/`.*/, "", rule)
-        path = $0; sub(/^- `[^`]+` at `/, "", path); sub(/:[0-9]+`.*/, "", path)
-        print path "\t" rule "\t" $0
+        path = $0; sub(/^- `[^`]+` at `/, "", path); sub(/`.*/, "", path)
+        line = path; sub(/^.*:/, "", line); sub(/:[0-9]+$/, "", path)
+        print path "\t" rule "\t" line "\t" $0
       }' "$AUDIT_PREVIOUS_REPORT"
   fi
 }
 
 # The previous findings this run can neither confirm nor rule out: in a file semgrep did not
 # finish (or from a rule that failed on it), and not reported again. A gap with no path, `?`,
-# could be anywhere, so it covers every previous finding. The files are told apart by name:
-# `NR == FNR` stays true past an empty first file.
+# could be anywhere, so it covers every previous finding.
+#
+# "Reported again" means that finding, not one like it: the same rule at the same line of the
+# same file, and each result of this run answers for one previous finding only. Of two
+# previous findings from one rule in one unfinished file, a single result leaves the other
+# unverified. A previous finding given without a line can be matched to nothing and stays
+# unverified for as long as its file is unfinished; so does one whose line has moved.
+#
+# The files are told apart by name: `NR == FNR` stays true past an empty first file.
 unverified_code_findings() {
   previous_code_findings > "$out/previous.tsv"
   jq -r '.runs[].results[]
-    | [(.locations[0].physicalLocation.artifactLocation.uri // "?"), .ruleId] | @tsv' "$1" |
-    sort -u > "$out/current.tsv"
+    | (.locations[0].physicalLocation // {}) as $at
+    | [($at.artifactLocation.uri // "?"), .ruleId, ($at.region.startLine // 1)] | @tsv' "$1" \
+    > "$out/current.tsv"
   awk -F'\t' '
     FILENAME == ARGV[1] { if ($1 == "?") anywhere = 1; gap[$1 "\t" $2] = 1; next }
-    FILENAME == ARGV[2] { reported[$1 "\t" $2] = 1; next }
-    (anywhere || (($1 "\t*") in gap) || (($1 "\t" $2) in gap)) && !(($1 "\t" $2) in reported)
+    FILENAME == ARGV[2] { reported[$1 "\t" $2 "\t" $3]++; next }
+    anywhere || (($1 "\t*") in gap) || (($1 "\t" $2) in gap) {
+      finding = $1 "\t" $2 "\t" $3
+      if ($3 != "" && reported[finding] > 0) { reported[finding]--; next }
+      print
+    }
   ' "$out/unscanned.tsv" "$out/current.tsv" "$out/previous.tsv" > "$out/unverified.tsv"
 }
 
@@ -406,9 +423,9 @@ if enabled code; then
     {
       echo "### Not verified this run (semgrep): $unverified"
       echo
-      echo "The last run reported these, in a file or from a rule that semgrep did not finish this time. They stay listed until a run can check them."
+      echo "The last run reported these, in a file or from a rule that semgrep did not finish this time, and this run does not report them at the same line. They stay listed until a run finishes that file."
       echo
-      cut -f3 "$out/unverified.tsv" | sort
+      cut -f4 "$out/unverified.tsv" | sort
       echo
     } >> "$out/sections.md"
   fi

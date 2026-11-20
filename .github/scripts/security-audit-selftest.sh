@@ -156,9 +156,10 @@ fi
 
 # What the publisher is told about findings the last run left open. `risky.py` is scanned
 # and still reported, `gone.py` is scanned and clean, `unparsable.py` is not finished.
+# Compares `path:line` of each unverified finding.
 check_unverified() {
   local label=$1 want=$2 got
-  got=$(cut -f1 "$last_out/unverified.tsv" | sort | tr '\n' ' ')
+  got=$(awk -F'\t' '{ print $1 ":" $3 }' "$last_out/unverified.tsv" | sort | tr '\n' ' ')
   if [ "$got" != "$want" ]; then
     echo "FAIL $label: unverified is '$got', expected '$want'"
     failures=$((failures + 1))
@@ -166,10 +167,10 @@ check_unverified() {
 }
 echo "x = 1" > gone.py
 commit_all "a file with nothing to report"
-printf 'risky.py\tselftest-eval\ngone.py\tselftest-eval\nunparsable.py\tselftest-eval\n' > "$work/previous.tsv"
+printf 'risky.py\tselftest-eval\t2\ngone.py\tselftest-eval\t1\nunparsable.py\tselftest-eval\t2\n' > "$work/previous.tsv"
 expect "an open finding in an unfinished file is kept" 0 "Not verified this run (semgrep): 1" \
   AUDIT_SCANNERS=code AUDIT_CODE_RULES="$work/rules.yml" AUDIT_PREVIOUS="$work/previous.tsv" bash "$audit" full
-check_unverified "only the finding in the unfinished file is unverified" "unparsable.py "
+check_unverified "only the finding in the unfinished file is unverified" "unparsable.py:2 "
 
 # The same, read back from a report of this script, as an issue body is.
 cat > "$work/previous.md" << 'REPORT'
@@ -191,7 +192,7 @@ REPORT
 expect "a finding carried over once is carried again" 0 \
   "at \`unparsable.py:2\`: eval of a dynamic value" \
   AUDIT_SCANNERS=code AUDIT_CODE_RULES="$work/rules.yml" AUDIT_PREVIOUS_REPORT="$work/previous.md" bash "$audit" full
-check_unverified "the report is read back section by section" "unparsable.py "
+check_unverified "the report is read back section by section" "unparsable.py:2 "
 
 rm unparsable.py
 commit_all "remove the file that does not parse"
@@ -199,8 +200,8 @@ expect "a complete scan verifies every open finding" 0 "" \
   AUDIT_SCANNERS=code AUDIT_CODE_RULES="$work/rules.yml" AUDIT_PREVIOUS="$work/previous.tsv" bash "$audit" full
 check_unverified "nothing is unverified after a complete scan" ""
 
-# A gap semgrep reports without saying where: a stand-in semgrep that finds nothing and
-# reports one error with no path. Every open finding is then unverified.
+# The rest needs semgrep to answer in ways it cannot be made to on demand, so a stand-in
+# answers for it: it writes the results and the errors it is handed.
 mkdir "$work/fake-bin"
 cat > "$work/fake-bin/semgrep" << 'SEMGREP'
 #!/usr/bin/env bash
@@ -211,13 +212,72 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
-echo '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Semgrep OSS","rules":[]}},"results":[]}]}' > "$sarif"
-echo '{"results":[],"errors":[{"type":"Fatal error","level":"warn","message":"gave up"}]}' > "$json"
+printf '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Semgrep OSS","rules":[]}},"results":[%s]}]}\n' "$FAKE_RESULTS" > "$sarif"
+printf '{"results":[],"errors":[%s]}\n' "$FAKE_ERRORS" > "$json"
 SEMGREP
 chmod +x "$work/fake-bin/semgrep"
+# fake_result <path> <line>: one `selftest-eval` result as semgrep writes it.
+fake_result() {
+  printf '{"ruleId":"selftest-eval","level":"error","message":{"text":"eval of a dynamic value"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"%s"},"region":{"startLine":%s}}}]}' "$1" "$2"
+}
+
+# A gap semgrep reports without saying where. Every open finding is then unverified.
 expect "a gap with no path leaves every open finding unverified" 0 "Not verified this run (semgrep): 3" \
-  PATH="$work/fake-bin:$PATH" AUDIT_SCANNERS=code AUDIT_PREVIOUS="$work/previous.tsv" bash "$audit" full
-check_unverified "all three are unverified" "gone.py risky.py unparsable.py "
+  PATH="$work/fake-bin:$PATH" FAKE_RESULTS="" \
+  FAKE_ERRORS='{"type":"Fatal error","level":"warn","message":"gave up"}' \
+  AUDIT_SCANNERS=code AUDIT_PREVIOUS="$work/previous.tsv" bash "$audit" full
+check_unverified "all three are unverified" "gone.py:1 risky.py:2 unparsable.py:2 "
+
+# semgrep gave up on `long.py` part of the way through, having reported one finding there.
+# The last run left two open in that file, from the same rule. The one result confirms the
+# finding at its own line and says nothing about the other.
+timeout_error='{"type":"Timeout","level":"warn","message":"gave up","path":"long.py"}'
+printf 'long.py\tselftest-eval\t2\nlong.py\tselftest-eval\t9\n' > "$work/two.tsv"
+expect "one result does not stand in for two open findings" 0 "Not verified this run (semgrep): 1" \
+  PATH="$work/fake-bin:$PATH" FAKE_RESULTS="$(fake_result long.py 2)" FAKE_ERRORS="$timeout_error" \
+  AUDIT_SCANNERS=code AUDIT_PREVIOUS="$work/two.tsv" bash "$audit" full
+check_unverified "the finding that was not reported again is kept" "long.py:9 "
+
+# Two open findings on one line, and one result there: it answers for one of them.
+printf 'long.py\tselftest-eval\t2\nlong.py\tselftest-eval\t2\n' > "$work/same-line.tsv"
+expect "one result answers for one open finding on its line" 0 "Not verified this run (semgrep): 1" \
+  PATH="$work/fake-bin:$PATH" FAKE_RESULTS="$(fake_result long.py 2)" FAKE_ERRORS="$timeout_error" \
+  AUDIT_SCANNERS=code AUDIT_PREVIOUS="$work/same-line.tsv" bash "$audit" full
+check_unverified "the second finding on the line is kept" "long.py:2 "
+
+# The result is at another line than the open finding: not shown to be the same one.
+printf 'long.py\tselftest-eval\t9\n' > "$work/moved.tsv"
+expect "a result at another line confirms nothing" 0 "Not verified this run (semgrep): 1" \
+  PATH="$work/fake-bin:$PATH" FAKE_RESULTS="$(fake_result long.py 2)" FAKE_ERRORS="$timeout_error" \
+  AUDIT_SCANNERS=code AUDIT_PREVIOUS="$work/moved.tsv" bash "$audit" full
+check_unverified "the open finding at the other line is kept" "long.py:9 "
+
+# An open finding listed without its line can be matched to nothing.
+printf 'long.py\tselftest-eval\n' > "$work/no-line.tsv"
+expect "an open finding without a line is never confirmed" 0 "Not verified this run (semgrep): 1" \
+  PATH="$work/fake-bin:$PATH" FAKE_RESULTS="$(fake_result long.py 2)" FAKE_ERRORS="$timeout_error" \
+  AUDIT_SCANNERS=code AUDIT_PREVIOUS="$work/no-line.tsv" bash "$audit" full
+
+# Both open findings are reported again, so the gap hides neither.
+expect "findings reported again at their lines are verified" 0 "" \
+  PATH="$work/fake-bin:$PATH" FAKE_RESULTS="$(fake_result long.py 2),$(fake_result long.py 9)" \
+  FAKE_ERRORS="$timeout_error" \
+  AUDIT_SCANNERS=code AUDIT_PREVIOUS="$work/two.tsv" bash "$audit" full
+check_unverified "nothing is unverified when both are reported" ""
+
+# The same through a report of this script: the line that was not reported again is the one
+# carried over, word for word.
+cat > "$work/two.md" << 'REPORT'
+### Risky code patterns (semgrep): 2
+
+- `selftest-eval` at `long.py:2`: eval of a dynamic value
+- `selftest-eval` at `long.py:9`: eval of a dynamic value
+REPORT
+expect "the finding a report listed and this run lacks is carried over" 0 \
+  "at \`long.py:9\`: eval of a dynamic value" \
+  PATH="$work/fake-bin:$PATH" FAKE_RESULTS="$(fake_result long.py 2)" FAKE_ERRORS="$timeout_error" \
+  AUDIT_SCANNERS=code AUDIT_PREVIOUS_REPORT="$work/two.md" bash "$audit" full
+check_unverified "only that finding is carried over" "long.py:9 "
 
 if [ "$failures" -gt 0 ]; then
   echo "$failures case(s) failed"

@@ -145,18 +145,21 @@ jobs:
       # reported closes as fixed. gitleaks and zizmor either finish or fail the scan, so
       # their silence means something. semgrep can finish having given up on a file, and
       # its silence about that file means nothing. So the script is told which semgrep
-      # alerts are open now, and reports how many of them this run could not have confirmed.
+      # alerts are open now, and reports how many of them this run could not have confirmed:
+      # those in a file it did not finish, unless it reports that alert again at the same
+      # line. Another result of the same rule in the same file does not stand in for it.
       - name: List the code alerts that are open
         env:
           GH_TOKEN: ${{ github.token }}
           OPEN: ${{ runner.temp }}/security-audit-open.tsv
         run: |
           set -o pipefail
-          # `path<TAB>rule` for each open semgrep alert on this branch.
+          # `path<TAB>rule<TAB>line` for each open semgrep alert on this branch.
           if ! gh api --paginate \
             "repos/$GITHUB_REPOSITORY/code-scanning/alerts?state=open&ref=$GITHUB_REF&per_page=100" \
             --jq '.[] | select(.most_recent_instance.category == "semgrep")
-                  | [.most_recent_instance.location.path, .rule.id] | @tsv' > "$OPEN" 2> "$RUNNER_TEMP/api.err"; then
+                  | [ .most_recent_instance.location.path, .rule.id,
+                      .most_recent_instance.location.start_line ] | @tsv' > "$OPEN" 2> "$RUNNER_TEMP/api.err"; then
             # Before the first upload there is no analysis, and so no alert to lose.
             if ! grep -q "no analysis found" "$RUNNER_TEMP/api.err"; then
               cat "$RUNNER_TEMP/api.err"
@@ -252,7 +255,7 @@ jobs:
           category: gitleaks
 
       # Skipped when it would close an alert on no evidence: when an alert that is open now
-      # sits in a file semgrep did not finish this time and is not reported again. The
+      # sits in a file semgrep did not finish this time and is not reported again there. The
       # previous results then stay as they are, and the last step fails the run so that
       # someone looks. The scan job made the count, with the script the self-test covers.
       - name: Upload the code findings to the Security tab
