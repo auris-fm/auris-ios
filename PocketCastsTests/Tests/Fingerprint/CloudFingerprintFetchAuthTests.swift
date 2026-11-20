@@ -133,7 +133,9 @@ final class CloudFingerprintFetchAuthTests: XCTestCase {
         XCTAssertEqual(provider.unauthorizedCalls, 1)
     }
 
-    /// A second rejection gives up: two requests, one refresh report, nil.
+    /// A second rejection gives up: two requests, ONE refresh report (the
+    /// retry's), nil. Reporting the second rejection too would rotate the
+    /// shared Auris refresh chain twice for a request that is never retried.
     func testSecondRejectionGivesUp() async {
         final class RotatingProvider: CloudTokenProviding {
             var tokens: [String]
@@ -157,5 +159,6 @@ final class CloudFingerprintFetchAuthTests: XCTestCase {
 
         XCTAssertNil(matcher)
         XCTAssertEqual(requests, 2, "refresh-and-retry-ONCE, never a loop")
+        XCTAssertEqual(provider.unauthorizedCalls, 1, "only the rejection a retry follows is reported; the shared chain rotates once")
     }
 }

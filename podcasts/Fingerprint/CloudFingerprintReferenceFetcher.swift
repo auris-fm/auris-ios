@@ -73,8 +73,11 @@ final class CloudFingerprintReferenceFetcher {
                 case .body(let data):
                     return buildMatcher(from: data)
                 case .unauthorized:
-                    // Report the bearer this request carried so a concurrent
-                    // refresh that already replaced it makes this a no-op.
+                    // Report the rejected bearer only when a retry follows:
+                    // each report rotates the SHARED Auris refresh chain, and
+                    // a second rejection gives up — rotating again would cost
+                    // turns a refresh for a request that is never retried.
+                    guard attempt == 0 else { return nil }
                     await tokenProvider.handleUnauthorized(rejectedToken: token)
                     rejectedToken = token
                 }
