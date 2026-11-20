@@ -154,6 +154,71 @@ if grep -q "risky.py" "$work/stdout" "$work/stderr"; then
   failures=$((failures + 1))
 fi
 
+# What the publisher is told about findings the last run left open. `risky.py` is scanned
+# and still reported, `gone.py` is scanned and clean, `unparsable.py` is not finished.
+check_unverified() {
+  local label=$1 want=$2 got
+  got=$(cut -f1 "$last_out/unverified.tsv" | sort | tr '\n' ' ')
+  if [ "$got" != "$want" ]; then
+    echo "FAIL $label: unverified is '$got', expected '$want'"
+    failures=$((failures + 1))
+  fi
+}
+echo "x = 1" > gone.py
+commit_all "a file with nothing to report"
+printf 'risky.py\tselftest-eval\ngone.py\tselftest-eval\nunparsable.py\tselftest-eval\n' > "$work/previous.tsv"
+expect "an open finding in an unfinished file is kept" 0 "Not verified this run (semgrep): 1" \
+  AUDIT_SCANNERS=code AUDIT_CODE_RULES="$work/rules.yml" AUDIT_PREVIOUS="$work/previous.tsv" bash "$audit" full
+check_unverified "only the finding in the unfinished file is unverified" "unparsable.py "
+
+# The same, read back from a report of this script, as an issue body is.
+cat > "$work/previous.md" << 'REPORT'
+## Security audit: 3 findings at 0000000
+
+### Risky code patterns (semgrep): 2
+
+- `selftest-eval` at `gone.py:1`: eval of a dynamic value
+- `selftest-eval` at `risky.py:2`: eval of a dynamic value
+
+### Not verified this run (semgrep): 1
+
+- `selftest-eval` at `unparsable.py:2`: eval of a dynamic value
+
+### Unsafe workflows (zizmor): 1
+
+- `zizmor/unpinned-uses` at `unparsable.py:7`: not a semgrep finding
+REPORT
+expect "a finding carried over once is carried again" 0 \
+  "at \`unparsable.py:2\`: eval of a dynamic value" \
+  AUDIT_SCANNERS=code AUDIT_CODE_RULES="$work/rules.yml" AUDIT_PREVIOUS_REPORT="$work/previous.md" bash "$audit" full
+check_unverified "the report is read back section by section" "unparsable.py "
+
+rm unparsable.py
+commit_all "remove the file that does not parse"
+expect "a complete scan verifies every open finding" 0 "" \
+  AUDIT_SCANNERS=code AUDIT_CODE_RULES="$work/rules.yml" AUDIT_PREVIOUS="$work/previous.tsv" bash "$audit" full
+check_unverified "nothing is unverified after a complete scan" ""
+
+# A gap semgrep reports without saying where: a stand-in semgrep that finds nothing and
+# reports one error with no path. Every open finding is then unverified.
+mkdir "$work/fake-bin"
+cat > "$work/fake-bin/semgrep" << 'SEMGREP'
+#!/usr/bin/env bash
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --sarif-output) sarif=$2 ;;
+    --json-output) json=$2 ;;
+  esac
+  shift
+done
+echo '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Semgrep OSS","rules":[]}},"results":[]}]}' > "$sarif"
+echo '{"results":[],"errors":[{"type":"Fatal error","level":"warn","message":"gave up"}]}' > "$json"
+SEMGREP
+chmod +x "$work/fake-bin/semgrep"
+expect "a gap with no path leaves every open finding unverified" 0 "Not verified this run (semgrep): 3" \
+  PATH="$work/fake-bin:$PATH" AUDIT_SCANNERS=code AUDIT_PREVIOUS="$work/previous.tsv" bash "$audit" full
+check_unverified "all three are unverified" "gone.py risky.py unparsable.py "
+
 if [ "$failures" -gt 0 ]; then
   echo "$failures case(s) failed"
   exit 1

@@ -12,7 +12,8 @@
 #
 # Environment (all optional):
 #   AUDIT_OUT              directory for the report and the raw scanner output (default: a temp
-#                          dir). `unscanned.tsv` there lists what semgrep did not finish.
+#                          dir). `unscanned.tsv` there lists what semgrep did not finish, as
+#                          `path<TAB>rule`, with `*` for a file no rule finished.
 #   AUDIT_SCANNERS         which of "secrets deps code workflows" to run (default: all four)
 #   AUDIT_ENFORCE          "true" makes high-severity findings from deps, code and workflows
 #                          fail a `pr` run. A leaked secret fails a `pr` run regardless.
@@ -24,6 +25,14 @@
 #                          It is removed from the environment before any scanner starts and
 #                          handed to zizmor alone. Run this from a job whose token is read-only.
 #   AUDIT_CODE_RULES       semgrep configuration (default: the registry's `p/default`)
+#   AUDIT_PREVIOUS         `full` only: the semgrep findings the last published run left open,
+#                          one `path<TAB>rule` per line
+#   AUDIT_PREVIOUS_REPORT  `full` only: the same, given as the last report this script wrote
+#
+# A `full` run that is told what the last run reported checks each of those findings against
+# what semgrep did not finish this time. One that sits in an unfinished file, and is not
+# reported again, has not been shown to be fixed: it goes to `unverified.tsv` and into the
+# report under "Not verified this run", for the caller to keep instead of dropping.
 #
 # Exit status: 0 nothing blocks, 1 a blocking finding in a `pr` run, 2 the audit could not be
 # completed. A scanner that fails, a workflow or lockfile that cannot be read and a bad
@@ -221,6 +230,7 @@ scan_code() {
   local report="$out/semgrep.sarif" errors="$out/semgrep.json" targets=0 path
   : > "$out/unscanned.lines"
   : > "$out/unscanned.tsv"
+  : > "$out/unverified.tsv"
   set -- --metrics=off --quiet --config "${AUDIT_CODE_RULES:-p/default}" \
     --sarif-output "$report" --json-output "$errors"
   if [ "$mode" = pr ]; then
@@ -268,6 +278,42 @@ scan_code() {
     | [ (.path // "?"),
         (if $kind == "Internal matching error" and .rule_id != null then .rule_id else "*" end) ]
     | @tsv' "$errors" | sort -u > "$out/unscanned.tsv"
+  if [ "$mode" = full ]; then unverified_code_findings "$report"; fi
+}
+
+# What the last published run reported from semgrep, as `path<TAB>rule<TAB>Markdown line`.
+previous_code_findings() {
+  if [ -n "${AUDIT_PREVIOUS:-}" ]; then
+    [ -r "$AUDIT_PREVIOUS" ] || die "AUDIT_PREVIOUS is not readable: $AUDIT_PREVIOUS"
+    awk -F'\t' 'BEGIN { OFS = "\t" } NF >= 2 { print $1, $2, "- `" $2 "` at `" $1 "`" }' "$AUDIT_PREVIOUS"
+  elif [ -n "${AUDIT_PREVIOUS_REPORT:-}" ]; then
+    [ -r "$AUDIT_PREVIOUS_REPORT" ] ||
+      die "AUDIT_PREVIOUS_REPORT is not readable: $AUDIT_PREVIOUS_REPORT"
+    # The two sections of this script's own report that hold semgrep findings.
+    awk '
+      /^### / { inside = ($0 ~ /^### (Risky code patterns|Not verified this run) \(semgrep\)/); next }
+      inside && /^- `[^`]+` at `[^`]+:[0-9]+`/ {
+        rule = $0; sub(/^- `/, "", rule); sub(/`.*/, "", rule)
+        path = $0; sub(/^- `[^`]+` at `/, "", path); sub(/:[0-9]+`.*/, "", path)
+        print path "\t" rule "\t" $0
+      }' "$AUDIT_PREVIOUS_REPORT"
+  fi
+}
+
+# The previous findings this run can neither confirm nor rule out: in a file semgrep did not
+# finish (or from a rule that failed on it), and not reported again. A gap with no path, `?`,
+# could be anywhere, so it covers every previous finding. The files are told apart by name:
+# `NR == FNR` stays true past an empty first file.
+unverified_code_findings() {
+  previous_code_findings > "$out/previous.tsv"
+  jq -r '.runs[].results[]
+    | [(.locations[0].physicalLocation.artifactLocation.uri // "?"), .ruleId] | @tsv' "$1" |
+    sort -u > "$out/current.tsv"
+  awk -F'\t' '
+    FILENAME == ARGV[1] { if ($1 == "?") anywhere = 1; gap[$1 "\t" $2] = 1; next }
+    FILENAME == ARGV[2] { reported[$1 "\t" $2] = 1; next }
+    (anywhere || (($1 "\t*") in gap) || (($1 "\t" $2) in gap)) && !(($1 "\t" $2) in reported)
+  ' "$out/unscanned.tsv" "$out/current.tsv" "$out/previous.tsv" > "$out/unverified.tsv"
 }
 
 zizmor_rows() {
@@ -354,6 +400,18 @@ if enabled code; then
       echo
     } >> "$out/sections.md"
   fi
+  unverified=$(wc -l < "$out/unverified.tsv" | tr -d ' ')
+  if [ "$unverified" -gt 0 ]; then
+    echo "- Not verified this run (semgrep): $unverified" >> "$out/counts.md"
+    {
+      echo "### Not verified this run (semgrep): $unverified"
+      echo
+      echo "The last run reported these, in a file or from a rule that semgrep did not finish this time. They stay listed until a run can check them."
+      echo
+      cut -f3 "$out/unverified.tsv" | sort
+      echo
+    } >> "$out/sections.md"
+  fi
 fi
 if enabled workflows; then
   scan_workflows
@@ -383,8 +441,11 @@ fi
 cat "$shown"
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then cat "$shown" >> "$GITHUB_STEP_SUMMARY"; fi
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
-  echo "findings=$total" >> "$GITHUB_OUTPUT"
-  echo "unscanned=${unscanned:-0}" >> "$GITHUB_OUTPUT"
+  {
+    echo "findings=$total"
+    echo "unscanned=${unscanned:-0}"
+    echo "unverified=${unverified:-0}"
+  } >> "$GITHUB_OUTPUT"
 fi
 
 if [ "$mode" = pr ] && [ "$blocking" -gt 0 ]; then
