@@ -22,8 +22,11 @@
 #     with this repository's secrets, whoever wrote it.
 #   - **Where findings go.** The weekly run uploads to the Security tab, which only people
 #     with write access can read, and prints counts only, because the job log and summary of
-#     a public repository are public. A pull request run lists its findings: they are about
-#     code that is already public in that pull request.
+#     a public repository are public. For the same reason the results are encrypted on their
+#     way from the job that scans to the job that uploads, with the repository secret
+#     `SECURITY_AUDIT_HANDOFF_KEY` (any long random string; nothing else uses it). A pull
+#     request run lists its findings: they are about code that is already public in that
+#     pull request.
 #   - **Dependencies.** Not scanned here. osv-scanner does not read Swift Package Manager's
 #     `Package.resolved`; Dependabot alerts cover it and the Ruby tooling in `Gemfile.lock`.
 
@@ -111,9 +114,7 @@ jobs:
     permissions:
       contents: read
     outputs:
-      gitleaks: ${{ steps.results.outputs.gitleaks }}
-      semgrep: ${{ steps.results.outputs.semgrep }}
-      zizmor: ${{ steps.results.outputs.zizmor }}
+      bundle: ${{ steps.results.outputs.bundle }}
     steps:
       - name: Checkout with full history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -150,24 +151,44 @@ jobs:
           AUDIT_CODE_TARGETS: ${{ runner.temp }}/security-audit-scope.txt
         run: .github/scripts/security-audit.sh full
 
-      # As job outputs, not as an artifact: anyone can download an artifact of a public
-      # repository, and these are the findings. Each file is cut down to the rules that have
-      # a result (semgrep lists every rule it loaded, several megabytes), compressed and
-      # base64-encoded, which keeps it far below the one megabyte an output may hold.
+      # The results cross to the publishing job as one encrypted job output. Nothing between
+      # two jobs of a public repository is private: anyone can download an artifact, and a
+      # job output is printed in the log of the step that receives it. So what crosses is
+      # ciphertext, and the key is a secret, which the log masks.
+      #
+      # Each result file is first cut down to the rules that have a result (semgrep lists
+      # every rule it loaded, several megabytes), which keeps the bundle far below the one
+      # megabyte an output may hold.
       - name: Hand the results to the publishing job
         id: results
         env:
           AUDIT_OUT: ${{ runner.temp }}/security-audit
+          HANDOFF_KEY: ${{ secrets.SECURITY_AUDIT_HANDOFF_KEY }}
         run: |
           set -o pipefail
+          if [ -z "$HANDOFF_KEY" ]; then
+            echo "::error::The repository secret SECURITY_AUDIT_HANDOFF_KEY must be configured."
+            exit 1
+          fi
+          cd "$AUDIT_OUT"
+          mkdir handoff
           for tool in gitleaks semgrep zizmor; do
-            packed=$(jq -c '
+            jq -c '
               ([.runs[].results[].ruleId] | unique) as $used
               | .runs[].tool.driver.rules |= map(select(.id as $id | $used | index($id)))
-            ' "$AUDIT_OUT/$tool.sarif" | gzip -9 | base64 -w 0)
-            echo "$tool: ${#packed} characters"
-            echo "$tool=$packed" >> "$GITHUB_OUTPUT"
+            ' "$tool.sarif" > "handoff/$tool.sarif"
           done
+          # What semgrep did not finish, so that the publisher can tell a fixed finding from
+          # one that was merely not looked for.
+          cp unscanned.tsv handoff/
+          bundle=$(tar -C handoff -cf - . | gzip -9 \
+            | openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:HANDOFF_KEY | base64 -w 0)
+          echo "bundle: ${#bundle} characters"
+          if [ "${#bundle}" -gt 900000 ]; then
+            echo "::error::The results are too large for a job output."
+            exit 1
+          fi
+          echo "bundle=$bundle" >> "$GITHUB_OUTPUT"
 
   weekly-publish:
     needs: weekly-scan
@@ -181,15 +202,47 @@ jobs:
     steps:
       - name: Unpack the results
         env:
-          GITLEAKS: ${{ needs.weekly-scan.outputs.gitleaks }}
-          SEMGREP: ${{ needs.weekly-scan.outputs.semgrep }}
-          ZIZMOR: ${{ needs.weekly-scan.outputs.zizmor }}
+          BUNDLE: ${{ needs.weekly-scan.outputs.bundle }}
+          HANDOFF_KEY: ${{ secrets.SECURITY_AUDIT_HANDOFF_KEY }}
         run: |
           set -o pipefail
           mkdir -p "$RUNNER_TEMP/security-audit"
-          printf '%s' "$GITLEAKS" | base64 -d | gunzip > "$RUNNER_TEMP/security-audit/gitleaks.sarif"
-          printf '%s' "$SEMGREP" | base64 -d | gunzip > "$RUNNER_TEMP/security-audit/semgrep.sarif"
-          printf '%s' "$ZIZMOR" | base64 -d | gunzip > "$RUNNER_TEMP/security-audit/zizmor.sarif"
+          printf '%s' "$BUNDLE" | base64 -d \
+            | openssl enc -d -aes-256-cbc -pbkdf2 -pass env:HANDOFF_KEY | gunzip \
+            | tar -C "$RUNNER_TEMP/security-audit" -xf -
+
+      # An upload replaces the scanner's previous results, and an alert that is no longer
+      # reported closes as fixed. gitleaks and zizmor either finish or fail the scan, so
+      # their absence of a finding means something. semgrep can finish while having given up
+      # on a file, and its silence about that file means nothing. So before its results
+      # replace the previous ones: is any alert that is open now in a file, or from a rule,
+      # that this run did not finish?
+      - name: Count the open alerts this scan could not have confirmed
+        id: coverage
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          cd "$RUNNER_TEMP/security-audit"
+          # `path<TAB>rule` for each open semgrep alert on this branch.
+          if ! gh api --paginate \
+            "repos/$GITHUB_REPOSITORY/code-scanning/alerts?state=open&ref=$GITHUB_REF&per_page=100" \
+            --jq '.[] | select(.most_recent_instance.category == "semgrep")
+                  | [.most_recent_instance.location.path, .rule.id] | @tsv' > open.tsv 2> api.err; then
+            # Before the first upload there is no analysis, and so no alert to lose.
+            if ! grep -q "no analysis found" api.err; then
+              cat api.err
+              exit 1
+            fi
+            : > open.tsv
+          fi
+          # `unscanned.tsv` is `path<TAB>rule`, with `*` when no rule finished the file. The
+          # first file is told apart by name: `NR == FNR` stays true when it is empty.
+          unverifiable=$(awk -F'\t' '
+            FILENAME == ARGV[1] { gap[$1 "\t" $2] = 1; next }
+            (($1 "\t*") in gap) || (($1 "\t" $2) in gap)' unscanned.tsv open.tsv | wc -l)
+          echo "$(wc -l < open.tsv) open semgrep alerts, $unverifiable where this scan did not finish"
+          echo "unverifiable=$((unverifiable))" >> "$GITHUB_OUTPUT"
 
       # One upload per scanner, each under its own category, so that a later run replaces
       # that scanner's results and nothing else's. An alert closes itself when a run no
@@ -200,7 +253,10 @@ jobs:
           sarif_file: ${{ runner.temp }}/security-audit/gitleaks.sarif
           category: gitleaks
 
+      # Skipped when it would close an alert on no evidence. The previous results then stay
+      # as they are, and the last step fails the run so that someone looks.
       - name: Upload the code findings to the Security tab
+        if: steps.coverage.outputs.unverifiable == '0'
         uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           sarif_file: ${{ runner.temp }}/security-audit/semgrep.sarif
@@ -211,3 +267,11 @@ jobs:
         with:
           sarif_file: ${{ runner.temp }}/security-audit/zizmor.sarif
           category: zizmor
+
+      - name: Fail when the code findings were held back
+        if: steps.coverage.outputs.unverifiable != '0'
+        env:
+          UNVERIFIABLE: ${{ steps.coverage.outputs.unverifiable }}
+        run: |
+          echo "::error::semgrep did not finish a file or rule behind $UNVERIFIABLE open alert(s). Its previous results are kept and this run's code findings are not published. Fix what stops the scan, or dismiss those alerts, and run again."
+          exit 1

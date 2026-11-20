@@ -11,7 +11,8 @@
 #   zizmor        unsafe GitHub Actions workflows
 #
 # Environment (all optional):
-#   AUDIT_OUT              directory for the report and the raw scanner output (default: a temp dir)
+#   AUDIT_OUT              directory for the report and the raw scanner output (default: a temp
+#                          dir). `unscanned.tsv` there lists what semgrep did not finish.
 #   AUDIT_SCANNERS         which of "secrets deps code workflows" to run (default: all four)
 #   AUDIT_ENFORCE          "true" makes high-severity findings from deps, code and workflows
 #                          fail a `pr` run. A leaked secret fails a `pr` run regardless.
@@ -219,6 +220,7 @@ scan_deps() {
 scan_code() {
   local report="$out/semgrep.sarif" errors="$out/semgrep.json" targets=0 path
   : > "$out/unscanned.lines"
+  : > "$out/unscanned.tsv"
   set -- --metrics=off --quiet --config "${AUDIT_CODE_RULES:-p/default}" \
     --sarif-output "$report" --json-output "$errors"
   if [ "$mode" = pr ]; then
@@ -256,6 +258,16 @@ scan_code() {
       ( $all | map(select(.kind == "Internal matching error")) | group_by(.rule)[]
         | "- rule `\(.[0].rule)` failed on \(length) file\(if length == 1 then "" else "s" end)" )
   ' "$errors" > "$out/unscanned.lines"
+  # The same gaps for whoever publishes the results: `path<TAB>rule`, with `*` for a file
+  # that no rule finished. A finding an earlier run reported there cannot be called fixed
+  # because this run does not report it. A timeout counts for the whole file: after a few
+  # of them semgrep stops running rules on it.
+  jq -r '
+    .errors[]
+    | (.type | if type == "array" then .[0] else . end) as $kind
+    | [ (.path // "?"),
+        (if $kind == "Internal matching error" and .rule_id != null then .rule_id else "*" end) ]
+    | @tsv' "$errors" | sort -u > "$out/unscanned.tsv"
 }
 
 zizmor_rows() {
@@ -336,7 +348,7 @@ if enabled code; then
     {
       echo "### Not fully scanned (semgrep): $unscanned"
       echo
-      echo "semgrep could not parse these files completely, or gave up on them, so a finding in them may be missing."
+      echo "semgrep could not parse these files completely, or gave up on them. A finding in them may be missing, including one an earlier run reported."
       echo
       sort "$out/unscanned.lines"
       echo
@@ -370,7 +382,10 @@ if [ "${AUDIT_QUIET:-false}" = true ]; then
 fi
 cat "$shown"
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then cat "$shown" >> "$GITHUB_STEP_SUMMARY"; fi
-if [ -n "${GITHUB_OUTPUT:-}" ]; then echo "findings=$total" >> "$GITHUB_OUTPUT"; fi
+if [ -n "${GITHUB_OUTPUT:-}" ]; then
+  echo "findings=$total" >> "$GITHUB_OUTPUT"
+  echo "unscanned=${unscanned:-0}" >> "$GITHUB_OUTPUT"
+fi
 
 if [ "$mode" = pr ] && [ "$blocking" -gt 0 ]; then
   echo "::error::Security audit: $blocking blocking finding(s). See the job summary."

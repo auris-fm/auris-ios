@@ -16,6 +16,7 @@ audit=$(cd "$(dirname "$0")" && pwd)/security-audit.sh
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 failures=0
+last_out=""
 
 # A credential in a provider's format, put together here so that this file holds no match.
 fake_token="ghp_$(printf '%s' 0123456789abcdefghijABCDEFGHIJ012345)"
@@ -51,8 +52,9 @@ commit_all() {
 expect() {
   local label=$1 want=$2 text=$3 got=0
   shift 3
-  env -u AUDIT_GITHUB_TOKEN -u AUDIT_ENFORCE -u AUDIT_QUIET AUDIT_OUT="$(mktemp -d "$work/out.XXXXXX")" \
-    "$@" > "$work/stdout" 2> "$work/stderr" || got=$?
+  last_out=$(mktemp -d "$work/out.XXXXXX")
+  env -u AUDIT_GITHUB_TOKEN -u AUDIT_ENFORCE -u AUDIT_QUIET -u GITHUB_OUTPUT -u GITHUB_STEP_SUMMARY \
+    AUDIT_OUT="$last_out" "$@" > "$work/stdout" 2> "$work/stderr" || got=$?
   if [ "$got" -ne "$want" ]; then
     echo "FAIL $label: exit $got, expected $want"
     tail -n 5 "$work/stderr" | sed 's/^/    /'
@@ -141,6 +143,10 @@ expect "a risky call in changed code is reported" 0 "selftest-eval" \
   AUDIT_SCANNERS=code AUDIT_CODE_RULES="$work/rules.yml" bash "$audit" pr 'HEAD^1'
 expect "a file semgrep cannot parse is named" 0 "unparsable.py" \
   AUDIT_SCANNERS=code AUDIT_CODE_RULES="$work/rules.yml" bash "$audit" full
+if ! grep -q "^unparsable.py$(printf '\t')\*\$" "$last_out/unscanned.tsv"; then
+  echo "FAIL the unparsed file is not in the list handed to the publisher"
+  failures=$((failures + 1))
+fi
 expect "quiet mode does not print the findings" 0 "Risky code patterns (semgrep): 1" \
   AUDIT_SCANNERS=code AUDIT_CODE_RULES="$work/rules.yml" AUDIT_QUIET=true bash "$audit" full
 if grep -q "risky.py" "$work/stdout" "$work/stderr"; then
