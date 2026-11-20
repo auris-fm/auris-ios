@@ -26,16 +26,16 @@
 #                          handed to zizmor alone. Run this from a job whose token is read-only.
 #   AUDIT_CODE_RULES       semgrep configuration (default: the registry's `p/default`)
 #   AUDIT_PREVIOUS         `full` only: the semgrep findings the last published run left open,
-#                          one `path<TAB>rule<TAB>line` per line
+#                          one `path<TAB>rule` per line
 #   AUDIT_PREVIOUS_REPORT  `full` only: the same, given as the last report this script wrote
 #
 # A `full` run that is told what the last run reported checks each of those findings against
 # what semgrep did not finish this time. One that sits in an unfinished file has not been
 # shown to be fixed, unless this run reports that very finding again and there is no doubt
 # that it is the same one. It goes to `unverified.tsv` and into the report under "Not
-# verified this run", for the caller to keep instead of dropping. Whenever what is known
-# about a finding does not single it out (no line, or several findings at its line), it is
-# kept: see `unverified_code_findings`.
+# verified this run", for the caller to keep instead of dropping. Only a finding from a
+# report can be recognised again, and only when what the report says singles it out; one
+# from an AUDIT_PREVIOUS list is always kept. See `unverified_code_findings`.
 #
 # Exit status: 0 nothing blocks, 1 a blocking finding in a `pr` run, 2 the audit could not be
 # completed. A scanner that fails, a workflow or lockfile that cannot be read and a bad
@@ -289,16 +289,13 @@ scan_code() {
 }
 
 # What the last published run reported from semgrep, as
-# `path<TAB>rule<TAB>line<TAB>Markdown line<TAB>M or -<TAB>message`. The line is empty when
-# it is not known. `M` says that the message is known too, which it is from a report.
+# `path<TAB>rule<TAB>line<TAB>Markdown line<TAB>message`. A report gives the line, unless
+# the finding had none, and the message. A list gives neither, and both stay empty.
 previous_code_findings() {
   if [ -n "${AUDIT_PREVIOUS:-}" ]; then
     [ -r "$AUDIT_PREVIOUS" ] || die "AUDIT_PREVIOUS is not readable: $AUDIT_PREVIOUS"
-    awk -F'\t' 'BEGIN { OFS = "\t" }
-      NF >= 2 {
-        line = ($3 ~ /^[0-9]+$/ ? $3 : "")
-        print $1, $2, line, "- `" $2 "` at `" $1 ":" (line == "" ? "?" : line) "`", "-", ""
-      }' "$AUDIT_PREVIOUS"
+    awk -F'\t' 'BEGIN { OFS = "\t" } NF >= 2 { print $1, $2, "", "- `" $2 "` at `" $1 ":?`", "" }' \
+      "$AUDIT_PREVIOUS"
   elif [ -n "${AUDIT_PREVIOUS_REPORT:-}" ]; then
     [ -r "$AUDIT_PREVIOUS_REPORT" ] ||
       die "AUDIT_PREVIOUS_REPORT is not readable: $AUDIT_PREVIOUS_REPORT"
@@ -320,7 +317,7 @@ previous_code_findings() {
           line = place; sub(/^.*:/, "", line); sub(/:[^:]*$/, "", path)
           if (line == "?") line = ""
         }
-        print path "\t" rule "\t" line "\t" $0 "\tM\t" message
+        print path "\t" rule "\t" line "\t" $0 "\t" message
       }' "$AUDIT_PREVIOUS_REPORT" | sort -u
   fi
 }
@@ -330,17 +327,16 @@ previous_code_findings() {
 # could be anywhere, so it covers every previous finding.
 #
 # "Reported again" has to mean that finding and no other, or a result would let a different
-# finding be dropped unchecked. A previous finding is confirmed only when all of this holds:
+# finding be dropped unchecked. So a previous finding is confirmed only when it came from a
+# report, which gives its line and message, its line is known, and exactly one result of
+# this run has its file, rule, line and message. Anything less leaves it unverified:
 #
-#   - its line is known, and so is the line of the result;
-#   - exactly one result of this run has its file, rule and line, and its message when the
-#     previous finding came with one (a report has it, a `path<TAB>rule<TAB>line` list
-#     does not);
-#   - no other previous finding has the same.
-#
-# Anything less leaves it unverified: with two candidates on either side there is no telling
-# which one the gap hides. A finding whose line has moved stays unverified as well, until
-# its file is scanned to the end.
+#   - a finding from a list of `path<TAB>rule`: a result at the same place may be another
+#     finding, and the list does not say enough to tell;
+#   - a finding or a result without a line;
+#   - two results that fit it: the report shows them as one line, so there is no telling
+#     how many findings that line stood for;
+#   - a finding whose line has moved, until its file is scanned to the end.
 unverified_code_findings() {
   previous_code_findings > "$out/previous.tsv"
   # `@tsv` doubles a backslash; the report, where a previous message comes from, shows one.
@@ -351,15 +347,13 @@ unverified_code_findings() {
     sed 's/\\\\/\\/g' > "$out/current.tsv"
   awk -F'\t' '
     stage == "gaps" { if ($1 == "?") anywhere = 1; gap[$1 FS $2] = 1; next }
-    stage == "results" { at = $1 FS $2 FS $3; results[at]++; results[at FS $4]++; next }
-    { at = $1 FS $2 FS $3; if ($5 == "M") at = at FS $6 }
-    stage == "count" { previous[at]++; next }
+    stage == "results" { results[$1 FS $2 FS $3 FS $4]++; next }
     anywhere || (($1 FS "*") in gap) || (($1 FS $2) in gap) {
-      if ($3 != "" && previous[at] == 1 && results[at] == 1) next
+      if ($3 != "" && results[$1 FS $2 FS $3 FS $5] == 1) next
       print
     }
   ' stage=gaps "$out/unscanned.tsv" stage=results "$out/current.tsv" \
-    stage=count "$out/previous.tsv" stage=decide "$out/previous.tsv" > "$out/unverified.tsv"
+    stage=previous "$out/previous.tsv" > "$out/unverified.tsv"
 }
 
 zizmor_rows() {
@@ -452,7 +446,7 @@ if enabled code; then
     {
       echo "### Not verified this run (semgrep): $unverified"
       echo
-      echo "The last run reported these, in a file or from a rule that semgrep did not finish this time, and this run does not single each of them out again: one result, at the same line, with the same message. They stay listed until a run finishes that file."
+      echo "The last run reported these, in a file or from a rule that semgrep did not finish this time, and this run does not single each of them out again: exactly one result, at the same line, with the same message. They stay listed until a run finishes that file."
       echo
       cut -f4 "$out/unverified.tsv" | sort
       echo
