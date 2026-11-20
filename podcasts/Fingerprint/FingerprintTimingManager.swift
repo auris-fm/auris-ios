@@ -902,16 +902,16 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
     /// reference. Returns the matcher (nil when unconfigured or unavailable);
     /// the caller assigns it on `queue` — this function never touches state
     /// directly, since it runs on the cooperative pool (PR #14 review).
-    private func fetchCloudReference(uuid: String) async -> CloudReferenceMatcher? {
+    private func fetchCloudReference(uuid: String) async -> CloudFingerprintReferenceFetcher.FetchedReference? {
         let baseUrl = CloudConfig.shared.baseUrl
         guard !baseUrl.isEmpty else { return nil }
-        let matcher = await CloudFingerprintReferenceFetcher.shared.fetchReference(baseUrl: baseUrl, episodeUuid: uuid)
-        if let matcher {
-            FileLog.shared.addMessage("FingerprintTimingManager: cloud reference loaded (\(matcher.count) checkpoints) for \(uuid)")
+        let fetched = await CloudFingerprintReferenceFetcher.shared.fetchReference(baseUrl: baseUrl, episodeUuid: uuid)
+        if let fetched {
+            FileLog.shared.addMessage("FingerprintTimingManager: cloud reference loaded (\(fetched.matcher.count) checkpoints) for \(uuid)")
         } else {
             FileLog.shared.addMessage("FingerprintTimingManager: cloud reference unavailable for \(uuid)")
         }
-        return matcher
+        return fetched
     }
 
     private func prepareForEpisode(_ episode: BaseEpisode?) {
@@ -946,15 +946,25 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
             let flag = cancellationFlag
             fetchTask = Task { [weak self] in
                 guard let self, !flag.isCancelled else { return }
-                let matcher = await self.fetchCloudReference(uuid: uuid)
+                let fetched = await self.fetchCloudReference(uuid: uuid)
                 self.queue.async { [weak self] in
                     guard let self, !flag.isCancelled else { return }
                     // The running stream reads the matcher through the
                     // context's provider, so this assignment alone makes the
                     // late-arriving reference live immediately.
-                    self.cloudMatcher = matcher
+                    self.cloudMatcher = fetched?.matcher
                 }
             }
+            return
+        }
+
+        // No Pocket Casts reference on disk. A persisted Auris reference from
+        // an earlier cloud-built pass is its own independent source — read it
+        // through the cloud path only, never `loadReference` (the Rust
+        // checkpoint matcher must not parse Go-scheme bytes).
+        if let loaded = loadCloudReference(for: episode) {
+            cloudMatcher = loaded.matcher
+            configureForCloudReference(loaded, episode: episode)
             return
         }
 
@@ -974,28 +984,37 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
             // The cloud reference and the transcript-sync reference are
             // independent — fetch them concurrently instead of serializing the
             // two network round-trips (PR #14 review).
-            async let cloudMatcherTask = self?.fetchCloudReference(uuid: uuid)
+            async let cloudFetchedTask = self?.fetchCloudReference(uuid: uuid)
             async let referenceDataTask = FingerprintReferenceRetriever.shared.fetchReferenceData(
                 podcastUuid: episode.parentIdentifier(),
                 episodeUuid: uuid
             )
-            let matcher = await cloudMatcherTask
+            let fetched = await cloudFetchedTask
             let data = await referenceDataTask
 
             self?.queue.async { [weak self] in
                 guard let self, !flag.isCancelled else { return }
 
-                self.cloudMatcher = matcher
+                self.cloudMatcher = fetched?.matcher
 
-                guard let data, let reference = ReferenceFingerprint.decode(from: data) else {
-                    self.updateState(.unavailable)
-                    self.track(.syncedTranscriptsUnavailable, properties: ["reason": "no_reference"])
-                    FileLog.shared.addMessage("FingerprintTimingManager: no reference available for \(uuid)")
+                if let data, let reference = ReferenceFingerprint.decode(from: data) {
+                    self.saveReferenceData(data, for: episode)
+                    self.configureForReference(reference, referenceData: data, episode: episode)
                     return
                 }
 
-                self.saveReferenceData(data, for: episode)
-                self.configureForReference(reference, referenceData: data, episode: episode)
+                // Pocket Casts' object is missing or unusable. The Auris
+                // reference is independent: when it loaded, map through it
+                // instead of giving up (the defect this branch fixes).
+                if let fetched {
+                    self.saveCloudReferenceData(fetched.data, for: episode)
+                    self.configureForCloudReference(fetched, episode: episode)
+                    return
+                }
+
+                self.updateState(.unavailable)
+                self.track(.syncedTranscriptsUnavailable, properties: ["reason": "no_reference"])
+                FileLog.shared.addMessage("FingerprintTimingManager: no reference available for \(uuid)")
             }
         }
     }
@@ -1109,6 +1128,111 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
 
             FileLog.shared.addMessage(
                 "FingerprintTimingManager: cache loaded for \(uuid) but playback at "
+                    + "\(String(format: "%.1f", currentTime))s is outside cached range — starting stream"
+            )
+        }
+
+        startStream(context: newContext, fromPosition: currentTime)
+    }
+
+    /// Configures preparation from the Auris cloud reference alone (the Pocket
+    /// Casts transcript-sync object is missing). Same stream loop, drift filter
+    /// and cache machinery as `configureForReference`; the differences are the
+    /// matcher and the cache identity:
+    /// - the Rust checkpoint matcher stays EMPTY (Go-scheme hashes never match
+    ///   it, so it contributes nothing — correct), and alignment runs through
+    ///   the cloud matcher the stream already feeds;
+    /// - the mapping cache validates against the Auris payload's own sibling
+    ///   file, so a later session with a Pocket Casts reference correctly
+    ///   discards a cloud-built cache and vice versa.
+    private func configureForCloudReference(
+        _ fetched: CloudFingerprintReferenceFetcher.FetchedReference,
+        episode: BaseEpisode
+    ) {
+        let uuid = episode.uuid
+
+        let source = resolveAudioSource(for: episode)
+        let audioFileURL: URL
+        let isStreaming: Bool
+        switch source {
+        case .downloaded(let url):
+            audioFileURL = url
+            isStreaming = false
+        case .streaming(let url):
+            audioFileURL = url
+            isStreaming = true
+        }
+
+        let duration = episode.duration
+        guard duration > 0 else {
+            updateState(.unavailable)
+            track(.syncedTranscriptsUnavailable, properties: ["reason": "invalid_duration"])
+            return
+        }
+
+        let flag = cancellationFlag
+        let refPath = cloudReferencePath(for: episode)
+        let newContext = GenerationContext(
+            generation: nextGeneration(),
+            episodeUuid: uuid,
+            audioFileURL: audioFileURL,
+            isStreaming: isStreaming,
+            duration: duration,
+            matcher: CheckpointMatcher(),
+            cloudMatcherProvider: { [weak self] in self?.cloudMatcher },
+            referenceData: fetched.data,
+            referenceFilePath: refPath,
+            referenceDuration: fetched.reference.totalDuration,
+            isCancelled: { flag.isCancelled }
+        )
+        context = newContext
+
+        if preparationStartDate == nil {
+            preparationStartDate = Date()
+        }
+        updateState(.preparing)
+        if !hasEmittedPreparationStarted {
+            track(.syncedTranscriptsPreparationStarted, properties: [
+                "is_streaming": isStreaming,
+                "episode_duration_seconds": duration
+            ])
+            hasEmittedPreparationStarted = true
+        }
+        FileLog.shared.addMessage(
+            "FingerprintTimingManager: preparing for \(uuid) from the Auris cloud reference (\(fetched.matcher.count) checkpoints)"
+        )
+
+        let currentTime = PlaybackManager.shared.currentTime()
+
+        // Same all-or-nothing cache contract, keyed to the Auris payload.
+        if !isStreaming,
+           let cached = FingerprintMappingCache.load(
+               audioFilePath: audioFileURL.path,
+               referenceFilePath: refPath,
+               referenceData: fetched.data
+           ) {
+            main.playbackToReference = cached.entries
+            main.referenceToPlayback = cached.entries.sorted { $0.referenceTime < $1.referenceTime }
+
+            if isWithinMappedRange(currentTime) {
+                main.filterLastTrusted = cached.entries.last
+                let coverage = cached.entries.count
+                updateState(.active(coverage: coverage))
+                if !hasReachedActive {
+                    hasReachedActive = true
+                    track(.syncedTranscriptsPreparationCompleted, properties: [
+                        "duration_ms": preparationDurationMs,
+                        "is_streaming": isStreaming
+                    ])
+                }
+                FileLog.shared.addMessage(
+                    "FingerprintTimingManager: skipping stream — full cloud mapping loaded from cache for \(uuid)"
+                )
+                return
+            }
+
+            FileLog.shared.addMessage(
+                "FingerprintTimingManager: cloud cache loaded for \(uuid) but playback at "
                     + "\(String(format: "%.1f", currentTime))s is outside cached range — starting stream"
             )
         }
@@ -2157,6 +2281,31 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
             FileLog.shared.addMessage("FingerprintTimingManager: saved reference to disk for \(episode.uuid)")
         } catch {
             FileLog.shared.addMessage("FingerprintTimingManager: failed to save reference — \(error.localizedDescription)")
+        }
+    }
+
+    /// The Auris cloud reference's OWN sibling file. Deliberately not the
+    /// Pocket Casts path: `loadReference` (and the one-shot chapter/bookmark
+    /// resolves) parse that path as a transcript-sync reference, and Go-scheme
+    /// bytes would decode "successfully" into a never-matching Rust matcher.
+    private func cloudReferencePath(for episode: BaseEpisode) -> String {
+        let audioPath = DownloadManager.shared.pathForEpisode(episode)
+        return (audioPath as NSString).deletingPathExtension + ".cloud.ref.fp.json"
+    }
+
+    private func loadCloudReference(for episode: BaseEpisode) -> CloudFingerprintReferenceFetcher.FetchedReference? {
+        let path = cloudReferencePath(for: episode)
+        guard let data = FileManager.default.contents(atPath: path) else { return nil }
+        return CloudFingerprintReferenceFetcher.shared.buildFetchedReference(from: data)
+    }
+
+    private func saveCloudReferenceData(_ data: Data, for episode: BaseEpisode) {
+        let path = cloudReferencePath(for: episode)
+        do {
+            try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+            FileLog.shared.addMessage("FingerprintTimingManager: saved cloud reference to disk for \(episode.uuid)")
+        } catch {
+            FileLog.shared.addMessage("FingerprintTimingManager: failed to save cloud reference — \(error.localizedDescription)")
         }
     }
 

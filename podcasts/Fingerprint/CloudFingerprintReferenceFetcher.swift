@@ -27,7 +27,16 @@ final class CloudFingerprintReferenceFetcher {
         self.identity = identity
     }
 
-    func fetchReference(baseUrl: String, episodeUuid: String) async -> CloudReferenceMatcher? {
+    /// The parsed reference alongside its matcher: the raw compact-v2 bytes
+    /// are the cache/provenance identity for a cloud-built mapping, so the
+    /// fetcher hands them back instead of discarding them after parsing.
+    struct FetchedReference {
+        let matcher: CloudReferenceMatcher
+        let reference: ReferenceFingerprint
+        let data: Data
+    }
+
+    func fetchReference(baseUrl: String, episodeUuid: String) async -> FetchedReference? {
         let trimmedBase = baseUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard let url = URL(string: "\(trimmedBase)/api/v1/episodes/\(episodeUuid)/fingerprints") else {
             return nil
@@ -45,14 +54,15 @@ final class CloudFingerprintReferenceFetcher {
                 }
                 return data
             }
-            return buildMatcher(from: data)
+            return buildFetchedReference(from: data)
         } catch {
             return nil
         }
     }
 
-    /// Parses compact-v2 bytes into a matcher, or nil when unusable.
-    func buildMatcher(from data: Data) -> CloudReferenceMatcher? {
+    /// Parses compact-v2 bytes into a matcher plus the decoded reference and
+    /// raw payload, or nil when unusable.
+    func buildFetchedReference(from data: Data) -> FetchedReference? {
         guard let reference = ReferenceFingerprint.decode(from: data) else { return nil }
         let checkpoints = reference.libraryCheckpoints()
         guard !checkpoints.isEmpty else { return nil }
@@ -65,7 +75,12 @@ final class CloudFingerprintReferenceFetcher {
                 durationSeconds: reference.checkpointDurationSeconds
             )
         }
-        return matcher
+        return FetchedReference(matcher: matcher, reference: reference, data: data)
+    }
+
+    /// Parses compact-v2 bytes into a matcher, or nil when unusable.
+    func buildMatcher(from data: Data) -> CloudReferenceMatcher? {
+        buildFetchedReference(from: data)?.matcher
     }
 
     private func withTimeout<T: Sendable>(

@@ -24,6 +24,12 @@ final class FingerprintEpisodeFixture {
         FingerprintMappingCache.mappingPath(forAudioFilePath: audioURL.path)
     }
 
+    /// The Auris cloud reference's own sibling path, derived the same way the
+    /// timing manager derives it.
+    var cloudReferenceURL: URL {
+        URL(fileURLWithPath: (audioURL.path as NSString).deletingPathExtension + ".cloud.ref.fp.json")
+    }
+
     /// - Parameter duration: the episode's duration as the database knows it.
     ///   Preparation refuses to run without one.
     init(duration: Double) {
@@ -70,7 +76,7 @@ final class FingerprintEpisodeFixture {
     /// Removes everything this fixture put in the shared podcasts directory —
     /// audio, reference, and any mapping cache a pass persisted next to them.
     func removeFiles() {
-        for path in [audioURL.path, referenceURL.path, mappingCachePath] {
+        for path in [audioURL.path, referenceURL.path, cloudReferenceURL.path, mappingCachePath] {
             try? FileManager.default.removeItem(atPath: path)
         }
     }
