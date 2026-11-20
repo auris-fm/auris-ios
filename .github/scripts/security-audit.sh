@@ -266,9 +266,7 @@ scan_code() {
   else
     # semgrep prints each finding on stdout as well as writing the report; errors go to stderr.
     semgrep scan "$@" > /dev/null || die "semgrep failed"
-    if [ "$mode" = full ]; then fingerprint_results "$report"; fi
   fi
-  sarif_rows "$report" | number_repeats > "$out/code.tsv"
   # semgrep exits 0 when it could not parse a file or gave up on it, and its `--strict` would
   # fail every run here: the registry rules themselves produce such warnings on files this
   # size. So the gaps are reported instead: one line per file, and one per rule that failed.
@@ -291,10 +289,12 @@ scan_code() {
     | [ (.path // "?"),
         (if $kind == "Internal matching error" and .rule_id != null then .rule_id else "*" end) ]
     | @tsv' "$errors" | sort -u > "$out/unscanned.tsv"
+  if [ "$mode" = full ]; then fingerprint_results "$report"; fi
+  sarif_rows "$report" | number_repeats > "$out/code.tsv"
   if [ "$mode" = full ]; then unverified_code_findings "$report"; fi
 }
 
-# Gives each result of a SARIF file a fingerprint, as `partialFingerprints.primaryLocationLineHash`.
+# Gives each result of this run a fingerprint, as `partialFingerprints.primaryLocationLineHash`.
 #
 # GitHub's code scanning decides by that value whether a result is an alert it already has.
 # Its upload action works the value out from the source when a result has none, and cannot
@@ -302,31 +302,101 @@ scan_code() {
 # finding that moves down a line becomes a new alert. The same value is what lets this
 # script tell whether a result the last run published is reported again.
 #
-# The fingerprint is a hash of the rule, the file and the matched code without its
-# indentation, followed by a count for the second and later matches of the same code in the
-# file. It does not change when the code moves. A result that states no code gets none, and
-# one that has a fingerprint keeps it.
+# The fingerprint is a hash of the rule, the file and the matched code without the space
+# around it, followed by a number that tells apart several matches of the same code in one
+# file: `<hash>_0`, `<hash>_1`, in the order they stand in. It does not change when the
+# code moves. A result that states no code gets none, and one that has a fingerprint keeps it.
+#
+# Counting alone is only right when all the matches are known, and they are not in a file
+# semgrep did not finish: of two matches the last run published, a scan that gives up
+# early may report the second alone, and counting would make it the first. So when the last
+# published results are given (AUDIT_PREVIOUS_SARIF), they are consulted:
+#
+#   - A result that is the same code at the same place as a previous result takes that
+#     result's fingerprint, in any file.
+#   - Any other result gets the lowest number that is free. Where the scan did not finish,
+#     every number a previous result of that code has counts as taken. The result can then
+#     stand for no earlier finding, and every earlier finding that is not reported at its
+#     place is kept as it was, at the price of a second alert for a finding that has only
+#     moved.
+#
+# The last run may also have published a result without a fingerprint. A result of this run
+# that is exactly that one (rule, file, region and message) is published without one as
+# well, so that it stays the alert it is instead of becoming a second one.
 fingerprint_results() {
-  local file=$1 index key
+  local file=$1 previous=${AUDIT_PREVIOUS_SARIF:-} index key
+  if [ -z "$previous" ]; then
+    previous="$out/no-previous.sarif"
+    echo '{"version":"2.1.0","runs":[]}' > "$previous"
+  fi
+  check_previous_sarif "$previous"
   jq -r '
-    .runs[0].results // [] | to_entries
-    | map(select((.value.partialFingerprints.primaryLocationLineHash // "") == "")
-          | (.value.locations[0].physicalLocation // {}) as $at
-          | select($at.region.snippet.text != null)
-          | { index: .key, line: ($at.region.startLine // 0), column: ($at.region.startColumn // 0),
-              key: ([ .value.ruleId, $at.artifactLocation.uri,
-                      ($at.region.snippet.text | gsub("^\\s+|\\s+$"; "")) ] | tojson) })
-    | sort_by(.key, .line, .column)[]
-    | [.index, .key] | @tsv' "$file" |
+    .runs[0].results // [] | to_entries[]
+    | select((.value.partialFingerprints.primaryLocationLineHash // "") == "")
+    | (.value.locations[0].physicalLocation // {}) as $at
+    | select($at.region.snippet.text != null)
+    | [ .key, ([ .value.ruleId, $at.artifactLocation.uri,
+                 ($at.region.snippet.text | gsub("^\\s+|\\s+$"; "")) ] | tojson) ] | @tsv' "$file" |
     while IFS="$tab" read -r index key; do
       printf '%s\t%s\n' "$index" "$(printf '%s' "$key" | git hash-object --stdin)"
-    done |
-    awk -F'\t' '{ printf "%s\t%s_%d\n", $1, $2, seen[$2]++ }' > "$out/fingerprints.tsv"
-  jq --rawfile fingerprints "$out/fingerprints.tsv" '
-    reduce ($fingerprints | split("\n")[] | select(. != "") | split("\t")) as $row
-      (.; .runs[0].results[$row[0] | tonumber].partialFingerprints.primaryLocationLineHash = $row[1])
+    done > "$out/hashes.tsv"
+  jq --rawfile hashes "$out/hashes.tsv" --rawfile gaps "$out/unscanned.tsv" --slurpfile previous "$previous" '
+    def place: .locations[0].physicalLocation // {};
+    def fingerprint: .partialFingerprints.primaryLocationLineHash // "";
+    def spot: [ place.region.startLine, place.region.startColumn ];
+    def exactly: [ (place.region // {} | .startLine, .startColumn, .endLine, .endColumn), .message.text ];
+    . as $report
+    | [ $gaps | split("\n")[] | select(. != "") | split("\t") ] as $gap
+    | any($gap[]; .[0] == "?") as $anywhere
+    | ($hashes | split("\n") | map(select(. != "") | split("\t") | { key: .[0], value: .[1] }) | from_entries) as $hash
+    # The previous results, by rule and file.
+    | ( [ $previous[0].runs[]?.results[]? ]
+        | group_by([ .ruleId, (place.artifactLocation.uri // "?") ])
+        | map({ key: ([ .[0].ruleId, (.[0] | place.artifactLocation.uri // "?") ] | tojson), value: . })
+        | from_entries ) as $before
+    | ( [ $report.runs[0].results // [] | to_entries[]
+          | select($hash[.key | tostring] != null)
+          | .value as $result
+          | { index: (.key | tostring), hash: $hash[.key | tostring], rule: $result.ruleId,
+              uri: ($result | place.artifactLocation.uri // "?"),
+              spot: ($result | spot), exactly: ($result | exactly) }
+          | .unfinished = (. as $it | $anywhere or any($gap[]; .[0] == $it.uri and (.[1] == "*" or .[1] == $it.rule)))
+          | .matches = ([ .rule, .uri ] | tojson) ]
+        | sort_by(.matches, .hash, .spot) ) as $results
+    # First the results that are a previous result at its place, then the others, so that
+    # none of the others is given a fingerprint one of the first has a claim to.
+    | ( reduce $results[] as $it ({ taken: {}, give: {} };
+          ($before[$it.matches] // []) as $same
+          | ($it.matches + $it.hash) as $code
+          | (.taken[$code]
+             // (if $it.unfinished then [ $same[] | fingerprint | select(startswith($it.hash + "_")) ] else [] end)) as $taken
+          | (first($same[] | select((fingerprint | startswith($it.hash + "_")) and spot == $it.spot) | fingerprint) // null) as $kept
+          | .taken[$code] = $taken
+          | if $kept and (any($same[]; fingerprint == "" and exactly == $it.exactly) | not)
+            then .taken[$code] = ($taken + [ $kept ] | unique) | .give[$it.index] = $kept
+            else . end) ) as $first
+    | ( reduce $results[] as $it ($first;
+          ($before[$it.matches] // []) as $same
+          | ($it.matches + $it.hash) as $code
+          | if .give[$it.index] or any($same[]; fingerprint == "" and exactly == $it.exactly) then .
+            else
+              .taken[$code] as $taken
+              | first(range(0; ($taken | length) + 1) | "\($it.hash)_\(.)" | select(. as $new | all($taken[]; . != $new))) as $new
+              | .taken[$code] = $taken + [ $new ]
+              | .give[$it.index] = $new
+            end) ).give as $give
+    | $report
+    | .runs[0].results |= ( (. // []) | to_entries
+        | map(if $give[.key | tostring] then .value.partialFingerprints.primaryLocationLineHash = $give[.key | tostring] else . end
+              | .value) )
   ' "$file" > "$file.fingerprinted"
   mv "$file.fingerprinted" "$file"
+}
+
+# An empty or cut-off file would read as "the last run reported nothing".
+check_previous_sarif() {
+  [ -r "$1" ] || die "AUDIT_PREVIOUS_SARIF is not readable: $1"
+  jq -e '.runs | type == "array"' "$1" > /dev/null 2>&1 || die "AUDIT_PREVIOUS_SARIF is not a SARIF file: $1"
 }
 
 # What the last report listed from semgrep, as
@@ -359,31 +429,32 @@ previous_report_findings() {
 # The previous results that sit where semgrep did not finish and that this run does not
 # report again, as a SARIF file of their own.
 #
-# "Again" means the result GitHub would take for the same alert: the same rule and file and
-# the same fingerprint. Only then is the previous one left out, because this run's result
-# keeps that alert as it is. A previous result without a fingerprint cannot be shown to be
-# any result of this run, however alike the two look, so it is kept; so is one whose
-# fingerprint this run does not have. A kept result keeps its fingerprint, so that it stays
-# the alert it was.
+# "Again" means the result GitHub would take for the same alert. For a result with a
+# fingerprint that is the same rule, file and fingerprint; for one without, GitHub has only
+# the place to go by, and it is the same rule, file, region and message with no fingerprint
+# either. Only then is the previous one left out, because this run's result keeps that
+# alert as it is. A result with a fingerprint and one without are never the same, however
+# alike they look. Every other previous result in a gap is kept, with the fingerprint it
+# was published with, so that it stays the alert it was.
 previous_results_to_keep() {
-  [ -r "$AUDIT_PREVIOUS_SARIF" ] || die "AUDIT_PREVIOUS_SARIF is not readable: $AUDIT_PREVIOUS_SARIF"
-  # An empty or cut-off file would read as "the last run reported nothing".
-  jq -e '.runs | type == "array"' "$AUDIT_PREVIOUS_SARIF" > /dev/null 2>&1 ||
-    die "AUDIT_PREVIOUS_SARIF is not a SARIF file: $AUDIT_PREVIOUS_SARIF"
+  check_previous_sarif "$AUDIT_PREVIOUS_SARIF"
   jq --slurpfile previous "$AUDIT_PREVIOUS_SARIF" --rawfile gaps "$out/unscanned.tsv" '
     def place: .locations[0].physicalLocation // {};
     def fingerprint: .partialFingerprints.primaryLocationLineHash // "";
-    def alert: [ .ruleId, (place.artifactLocation.uri // "?"), fingerprint ] | tojson;
+    def alert:
+      ( if fingerprint != "" then [ "fingerprint", fingerprint ]
+        else [ "place", (place.region // {} | .startLine, .startColumn, .endLine, .endColumn), .message.text ] end
+      ) + [ .ruleId, (place.artifactLocation.uri // "?") ] | tojson;
     [ $gaps | split("\n")[] | select(. != "") | split("\t") ] as $gap
     | any($gap[]; .[0] == "?") as $anywhere
-    | ([ .runs[].results[] | select(fingerprint != "") | { key: alert, value: true } ] | from_entries) as $reported
+    | ([ .runs[].results[] | { key: alert, value: true } ] | from_entries) as $reported
     | [ $previous[0].runs[]?
         | (.tool.driver.rules // []) as $rules
         | (.results // [])[]
         | (place.artifactLocation.uri // "?") as $path
         | .ruleId as $rule
         | select($anywhere or any($gap[]; .[0] == $path and (.[1] == "*" or .[1] == $rule)))
-        | select(fingerprint == "" or ($reported[alert] | not))
+        | select($reported[alert] | not)
         # Only what a result is made of. What GitHub adds when it stores one (the alert it
         # belongs to, positions in lists of the file it was stored in) does not carry over.
         | { rule: (first($rules[] | select(.id == $rule)) // null),
@@ -409,11 +480,12 @@ previous_results_to_keep() {
 # "Reported again" has to mean that finding and no other, or a result would let a different
 # finding be dropped unchecked.
 #
-# From SARIF a previous result has a fingerprint, and it is reported again when this run
-# has a result of the same rule and file with that fingerprint. Every other one in a gap is
-# added to this run's SARIF file, so that the file can replace the last one: nothing the
-# scan could not check is dropped from it. A result kept this way stays until a run
-# finishes its file, at the place it had when it was last found.
+# From SARIF a previous result is reported again when this run has the result GitHub would
+# take for the same alert: see `previous_results_to_keep`, and `fingerprint_results` for how
+# a result of an unfinished file comes by its fingerprint. Every other one in a gap is added
+# to this run's SARIF file, so that the file can replace the last one: nothing the scan
+# could not check is dropped from it. A result kept this way stays until a run finishes its
+# file, at the place it had when it was last found.
 #
 # From a report a previous finding is a line of text: its rule, file, line and message. It
 # is confirmed only when its line is known and exactly one result of this run has all four.

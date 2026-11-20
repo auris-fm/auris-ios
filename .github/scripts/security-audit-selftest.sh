@@ -335,6 +335,10 @@ if [ "$(published_fingerprints)" != "long.py:2= long.py:2=aaa_0 " ]; then
   echo "FAIL both results should be published, not: $(published_fingerprints)"
   failures=$((failures + 1))
 fi
+# Without fingerprints, a result at another place is not the previous one either.
+expect "a result without a fingerprint elsewhere does not replace one without" 0 "Not verified this run (semgrep): 1" \
+  "${gave_up[@]}" FAKE_RESULTS="$(fake_result long.py 7)" AUDIT_PREVIOUS_SARIF="$work/bare.sarif" bash "$audit" full
+check_published "both are published" "long.py:2 long.py:7 "
 # Nor can a result of this run that has none stand for a previous one.
 expect "a result without a fingerprint does not replace a previous result" 0 "Not verified this run (semgrep): 1" \
   "${gave_up[@]}" FAKE_RESULTS="$(fake_result long.py 2)" AUDIT_PREVIOUS_SARIF="$work/one.sarif" bash "$audit" full
@@ -379,6 +383,83 @@ if [ "$(jq -c '[.runs[0].tool.driver.rules[].id]' "$last_out/semgrep.sarif")" !=
   echo "FAIL the rule of the stored result is not published with it, or another rule is"
   failures=$((failures + 1))
 fi
+
+# The fingerprints this script makes itself, where the scan did not finish. `hit` is a
+# result as semgrep writes it, with the code it matched and no fingerprint.
+hit() { # path line code
+  printf '{"ruleId":"selftest-eval","message":{"text":"eval of a dynamic value"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"%s"},"region":{"startLine":%s,"startColumn":5,"endLine":%s,"endColumn":15,"snippet":{"text":"    %s"}}}}]}' \
+    "$1" "$2" "$2" "$3"
+}
+check_fingerprints() { # label, then what `published_fingerprints` should print with H for the hash
+  local label=$1 want=$2 got
+  got=$(published_fingerprints | sed -E 's/=[0-9a-f]{40}_/=H_/g')
+  if [ "$got" != "$want" ]; then
+    echo "FAIL $label: published '$got', expected '$want'"
+    failures=$((failures + 1))
+  fi
+}
+finished=(PATH="$work/fake-bin:$PATH" AUDIT_SCANNERS=code FAKE_ERRORS="")
+
+# A complete scan finds the same code at lines 10 and 20: the first and the second match.
+expect "a complete scan numbers two matches of the same code" 0 "" \
+  "${finished[@]}" FAKE_RESULTS="$(hit long.py 10 "eval(text)"),$(hit long.py 20 "eval(text)")" bash "$audit" full
+check_fingerprints "they are the first and the second" "long.py:10=H_0 long.py:20=H_1 "
+cp "$last_out/semgrep.sarif" "$work/twice.sarif"
+
+# The next scan gives up on the file and reports the match at line 20 alone. It is still
+# the second: counting what this scan returned would make it the first, and the one at
+# line 10, which the scan did not check, would be dropped for it.
+expect "the only match an unfinished scan reports keeps its own number" 0 "Not verified this run (semgrep): 1" \
+  "${gave_up[@]}" FAKE_RESULTS="$(hit long.py 20 "eval(text)")" AUDIT_PREVIOUS_SARIF="$work/twice.sarif" bash "$audit" full
+check_fingerprints "the unchecked match is kept at its place" "long.py:10=H_0 long.py:20=H_1 "
+check_unverified "the unchecked match is the one not verified" "long.py:10 "
+
+# Both reported where they were: nothing to keep, nothing renumbered.
+expect "matches reported at their places keep their numbers" 0 "" \
+  "${gave_up[@]}" FAKE_RESULTS="$(hit long.py 10 "eval(text)"),$(hit long.py 20 "eval(text)")" \
+  AUDIT_PREVIOUS_SARIF="$work/twice.sarif" bash "$audit" full
+check_fingerprints "each is published once" "long.py:10=H_0 long.py:20=H_1 "
+
+# One match, at a line where there was none: it may be either of the two moved, or a third.
+# It takes no earlier number, and both earlier matches are kept.
+expect "a match at a new place in an unfinished file takes no earlier number" 0 "Not verified this run (semgrep): 2" \
+  "${gave_up[@]}" FAKE_RESULTS="$(hit long.py 21 "eval(text)")" AUDIT_PREVIOUS_SARIF="$work/twice.sarif" bash "$audit" full
+check_fingerprints "both earlier matches are kept" "long.py:10=H_0 long.py:20=H_1 long.py:21=H_2 "
+
+# The same holds for a single earlier match: a match elsewhere may be a second one.
+expect "a complete scan numbers a single match" 0 "" \
+  "${finished[@]}" FAKE_RESULTS="$(hit long.py 10 "eval(text)")" bash "$audit" full
+cp "$last_out/semgrep.sarif" "$work/once.sarif"
+expect "a single match that an unfinished scan reports elsewhere is not taken for the earlier one" 0 "Not verified this run (semgrep): 1" \
+  "${gave_up[@]}" FAKE_RESULTS="$(hit long.py 12 "eval(text)")" AUDIT_PREVIOUS_SARIF="$work/once.sarif" bash "$audit" full
+check_fingerprints "the earlier match is kept" "long.py:10=H_0 long.py:12=H_1 "
+
+# Where the scan finished, all matches are known. One left of two, at its place, is still
+# the second, and the first is gone.
+expect "a complete scan keeps the number of a match at its place" 0 "" \
+  "${finished[@]}" FAKE_RESULTS="$(hit long.py 20 "eval(text)")" AUDIT_PREVIOUS_SARIF="$work/twice.sarif" bash "$audit" full
+check_fingerprints "only that match is published" "long.py:20=H_1 "
+# Both moved down a line: they are the first and the second again.
+expect "a complete scan renumbers matches that moved" 0 "" \
+  "${finished[@]}" FAKE_RESULTS="$(hit long.py 11 "eval(text)"),$(hit long.py 21 "eval(text)")" \
+  AUDIT_PREVIOUS_SARIF="$work/twice.sarif" bash "$audit" full
+check_fingerprints "they keep their numbers" "long.py:11=H_0 long.py:21=H_1 "
+# A new match above one that stayed: the one that stayed keeps its number.
+expect "a new match does not take the number of a match at its place" 0 "" \
+  "${finished[@]}" FAKE_RESULTS="$(hit long.py 5 "eval(text)"),$(hit long.py 10 "eval(text)")" \
+  AUDIT_PREVIOUS_SARIF="$work/once.sarif" bash "$audit" full
+check_fingerprints "the new match gets the next number" "long.py:10=H_0 long.py:5=H_1 "
+
+# What was published before results had fingerprints. The same result again is published
+# as it was, so that it stays the alert it is.
+sarif "$(hit long.py 10 "eval(text)")" > "$work/legacy.sarif"
+expect "a result that was published without a fingerprint stays without one" 0 "" \
+  "${gave_up[@]}" FAKE_RESULTS="$(hit long.py 10 "eval(text)")" AUDIT_PREVIOUS_SARIF="$work/legacy.sarif" bash "$audit" full
+check_fingerprints "it is published once, as before" "long.py:10= "
+# Reported elsewhere, it is a result of its own, and the earlier one is kept.
+expect "a result published without a fingerprint is kept when it is not reported at its place" 0 "Not verified this run (semgrep): 1" \
+  "${gave_up[@]}" FAKE_RESULTS="$(hit long.py 12 "eval(text)")" AUDIT_PREVIOUS_SARIF="$work/legacy.sarif" bash "$audit" full
+check_fingerprints "both are published" "long.py:10= long.py:12=H_0 "
 
 # Previous results where semgrep finished are not held by a gap somewhere else: the run
 # looked there and did not find them.
