@@ -539,6 +539,20 @@ echo "--- :test_tube: Running the full test plan"
 RESULT_BUNDLE="$LOG_DIR/auris-${BUILDKITE_BUILD_NUMBER:-local}-${BUILDKITE_JOB_ID:-job}.xcresult"
 rm -rf "$RESULT_BUNDLE"
 
+# The host-only macro package's tests run outside the simulator plan: they
+# exercise a compiler plugin, which is host code. `swift test` in the package
+# writes its own result bundle so the coverage guard can count what executed
+# with the same tool it uses for the plan's bundles.
+PACKAGE_BUNDLE="$LOG_DIR/modules-macros-${BUILDKITE_BUILD_NUMBER:-local}-${BUILDKITE_JOB_ID:-job}.xcresult"
+rm -rf "$PACKAGE_BUNDLE"
+# The status is recorded, not fatal: a failing macro test is a product change,
+# and it is the coverage guard's verdict, read from the result bundle, that
+# fails the step — the same way the plan's own red runs are handled.
+set +e
+{ (cd ModulesMacros && swift test --xcresult-output "$PACKAGE_BUNDLE") 2>&1 | tee "$LOG_DIR/modules-macros-tests.log"; } & wait $!
+SWIFT_TEST_STATUS=$?
+set -e
+
 # `-testPlan UnitTests` names the plan explicitly. Marking a plan `default = YES`
 # in the scheme is not enough on the command line: without this flag xcodebuild
 # runs the scheme's Testables list, which holds only PocketCastsTests, and the
@@ -790,7 +804,7 @@ echo "--- :mag: Checking that the whole plan ran"
 # status is reported separately so a coverage gap is not hidden by a test failure
 # and a test failure is not excused by coverage being complete.
 set +e
-run_bg python3 .buildkite/lib/check-test-coverage.py "$RESULT_BUNDLE" --log "$LOG_DIR/test.log"
+run_bg python3 .buildkite/lib/check-test-coverage.py "$RESULT_BUNDLE" --log "$LOG_DIR/test.log" --package-bundle "$PACKAGE_BUNDLE"
 COVERAGE_STATUS=$?
 set -e
 
@@ -798,6 +812,9 @@ if [ -d "$RESULT_BUNDLE" ]; then
   # Zipped for upload: an .xcresult is a directory, and the artifact glob would
   # otherwise upload thousands of loose files.
   (cd "$LOG_DIR" && zip -qry "$(basename "$RESULT_BUNDLE").zip" "$(basename "$RESULT_BUNDLE")")
+fi
+if [ -d "$PACKAGE_BUNDLE" ]; then
+  (cd "$LOG_DIR" && zip -qry "$(basename "$PACKAGE_BUNDLE").zip" "$(basename "$PACKAGE_BUNDLE")")
 fi
 
 # The live log is streamed over a link that has dropped chunks, so a failure's

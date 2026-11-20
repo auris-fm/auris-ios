@@ -38,7 +38,20 @@ from pathlib import Path
 REQUIRED_TARGETS = [
     "PocketCastsTests",
     "PocketCastsUtilsTests",
+    "PocketCastsDataModelTests",
+    "PocketCastsServerTests",
+    "ModulesTests",
 ]
+
+# Host-only package tests run outside the simulator plan, one runner each, and
+# are guarded with the same floor discipline. GRDBMacrosTests exercise the
+# compiler plugin, so they run on macOS with `swift test` and write their own
+# result bundle, which the step passes to the guard alongside the plan bundle.
+PACKAGE_REQUIRED_TARGETS = {
+    "GRDBMacrosTests": {
+        "minimum": 20,
+    },
+}
 
 # A floor per target, not just "more than zero". A test runner that dies after one
 # test still reports that test as passing; only a count near the target's real size
@@ -47,6 +60,9 @@ REQUIRED_TARGETS = [
 MINIMUM_TESTS = {
     "PocketCastsTests": 2000,
     "PocketCastsUtilsTests": 50,
+    "PocketCastsDataModelTests": 100,
+    "PocketCastsServerTests": 50,
+    "ModulesTests": 1,
 }
 
 # A test that skips itself is not run, and a green summary does not show the
@@ -144,28 +160,19 @@ FLAKY_TESTS = {
         "fails in a full run, passes alone or in a smaller selection",
 }
 
-# Targets that belong in the plan but cannot currently build for the simulator.
-# PocketCastsDataModel depends on GRDBMacros, whose plugin is a macro target —
-# host code, built for macOS. Linking its object into an iOS-simulator test
-# bundle fails:
-#   ld: building for 'iOS-simulator', but linking in object file
-#       (.../Debug/ExecutableModules/GRDBMacrosPlugin.o) built for 'macOS'
-# PocketCastsServerTests links PocketCastsServer, which reaches the same target.
-# Neither is skipped or quarantined: they are absent from the plan until the
-# package separates host and simulator code, and this list is what makes their
-# absence visible rather than forgotten. Adding a target back to the plan means
-# moving it from here into REQUIRED_TARGETS.
-BLOCKED_TARGETS = [
-    "PocketCastsDataModelTests",
-    "PocketCastsServerTests",
-]
+# No target is blocked any more: the host-only macro plugin lives in the
+# ModulesMacros package now, so the DataModel and Server test bundles link for
+# the simulator and are required targets above. If a target stops linking
+# again, this list is where its absence is made visible rather than forgotten.
+BLOCKED_TARGETS = []
 
-# Skips to carry over when PocketCastsDataModelTests returns to the plan, so the
-# target comes back with its reasons rather than without them:
-#   AutoAddCandidatesDataManagerTests/testNewQueryPerformance() — a performance
-#     measurement rather than a correctness check, too slow for CI.
-#   AutoAddCandidatesDataManagerTests/testSyncableUpNextSetting() — needs the sync
-#     server stack this plan does not stand up.
+# Skips to carry when a target returns to the plan, so it comes back with its
+# reasons rather than without them:
+#   PocketCastsDataModelTests:
+#     AutoAddCandidatesDataManagerTests/testNewQueryPerformance() — a performance
+#       measurement rather than a correctness check, too slow for CI.
+#     AutoAddCandidatesDataManagerTests/testSyncableUpNextSetting() — needs the
+#       sync server stack this plan does not stand up.
 
 # The skips that exist today, each for a stated reason. A skip absent from this
 # list fails the run, so adding one is a deliberate edit here with its reason.
@@ -176,6 +183,15 @@ EXPECTED_SKIPS = {
         "IAPHelperTests/testPurchase()",
     },
     "PocketCastsUtilsTests": set(),
+    "PocketCastsDataModelTests": {
+        # A performance measurement rather than a correctness check, too slow
+        # for CI.
+        "AutoAddCandidatesDataManagerTests/testNewQueryPerformance()",
+        # Needs the sync server stack this plan does not stand up.
+        "AutoAddCandidatesDataManagerTests/testSyncableUpNextSetting()",
+    },
+    "PocketCastsServerTests": set(),
+    "ModulesTests": set(),
 }
 
 DEFAULT_PLAN = "PocketCastsTests/UnitTests.xctestplan"
@@ -568,11 +584,40 @@ def print_intermittent_outcomes(failed: set, executed: set) -> None:
         print(f"  {name}: {outcome} this run ({reason})")
 
 
+def check_package_coverage(report: dict, counts: dict) -> list:
+    """The host-only package tests, one runner each, same floor discipline."""
+    failures = []
+    for target, spec in sorted(PACKAGE_REQUIRED_TARGETS.items()):
+        # swift test names its bundle with the .xctest suffix; xcodebuild does not.
+        count = sum(n for name, n in counts.items() if name.startswith(target))
+        if count < spec["minimum"]:
+            failures.append(
+                f"{target} (host runner) executed {count} tests, expected at "
+                f"least {spec['minimum']}. A host runner that stops early — a "
+                "compile failure in the package, a crashed test process — leaves "
+                "the tests it did run passing, so a floor is what distinguishes "
+                "a complete run from a truncated one."
+            )
+    failed = bundle_failures(report)
+    if failed:
+        failures.append(
+            "host-runner package tests failed: "
+            + ", ".join(sorted(failed))
+            + ". A package test failure is a product change, not an "
+            "environment one; fix the macro or the test."
+        )
+    return failures
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("bundle")
     parser.add_argument("--plan", default=DEFAULT_PLAN)
     parser.add_argument("--log", default="artifacts/test.log")
+    parser.add_argument(
+        "--package-bundle",
+        help="result bundle of the host-runner package tests (swift test)",
+    )
     args = parser.parse_args()
 
     try:
@@ -607,6 +652,28 @@ def main() -> int:
         counts, Path(args.plan), skips, reasons,
         signed=SIGNED_HOST,
     )
+    if PACKAGE_REQUIRED_TARGETS:
+        if not args.package_bundle:
+            failures.append(
+                "package tests are required but no package result bundle was "
+                "given; the step must run swift test with --xcresult-output and "
+                "pass it here"
+            )
+        else:
+            try:
+                package_report = read_report(args.package_bundle)
+                package_counts = count_tests(package_report)
+            except subprocess.CalledProcessError as error:
+                print(f"cannot read the package result bundle: {error.stderr.strip()}", file=sys.stderr)
+                package_counts = {}
+                package_report = {}
+            except json.JSONDecodeError as error:
+                print(f"package result bundle report is not JSON: {error}", file=sys.stderr)
+                package_counts = {}
+                package_report = {}
+            for target in sorted(PACKAGE_REQUIRED_TARGETS):
+                print(f"{target} (host runner): {package_counts.get(target, 0)} tests executed")
+            failures += check_package_coverage(package_report, package_counts)
     # Failures come from both places. The log names the tests that reported a
     # failure; the bundle also marks the ones that were killed at their execution
     # time allowance, which print no result line and so appear in no log list.
@@ -634,6 +701,8 @@ def main() -> int:
     print("\nCoverage check passed: every buildable target ran, no unexpected skips.")
     if BLOCKED_TARGETS:
         print(f"Still blocked: {', '.join(BLOCKED_TARGETS)}")
+    if PACKAGE_REQUIRED_TARGETS:
+        print(f"Host-runner package targets: {', '.join(sorted(PACKAGE_REQUIRED_TARGETS))}")
     return exit_code(failures, failed)
 
 
