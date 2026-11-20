@@ -41,3 +41,17 @@ steps:
     artifact_paths:
       - "artifacts/*.log"
       - "artifacts/*.xcresult.zip"
+
+  # Beta rollout: on a green run on main, archive the app and upload it to
+  # TestFlight internal testers. The upload runs only on main, only after
+  # a passed test step (allow_dependency_failure keeps a red or skipped
+  # test step from running it), and never on PR branches. The command's
+  # preflight runs before any heavy work and fails fast when the App Store
+  # Connect key env vars or the device llama build are missing.
+  - label: ":rocket: TestFlight beta upload"
+    key: beta-upload
+    if: build.branch == "main"
+    depends_on: build-and-test
+    allow_dependency_failure: false
+    timeout_in_minutes: 60
+    command: .buildkite/commands/auris-beta-upload.sh

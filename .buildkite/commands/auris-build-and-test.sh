@@ -773,6 +773,16 @@ run_bg bash .buildkite/lib/test-step-verdict.sh
 VERDICT_SELFTEST_STATUS=$?
 set -e
 
+echo "--- :mag: Checking the beta-upload step itself"
+# The beta-upload command must refuse to run when the agent lacks the
+# App Store Connect key env vars or the device llama build, naming which;
+# and the pipeline must run it only on main, only after a passed test
+# step.
+set +e
+run_bg bash .buildkite/lib/test-auris-beta-upload.sh
+BETA_UPLOAD_SELFTEST_STATUS=$?
+set -e
+
 echo "--- :mag: Checking the coverage guard itself"
 # The guard is only worth trusting if it can fail. These cases remove coverage
 # and assert it notices, against the result bundle this run just produced.
