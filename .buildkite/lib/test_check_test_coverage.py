@@ -111,10 +111,14 @@ def main():
         coverage_lost = [f for f in baseline_failures if "failed and is not a known" not in f
                          and "listed as a known failure but passed" not in f]
         if coverage_lost:
-            print("FAIL  baseline run is not complete; the cases below prove nothing")
+            # The floor/skip cases below compare against this run, so a
+            # truncated baseline voids them; the package-guard cases are
+            # synthetic and stand on their own, so they still run and are
+            # still counted.
+            print("FAIL  baseline run is not complete; floor and skip cases are void")
             for f in coverage_lost:
                 print(f"        -> {f}")
-            return 1
+            results.append(False)
         print("      this recording has failures the guard does not recognise:")
         for f in baseline_failures:
             print(f"        -> {f}")
@@ -150,20 +154,81 @@ def main():
                         json.dumps(narrowed), expect_failure=True,
                         expected_text="narrowed to", signed=signed, bundle=bundle))
 
-    # A blocked target comes back to the plan without being made required.
-    restored = json.loads(PLAN)
-    restored["testTargets"].append({
-        "target": {
-            "containerPath": "container:Modules",
-            "identifier": "PocketCastsDataModelTests",
-            "name": "PocketCastsDataModelTests",
-        }
-    })
-    failures = run_guard(base, json.dumps(restored), bundle=bundle)
-    ok = any("still listed as blocked" in f for f in failures)
-    for f in failures:
+    # No target may silently vanish. Each target this PR made required — the
+    # three new simulator bundles and the host-runner macro bundle — is dropped
+    # in turn, and the guard must name it.
+    for target in ("PocketCastsDataModelTests", "PocketCastsServerTests",
+                   "ModulesTests"):
+        dropped_target = copy.deepcopy(base)
+        node = dropped_target["testNodes"][0]
+        node["children"] = [c for c in node["children"] if c["name"] != target]
+        results.append(case(f"newly required target {target} runs nothing",
+                            dropped_target, PLAN, expect_failure=True,
+                            expected_text=target, signed=signed, bundle=bundle))
+
+    # The host bundle: identity must be exact (a renamed bundle is missing, not
+    # partially found), a run under the floor fails, a failing macro test fails,
+    # and a skip is a failure — the macro tests have no environment to lack.
+    def synthetic_host(result="Passed", names=None):
+        default = [f"GRDBRecordMacroTests/test{i}()" for i in range(22)]
+        names = default if names is None else names
+        return {"testNodes": [{
+            "nodeType": "Test Plan", "name": "All", "children": [{
+                "nodeType": "Unit test bundle", "name": "GRDBMacrosTests",
+                "children": [{
+                    "nodeType": "Test Case", "result": result,
+                    "nodeIdentifier": n,
+                } for n in names],
+            }],
+        }]}
+    good_host = synthetic_host()
+    host_failures = check.check_package_coverage(good_host, check.count_tests(good_host))
+    ok = not host_failures
+    print(f"{'PASS' if ok else 'FAIL'}  complete host bundle passes the package guard")
+    for f in host_failures:
         print(f"        -> {f}")
-    print(f"{'PASS' if ok else 'FAIL'}  blocked target returns without being required")
+    results.append(ok)
+
+    missing_host = synthetic_host(names=[])
+    host_failures = check.check_package_coverage(missing_host, check.count_tests(missing_host))
+    ok = any("executed 0 tests" in f for f in host_failures)
+    print(f"{'PASS' if ok else 'FAIL'}  host bundle running nothing fails on its floor")
+    for f in host_failures:
+        print(f"        -> {f}")
+    results.append(ok)
+
+    renamed_host = synthetic_host()
+    renamed_host["testNodes"][0]["children"][0]["name"] = "GRDBMacrosTests.xctest"
+    host_failures = check.check_package_coverage(renamed_host, check.count_tests(renamed_host))
+    ok = any("produced no result bundle entries" in f for f in host_failures)
+    print(f"{'PASS' if ok else 'FAIL'}  renamed host bundle counts as missing, not partial")
+    for f in host_failures:
+        print(f"        -> {f}")
+    results.append(ok)
+
+    skipped_host = synthetic_host()
+    skipped_host["testNodes"][0]["children"][0]["children"][-1]["result"] = "Skipped"
+    host_failures = check.check_package_coverage(skipped_host, check.count_tests(skipped_host))
+    ok = any("skipped" in f for f in host_failures)
+    print(f"{'PASS' if ok else 'FAIL'}  21 passes plus one skip is not green")
+    for f in host_failures:
+        print(f"        -> {f}")
+    results.append(ok)
+
+    failed_host = synthetic_host()
+    failed_host["testNodes"][0]["children"][0]["children"][0]["result"] = "Failed"
+    host_failures = check.check_package_coverage(failed_host, check.count_tests(failed_host))
+    ok = any("host-runner package tests failed" in f for f in host_failures)
+    print(f"{'PASS' if ok else 'FAIL'}  a failing macro test fails the guard")
+    for f in host_failures:
+        print(f"        -> {f}")
+    results.append(ok)
+
+    # A missing package bundle at all: the step must name the absence rather
+    # than pass on it. The wording lives in main(); assert it is really there.
+    source = (HERE / "check-test-coverage.py").read_text()
+    ok = "no package result bundle was" in source
+    print(f"{'PASS' if ok else 'FAIL'}  missing package bundle is named by the step")
     results.append(ok)
 
     # Listing the tests that legitimately skip must not let a broken build skip

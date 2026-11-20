@@ -45,8 +45,9 @@ REQUIRED_TARGETS = [
 
 # Host-only package tests run outside the simulator plan, one runner each, and
 # are guarded with the same floor discipline. GRDBMacrosTests exercise the
-# compiler plugin, so they run on macOS with `swift test` and write their own
-# result bundle, which the step passes to the guard alongside the plan bundle.
+# compiler plugin, so they run on macOS via xcodebuild against the package's
+# scheme, which produces a real result bundle this toolchain's `swift test`
+# cannot (it has no --xcresult-output).
 PACKAGE_REQUIRED_TARGETS = {
     "GRDBMacrosTests": {
         "minimum": 21,
@@ -585,12 +586,24 @@ def print_intermittent_outcomes(failed: set, executed: set) -> None:
 
 
 def check_package_coverage(report: dict, counts: dict) -> list:
-    """The host-only package tests, one runner each, same floor discipline."""
+    """The host-only package tests, one runner each, same floor discipline.
+
+    The bundle identity is exact: the host run is produced by xcodebuild against
+    a macOS destination, and its unit-test bundle is named GRDBMacrosTests in
+    the report — the same key the floor looks up and the same key that is
+    printed, so a renamed bundle reads as missing rather than partially found.
+    """
     failures = []
     for target, spec in sorted(PACKAGE_REQUIRED_TARGETS.items()):
-        # swift test names its bundle with the .xctest suffix; xcodebuild does not.
-        count = sum(n for name, n in counts.items() if name.startswith(target))
-        if count < spec["minimum"]:
+        count = counts.get(target, 0)
+        if target not in counts:
+            failures.append(
+                f"{target} (host runner) produced no result bundle entries. A "
+                "host run that never got as far as its test bundle — a compile "
+                "failure in the package, a scheme that does not exist — leaves "
+                "nothing to count, so the missing identity itself is the failure."
+            )
+        elif count < spec["minimum"]:
             failures.append(
                 f"{target} (host runner) executed {count} tests, expected at "
                 f"least {spec['minimum']}. A host runner that stops early — a "
@@ -606,7 +619,28 @@ def check_package_coverage(report: dict, counts: dict) -> list:
             + ". A package test failure is a product change, not an "
             "environment one; fix the macro or the test."
         )
+    skipped = sorted(
+        walk_test_cases_skipped(report)
+    )
+    if skipped:
+        failures.append(
+            "host-runner package tests skipped: "
+            + ", ".join(skipped)
+            + ". The macro tests have no environment to lack: every skip is a "
+            "test that stopped asserting. A deliberate skip is listed here, not "
+            "silent."
+        )
     return failures
+
+
+def walk_test_cases_skipped(report: dict) -> set:
+    """Identifiers of test cases the host bundle marks Skipped."""
+    skipped = set()
+    for node in walk_test_cases(report):
+        identifier = node.get("nodeIdentifier", "")
+        if node.get("result") == "Skipped" and "/" in identifier:
+            skipped.add(identifier)
+    return skipped
 
 
 def main() -> int:

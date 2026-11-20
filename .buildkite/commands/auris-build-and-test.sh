@@ -540,18 +540,27 @@ RESULT_BUNDLE="$LOG_DIR/auris-${BUILDKITE_BUILD_NUMBER:-local}-${BUILDKITE_JOB_I
 rm -rf "$RESULT_BUNDLE"
 
 # The host-only macro package's tests run outside the simulator plan: they
-# exercise a compiler plugin, which is host code. `swift test` in the package
-# writes its own result bundle so the coverage guard can count what executed
-# with the same tool it uses for the plan's bundles.
+# exercise a compiler plugin, which is host code. They run on this Mac as a
+# macOS destination so the run produces a real result bundle: this toolchain's
+# `swift test` has no --xcresult-output, and an unverified host run would be
+# exactly the coverage this pipeline exists to catch. A nonzero exit here ends
+# the step before the plan runs: a broken macro build is not a partial result
+# to be judged by a floor, it is no result at all.
 PACKAGE_BUNDLE="$LOG_DIR/modules-macros-${BUILDKITE_BUILD_NUMBER:-local}-${BUILDKITE_JOB_ID:-job}.xcresult"
 rm -rf "$PACKAGE_BUNDLE"
-# The status is recorded, not fatal: a failing macro test is a product change,
-# and it is the coverage guard's verdict, read from the result bundle, that
-# fails the step — the same way the plan's own red runs are handled.
 set +e
-{ (cd ModulesMacros && swift test --xcresult-output "$PACKAGE_BUNDLE") 2>&1 | tee "$LOG_DIR/modules-macros-tests.log"; } & wait $!
-SWIFT_TEST_STATUS=$?
+{ xcodebuild test -scheme ModulesMacros -destination 'platform=macOS' \
+    -derivedDataPath "${MACRO_DERIVED_DATA:-$DERIVED/macros-host}" \
+    -clonedSourcePackagesDirPath "$DERIVED/SourcePackages" \
+    -disableAutomaticPackageResolution \
+    -resultBundlePath "$PACKAGE_BUNDLE" \
+    2>&1 | tee "$LOG_DIR/modules-macros-tests.log"; } & wait $!
+MACRO_TEST_STATUS=$?
 set -e
+if [ "$MACRO_TEST_STATUS" -ne 0 ]; then
+  echo "macro package tests failed (xcodebuild exit $MACRO_TEST_STATUS); see $LOG_DIR/modules-macros-tests.log" >&2
+  exit 1
+fi
 
 # `-testPlan UnitTests` names the plan explicitly. Marking a plan `default = YES`
 # in the scheme is not enough on the command line: without this flag xcodebuild
