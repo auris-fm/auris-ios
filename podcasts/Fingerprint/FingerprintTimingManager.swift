@@ -32,6 +32,11 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
 
     static let shared = FingerprintTimingManager()
 
+    /// The fetcher used for cloud reference loads. Production takes the
+    /// shared singleton; tests inject their own (e.g. with a stub token
+    /// provider) instead of mutating shared state.
+    private let cloudFetcher: CloudFingerprintReferenceFetcher
+
     // MARK: - Public Properties
 
     private(set) var state: State = .idle
@@ -164,7 +169,8 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
 
     // MARK: - Init
 
-    override init() {
+    init(cloudFetcher: CloudFingerprintReferenceFetcher = .shared) {
+        self.cloudFetcher = cloudFetcher
         super.init()
         NotificationCenter.default.addObserver(
             self,
@@ -905,7 +911,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
     private func fetchCloudReference(uuid: String, podcastUuid: String) async -> CloudFingerprintReferenceFetcher.FetchedReference? {
         let baseUrl = CloudConfig.shared.baseUrl
         guard !baseUrl.isEmpty else { return nil }
-        let fetched = await CloudFingerprintReferenceFetcher.shared.fetchReference(baseUrl: baseUrl, episodeUuid: uuid, podcastUuid: podcastUuid)
+        let fetched = await cloudFetcher.fetchReference(baseUrl: baseUrl, episodeUuid: uuid, podcastUuid: podcastUuid)
         if let fetched {
             FileLog.shared.addMessage("FingerprintTimingManager: cloud reference loaded (\(fetched.matcher.count) checkpoints) for \(uuid)")
         } else {
@@ -2296,7 +2302,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
     private func loadCloudReference(for episode: BaseEpisode) -> CloudFingerprintReferenceFetcher.FetchedReference? {
         let path = cloudReferencePath(for: episode)
         guard let data = FileManager.default.contents(atPath: path) else { return nil }
-        return CloudFingerprintReferenceFetcher.shared.buildFetchedReference(from: data)
+        return cloudFetcher.buildFetchedReference(from: data)
     }
 
     private func saveCloudReferenceData(_ data: Data, for episode: BaseEpisode) {

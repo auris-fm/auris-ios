@@ -27,24 +27,20 @@ final class CloudReferenceDecouplingTests: XCTestCase {
     private var previousBaseURL: Any?
     private var previousDirectUpstream: Any?
     private var cloudPayload: Data!
-    private var previousTokenProvider: (any CloudTokenProviding)?
-
-    /// Static bearer for the stubbed gateway: the fetcher fails closed
-    /// without a token, and the suite's gateway is URLProtocol-stubbed, so a
-    /// fixed literal exercises exactly the request path under test.
+    /// Own fetcher with a static bearer: the fetcher fails closed without a
+    /// token, and the suite's gateway is URLProtocol-stubbed, so a fixed
+    /// literal exercises exactly the request path under test — without
+    /// touching the shared singleton or the keychain-backed Auris chain.
     private final class StubTokenProvider: CloudTokenProviding {
         func token() async -> String? { "decoupling-test-token" }
         func handleUnauthorized(rejectedToken: String?) async {}
     }
 
+    private lazy var stubbedFetcher = CloudFingerprintReferenceFetcher(tokenProvider: StubTokenProvider())
+
     override func setUpWithError() throws {
         try super.setUpWithError()
         featureFlags.set(.syncedTranscripts, value: true)
-
-        // The fetcher's default provider reads the shared Auris chain
-        // (keychain-backed); the suite presents a static stub instead.
-        previousTokenProvider = CloudFingerprintReferenceFetcher.shared.tokenProviderForTesting
-        CloudFingerprintReferenceFetcher.shared.tokenProviderForTesting = StubTokenProvider()
 
         // Point the production config reader at the stubbed gateway. Saved and
         // restored around each test so no other suite sees the override.
@@ -66,11 +62,6 @@ final class CloudReferenceDecouplingTests: XCTestCase {
         fixture?.removeFiles()
         fixture = nil
         cloudPayload = nil
-
-        if let previousTokenProvider {
-            CloudFingerprintReferenceFetcher.shared.tokenProviderForTesting = previousTokenProvider
-        }
-        previousTokenProvider = nil
 
         CloudRouteTestURLProtocol.reset()
         URLProtocol.unregisterClass(CloudRouteTestURLProtocol.self)
@@ -160,7 +151,7 @@ final class CloudReferenceDecouplingTests: XCTestCase {
         // Second session: a fresh manager, both hosts now fail hard. If the
         // persisted Auris file is read, preparation still maps; if the code
         // only knows the Pocket Casts path, this ends `.unavailable`.
-        let secondManager = FingerprintTimingManager()
+        let secondManager = FingerprintTimingManager(cloudFetcher: stubbedFetcher)
         defer { secondManager.stop() }
         CloudRouteTestURLProtocol.requestHandler = { _ in
             .complete(status: 500, headers: [:], body: Data())
@@ -203,7 +194,7 @@ final class CloudReferenceDecouplingTests: XCTestCase {
         try fixture.writeAudio(seconds: Self.episodeDuration)
         self.fixture = fixture
         currentEpisode = CurrentEpisodeOverride(episode: fixture.episode)
-        manager = FingerprintTimingManager()
+        manager = FingerprintTimingManager(cloudFetcher: stubbedFetcher)
         cloudPayload = try Self.makeCloudReference(forAudioAt: fixture.audioURL)
     }
 
