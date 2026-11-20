@@ -156,10 +156,13 @@ jobs:
           PREVIOUS: ${{ runner.temp }}/security-audit-previous.sarif
         run: |
           set -o pipefail
-          # The newest semgrep analysis of this branch, which is what its open alerts rest on.
+          # The newest analysis of this branch under the category the code findings are
+          # uploaded with below, which is what its open code alerts rest on. Chosen by that
+          # category and by date: not by the name the scanner gives itself, which a new
+          # version may change, and not by the order the list happens to come in.
           if ! id=$(gh api \
-            "repos/$GITHUB_REPOSITORY/code-scanning/analyses?ref=$GITHUB_REF&tool_name=Semgrep%20OSS&per_page=100" \
-            --jq '[.[] | select(.category == "semgrep")][0].id // empty' 2> "$RUNNER_TEMP/api.err"); then
+            "repos/$GITHUB_REPOSITORY/code-scanning/analyses?ref=$GITHUB_REF&sort=created&direction=desc&per_page=100" \
+            --jq '[.[] | select(.category == "semgrep")] | sort_by(.created_at) | last | .id // empty' 2> "$RUNNER_TEMP/api.err"); then
             # Before the first upload there is no analysis, and so no result to lose.
             if ! grep -q "no analysis found" "$RUNNER_TEMP/api.err"; then
               cat "$RUNNER_TEMP/api.err"

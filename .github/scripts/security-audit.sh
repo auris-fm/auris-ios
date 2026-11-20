@@ -82,6 +82,10 @@ for name in $scanners; do
   esac
 done
 
+# Read by earlier versions of this script, as a list of the findings that were open. A caller
+# that still passes it expects them to be kept, and they would not be.
+[ -z "${AUDIT_PREVIOUS:-}" ] || die "AUDIT_PREVIOUS is no longer read: pass the last results as AUDIT_PREVIOUS_SARIF"
+
 # Out of the environment before anything else runs, so that no scanner but zizmor inherits it.
 lookup_token=${AUDIT_GITHUB_TOKEN:-}
 unset AUDIT_GITHUB_TOKEN
@@ -303,7 +307,7 @@ scan_code() {
 # script tell whether a result the last run published is reported again.
 #
 # The fingerprint is a hash of the rule, the file and the matched code without the space
-# around it, followed by a number that tells apart several matches of the same code in one
+# around each of its lines, followed by a number that tells apart several matches of the same code in one
 # file: `<hash>_0`, `<hash>_1`, in the order they stand in. It does not change when the
 # code moves. A result that states no code gets none, and one that has a fingerprint keeps it.
 #
@@ -336,7 +340,7 @@ fingerprint_results() {
     | (.value.locations[0].physicalLocation // {}) as $at
     | select($at.region.snippet.text != null)
     | [ .key, ([ .value.ruleId, $at.artifactLocation.uri,
-                 ($at.region.snippet.text | gsub("^\\s+|\\s+$"; "")) ] | tojson) ] | @tsv' "$file" |
+                 ($at.region.snippet.text | split("\n") | map(gsub("^\\s+|\\s+$"; "")) | join("\n")) ] | tojson) ] | @tsv' "$file" |
     while IFS="$tab" read -r index key; do
       printf '%s\t%s\n' "$index" "$(printf '%s' "$key" | git hash-object --stdin)"
     done > "$out/hashes.tsv"

@@ -126,6 +126,8 @@ expect "an unknown history bound is refused" 2 "" \
   AUDIT_SCANNERS=secrets AUDIT_HISTORY_SINCE=no-such-tag bash "$audit" full
 expect "an unknown base commit is refused" 2 "" \
   AUDIT_SCANNERS=secrets bash "$audit" pr no-such-commit
+expect "a list of open findings, which is no longer read, is refused" 2 "" \
+  AUDIT_SCANNERS=secrets AUDIT_PREVIOUS=README.md bash "$audit" full
 
 new_repo code
 cat > "$work/rules.yml" << 'EOF'
@@ -399,6 +401,17 @@ check_fingerprints() { # label, then what `published_fingerprints` should print 
   fi
 }
 finished=(PATH="$work/fake-bin:$PATH" AUDIT_SCANNERS=code FAKE_ERRORS="")
+
+# A match of several lines is the same code however its lines are indented.
+expect "a match of several lines is fingerprinted" 0 "" \
+  "${finished[@]}" FAKE_RESULTS="$(hit long.py 10 'eval(\n        text)')" bash "$audit" full
+before=$(published_fingerprints)
+expect "the same match with its lines indented otherwise is fingerprinted" 0 "" \
+  "${finished[@]}" FAKE_RESULTS="$(hit long.py 10 'eval(\n  text)')" bash "$audit" full
+if [ "$before" != "$(published_fingerprints)" ] || ! printf '%s' "$before" | grep -qE '=[0-9a-f]{40}_0 $'; then
+  echo "FAIL indenting the lines of a match changed its fingerprint: $before became $(published_fingerprints)"
+  failures=$((failures + 1))
+fi
 
 # A complete scan finds the same code at lines 10 and 20: the first and the second match.
 expect "a complete scan numbers two matches of the same code" 0 "" \
