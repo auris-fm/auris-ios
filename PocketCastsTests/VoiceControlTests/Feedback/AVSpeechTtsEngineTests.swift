@@ -37,6 +37,21 @@ private final class StubSpeechSynthesizer: SpeechSynthesizing {
                           with: AVSpeechSynthesizer(), with: utterance)
     }
 
+    func deliverDidStart(_ utterance: AVSpeechUtterance) {
+        delegate?.perform(#selector(AVSpeechSynthesizerDelegate.speechSynthesizer(_:didStart:)),
+                          with: AVSpeechSynthesizer(), with: utterance)
+    }
+
+    func deliverWillSpeak(_ utterance: AVSpeechUtterance) {
+        // The delegate method takes a struct NSRange, which perform(with:)
+        // cannot pass — invoke it through its C function pointer instead.
+        guard let obj = delegate as? NSObject else { return }
+        let sel = #selector(AVSpeechSynthesizerDelegate.speechSynthesizer(_:willSpeakRangeOfSpeechString:utterance:))
+        typealias Fn = @convention(c) (AnyObject, Selector, AVSpeechSynthesizer, NSRange, AVSpeechUtterance) -> Void
+        let fn = unsafeBitCast(obj.method(for: sel), to: Fn.self)
+        fn(obj, sel, AVSpeechSynthesizer(), NSRange(location: 0, length: min(5, (utterance.speechString as NSString).length)), utterance)
+    }
+
 }
 
 final class AVSpeechTtsEngineTests: XCTestCase {
@@ -93,7 +108,7 @@ final class AVSpeechTtsEngineTests: XCTestCase {
     /// must complete even when the synthesizer never calls back.
     func test_speak_completesEvenWhenTheSynthesizerNeverCallsBack() async {
         let synthesizer = StubSpeechSynthesizer()
-        let engine = AVSpeechTtsEngine(synthesizer: synthesizer)
+        let engine = AVSpeechTtsEngine(synthesizer: synthesizer, silenceTimeout: 0.2)
         await engine.speak(text: "Hello", language: "en-US")
         XCTAssertEqual(synthesizer.spoken.count, 1, "the utterance was enqueued")
     }
@@ -162,5 +177,40 @@ final class AVSpeechTtsEngineTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 50_000_000)
         engine.cancel()
         await speaking.value
+    }
+
+    /// A long utterance that IS speaking keeps sending progress callbacks.
+    /// The fallback timer covers silence, not duration, so it must never end a
+    /// speak that is still making progress.
+    func test_speak_longUtteranceWithSteadyProgressIsNotEndedByTheFallback() async {
+        let synthesizer = StubSpeechSynthesizer()
+        let engine = AVSpeechTtsEngine(synthesizer: synthesizer, silenceTimeout: 0.3)
+        // Progress every 0.1 s for a full second — three silence windows worth.
+        synthesizer.onSpeak = { stub, utterance in
+            stub.deliverDidStart(utterance)
+            for i in 0..<10 {
+                DispatchQueue.global().asyncAfter(deadline: .now() + Double(i + 1) * 0.1) {
+                    stub.deliverWillSpeak(utterance)
+                }
+            }
+        }
+        let lock = NSLock()
+        var finished = false
+        let task = Task {
+            await engine.speak(text: String(repeating: "word ", count: 200), language: "en-US")
+            lock.lock()
+            finished = true
+            lock.unlock()
+        }
+        // Give any (wrong) duration-based cutoff ample time to fire.
+        try? await Task.sleep(nanoseconds: 700_000_000)
+        lock.lock()
+        let done = finished
+        lock.unlock()
+        XCTAssertFalse(done,
+                       "speak must not end while the synthesizer is still reporting progress")
+        let utterance = synthesizer.spoken[0]
+        synthesizer.deliverDidFinish(utterance)
+        await task.value
     }
 }

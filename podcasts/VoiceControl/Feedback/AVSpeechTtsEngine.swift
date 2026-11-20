@@ -17,22 +17,25 @@ final class SystemSpeechSynthesizer: AVSpeechSynthesizer, SpeechSynthesizing {}
 
 class AVSpeechTtsEngine: NSObject, TtsEngineProtocol {
     private let synthesizer: SpeechSynthesizing
-    /// How long `speak` waits for a delegate callback before resuming anyway.
-    /// A synthesizer without a usable audio route can silently never start an
-    /// utterance, and without this the waiter hangs forever.
-    private let callbackTimeout: TimeInterval
+    /// How long `speak` waits for the synthesizer to go silent — no start, no
+    /// speech-progress, no finish — before resuming anyway. A synthesizer
+    /// without a usable audio route never starts an utterance at all, and
+    /// without this the waiter hangs forever. A long utterance that IS speaking
+    /// keeps resetting the window, so it is never cut off mid-sentence.
+    private let silenceTimeout: TimeInterval
     private var continuation: CheckedContinuation<Void, Never>?
     /// The utterance the stored continuation waits on. Callbacks for older
     /// utterances must not resume it: after a cancel-then-speak, a late
     /// `didCancel` for the old utterance arrives while the new utterance's
     /// continuation is already stored.
     private var awaitedUtterance: AVSpeechUtterance?
+    private var fallbackTask: Task<Void, Never>?
     private let stateLock = NSLock()
 
     init(synthesizer: SpeechSynthesizing = SystemSpeechSynthesizer(),
-         callbackTimeout: TimeInterval = 10) {
+         silenceTimeout: TimeInterval = 10) {
         self.synthesizer = synthesizer
-        self.callbackTimeout = callbackTimeout
+        self.silenceTimeout = silenceTimeout
         super.init()
         self.synthesizer.delegate = self
     }
@@ -83,6 +86,8 @@ class AVSpeechTtsEngine: NSObject, TtsEngineProtocol {
         let cont = continuation
         continuation = nil
         awaitedUtterance = nil
+        fallbackTask?.cancel()
+        fallbackTask = nil
         stateLock.unlock()
         FileLog.shared.addMessage("[VoicePipeline] TTS speak resumed (\(reason))")
         cont?.resume()
@@ -101,11 +106,23 @@ class AVSpeechTtsEngine: NSObject, TtsEngineProtocol {
         stateLock.unlock()
     }
 
+    /// Arms (or rearms) the silence timer for `utterance`. Every sign of
+    /// life from the synthesizer — start, speech progress — calls this, so the
+    /// timer fires only when the synthesizer has gone quiet without finishing.
     private func scheduleFallbackResume(for utterance: AVSpeechUtterance) {
-        Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64((self?.callbackTimeout ?? 10) * 1_000_000_000))
-            self?.resumeIfCurrent(utterance, reason: "callback timeout")
+        stateLock.lock()
+        guard utterance === awaitedUtterance else {
+            stateLock.unlock()
+            return
         }
+        fallbackTask?.cancel()
+        let timeout = silenceTimeout
+        fallbackTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            self?.resumeIfCurrent(utterance, reason: "silence timeout")
+        }
+        stateLock.unlock()
     }
 
     // MARK: - Voice Selection
@@ -125,5 +142,13 @@ extension AVSpeechTtsEngine: AVSpeechSynthesizerDelegate {
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
         resumeIfCurrent(utterance, reason: "didCancel")
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
+        scheduleFallbackResume(for: utterance)
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, willSpeakRangeOfSpeechString characterRange: NSRange, utterance: AVSpeechUtterance) {
+        scheduleFallbackResume(for: utterance)
     }
 }
