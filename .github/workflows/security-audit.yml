@@ -114,8 +114,6 @@ jobs:
     permissions:
       contents: read
       security-events: read
-    outputs:
-      unverified: ${{ steps.audit.outputs.unverified }}
     steps:
       - name: Checkout with full history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -144,31 +142,38 @@ jobs:
       # An upload replaces a scanner's previous results, and an alert that is no longer
       # reported closes as fixed. gitleaks and zizmor either finish or fail the scan, so
       # their silence means something. semgrep can finish having given up on a file, and
-      # its silence about that file means nothing. So the script is told which semgrep
-      # alerts are open now, and reports how many of them this run could not have confirmed:
-      # every one in a file it did not finish, or from a rule that failed on that file. A
-      # result at the same place does not confirm an alert: it may be a different finding,
-      # which GitHub can tell and this list cannot. A complete scan, and one whose gaps
-      # touch no open alert, publish as usual.
-      - name: List the code alerts that are open
+      # its silence about that file means nothing. So the script is handed the code results
+      # the last run published, and adds to this run's results each of them that sits in a
+      # file it did not finish (or comes from a rule that failed there) and that it does
+      # not report again itself. What is then uploaded replaces the last results without
+      # dropping anything the scan could not check.
+      #
+      # A result kept this way stays until a run finishes its file. If its finding was fixed
+      # in a file semgrep never finishes, dismiss the alert in the Security tab.
+      - name: Fetch the code results the last run published
         env:
           GH_TOKEN: ${{ github.token }}
-          OPEN: ${{ runner.temp }}/security-audit-open.tsv
+          PREVIOUS: ${{ runner.temp }}/security-audit-previous.sarif
         run: |
           set -o pipefail
-          # `path<TAB>rule` for each open semgrep alert on this branch.
-          if ! gh api --paginate \
-            "repos/$GITHUB_REPOSITORY/code-scanning/alerts?state=open&ref=$GITHUB_REF&per_page=100" \
-            --jq '.[] | select(.most_recent_instance.category == "semgrep")
-                  | [.most_recent_instance.location.path, .rule.id] | @tsv' > "$OPEN" 2> "$RUNNER_TEMP/api.err"; then
-            # Before the first upload there is no analysis, and so no alert to lose.
+          # The newest semgrep analysis of this branch, which is what its open alerts rest on.
+          if ! id=$(gh api \
+            "repos/$GITHUB_REPOSITORY/code-scanning/analyses?ref=$GITHUB_REF&tool_name=Semgrep%20OSS&per_page=100" \
+            --jq '[.[] | select(.category == "semgrep")][0].id // empty' 2> "$RUNNER_TEMP/api.err"); then
+            # Before the first upload there is no analysis, and so no result to lose.
             if ! grep -q "no analysis found" "$RUNNER_TEMP/api.err"; then
               cat "$RUNNER_TEMP/api.err"
               exit 1
             fi
-            : > "$OPEN"
+            id=""
           fi
-          echo "$(wc -l < "$OPEN") open semgrep alerts"
+          if [ -n "$id" ]; then
+            gh api "repos/$GITHUB_REPOSITORY/code-scanning/analyses/$id" \
+              -H "Accept: application/sarif+json" > "$PREVIOUS"
+          else
+            echo '{"version":"2.1.0","runs":[]}' > "$PREVIOUS"
+          fi
+          echo "$(jq '[.runs[].results[]?] | length' "$PREVIOUS") code results in the last published analysis"
 
       - name: Audit what Auris changed
         id: audit
@@ -180,7 +185,7 @@ jobs:
           AUDIT_QUIET: "true"
           AUDIT_HISTORY_SINCE: ${{ steps.upstream.outputs.base }}
           AUDIT_CODE_TARGETS: ${{ runner.temp }}/security-audit-scope.txt
-          AUDIT_PREVIOUS: ${{ runner.temp }}/security-audit-open.tsv
+          AUDIT_PREVIOUS_SARIF: ${{ runner.temp }}/security-audit-previous.sarif
         run: .github/scripts/security-audit.sh full
 
       # The results cross to the publishing job as an encrypted file. Nothing between two
@@ -204,8 +209,8 @@ jobs:
           mkdir handoff
           for tool in gitleaks semgrep zizmor; do
             jq -c '
-              ([.runs[].results[].ruleId] | unique) as $used
-              | .runs[].tool.driver.rules |= map(select(.id as $id | $used | index($id)))
+              ([(.runs[].results // [])[].ruleId] | unique) as $used
+              | .runs[].tool.driver.rules |= ((. // []) | map(select(.id as $id | $used | index($id))))
             ' "$tool.sarif" > "handoff/$tool.sarif"
           done
           tar -C handoff -cf - . | gzip -9 \
@@ -255,12 +260,9 @@ jobs:
           sarif_file: ${{ runner.temp }}/security-audit/gitleaks.sarif
           category: gitleaks
 
-      # Skipped when it would close an alert on no evidence: when an alert that is open now
-      # sits in a file semgrep did not finish this time. The previous results then stay as
-      # they are, and the last step fails the run so that someone looks. The scan job made
-      # the count, with the script the self-test covers.
+      # These include the results of the last run that this one could not check: see the
+      # scan job. So this upload closes an alert only where the scan looked and found nothing.
       - name: Upload the code findings to the Security tab
-        if: needs.weekly-scan.outputs.unverified == '0'
         uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           sarif_file: ${{ runner.temp }}/security-audit/semgrep.sarif
@@ -271,11 +273,3 @@ jobs:
         with:
           sarif_file: ${{ runner.temp }}/security-audit/zizmor.sarif
           category: zizmor
-
-      - name: Fail when the code findings were held back
-        if: needs.weekly-scan.outputs.unverified != '0'
-        env:
-          UNVERIFIED: ${{ needs.weekly-scan.outputs.unverified }}
-        run: |
-          echo "::error::semgrep did not finish a file or rule behind $UNVERIFIED open alert(s). Its previous results are kept and this run's code findings are not published. Fix what stops the scan, or dismiss those alerts, and run again."
-          exit 1

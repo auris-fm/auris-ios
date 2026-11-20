@@ -25,17 +25,16 @@
 #                          It is removed from the environment before any scanner starts and
 #                          handed to zizmor alone. Run this from a job whose token is read-only.
 #   AUDIT_CODE_RULES       semgrep configuration (default: the registry's `p/default`)
-#   AUDIT_PREVIOUS         `full` only: the semgrep findings the last published run left open,
-#                          one `path<TAB>rule` per line
+#   AUDIT_PREVIOUS_SARIF   `full` only: the semgrep results the last run published, as SARIF
 #   AUDIT_PREVIOUS_REPORT  `full` only: the same, given as the last report this script wrote
 #
 # A `full` run that is told what the last run reported checks each of those findings against
 # what semgrep did not finish this time. One that sits in an unfinished file has not been
-# shown to be fixed, unless this run reports that very finding again and there is no doubt
-# that it is the same one. It goes to `unverified.tsv` and into the report under "Not
-# verified this run", for the caller to keep instead of dropping. Only a finding from a
-# report can be recognised again, and only when what the report says singles it out; one
-# from an AUDIT_PREVIOUS list is always kept. See `unverified_code_findings`.
+# shown to be fixed, unless this run reports that very finding again. It goes to
+# `unverified.tsv` and into the report under "Not verified this run", for the caller to keep
+# instead of dropping. Given the last results as SARIF the script keeps them itself: it adds
+# them to `semgrep.sarif` in AUDIT_OUT, so that publishing that file in place of the last
+# one drops no finding the scan could not check. See `unverified_code_findings`.
 #
 # Exit status: 0 nothing blocks, 1 a blocking finding in a `pr` run, 2 the audit could not be
 # completed. A scanner that fails, a workflow or lockfile that cannot be read and a bad
@@ -251,17 +250,19 @@ scan_code() {
         targets=$((targets + 1))
       fi
     done < "$AUDIT_CODE_TARGETS"
-    # With no target semgrep scans the whole repository, which is the opposite of the scope.
-    if [ "$targets" -eq 0 ]; then
-      empty_sarif "Semgrep OSS" "$report"
-      : > "$out/code.tsv"
-      return
-    fi
   else
     set -- "$@" .
   fi
-  # semgrep prints each finding on stdout as well as writing the report; errors go to stderr.
-  semgrep scan "$@" > /dev/null || die "semgrep failed"
+  if [ -n "${AUDIT_CODE_TARGETS:-}" ] && [ "$mode" = full ] && [ "$targets" -eq 0 ]; then
+    # With no target semgrep scans the whole repository, which is the opposite of the scope.
+    # So it is not run, and that is a scan which did not happen, not one which found
+    # nothing: it is recorded as a gap with no path, which keeps every previous finding.
+    empty_sarif "Semgrep OSS" "$report"
+    echo '{"results":[],"errors":[{"type":"No file of the scope exists"}]}' > "$errors"
+  else
+    # semgrep prints each finding on stdout as well as writing the report; errors go to stderr.
+    semgrep scan "$@" > /dev/null || die "semgrep failed"
+  fi
   sarif_rows "$report" | number_repeats > "$out/code.tsv"
   # semgrep exits 0 when it could not parse a file or gave up on it, and its `--strict` would
   # fail every run here: the registry rules themselves produce such warnings on files this
@@ -288,72 +289,134 @@ scan_code() {
   if [ "$mode" = full ]; then unverified_code_findings "$report"; fi
 }
 
-# What the last published run reported from semgrep, as
-# `path<TAB>rule<TAB>line<TAB>Markdown line<TAB>message`. A report gives the line, unless
-# the finding had none, and the message. A list gives neither, and both stay empty.
-previous_code_findings() {
-  if [ -n "${AUDIT_PREVIOUS:-}" ]; then
-    [ -r "$AUDIT_PREVIOUS" ] || die "AUDIT_PREVIOUS is not readable: $AUDIT_PREVIOUS"
-    awk -F'\t' 'BEGIN { OFS = "\t" } NF >= 2 { print $1, $2, "", "- `" $2 "` at `" $1 ":?`", "" }' \
-      "$AUDIT_PREVIOUS"
-  elif [ -n "${AUDIT_PREVIOUS_REPORT:-}" ]; then
-    [ -r "$AUDIT_PREVIOUS_REPORT" ] ||
-      die "AUDIT_PREVIOUS_REPORT is not readable: $AUDIT_PREVIOUS_REPORT"
-    # The two sections of this script's own report that hold semgrep findings. A finding is
-    # read back whether or not its place ends in a line, so that one without a line is
-    # carried and not lost here. An issue edited on the web comes back with CRLF line ends.
-    # The report lists a line once however many findings share it, hence `sort -u`.
-    awk '
-      { sub(/\r$/, ""); gsub(/\t/, " ") }
-      /^### / { inside = ($0 ~ /^### (Risky code patterns|Not verified this run) \(semgrep\)/); next }
-      inside && /^- `[^`]+` at `[^`]+`/ {
-        rest = $0; sub(/^- `/, "", rest)
-        rule = rest; sub(/`.*/, "", rule)
-        sub(/^[^`]+` at `/, "", rest)
-        place = rest; sub(/`.*/, "", place)
-        message = substr(rest, length(place) + 2); sub(/^: /, "", message)
-        path = place; line = ""
-        if (place ~ /:([0-9]+|\?)$/) {
-          line = place; sub(/^.*:/, "", line); sub(/:[^:]*$/, "", path)
-          if (line == "?") line = ""
-        }
-        print path "\t" rule "\t" line "\t" $0 "\t" message
-      }' "$AUDIT_PREVIOUS_REPORT" | sort -u
-  fi
+# What the last report listed from semgrep, as
+# `path<TAB>rule<TAB>line<TAB>Markdown line<TAB>message`. The line is empty for a finding
+# that had none.
+previous_report_findings() {
+  [ -r "$AUDIT_PREVIOUS_REPORT" ] || die "AUDIT_PREVIOUS_REPORT is not readable: $AUDIT_PREVIOUS_REPORT"
+  # The two sections of this script's own report that hold semgrep findings. A finding is
+  # read back whether or not its place ends in a line, so that one without a line is
+  # carried and not lost here. An issue edited on the web comes back with CRLF line ends.
+  # The report lists a line once however many findings share it, hence `sort -u`.
+  awk '
+    { sub(/\r$/, ""); gsub(/\t/, " ") }
+    /^### / { inside = ($0 ~ /^### (Risky code patterns|Not verified this run) \(semgrep\)/); next }
+    inside && /^- `[^`]+` at `[^`]+`/ {
+      rest = $0; sub(/^- `/, "", rest)
+      rule = rest; sub(/`.*/, "", rule)
+      sub(/^[^`]+` at `/, "", rest)
+      place = rest; sub(/`.*/, "", place)
+      message = substr(rest, length(place) + 2); sub(/^: /, "", message)
+      path = place; line = ""
+      if (place ~ /:([0-9]+|\?)$/) {
+        line = place; sub(/^.*:/, "", line); sub(/:[^:]*$/, "", path)
+        if (line == "?") line = ""
+      }
+      print path "\t" rule "\t" line "\t" $0 "\t" message
+    }' "$AUDIT_PREVIOUS_REPORT" | sort -u
+}
+
+# The previous results that sit where semgrep did not finish and that this run does not
+# report again, as a SARIF file of their own. "Again" is the same result: the same rule,
+# file, region and message. Two such results are one to whoever reads the file, so leaving
+# the previous one out loses nothing; any other previous result in a gap is kept.
+previous_results_to_keep() {
+  [ -r "$AUDIT_PREVIOUS_SARIF" ] || die "AUDIT_PREVIOUS_SARIF is not readable: $AUDIT_PREVIOUS_SARIF"
+  # An empty or cut-off file would read as "the last run reported nothing".
+  jq -e '.runs | type == "array"' "$AUDIT_PREVIOUS_SARIF" > /dev/null 2>&1 ||
+    die "AUDIT_PREVIOUS_SARIF is not a SARIF file: $AUDIT_PREVIOUS_SARIF"
+  jq --slurpfile previous "$AUDIT_PREVIOUS_SARIF" --rawfile gaps "$out/unscanned.tsv" '
+    def place: .locations[0].physicalLocation // {};
+    def identity:
+      [ .ruleId, (place | .artifactLocation.uri, (.region // {} | .startLine, .startColumn, .endLine, .endColumn)),
+        .message.text ] | tojson;
+    [ $gaps | split("\n")[] | select(. != "") | split("\t") ] as $gap
+    | any($gap[]; .[0] == "?") as $anywhere
+    | ([ .runs[].results[] | { key: identity, value: true } ] | from_entries) as $reported
+    | [ $previous[0].runs[]?
+        | (.tool.driver.rules // []) as $rules
+        | (.results // [])[]
+        | (place.artifactLocation.uri // "?") as $path
+        | .ruleId as $rule
+        | select($anywhere or any($gap[]; .[0] == $path and (.[1] == "*" or .[1] == $rule)))
+        | select($reported[identity] | not)
+        # Only what a result is made of. What GitHub adds when it stores one (the alert it
+        # belongs to, positions in lists of the file it was stored in) does not carry over.
+        | { key: identity,
+            rule: (first($rules[] | select(.id == $rule)) // null),
+            result: ( { ruleId: $rule, message: { text: (.message.text // "") },
+                        locations: [ { physicalLocation:
+                          ( { artifactLocation: { uri: $path } }
+                            + (if place.region then { region: place.region } else {} end) ) } ] }
+                      + (if .level then { level: .level } else {} end) ) } ]
+      | unique_by(.key) as $keep
+    | { version: "2.1.0",
+        runs: [ { tool: { driver: { name: "Semgrep OSS",
+                                    rules: ([ $keep[].rule | select(. != null) ] | unique_by(.id)) } },
+                  results: [ $keep[].result ] } ] }
+  ' "$1"
 }
 
 # The previous findings this run can neither confirm nor rule out: in a file semgrep did not
 # finish (or from a rule that failed on it), and not reported again. A gap with no path, `?`,
-# could be anywhere, so it covers every previous finding.
+# could be anywhere, so it covers every previous finding. They go to `unverified.tsv`, as
+# `path<TAB>rule<TAB>line<TAB>Markdown line<TAB>message`.
 #
 # "Reported again" has to mean that finding and no other, or a result would let a different
-# finding be dropped unchecked. So a previous finding is confirmed only when it came from a
-# report, which gives its line and message, its line is known, and exactly one result of
-# this run has its file, rule, line and message. Anything less leaves it unverified:
+# finding be dropped unchecked.
 #
-#   - a finding from a list of `path<TAB>rule`: a result at the same place may be another
-#     finding, and the list does not say enough to tell;
+# From SARIF a previous result is complete, and it is reported again when this run has the
+# identical result. Every other one in a gap is added to this run's SARIF file, so that the
+# file can replace the last one: nothing the scan could not check is dropped from it. A
+# result kept this way stays until a run finishes its file, at the place it had when it was
+# last found.
+#
+# From a report a previous finding is a line of text: its rule, file, line and message. It
+# is confirmed only when its line is known and exactly one result of this run has all four.
+# Anything less leaves it unverified:
+#
 #   - a finding or a result without a line;
 #   - two results that fit it: the report shows them as one line, so there is no telling
 #     how many findings that line stood for;
 #   - a finding whose line has moved, until its file is scanned to the end.
 unverified_code_findings() {
-  previous_code_findings > "$out/previous.tsv"
-  # `@tsv` doubles a backslash; the report, where a previous message comes from, shows one.
-  jq -r "$jq_message"'
-    .runs[].results[]
-    | (.locations[0].physicalLocation // {}) as $at
-    | [($at.artifactLocation.uri // "?"), .ruleId, ($at.region.startLine // ""), message] | @tsv' "$1" |
-    sed 's/\\\\/\\/g' > "$out/current.tsv"
-  awk -F'\t' '
-    stage == "gaps" { if ($1 == "?") anywhere = 1; gap[$1 FS $2] = 1; next }
-    stage == "results" { results[$1 FS $2 FS $3 FS $4]++; next }
-    anywhere || (($1 FS "*") in gap) || (($1 FS $2) in gap) {
-      if ($3 != "" && results[$1 FS $2 FS $3 FS $5] == 1) next
-      print
-    }
-  ' stage=gaps "$out/unscanned.tsv" stage=results "$out/current.tsv" \
-    stage=previous "$out/previous.tsv" > "$out/unverified.tsv"
+  local report=$1
+  if [ -n "${AUDIT_PREVIOUS_SARIF:-}" ]; then
+    previous_results_to_keep "$report" > "$out/kept.sarif"
+    # `@tsv` doubles a backslash; the report shows one.
+    jq -r "$jq_message"'
+      .runs[].results[]
+      | (.locations[0].physicalLocation // {}) as $at
+      | ($at.artifactLocation.uri // "?") as $file
+      | [ $file, .ruleId, ($at.region.startLine // ""),
+          "- `\(.ruleId)` at `\($file):\($at.region.startLine // "?")`: \(message)", message ] | @tsv
+    ' "$out/kept.sarif" | sed 's/\\\\/\\/g' > "$out/unverified.tsv"
+    jq --slurpfile kept "$out/kept.sarif" '
+      $kept[0].runs[0] as $kept
+      | [ .runs[0].tool.driver.rules[]?.id ] as $known
+      | .runs[0].tool.driver.rules =
+          (.runs[0].tool.driver.rules // []) + [ $kept.tool.driver.rules[] | select(.id as $id | all($known[]; . != $id)) ]
+      | .runs[0].results = (.runs[0].results // []) + $kept.results
+    ' "$report" > "$report.merged"
+    mv "$report.merged" "$report"
+  elif [ -n "${AUDIT_PREVIOUS_REPORT:-}" ]; then
+    previous_report_findings > "$out/previous.tsv"
+    # `@tsv` doubles a backslash; the report, where a previous message comes from, shows one.
+    jq -r "$jq_message"'
+      .runs[].results[]
+      | (.locations[0].physicalLocation // {}) as $at
+      | [($at.artifactLocation.uri // "?"), .ruleId, ($at.region.startLine // ""), message] | @tsv' "$report" |
+      sed 's/\\\\/\\/g' > "$out/current.tsv"
+    awk -F'\t' '
+      stage == "gaps" { if ($1 == "?") anywhere = 1; gap[$1 FS $2] = 1; next }
+      stage == "results" { results[$1 FS $2 FS $3 FS $4]++; next }
+      anywhere || (($1 FS "*") in gap) || (($1 FS $2) in gap) {
+        if ($3 != "" && results[$1 FS $2 FS $3 FS $5] == 1) next
+        print
+      }
+    ' stage=gaps "$out/unscanned.tsv" stage=results "$out/current.tsv" \
+      stage=previous "$out/previous.tsv" > "$out/unverified.tsv"
+  fi
 }
 
 zizmor_rows() {
@@ -446,7 +509,7 @@ if enabled code; then
     {
       echo "### Not verified this run (semgrep): $unverified"
       echo
-      echo "The last run reported these, in a file or from a rule that semgrep did not finish this time, and this run does not single each of them out again: exactly one result, at the same line, with the same message. They stay listed until a run finishes that file."
+      echo "The last run reported these, in a file or from a rule that semgrep did not finish this time, and this run does not report exactly them again. They stay listed until a run reports them again or finishes that file."
       echo
       cut -f4 "$out/unverified.tsv" | sort
       echo
