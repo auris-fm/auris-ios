@@ -619,8 +619,13 @@ def check_package_coverage(report: dict, counts: dict) -> list:
             + ". A package test failure is a product change, not an "
             "environment one; fix the macro or the test."
         )
+    # The same reader the plan's skips go through, so a skip is caught however
+    # the report names it — identifier, or name alone when the record carries
+    # no identifier.
     skipped = sorted(
-        walk_test_cases_skipped(report)
+        test_id
+        for target in PACKAGE_REQUIRED_TARGETS
+        for test_id in runtime_skips(report).get(target, set())
     )
     if skipped:
         failures.append(
@@ -633,14 +638,19 @@ def check_package_coverage(report: dict, counts: dict) -> list:
     return failures
 
 
-def walk_test_cases_skipped(report: dict) -> set:
-    """Identifiers of test cases the host bundle marks Skipped."""
-    skipped = set()
-    for node in walk_test_cases(report):
-        identifier = node.get("nodeIdentifier", "")
-        if node.get("result") == "Skipped" and "/" in identifier:
-            skipped.add(identifier)
-    return skipped
+def package_bundle_failures(package_bundle) -> list:
+    """The step must hand over a host bundle when host tests are required.
+
+    An absent bundle is not an empty run the floors happen to catch: it means
+    the host command never wrote one, which is its own failure to name.
+    """
+    if not PACKAGE_REQUIRED_TARGETS or package_bundle:
+        return []
+    return [
+        "package tests are required but no package result bundle was given; "
+        "the step must run xcodebuild test for the ModulesMacros package on "
+        "the macOS host and pass its -resultBundlePath here"
+    ]
 
 
 def main() -> int:
@@ -686,28 +696,22 @@ def main() -> int:
         counts, Path(args.plan), skips, reasons,
         signed=SIGNED_HOST,
     )
-    if PACKAGE_REQUIRED_TARGETS:
-        if not args.package_bundle:
-            failures.append(
-                "package tests are required but no package result bundle was "
-                "given; the step must run swift test with --xcresult-output and "
-                "pass it here"
-            )
-        else:
-            try:
+    failures += package_bundle_failures(args.package_bundle)
+    if args.package_bundle:
+        try:
                 package_report = read_report(args.package_bundle)
                 package_counts = count_tests(package_report)
-            except subprocess.CalledProcessError as error:
-                print(f"cannot read the package result bundle: {error.stderr.strip()}", file=sys.stderr)
-                package_counts = {}
-                package_report = {}
-            except json.JSONDecodeError as error:
-                print(f"package result bundle report is not JSON: {error}", file=sys.stderr)
-                package_counts = {}
-                package_report = {}
-            for target in sorted(PACKAGE_REQUIRED_TARGETS):
-                print(f"{target} (host runner): {package_counts.get(target, 0)} tests executed")
-            failures += check_package_coverage(package_report, package_counts)
+        except subprocess.CalledProcessError as error:
+            print(f"cannot read the package result bundle: {error.stderr.strip()}", file=sys.stderr)
+            package_counts = {}
+            package_report = {}
+        except json.JSONDecodeError as error:
+            print(f"package result bundle report is not JSON: {error}", file=sys.stderr)
+            package_counts = {}
+            package_report = {}
+        for target in sorted(PACKAGE_REQUIRED_TARGETS):
+            print(f"{target} (host runner): {package_counts.get(target, 0)} tests executed")
+        failures += check_package_coverage(package_report, package_counts)
     # Failures come from both places. The log names the tests that reported a
     # failure; the bundle also marks the ones that were killed at their execution
     # time allowance, which print no result line and so appear in no log list.

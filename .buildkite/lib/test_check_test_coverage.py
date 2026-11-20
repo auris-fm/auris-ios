@@ -215,6 +215,32 @@ def main():
         print(f"        -> {f}")
     results.append(ok)
 
+    # A skip whose record carries only a name, no identifier: the same reader
+    # the plan's skips use must catch it, not an identifier-shaped filter.
+    nameskip_host = synthetic_host()
+    nameskip = nameskip_host["testNodes"][0]["children"][0]["children"][-1]
+    nameskip["result"] = "Skipped"
+    del nameskip["nodeIdentifier"]
+    nameskip["name"] = "GRDBRecordMacroTests/testTwentyTwo()"
+    host_failures = check.check_package_coverage(nameskip_host, check.count_tests(nameskip_host))
+    ok = any("host-runner package tests skipped" in f for f in host_failures)
+    print(f"{'PASS' if ok else 'FAIL'}  a name-only skip in the host bundle fails")
+    for f in host_failures:
+        print(f"        -> {f}")
+    results.append(ok)
+
+    # The bundle omitted entirely: the guard must name its absence by calling
+    # the same helper the CI step calls, not by searching its own source.
+    absent = check.package_bundle_failures(None)
+    ok = any("no package result bundle" in f for f in absent) and "macOS" in absent[0]
+    print(f"{'PASS' if ok else 'FAIL'}  missing package bundle is rejected by the guard itself")
+    for f in absent:
+        print(f"        -> {f}")
+    results.append(ok)
+    ok = not check.package_bundle_failures("/tmp/whatever.xcresult")
+    print(f"{'PASS' if ok else 'FAIL'}  a given package bundle passes the presence check")
+    results.append(ok)
+
     failed_host = synthetic_host()
     failed_host["testNodes"][0]["children"][0]["children"][0]["result"] = "Failed"
     host_failures = check.check_package_coverage(failed_host, check.count_tests(failed_host))
@@ -222,13 +248,6 @@ def main():
     print(f"{'PASS' if ok else 'FAIL'}  a failing macro test fails the guard")
     for f in host_failures:
         print(f"        -> {f}")
-    results.append(ok)
-
-    # A missing package bundle at all: the step must name the absence rather
-    # than pass on it. The wording lives in main(); assert it is really there.
-    source = (HERE / "check-test-coverage.py").read_text()
-    ok = "no package result bundle was" in source
-    print(f"{'PASS' if ok else 'FAIL'}  missing package bundle is named by the step")
     results.append(ok)
 
     # Listing the tests that legitimately skip must not let a broken build skip
