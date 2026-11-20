@@ -1,0 +1,244 @@
+import AVFoundation
+import XCTest
+
+@testable import PocketCastsUtils
+@testable import podcasts
+
+/// Preparation when the Pocket Casts transcript-sync reference is missing but
+/// the Auris cloud reference exists. The two references are independent: a
+/// missing Pocket Casts object must not disable the cloud alignment path.
+///
+/// Real audio, real fingerprinters, real drift filter — only the two reference
+/// hosts are stubbed. The Auris reference is built from the episode's own audio
+/// with the Go-scheme `CloudFingerprinter`, so a correct cloud-only pass maps
+/// every anchor onto its own timestamp.
+@MainActor
+final class CloudReferenceDecouplingTests: XCTestCase {
+
+    /// Long enough for the drift filter to bootstrap (three consecutive
+    /// in-trend candidates) and commit anchors across the file.
+    private static let episodeDuration: Double = 45
+
+    private let featureFlags = FeatureFlagMock()
+    private var manager: FingerprintTimingManager!
+    private var fixture: FingerprintEpisodeFixture!
+    private var currentEpisode: CurrentEpisodeOverride!
+    private var defaultsSuite: String!
+    private var previousBaseURL: Any?
+    private var previousDirectUpstream: Any?
+    private var cloudPayload: Data!
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        featureFlags.set(.syncedTranscripts, value: true)
+
+        // Point the production config reader at the stubbed gateway. Saved and
+        // restored around each test so no other suite sees the override.
+        defaultsSuite = "cloud_decoupling_\(UUID().uuidString)"
+        previousBaseURL = UserDefaults.standard.object(forKey: CloudConfig.baseURLKey)
+        previousDirectUpstream = UserDefaults.standard.object(forKey: CloudConfig.directUpstreamKey)
+        UserDefaults.standard.set("https://gateway.cloud-decoupling.test", forKey: CloudConfig.baseURLKey)
+        UserDefaults.standard.set(false, forKey: CloudConfig.directUpstreamKey)
+
+        URLProtocol.registerClass(CloudRouteTestURLProtocol.self)
+        CloudRouteTestURLProtocol.reset()
+    }
+
+    override func tearDown() {
+        manager?.stop()
+        manager = nil
+        currentEpisode?.restore()
+        currentEpisode = nil
+        fixture?.removeFiles()
+        fixture = nil
+        cloudPayload = nil
+
+        CloudRouteTestURLProtocol.reset()
+        URLProtocol.unregisterClass(CloudRouteTestURLProtocol.self)
+
+        if let previousBaseURL {
+            UserDefaults.standard.set(previousBaseURL, forKey: CloudConfig.baseURLKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: CloudConfig.baseURLKey)
+        }
+        if let previousDirectUpstream {
+            UserDefaults.standard.set(previousDirectUpstream, forKey: CloudConfig.directUpstreamKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: CloudConfig.directUpstreamKey)
+        }
+        defaultsSuite = nil
+
+        featureFlags.reset()
+        super.tearDown()
+    }
+
+    // MARK: - Controls
+
+    /// The defect this suite exists for: Pocket Casts' object is missing (403)
+    /// and the Auris reference loads. Preparation must still map the episode
+    /// through the cloud matcher instead of ending `.unavailable`.
+    func testPreparationMapsThroughTheAurisReferenceWhenPocketCastsIsMissing() async throws {
+        try prepareFixture()
+        stubHosts(pocketCasts: .complete(status: 403, headers: [:], body: Data()))
+
+        manager.prepareForCurrentEpisode()
+        await waitForPass(manager)
+
+        guard case .active(let coverage) = manager.state else {
+            XCTFail("expected .active from the Auris reference alone, got \(manager.state)")
+            return
+        }
+        let entries = manager.debugMappingSnapshot()
+        XCTAssertEqual(coverage, entries.count)
+        XCTAssertGreaterThanOrEqual(entries.count, FingerprintConstants.minimumCoverageForActive)
+
+        // The reference was built from this exact audio with the Go scheme, so
+        // anchors map onto their own timestamps.
+        for entry in entries {
+            XCTAssertEqual(entry.referenceTime, entry.playbackTime, accuracy: 1.0)
+        }
+        let midpoint = Self.episodeDuration / 2
+        XCTAssertTrue(manager.isWithinMatchedContent(forPlaybackTime: midpoint))
+        XCTAssertEqual(try XCTUnwrap(manager.matchedReferenceTime(forPlaybackTime: midpoint)), midpoint, accuracy: 1.0)
+    }
+
+    /// Both references absent stays `.unavailable` — the fix must not invent
+    /// alignment out of nothing.
+    func testPreparationStaysUnavailableWhenBothReferencesAreMissing() async throws {
+        try prepareFixture()
+        stubHosts(pocketCasts: .complete(status: 403, headers: [:], body: Data()))
+        CloudRouteTestURLProtocol.requestHandler = { request in
+            if request.url?.host == "gateway.cloud-decoupling.test" {
+                return .complete(status: 404, headers: [:], body: Data())
+            }
+            return .complete(status: 403, headers: [:], body: Data())
+        }
+
+        manager.prepareForCurrentEpisode()
+
+        await waitUntil("preparation to report unavailable") { self.manager.state.analyticsName == "unavailable" }
+        XCTAssertTrue(manager.debugMappingSnapshot().isEmpty)
+    }
+
+    /// A later session that starts with the persisted Auris reference on disk
+    /// and Pocket Casts still missing reaches `.active` through the cloud
+    /// matcher — never through the Rust checkpoint matcher, which must stay
+    /// empty because the Auris payload uses the Go hash scheme.
+    func testPersistedAurisReferenceOnDiskPreparesWithoutAnyFetch() async throws {
+        try prepareFixture()
+        // First pass: fetch the Auris reference and let it persist.
+        stubHosts(pocketCasts: .complete(status: 403, headers: [:], body: Data()))
+        manager.prepareForCurrentEpisode()
+        await waitForPass(manager)
+        XCTAssertEqual(manager.state.analyticsName, "active")
+        manager.stop()
+        await waitUntil("the manager to return to idle") { self.manager.state.analyticsName == "idle" }
+
+        // Second session: a fresh manager, both hosts now fail hard. If the
+        // persisted Auris file is read, preparation still maps; if the code
+        // only knows the Pocket Casts path, this ends `.unavailable`.
+        let secondManager = FingerprintTimingManager()
+        defer { secondManager.stop() }
+        CloudRouteTestURLProtocol.requestHandler = { _ in
+            .complete(status: 500, headers: [:], body: Data())
+        }
+        secondManager.prepareForCurrentEpisode()
+        await waitForPass(secondManager)
+
+        guard case .active = secondManager.state else {
+            XCTFail("expected .active from the persisted Auris reference, got \(secondManager.state)")
+            return
+        }
+        let entries = secondManager.debugMappingSnapshot()
+        XCTAssertFalse(entries.isEmpty)
+        for entry in entries {
+            XCTAssertEqual(entry.referenceTime, entry.playbackTime, accuracy: 1.0)
+        }
+    }
+
+    /// The Pocket Casts sibling path stays Pocket Casts-owned: a cloud-built
+    /// pass must not write Go-scheme bytes where `loadReference` (and the
+    /// one-shot resolves) would parse them as a transcript-sync reference.
+    func testCloudBuiltPassLeavesThePocketCastsReferencePathUntouched() async throws {
+        try prepareFixture()
+        stubHosts(pocketCasts: .complete(status: 403, headers: [:], body: Data()))
+
+        manager.prepareForCurrentEpisode()
+        await waitForPass(manager)
+        XCTAssertEqual(manager.state.analyticsName, "active")
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: fixture.referenceURL.path),
+            "the cloud pass wrote into the Pocket Casts reference path"
+        )
+    }
+
+    // MARK: - Fixture
+
+    private func prepareFixture() throws {
+        let fixture = FingerprintEpisodeFixture(duration: Self.episodeDuration)
+        try fixture.writeAudio(seconds: Self.episodeDuration)
+        self.fixture = fixture
+        currentEpisode = CurrentEpisodeOverride(episode: fixture.episode)
+        manager = FingerprintTimingManager()
+        cloudPayload = try Self.makeCloudReference(forAudioAt: fixture.audioURL)
+    }
+
+    /// Serves the Auris reference from the stubbed gateway; the Pocket Casts
+    /// host answers with the given stub (403 = the object is missing).
+    private func stubHosts(pocketCasts: CloudRouteTestStub) {
+        let payload = cloudPayload!
+        CloudRouteTestURLProtocol.requestHandler = { request in
+            if request.url?.host == "gateway.cloud-decoupling.test" {
+                return .complete(status: 200, headers: ["Content-Type": "application/json"], body: payload)
+            }
+            return pocketCasts
+        }
+    }
+
+    /// Builds a `fingerprint-compact-v2` payload with Go-scheme hashes from the
+    /// episode's own audio — the same scheme the server's reference uses.
+    private static func makeCloudReference(forAudioAt url: URL) throws -> Data {
+        let file = try AVAudioFile(forReading: url, commonFormat: .pcmFormatFloat32, interleaved: false)
+        let format = file.processingFormat
+        let fingerprinter = CloudFingerprinter()
+        let chunkFrames = AVAudioFrameCount(format.sampleRate * 5)
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: chunkFrames) else {
+            throw NSError(domain: "CloudReferenceDecouplingTests", code: 1)
+        }
+        while file.framePosition < file.length {
+            try file.read(into: buffer, frameCount: chunkFrames)
+            if buffer.frameLength == 0 { break }
+            guard let channel = buffer.floatChannelData?[0] else { break }
+            let samples = Array(UnsafeBufferPointer(start: channel, count: Int(buffer.frameLength)))
+            fingerprinter.pushSamples(samples, channels: Int(format.channelCount), sampleRate: Int(format.sampleRate))
+        }
+        let windows = fingerprinter.finish()
+
+        var checkpoints: [String] = []
+        var previousSecond = 0
+        for window in windows {
+            // One checkpoint per second, matching the server's grid.
+            guard checkpoints.isEmpty || window.timestampSec > previousSecond else { continue }
+            var bytes = Data(capacity: window.hashes.count * 4)
+            for hash in window.hashes {
+                var littleEndian = hash.littleEndian
+                withUnsafeBytes(of: &littleEndian) { bytes.append(contentsOf: $0) }
+            }
+            let delta = window.timestampSec - previousSecond
+            checkpoints.append("[\(delta), \"\(bytes.base64EncodedString())\"]")
+            previousSecond = window.timestampSec
+        }
+        let json = """
+        {
+          "format": "fingerprint-compact-v2",
+          "total_duration": \(Double(file.length) / format.sampleRate),
+          "checkpoint_interval": 1,
+          "checkpoint_duration": 8,
+          "timestamp_quantum": 1,
+          "checkpoints": [\(checkpoints.joined(separator: ","))]
+        }
+        """
+        return Data(json.utf8)
+    }
+}
