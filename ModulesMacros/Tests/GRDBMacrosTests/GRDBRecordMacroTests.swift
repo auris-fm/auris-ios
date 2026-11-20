@@ -212,6 +212,60 @@ final class GRDBRecordNSObjectTests: XCTestCase {
         #endif
     }
 
+    // An optional Bool cannot be marked @objc, so @GRDBColumn is the opt-in
+    // that keeps such a property in the GRDB save and load.
+
+    func testNSObjectWithGRDBColumnAndNonObjcOptionalBool() throws {
+        #if canImport(GRDBMacrosPlugin)
+        assertMacroExpansion(
+            """
+            @GRDBRecord(table: "SJEpisode")
+            public class Episode: NSObject {
+                @objc public var id = 0 as Int64
+                @GRDBColumn("hasGeneratedTranscript")
+                public var hasGeneratedTranscript: Bool? = nil
+            }
+            """,
+            expandedSource: """
+            public class Episode: NSObject {
+                @objc public var id = 0 as Int64
+                public var hasGeneratedTranscript: Bool? = nil
+
+                public static let databaseTableName = "SJEpisode"
+
+                enum CodingKeys: String, CodingKey {
+                    case id
+                        case hasGeneratedTranscript = "hasGeneratedTranscript"
+                }
+
+                public required init(from decoder: Decoder) throws {
+                    super.init()
+                    let container = try decoder.container(keyedBy: CodingKeys.self)
+                    id = try container.decodeIfPresent(Int64.self, forKey: .id) ?? 0
+                        hasGeneratedTranscript = try container.decodeIfPresent(Bool.self, forKey: .hasGeneratedTranscript)
+                }
+
+                public func encode(to container: inout PersistenceContainer) {
+                    container["id"] = id
+                        container["hasGeneratedTranscript"] = hasGeneratedTranscript
+                }
+
+                public enum Columns {
+                    public static let id = Column(CodingKeys.id)
+                        public static let hasGeneratedTranscript = Column(CodingKeys.hasGeneratedTranscript)
+                }
+            }
+
+            extension Episode: FetchableRecord, PersistableRecord, TableRecord, Decodable {
+            }
+            """,
+            macros: testMacros
+        )
+        #else
+        throw XCTSkip("macros are only supported when running tests for the host platform")
+        #endif
+    }
+
     // MARK: - NSObject with let property (EpisodeFilter.filterDownloading pattern)
 
     func testNSObjectWithLetProperty() throws {

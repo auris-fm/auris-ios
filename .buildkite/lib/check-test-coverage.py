@@ -49,7 +49,7 @@ REQUIRED_TARGETS = [
 # result bundle, which the step passes to the guard alongside the plan bundle.
 PACKAGE_REQUIRED_TARGETS = {
     "GRDBMacrosTests": {
-        "minimum": 20,
+        "minimum": 21,
     },
 }
 
@@ -60,8 +60,8 @@ PACKAGE_REQUIRED_TARGETS = {
 MINIMUM_TESTS = {
     "PocketCastsTests": 2000,
     "PocketCastsUtilsTests": 50,
-    "PocketCastsDataModelTests": 100,
-    "PocketCastsServerTests": 50,
+    "PocketCastsDataModelTests": 450,
+    "PocketCastsServerTests": 150,
     "ModulesTests": 1,
 }
 
