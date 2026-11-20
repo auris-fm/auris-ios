@@ -18,7 +18,7 @@ final class CloudFingerprintReferenceFetcher {
     private let timeoutSeconds: TimeInterval
 
     /// Test seam: the provider the fetcher will present. Production callers
-    /// never read this; the default is the turn route's shared router choice.
+    /// never read this; the default is the shared Auris provider.
     var tokenProviderForTesting: any CloudTokenProviding { tokenProvider }
 
     init(
