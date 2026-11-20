@@ -549,11 +549,14 @@ rm -rf "$RESULT_BUNDLE"
 PACKAGE_BUNDLE="$LOG_DIR/modules-macros-${BUILDKITE_BUILD_NUMBER:-local}-${BUILDKITE_JOB_ID:-job}.xcresult"
 rm -rf "$PACKAGE_BUNDLE"
 set +e
-{ xcodebuild -scmProvider system test -scheme ModulesMacros -destination 'platform=macOS' \
+# The scheme lives in the package, not in podcasts.xcodeproj: run from inside
+# the package directory or xcodebuild resolves the app project and finds no
+# ModulesMacros scheme.
+{ (cd ModulesMacros && xcodebuild -scmProvider system test -scheme ModulesMacros -destination 'platform=macOS' \
     -derivedDataPath "${MACRO_DERIVED_DATA:-$DERIVED/macros-host}" \
     -clonedSourcePackagesDirPath "$DERIVED/SourcePackages" \
     -disableAutomaticPackageResolution \
-    -resultBundlePath "$PACKAGE_BUNDLE" \
+    -resultBundlePath "$PACKAGE_BUNDLE") \
     2>&1 | tee "$LOG_DIR/modules-macros-tests.log"; } & wait $!
 MACRO_TEST_STATUS=$?
 set -e
