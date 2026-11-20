@@ -31,10 +31,11 @@
 #
 # A `full` run that is told what the last run reported checks each of those findings against
 # what semgrep did not finish this time. One that sits in an unfinished file has not been
-# shown to be fixed, unless this run reports that very finding again: the same rule at the
-# same line. It goes to `unverified.tsv` and into the report under "Not verified this run",
-# for the caller to keep instead of dropping. Another finding of the same rule in the same
-# file does not stand in for it.
+# shown to be fixed, unless this run reports that very finding again and there is no doubt
+# that it is the same one. It goes to `unverified.tsv` and into the report under "Not
+# verified this run", for the caller to keep instead of dropping. Whenever what is known
+# about a finding does not single it out (no line, or several findings at its line), it is
+# kept: see `unverified_code_findings`.
 #
 # Exit status: 0 nothing blocks, 1 a blocking finding in a `pr` run, 2 the audit could not be
 # completed. A scanner that fails, a workflow or lockfile that cannot be read and a bad
@@ -102,10 +103,14 @@ fi
 # Every scanner ends as rows of `key<TAB>severity<TAB>Markdown line`. The key identifies a finding
 # without its line number, so a finding that only moved is not new. `severity` is "high" or "-".
 
+# The first line of a result's message, as the report shows it.
+jq_message='def message: (.message.text // "") | split("\n")[0] // "" | gsub("\t"; " ") | .[0:240];'
+
 # Rows from a SARIF file, for the scanners whose findings sit at a place in a file. A result
 # that states no level of its own has its rule's default level (semgrep writes them that way).
+# One that states no line is shown at `file:?`, not at a line made up for it.
 sarif_rows() {
-  jq -r '
+  jq -r "$jq_message"'
     .runs[]
     | ((.tool.driver.rules // [])
        | map({ key: .id, value: (.defaultConfiguration.level // "warning") }) | from_entries) as $default
@@ -113,10 +118,10 @@ sarif_rows() {
     | (.level // $default[.ruleId] // "warning") as $level
     | (.locations[0].physicalLocation // {}) as $at
     | ($at.artifactLocation.uri // "?") as $file
-    | ((.message.text // "") | split("\n")[0] // "" | gsub("\t"; " ") | .[0:240]) as $message
+    | message as $message
     | [ ([.ruleId, $file, $message, ($at.region.snippet.text // "")] | @json),
         (if $level == "error" then "high" else "-" end),
-        "- `\(.ruleId)` at `\($file):\($at.region.startLine // 1)`: \($message)"
+        "- `\(.ruleId)` at `\($file):\($at.region.startLine // "?")`: \($message)"
       ] | @tsv' "$1"
 }
 
@@ -284,24 +289,39 @@ scan_code() {
 }
 
 # What the last published run reported from semgrep, as
-# `path<TAB>rule<TAB>line<TAB>Markdown line`.
+# `path<TAB>rule<TAB>line<TAB>Markdown line<TAB>M or -<TAB>message`. The line is empty when
+# it is not known. `M` says that the message is known too, which it is from a report.
 previous_code_findings() {
   if [ -n "${AUDIT_PREVIOUS:-}" ]; then
     [ -r "$AUDIT_PREVIOUS" ] || die "AUDIT_PREVIOUS is not readable: $AUDIT_PREVIOUS"
     awk -F'\t' 'BEGIN { OFS = "\t" }
-      NF >= 2 { print $1, $2, $3, "- `" $2 "` at `" $1 ($3 == "" ? "" : ":" $3) "`" }' "$AUDIT_PREVIOUS"
+      NF >= 2 {
+        line = ($3 ~ /^[0-9]+$/ ? $3 : "")
+        print $1, $2, line, "- `" $2 "` at `" $1 ":" (line == "" ? "?" : line) "`", "-", ""
+      }' "$AUDIT_PREVIOUS"
   elif [ -n "${AUDIT_PREVIOUS_REPORT:-}" ]; then
     [ -r "$AUDIT_PREVIOUS_REPORT" ] ||
       die "AUDIT_PREVIOUS_REPORT is not readable: $AUDIT_PREVIOUS_REPORT"
-    # The two sections of this script's own report that hold semgrep findings.
+    # The two sections of this script's own report that hold semgrep findings. A finding is
+    # read back whether or not its place ends in a line, so that one without a line is
+    # carried and not lost here. An issue edited on the web comes back with CRLF line ends.
+    # The report lists a line once however many findings share it, hence `sort -u`.
     awk '
+      { sub(/\r$/, ""); gsub(/\t/, " ") }
       /^### / { inside = ($0 ~ /^### (Risky code patterns|Not verified this run) \(semgrep\)/); next }
-      inside && /^- `[^`]+` at `[^`]+:[0-9]+`/ {
-        rule = $0; sub(/^- `/, "", rule); sub(/`.*/, "", rule)
-        path = $0; sub(/^- `[^`]+` at `/, "", path); sub(/`.*/, "", path)
-        line = path; sub(/^.*:/, "", line); sub(/:[0-9]+$/, "", path)
-        print path "\t" rule "\t" line "\t" $0
-      }' "$AUDIT_PREVIOUS_REPORT"
+      inside && /^- `[^`]+` at `[^`]+`/ {
+        rest = $0; sub(/^- `/, "", rest)
+        rule = rest; sub(/`.*/, "", rule)
+        sub(/^[^`]+` at `/, "", rest)
+        place = rest; sub(/`.*/, "", place)
+        message = substr(rest, length(place) + 2); sub(/^: /, "", message)
+        path = place; line = ""
+        if (place ~ /:([0-9]+|\?)$/) {
+          line = place; sub(/^.*:/, "", line); sub(/:[^:]*$/, "", path)
+          if (line == "?") line = ""
+        }
+        print path "\t" rule "\t" line "\t" $0 "\tM\t" message
+      }' "$AUDIT_PREVIOUS_REPORT" | sort -u
   fi
 }
 
@@ -309,28 +329,37 @@ previous_code_findings() {
 # finish (or from a rule that failed on it), and not reported again. A gap with no path, `?`,
 # could be anywhere, so it covers every previous finding.
 #
-# "Reported again" means that finding, not one like it: the same rule at the same line of the
-# same file, and each result of this run answers for one previous finding only. Of two
-# previous findings from one rule in one unfinished file, a single result leaves the other
-# unverified. A previous finding given without a line can be matched to nothing and stays
-# unverified for as long as its file is unfinished; so does one whose line has moved.
+# "Reported again" has to mean that finding and no other, or a result would let a different
+# finding be dropped unchecked. A previous finding is confirmed only when all of this holds:
 #
-# The files are told apart by name: `NR == FNR` stays true past an empty first file.
+#   - its line is known, and so is the line of the result;
+#   - exactly one result of this run has its file, rule and line, and its message when the
+#     previous finding came with one (a report has it, a `path<TAB>rule<TAB>line` list
+#     does not);
+#   - no other previous finding has the same.
+#
+# Anything less leaves it unverified: with two candidates on either side there is no telling
+# which one the gap hides. A finding whose line has moved stays unverified as well, until
+# its file is scanned to the end.
 unverified_code_findings() {
   previous_code_findings > "$out/previous.tsv"
-  jq -r '.runs[].results[]
+  # `@tsv` doubles a backslash; the report, where a previous message comes from, shows one.
+  jq -r "$jq_message"'
+    .runs[].results[]
     | (.locations[0].physicalLocation // {}) as $at
-    | [($at.artifactLocation.uri // "?"), .ruleId, ($at.region.startLine // 1)] | @tsv' "$1" \
-    > "$out/current.tsv"
+    | [($at.artifactLocation.uri // "?"), .ruleId, ($at.region.startLine // ""), message] | @tsv' "$1" |
+    sed 's/\\\\/\\/g' > "$out/current.tsv"
   awk -F'\t' '
-    FILENAME == ARGV[1] { if ($1 == "?") anywhere = 1; gap[$1 "\t" $2] = 1; next }
-    FILENAME == ARGV[2] { reported[$1 "\t" $2 "\t" $3]++; next }
-    anywhere || (($1 "\t*") in gap) || (($1 "\t" $2) in gap) {
-      finding = $1 "\t" $2 "\t" $3
-      if ($3 != "" && reported[finding] > 0) { reported[finding]--; next }
+    stage == "gaps" { if ($1 == "?") anywhere = 1; gap[$1 FS $2] = 1; next }
+    stage == "results" { at = $1 FS $2 FS $3; results[at]++; results[at FS $4]++; next }
+    { at = $1 FS $2 FS $3; if ($5 == "M") at = at FS $6 }
+    stage == "count" { previous[at]++; next }
+    anywhere || (($1 FS "*") in gap) || (($1 FS $2) in gap) {
+      if ($3 != "" && previous[at] == 1 && results[at] == 1) next
       print
     }
-  ' "$out/unscanned.tsv" "$out/current.tsv" "$out/previous.tsv" > "$out/unverified.tsv"
+  ' stage=gaps "$out/unscanned.tsv" stage=results "$out/current.tsv" \
+    stage=count "$out/previous.tsv" stage=decide "$out/previous.tsv" > "$out/unverified.tsv"
 }
 
 zizmor_rows() {
@@ -423,7 +452,7 @@ if enabled code; then
     {
       echo "### Not verified this run (semgrep): $unverified"
       echo
-      echo "The last run reported these, in a file or from a rule that semgrep did not finish this time, and this run does not report them at the same line. They stay listed until a run finishes that file."
+      echo "The last run reported these, in a file or from a rule that semgrep did not finish this time, and this run does not single each of them out again: one result, at the same line, with the same message. They stay listed until a run finishes that file."
       echo
       cut -f4 "$out/unverified.tsv" | sort
       echo

@@ -146,8 +146,9 @@ jobs:
       # their silence means something. semgrep can finish having given up on a file, and
       # its silence about that file means nothing. So the script is told which semgrep
       # alerts are open now, and reports how many of them this run could not have confirmed:
-      # those in a file it did not finish, unless it reports that alert again at the same
-      # line. Another result of the same rule in the same file does not stand in for it.
+      # those in a file it did not finish, unless exactly one result is at that alert's line
+      # and no other open alert is. Where that is in doubt, the alert counts as unconfirmed
+      # and the upload is held back.
       - name: List the code alerts that are open
         env:
           GH_TOKEN: ${{ github.token }}
