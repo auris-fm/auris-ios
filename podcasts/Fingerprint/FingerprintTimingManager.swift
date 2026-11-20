@@ -902,10 +902,10 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
     /// reference. Returns the matcher (nil when unconfigured or unavailable);
     /// the caller assigns it on `queue` — this function never touches state
     /// directly, since it runs on the cooperative pool (PR #14 review).
-    private func fetchCloudReference(uuid: String) async -> CloudFingerprintReferenceFetcher.FetchedReference? {
+    private func fetchCloudReference(uuid: String, podcastUuid: String) async -> CloudFingerprintReferenceFetcher.FetchedReference? {
         let baseUrl = CloudConfig.shared.baseUrl
         guard !baseUrl.isEmpty else { return nil }
-        let fetched = await CloudFingerprintReferenceFetcher.shared.fetchReference(baseUrl: baseUrl, episodeUuid: uuid)
+        let fetched = await CloudFingerprintReferenceFetcher.shared.fetchReference(baseUrl: baseUrl, episodeUuid: uuid, podcastUuid: podcastUuid)
         if let fetched {
             FileLog.shared.addMessage("FingerprintTimingManager: cloud reference loaded (\(fetched.matcher.count) checkpoints) for \(uuid)")
         } else {
@@ -946,7 +946,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
             let flag = cancellationFlag
             fetchTask = Task { [weak self] in
                 guard let self, !flag.isCancelled else { return }
-                let fetched = await self.fetchCloudReference(uuid: uuid)
+                let fetched = await self.fetchCloudReference(uuid: uuid, podcastUuid: episode.parentIdentifier())
                 self.queue.async { [weak self] in
                     guard let self, !flag.isCancelled else { return }
                     // The running stream reads the matcher through the
@@ -984,7 +984,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
             // The cloud reference and the transcript-sync reference are
             // independent — fetch them concurrently instead of serializing the
             // two network round-trips (PR #14 review).
-            async let cloudFetchedTask = self?.fetchCloudReference(uuid: uuid)
+            async let cloudFetchedTask = self?.fetchCloudReference(uuid: uuid, podcastUuid: episode.parentIdentifier())
             async let referenceDataTask = FingerprintReferenceRetriever.shared.fetchReferenceData(
                 podcastUuid: episode.parentIdentifier(),
                 episodeUuid: uuid

@@ -58,6 +58,15 @@ enum CloudTokenProviderRouter {
         return sharedAurisProvider
     }
 
+    /// The credential for the fingerprint reference fetch (spec ruling): the
+    /// SAME shared Auris provider, never the routing choice. The route verifies
+    /// tokens once the server verifier ships, so the router's legacy branch
+    /// would send a `user_<uuid>` that is a guaranteed 401. No configured
+    /// origin ⇒ no fetch at all (the caller already gates on the base URL).
+    static func fingerprintReferenceProvider() -> any CloudTokenProviding {
+        sharedAurisProvider
+    }
+
     private static func nonEmpty(_ value: String) -> String? {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
