@@ -1,13 +1,28 @@
 import AVFoundation
 import PocketCastsUtils
 
+/// The surface of AVSpeechSynthesizer the engine uses, so tests can supply a
+/// synthesizer that never delivers callbacks — the failure a headless CI runner
+/// produces, where the hang is real rather than simulated.
+typealias SpeechBoundary = AVSpeechBoundary
+
+protocol SpeechSynthesizing: AnyObject {
+    var delegate: AVSpeechSynthesizerDelegate? { get set }
+    var isSpeaking: Bool { get }
+    func speak(_ utterance: AVSpeechUtterance)
+    @discardableResult func stopSpeaking(at boundary: SpeechBoundary) -> Bool
+}
+
+final class SystemSpeechSynthesizer: AVSpeechSynthesizer, SpeechSynthesizing {}
+
 class AVSpeechTtsEngine: NSObject, TtsEngineProtocol {
-    private let synthesizer = AVSpeechSynthesizer()
+    private let synthesizer: SpeechSynthesizing
     private var continuation: CheckedContinuation<Void, Never>?
 
-    override init() {
+    init(synthesizer: SpeechSynthesizing = SystemSpeechSynthesizer()) {
+        self.synthesizer = synthesizer
         super.init()
-        synthesizer.delegate = self
+        self.synthesizer.delegate = self
     }
 
     func warmUp(language: String) {
@@ -29,9 +44,9 @@ class AVSpeechTtsEngine: NSObject, TtsEngineProtocol {
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             self.continuation = cont
             let utterance = AVSpeechUtterance(string: text)
-            utterance.voice = bestVoice(for: language)
+            utterance.voice = self.bestVoice(for: language)
             utterance.rate = AVSpeechUtteranceDefaultSpeechRate
-            synthesizer.speak(utterance)
+            self.synthesizer.speak(utterance)
         }
     }
 
