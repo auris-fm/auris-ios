@@ -1019,10 +1019,13 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
 
                 self.cloudMatcher = fetched?.matcher
 
-                if let data, let reference = ReferenceFingerprint.decode(from: data),
-                    self.configureForReference(reference, referenceData: data, episode: episode) {
+                if let data, let reference = ReferenceFingerprint.decode(from: data) {
+                    // Save before configuration, as trunk did: setup reads the
+                    // on-disk metadata for cache reuse.
                     self.saveReferenceData(data, for: episode)
-                    return
+                    if self.configureForReference(reference, referenceData: data, episode: episode) {
+                        return
+                    }
                 }
 
                 // Pocket Casts' object is missing or unusable. The Auris
@@ -1045,7 +1048,6 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
     /// reference. Returns false when the reference is unusable (no duration,
     /// no decodable checkpoints) WITHOUT changing state, so the caller can
     /// fall through to the independent Auris cloud reference.
-    @discardableResult
     private func configureForReference(
         _ reference: ReferenceFingerprint,
         referenceData: Data,
@@ -1067,7 +1069,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
             return false
         }
 
-        return startPreparation(
+        startPreparation(
             episode: episode,
             matcher: matcher,
             referenceData: referenceData,
@@ -1078,6 +1080,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
             cacheLabel: "full mapping",
             sourceLabel: ""
         )
+        return true
     }
 
     /// Configures preparation from the Auris cloud reference alone (the Pocket
@@ -1117,9 +1120,8 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
     /// The shared preparation machinery behind both reference paths: builds the
     /// generation context, emits the preparation-started analytics once, and
     /// either restores a full mapping from the cache or starts the stream.
-    /// Returns false only when there is nothing to prepare (no audio source);
-    /// the callers have already validated their own reference.
-    @discardableResult
+    /// The callers have already validated their own reference; the audio
+    /// source always resolves to a path, so this setup cannot fail.
     private func startPreparation(
         episode: BaseEpisode,
         matcher: CheckpointMatcher,
@@ -1130,7 +1132,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         checkpointCount: Int,
         cacheLabel: String,
         sourceLabel: String
-    ) -> Bool {
+    ) {
         let uuid = episode.uuid
 
         let source = resolveAudioSource(for: episode)
@@ -1213,7 +1215,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
                 FileLog.shared.addMessage(
                     "FingerprintTimingManager: skipping stream — \(cacheLabel) loaded from cache for \(uuid)"
                 )
-                return true
+                return
             }
 
             FileLog.shared.addMessage(
@@ -1223,7 +1225,6 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         }
 
         startStream(context: newContext, fromPosition: currentTime)
-        return true
     }
 
     /// Build a `CheckpointMatcher` populated from every usable checkpoint in

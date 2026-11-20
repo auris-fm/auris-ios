@@ -222,6 +222,81 @@ final class CloudReferenceDecouplingTests: XCTestCase {
         )
     }
 
+    /// A decodable Pocket Casts reference with NO usable checkpoints must not
+    /// mask the Auris reference: the disk call site falls through to the
+    /// persisted cloud reference instead of ending `.unavailable`.
+    func testUnusableDiskReferenceFallsThroughToThePersistedAurisReference() async throws {
+        try prepareFixture()
+        try fixture.writeReference(data: Self.unusableReference())
+        try cloudPayload!.write(to: fixture.cloudReferenceURL)
+        stubHosts(pocketCasts: .complete(status: 403, headers: [:], body: Data()))
+
+        manager.prepareForCurrentEpisode()
+        await waitForPass(manager)
+
+        guard case .active = manager.state else {
+            XCTFail("expected .active from the persisted Auris reference despite an unusable Pocket Casts object, got \(manager.state)")
+            return
+        }
+        // The mapping came from the Go-scheme cloud matcher: anchors map onto
+        // their own timestamps on this self-referenced fixture.
+        let entries = manager.debugMappingSnapshot()
+        XCTAssertGreaterThanOrEqual(entries.count, FingerprintConstants.minimumCoverageForActive)
+        for entry in entries {
+            XCTAssertEqual(entry.referenceTime, entry.playbackTime, accuracy: 1.0)
+        }
+    }
+
+    /// Same fall-through at the fetched call site: the server returns a
+    /// decodable Pocket Casts reference with no usable checkpoints, and the
+    /// concurrent Auris fetch succeeds — preparation must use the Auris one.
+    func testUnusableFetchedReferenceFallsThroughToTheFetchedAurisReference() async throws {
+        try prepareFixture()
+        let unusable = Self.unusableReference()
+        let payload = cloudPayload!
+        CloudRouteTestURLProtocol.requestHandler = { request in
+            if request.url?.host == "gateway.cloud-decoupling.test" {
+                return .complete(status: 200, headers: ["Content-Type": "application/json"], body: payload)
+            }
+            if request.url?.path.contains("-fingerprints.json") == true {
+                return .complete(status: 200, headers: ["Content-Type": "application/json"], body: unusable)
+            }
+            return .complete(status: 403, headers: [:], body: Data())
+        }
+
+        manager.prepareForCurrentEpisode()
+        await waitForPass(manager)
+
+        guard case .active = manager.state else {
+            XCTFail("expected .active from the fetched Auris reference despite an unusable fetched Pocket Casts object, got \(manager.state)")
+            return
+        }
+        let entries = manager.debugMappingSnapshot()
+        XCTAssertGreaterThanOrEqual(entries.count, FingerprintConstants.minimumCoverageForActive)
+        for entry in entries {
+            XCTAssertEqual(entry.referenceTime, entry.playbackTime, accuracy: 1.0)
+        }
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: fixture.cloudReferenceURL.path),
+            "the fetched Auris payload must persist to its own sibling file"
+        )
+    }
+
+    /// A valid compact-v2 JSON object that decodes but carries no checkpoints —
+    /// `configureForReference` must report failure so the caller falls through.
+    private static func unusableReference() -> Data {
+        let json: [String: Any] = [
+            "format": ReferenceFingerprint.supportedFormat,
+            "total_duration": episodeDuration,
+            "checkpoint_interval": 1,
+            "checkpoint_duration": 5,
+            "timestamp_quantum": 1,
+            "checkpoints": [[Any]]()
+        ]
+        // swiftlint:disable:next force_try
+        return try! JSONSerialization.data(withJSONObject: json)
+    }
+
     // MARK: - Fixture
 
     private func prepareFixture() throws {
