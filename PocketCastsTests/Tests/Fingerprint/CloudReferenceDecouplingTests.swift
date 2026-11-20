@@ -27,10 +27,24 @@ final class CloudReferenceDecouplingTests: XCTestCase {
     private var previousBaseURL: Any?
     private var previousDirectUpstream: Any?
     private var cloudPayload: Data!
+    private var previousTokenProvider: (any CloudTokenProviding)?
+
+    /// Static bearer for the stubbed gateway: the fetcher fails closed
+    /// without a token, and the suite's gateway is URLProtocol-stubbed, so a
+    /// fixed literal exercises exactly the request path under test.
+    private final class StubTokenProvider: CloudTokenProviding {
+        func token() async -> String? { "decoupling-test-token" }
+        func handleUnauthorized(rejectedToken: String?) async {}
+    }
 
     override func setUpWithError() throws {
         try super.setUpWithError()
         featureFlags.set(.syncedTranscripts, value: true)
+
+        // The fetcher's default provider reads the shared Auris chain
+        // (keychain-backed); the suite presents a static stub instead.
+        previousTokenProvider = CloudFingerprintReferenceFetcher.shared.tokenProviderForTesting
+        CloudFingerprintReferenceFetcher.shared.tokenProviderForTesting = StubTokenProvider()
 
         // Point the production config reader at the stubbed gateway. Saved and
         // restored around each test so no other suite sees the override.
@@ -52,6 +66,11 @@ final class CloudReferenceDecouplingTests: XCTestCase {
         fixture?.removeFiles()
         fixture = nil
         cloudPayload = nil
+
+        if let previousTokenProvider {
+            CloudFingerprintReferenceFetcher.shared.tokenProviderForTesting = previousTokenProvider
+        }
+        previousTokenProvider = nil
 
         CloudRouteTestURLProtocol.reset()
         URLProtocol.unregisterClass(CloudRouteTestURLProtocol.self)

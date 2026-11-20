@@ -14,12 +14,16 @@ final class CloudFingerprintReferenceFetcher {
     static let defaultTimeoutSeconds: TimeInterval = 150
 
     private let session: URLSession
-    private let tokenProvider: any CloudTokenProviding
+    private var tokenProvider: any CloudTokenProviding
     private let timeoutSeconds: TimeInterval
 
-    /// Test seam: the provider the fetcher will present. Production callers
-    /// never read this; the default is the shared Auris provider.
-    var tokenProviderForTesting: any CloudTokenProviding { tokenProvider }
+    /// Test seam: replaces the provider the fetcher will present (and reads
+    /// the current one). Production callers never touch this; the default is
+    /// the shared Auris provider.
+    var tokenProviderForTesting: any CloudTokenProviding {
+        get { tokenProvider }
+        set { tokenProvider = newValue }
+    }
 
     init(
         session: URLSession = .shared,
