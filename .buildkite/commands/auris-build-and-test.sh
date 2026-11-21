@@ -767,10 +767,14 @@ xcrun simctl spawn "$SIMULATOR_ID" log show \
   --start "$(date -r "$TEST_WINDOW_START" '+%Y-%m-%d %H:%M:%S')" --info --debug \
   --predicate 'process == "podcasts" AND (subsystem CONTAINS[c] "audio" OR subsystem CONTAINS[c] "speech" OR eventMessage CONTAINS[c] "AQMEIO" OR eventMessage CONTAINS[c] "AVAudioSession")' \
   > "$LOG_DIR/stuck-audio.log" 2>&1
-if [ -s "$LOG_DIR/stuck-audio.log" ]; then
+AUDIO_LOG_STATUS=$?
+# Gate on the command's status, not the file's size: stderr is merged into the
+# file, so a failed query leaves error text that would otherwise read as a
+# successful collection.
+if [ "$AUDIO_LOG_STATUS" -eq 0 ] && [ -s "$LOG_DIR/stuck-audio.log" ]; then
   echo "collected $(wc -c < "$LOG_DIR/stuck-audio.log" | tr -d ' ') bytes into stuck-audio.log"
 else
-  echo "audio log collection produced nothing; see stuck-audio.log"
+  echo "audio log collection failed (status $AUDIO_LOG_STATUS); see stuck-audio.log"
 fi
 set -e
 
@@ -853,8 +857,10 @@ WATCHDOG_SELFTEST_STATUS=$?
 set -e
 
 echo "--- :mag: Checking the stuck-test sampler itself"
-# A test in flight past the threshold must be sampled once with an audio log;
-# a healthy run must produce nothing; the sampler must never touch the run.
+# A test in flight past the threshold must be sampled once, with the machine's
+# load recorded in the capture; a healthy run must produce nothing; the sampler
+# must never touch the run. The audio log is a single post-run collection and
+# no case here exercises it.
 set +e
 run_bg bash .buildkite/lib/test-stuck-sampler.sh
 SAMPLER_SELFTEST_STATUS=$?
