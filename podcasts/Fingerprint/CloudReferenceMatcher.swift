@@ -8,6 +8,11 @@ import Foundation
 /// Replaces the Rust `CheckpointMatcher` for the cloud-alignment path only.
 /// Score semantics match the existing pipeline: match floor 0.5, anchor
 /// threshold 0.65, dominance gap 0.05 (see FingerprintConstants).
+///
+/// Storage: one sorted, deduplicated `[UInt32]` per checkpoint, membership by
+/// binary search — no `Set` beside the array. A long episode holds thousands
+/// of checkpoints; the array+Set pair cost several multiples of the raw hash
+/// bytes per checkpoint, the compact shape costs 4 bytes per distinct hash.
 final class CloudReferenceMatcher {
     struct Match {
         let timestampSeconds: Float
@@ -16,21 +21,25 @@ final class CloudReferenceMatcher {
 
     private struct Checkpoint {
         let timestampSeconds: Float
+        /// Sorted and deduplicated at `add`; the only hash storage kept.
         let hashes: [UInt32]
-        /// Precomputed so the per-window hot path never rebuilds a Set from the
-        /// full hash list (PR #14 review).
-        let hashSet: Set<UInt32>
     }
 
     private var checkpoints: [Checkpoint] = []
 
-    /// Adds a reference checkpoint (timestamp in seconds, sorted hash set).
-    /// `durationSeconds` is the checkpoint spacing metadata from the server
-    /// reference; client matching derives its own windows, so it is not used
-    /// for scoring today — the parameter is accepted to keep the builder
-    /// contract mirroring the server's reference format.
+    /// Adds a reference checkpoint (timestamp in seconds, hashes in any order;
+    /// duplicates are collapsed). `durationSeconds` is the checkpoint spacing
+    /// metadata from the server reference; client matching derives its own
+    /// windows, so it is not used for scoring today — the parameter is accepted
+    /// to keep the builder contract mirroring the server's reference format.
     func add(timestampSeconds: Float, hashes: [UInt32], durationSeconds: Float) {
-        checkpoints.append(Checkpoint(timestampSeconds: timestampSeconds, hashes: hashes, hashSet: Set(hashes)))
+        let sorted = hashes.sorted()
+        var deduped: [UInt32] = []
+        deduped.reserveCapacity(sorted.count)
+        for h in sorted where deduped.last != h {
+            deduped.append(h)
+        }
+        checkpoints.append(Checkpoint(timestampSeconds: timestampSeconds, hashes: deduped))
     }
 
     func clear() {
@@ -42,31 +51,50 @@ final class CloudReferenceMatcher {
     /// Returns the top `maxResults` reference checkpoints by overlap score.
     func findTopMatches(queryHashes: [UInt32], maxResults: Int) -> [Match] {
         guard !queryHashes.isEmpty else { return [] }
-        let querySet = Set(queryHashes)
+        let query = Self.sortedDeduplicated(queryHashes)
         return checkpoints
-            .map { Match(timestampSeconds: $0.timestampSeconds, score: Self.overlapScore(querySet, queryHashes, $0.hashSet)) }
+            .map { Match(timestampSeconds: $0.timestampSeconds, score: Self.scoreSortedDeduplicated(query, $0.hashes)) }
             .sorted { $0.score > $1.score }
             .prefix(maxResults)
             .map { $0 }
     }
 
-    /// Overlap score = |A ∩ B| / min(|A|, |B|) ∈ [0, 1].
+    /// Overlap score = |A ∩ B| / min(|A|, |B|) ∈ [0, 1], set semantics on both
+    /// sides (duplicates collapse before counting). Public entry: normalizes
+    /// its inputs first.
     static func overlapScore(_ a: [UInt32], _ b: [UInt32]) -> Float {
-        overlapScore(Set(a), a, Set(b))
+        scoreSortedDeduplicated(sortedDeduplicated(a), sortedDeduplicated(b))
     }
 
-    /// Set-form hot path: reuses precomputed hash sets so matching every
-    /// window against every checkpoint allocates nothing (PR #14 review).
-    /// Iterates the smaller set; membership is checked against the larger.
-    static func overlapScore(_ setA: Set<UInt32>, _ a: [UInt32], _ setB: Set<UInt32>) -> Float {
-        guard !a.isEmpty, !setB.isEmpty else { return 0 }
-        let iterateA = a.count <= setB.count
-        let (iterate, target) = iterateA ? (setA, setB) : (setB, setA)
-        let denominator = iterateA ? a.count : setB.count
+    /// Hot path for two sorted, deduplicated arrays: a merge walk counts the
+    /// intersection without allocating. Iteration is O(|A| + |B|) with no
+    /// per-hash table lookups; the denominator is the smaller distinct count.
+    private static func scoreSortedDeduplicated(_ a: [UInt32], _ b: [UInt32]) -> Float {
+        guard !a.isEmpty, !b.isEmpty else { return 0 }
+        var i = 0
+        var j = 0
         var intersection = 0
-        for h in iterate where target.contains(h) {
-            intersection += 1
+        while i < a.count && j < b.count {
+            if a[i] == b[j] {
+                intersection += 1
+                i += 1
+                j += 1
+            } else if a[i] < b[j] {
+                i += 1
+            } else {
+                j += 1
+            }
         }
-        return Float(intersection) / Float(denominator)
+        return Float(intersection) / Float(min(a.count, b.count))
+    }
+
+    private static func sortedDeduplicated(_ hashes: [UInt32]) -> [UInt32] {
+        let sorted = hashes.sorted()
+        var deduped: [UInt32] = []
+        deduped.reserveCapacity(sorted.count)
+        for h in sorted where deduped.last != h {
+            deduped.append(h)
+        }
+        return deduped
     }
 }
