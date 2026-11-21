@@ -47,6 +47,19 @@ private actor FinishedFlag {
     func set() { done = true }
 }
 
+/// A boolean a main-actor task can set and any test can read afterwards.
+private final class MainActorFlag {
+    private let lock = NSLock()
+    private var _value = false
+    var value: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return _value
+    }
+    func set() {
+        lock.lock(); _value = true; lock.unlock()
+    }
+}
+
 /// A one-shot gate an async test can park on and open explicitly, so an
 /// interleaving is forced rather than approximated with a sleep.
 private actor AsyncGate {
@@ -84,6 +97,41 @@ private final class StubSpeechSynthesizer: SpeechSynthesizing {
     var onPrepare: ((String) async -> Void)?
     var onClaimExpiry: (() async -> Void)?
     private var claimedExpiry = false
+
+    /// Records whether resolution ran on main. The production implementation must
+    /// resolve away from the main actor; a stub resolving inline would hide that.
+    private let voiceLock = NSLock()
+    private var _resolveOnMain: [Bool] = []
+    var resolveOnMain: [Bool] {
+        voiceLock.lock(); defer { voiceLock.unlock() }
+        return _resolveOnMain
+    }
+    var onResolve: (() async -> Void)?
+
+    /// Returns a voice resolved once, off main, when the stub is created. Resolving
+    /// per call would put the real system speech call back on the caller's thread —
+    /// the very thing the engine no longer does — and make every test pay its cost.
+    func resolveVoice(for language: String) async -> AVSpeechSynthesisVoice? {
+        if let onResolve { await onResolve() }
+        let onMain = Thread.isMainThread
+        voiceLock.lock(); _resolveOnMain.append(onMain); voiceLock.unlock()
+        return StubSpeechSynthesizer.cachedVoice
+    }
+
+    /// Resolved once for the whole suite, away from the main actor.
+    private static let cachedVoice: AVSpeechSynthesisVoice? = {
+        let lock = NSLock()
+        var voice: AVSpeechSynthesisVoice?
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async {
+            let resolved = AVSpeechSynthesisVoice(language: "en-US")
+            lock.lock(); voice = resolved; lock.unlock()
+            done.signal()
+        }
+        done.wait()
+        lock.lock(); defer { lock.unlock() }
+        return voice
+    }()
 
     func engineWillPrepareUtterance(text: String) async {
         if let onPrepare { await onPrepare(text) }
@@ -136,49 +184,56 @@ private final class StubSpeechSynthesizer: SpeechSynthesizing {
 @MainActor
 final class AVSpeechTtsEngineTests: XCTestCase {
 
-    func test_warmUp_doesNotThrow() {
-        let engine = AVSpeechTtsEngine()
-        engine.warmUp(language: "en-US")
-        // Verifying it doesn't crash
+    func test_warmUp_doesNotThrow() async {
+        let synthesizer = StubSpeechSynthesizer()
+        let engine = AVSpeechTtsEngine(synthesizer: synthesizer)
+        await engine.warmUp(language: "en-US")
+        XCTAssertEqual(synthesizer.spoken.count, 1, "warmUp enqueues one silent utterance")
     }
 
     func test_speak_completesAsync() async {
-        let engine = AVSpeechTtsEngine()
+        let synthesizer = StubSpeechSynthesizer()
+        synthesizer.onSpeak = { stub, utterance in stub.deliverDidFinish(utterance) }
+        let engine = AVSpeechTtsEngine(synthesizer: synthesizer)
         await engine.speak(text: "Hello", language: "en-US")
-        // Verifies async speak completion via delegate
+        XCTAssertEqual(synthesizer.spoken.count, 1)
     }
 
     func test_cancel_stopsSpeaking() {
-        let engine = AVSpeechTtsEngine()
+        let engine = AVSpeechTtsEngine(synthesizer: StubSpeechSynthesizer())
         engine.cancel()
         // Verifies no crash on cancel when not speaking
     }
 
     func test_releaseEngine_stopsEngine() {
-        let engine = AVSpeechTtsEngine()
+        let engine = AVSpeechTtsEngine(synthesizer: StubSpeechSynthesizer())
         engine.releaseEngine()
         // Verifies no crash on release
     }
 
     func test_speak_cancelsPreviousUtterance() async {
-        let engine = AVSpeechTtsEngine()
-        // Start first utterance (fire and forget to simulate ongoing speech)
-        Task {
-            await engine.speak(text: "Long text that takes time", language: "en-US")
-        }
-        // Give it a moment to start
-        try? await Task.sleep(nanoseconds: 50_000_000)
-        // Second utterance should cancel the first
+        let synthesizer = StubSpeechSynthesizer()
+        let engine = AVSpeechTtsEngine(synthesizer: synthesizer)
+        // The first utterance stays speaking: the stub delivers nothing for it.
+        let first = Task { await engine.speak(text: "Long text that takes time", language: "en-US") }
+        await waitUntil(timeout: 5) { !synthesizer.spoken.isEmpty }
+        // The second speak bumps the start generation while the first is still
+        // resolving its voice, so the first never reaches the synthesizer and its
+        // task returns settled rather than waiting. Only the second is spoken.
+        synthesizer.onSpeak = { stub, utterance in stub.deliverDidFinish(utterance) }
         await engine.speak(text: "Short", language: "en-US")
-        // Should complete without hanging
+        await first.value
+        XCTAssertEqual(synthesizer.spoken.count, 2,
+                       "the first utterance started speaking before the second was requested")
     }
 
-    func test_warmUp_acceptsAnyLanguage() {
-        let engine = AVSpeechTtsEngine()
-        engine.warmUp(language: "ja-JP")
-        engine.warmUp(language: "fr-FR")
-        engine.warmUp(language: "es-ES")
-        // Verifying no crash with different languages
+    func test_warmUp_acceptsAnyLanguage() async {
+        let synthesizer = StubSpeechSynthesizer()
+        let engine = AVSpeechTtsEngine(synthesizer: synthesizer)
+        for language in ["ja-JP", "fr-FR", "es-ES"] {
+            await engine.warmUp(language: language)
+        }
+        XCTAssertEqual(synthesizer.spoken.count, 3)
     }
 
     // MARK: - Hang and double-resume regressions
@@ -203,7 +258,7 @@ final class AVSpeechTtsEngineTests: XCTestCase {
         let firstTask = Task {
             await engine.speak(text: "Long text that takes time", language: "en-US")
         }
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        await waitUntil(timeout: 5) { !synthesizer.spoken.isEmpty }
         let firstUtterance = synthesizer.spoken[0]
 
         // The second speak stops the first; the synthesizer then reports the
@@ -254,7 +309,7 @@ final class AVSpeechTtsEngineTests: XCTestCase {
         let speaking = Task {
             await engine.speak(text: "Hello", language: "en-US")
         }
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        await waitUntil(timeout: 5) { !synthesizer.spoken.isEmpty }
         engine.cancel()
         await speaking.value
     }
@@ -435,4 +490,58 @@ final class AVSpeechTtsEngineTests: XCTestCase {
         }
         await fulfillment(of: [winnerDone], timeout: 5)
     }
+
+    /// Resolving a voice reaches the system speech service synchronously, so it must
+    /// not run on the main queue: `warmUp` runs during service construction at launch,
+    /// and a slow or unresponsive service would freeze the app rather than delay speech.
+    /// Measured 42 ms cold versus 0.1 ms warm, with no upper bound when it is unresponsive.
+    ///
+    /// Called on the real implementation from the main actor. `SystemSpeechSynthesizer`
+    /// asserts `.notOnQueue(.main)` where it resolves, so the old design — resolving on
+    /// the caller's thread — traps here, while resolving in a detached task passes.
+    /// A stub cannot show this: an `await` frees the main actor whichever thread it was
+    /// called from, and a non-main-actor stub's async methods do not run on main at all.
+    func test_systemSynthesizer_resolvesVoiceOffTheMainQueue() async {
+        let synthesizer = SystemSpeechSynthesizer()
+        let voice = await synthesizer.resolveVoice(for: "en-US")
+        XCTAssertNotNil(voice, "resolution returned no voice")
+    }
+
+    /// A start overtaken while its voice is still resolving must not speak. The
+    /// resolution is held on an explicit gate, so the ordering is forced, not timed.
+    func test_speak_overtakenWhileResolvingVoice_doesNotSpeak() async {
+        let synthesizer = StubSpeechSynthesizer()
+        let resolving = expectation(description: "first start is resolving its voice")
+        let gate = AsyncGate()
+        synthesizer.onResolve = {
+            resolving.fulfill()
+            await gate.wait()
+        }
+        let engine = AVSpeechTtsEngine(synthesizer: synthesizer)
+        let first = Task { await engine.speak(text: "First", language: "en-US") }
+        await fulfillment(of: [resolving], timeout: 5)
+
+        // Cancel while the first start is still resolving, then let it go.
+        engine.cancel()
+        await gate.open()
+        await first.value
+
+        XCTAssertTrue(synthesizer.spoken.isEmpty,
+                      "a start cancelled while resolving its voice must not reach the synthesizer")
+    }
+
+    /// Polls the event rather than sleeping a fixed interval: under load a fixed
+    /// sleep is a deadline that can expire before the work has happened.
+    ///
+    /// Deliberately NOT main-actor. The work being waited for runs on the main actor,
+    /// so polling there competes with it: under load the poll can consume the whole
+    /// window and the awaited work never runs. Reading the stub's lock-guarded state
+    /// from off-main avoids that.
+    private nonisolated func waitUntil(timeout: TimeInterval, _ condition: @Sendable () -> Bool) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition(), Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
 }

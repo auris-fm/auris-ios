@@ -17,6 +17,12 @@ protocol SpeechSynthesizing: AnyObject {
     /// interleaving instead of approximating one with a sleep.
     func engineWillPrepareUtterance(text: String) async
     func engineWillClaimSilenceExpiry() async
+
+    /// Resolves a voice for `language`. `AVSpeechSynthesisVoice(language:)` talks to
+    /// the system speech service and is synchronous, so it must not run on the main
+    /// actor: the first resolution in a process pays the service's cold-start cost
+    /// and would freeze the caller. Implementations resolve away from main.
+    func resolveVoice(for language: String) async -> AVSpeechSynthesisVoice?
 }
 
 extension SpeechSynthesizing {
@@ -26,7 +32,23 @@ extension SpeechSynthesizing {
 
 typealias SpeechBoundary = AVSpeechBoundary
 
-final class SystemSpeechSynthesizer: AVSpeechSynthesizer, SpeechSynthesizing {}
+final class SystemSpeechSynthesizer: AVSpeechSynthesizer, SpeechSynthesizing {
+    /// Resolves off the main actor. The call is synchronous and reaches the system
+    /// speech service, whose first use in a process costs tens of milliseconds and
+    /// can block indefinitely when that service is unresponsive — measured at 42 ms
+    /// cold versus 0.1 ms warm. On the main actor that is a frozen app, not a slow
+    /// one, and `warmUp` runs during service construction at launch.
+    nonisolated func resolveVoice(for language: String) async -> AVSpeechSynthesisVoice? {
+        await Task.detached(priority: .userInitiated) {
+            // Resolving reaches the system speech service synchronously. On the main
+            // queue that freezes the caller for as long as the service takes, and this
+            // runs on the launch path through `warmUp`. True of the code, not a test hook.
+            dispatchPrecondition(condition: .notOnQueue(.main))
+            return AVSpeechSynthesisVoice(language: language)
+                ?? AVSpeechSynthesisVoice(language: "en-US")
+        }.value
+    }
+}
 
 /// Waits out a silence window. Injected so a test can hold an expiry at a
 /// chosen point and let it go explicitly, rather than racing a real clock.
@@ -93,9 +115,10 @@ class AVSpeechTtsEngine: NSObject, TtsEngineProtocol {
         self.synthesizer.delegate = self
     }
 
-    func warmUp(language: String) {
+    func warmUp(language: String) async {
+        let voice = await synthesizer.resolveVoice(for: language)
         let utterance = AVSpeechUtterance(string: "")
-        utterance.voice = bestVoice(for: language)
+        utterance.voice = voice
         utterance.volume = 0
         synthesizer.speak(utterance)
     }
@@ -105,8 +128,9 @@ class AVSpeechTtsEngine: NSObject, TtsEngineProtocol {
         startGeneration &+= 1
         let generation = startGeneration
         await synthesizer.engineWillPrepareUtterance(text: text)
+        let voice = await synthesizer.resolveVoice(for: language)
         let utterance = AVSpeechUtterance(string: text)
-        utterance.voice = bestVoice(for: language)
+        utterance.voice = voice
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             // Re-checked after the preparation point: a later start or a cancel
@@ -191,10 +215,6 @@ class AVSpeechTtsEngine: NSObject, TtsEngineProtocol {
 
     // MARK: - Voice Selection
 
-    private func bestVoice(for language: String) -> AVSpeechSynthesisVoice {
-        return AVSpeechSynthesisVoice(language: language)
-            ?? AVSpeechSynthesisVoice(language: "en-US")!
-    }
 }
 
 // MARK: - AVSpeechSynthesizerDelegate
