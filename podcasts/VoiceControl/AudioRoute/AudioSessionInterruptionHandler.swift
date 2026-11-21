@@ -40,8 +40,6 @@ class AudioSessionInterruptionHandler: ObservableObject {
                 case .began:
                     FileLog.shared.addMessage("[VoicePipeline] Began — stopping capture, discarding segment")
                     self.isInterrupted = true
-                    // The notification handler runs on the posting thread; the callback
-                    // and the `@Published` write above are main-actor work.
                     self.onInterruptionBegan?()
 
                 case .ended:
