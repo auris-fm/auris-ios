@@ -663,9 +663,12 @@ WATCHDOG_PID=$!
 # tags (podcasts[pid:tid]), so a relaunch is followed without any extra state.
 (
   set +e
-  declare -A sampled=()
+  # Bash 3.2 is /bin/bash on this Mac: no associative arrays. The sampled list
+  # is newline-delimited test names; fgrep -x matches a whole line literally.
+  sampled=""
   current=""
   since=0
+  seq=0
   while kill -0 "$XCODEBUILD_PID" 2>/dev/null; do
     line=$(grep -E "Test Case .* started\.$|Test Case .*(passed|failed) \(" "$LOG_DIR/test.log" 2>/dev/null | tail -1)
     case "$line" in
@@ -674,16 +677,39 @@ WATCHDOG_PID=$!
           current="$line"
           since=$(date +%s)
         fi
-        if [ -n "$current" ] && [ -z "${sampled[$current]:-}" ] \
+        if [ -n "$current" ] && ! printf '%s\n' "$sampled" | grep -Fxq -- "$current" \
           && [ $(( $(date +%s) - since )) -ge "$STUCK_TEST_THRESHOLD" ]; then
-          sampled["$current"]=1
+          sampled="${sampled}${current}
+"
+          seq=$((seq + 1))
           pid=$(grep -oE 'podcasts\[[0-9]+' "$LOG_DIR/test.log" 2>/dev/null | tail -1 | tr -dc '0-9')
           if [ -n "$pid" ]; then
             echo "stuck-test sampler: capturing pid $pid for: $current" >&2
-            sample "$pid" 10 -file "$LOG_DIR/stuck-sample-${pid}.txt" >/dev/null 2>&1
-            xcrun simctl spawn "$SIMULATOR_ID" log show --last 2m --info --debug \
-              --predicate 'process == "podcasts" AND (subsystem CONTAINS[c] "audio" OR subsystem CONTAINS[c] "speech" OR eventMessage CONTAINS[c] "AQMEIO" OR eventMessage CONTAINS[c] "AVAudioSession")' \
-              > "$LOG_DIR/stuck-audio-${pid}.log" 2>&1
+            # Distinct names per capture: two stuck tests in one host must not
+            # overwrite each other. Each diagnostic is bounded so a wedged
+            # sample/log cannot hold the step past the run's end.
+            (
+              sample "$pid" 10 -file "$LOG_DIR/stuck-sample-${seq}-${pid}.txt" >/dev/null 2>&1 &
+              sp=$!
+              ( sleep 30; pkill -P "$sp" 2>/dev/null; kill "$sp" 2>/dev/null ) &
+              sk=$!
+              wait "$sp" 2>/dev/null
+              kill "$sk" 2>/dev/null
+              pkill -P "$sk" 2>/dev/null
+              wait "$sk" 2>/dev/null
+            )
+            (
+              xcrun simctl spawn "$SIMULATOR_ID" log show --last 2m --info --debug \
+                --predicate 'process == "podcasts" AND (subsystem CONTAINS[c] "audio" OR subsystem CONTAINS[c] "speech" OR eventMessage CONTAINS[c] "AQMEIO" OR eventMessage CONTAINS[c] "AVAudioSession")' \
+                > "$LOG_DIR/stuck-audio-${seq}-${pid}.log" 2>&1 &
+              lp=$!
+              ( sleep 30; pkill -P "$lp" 2>/dev/null; kill "$lp" 2>/dev/null ) &
+              lk=$!
+              wait "$lp" 2>/dev/null
+              kill "$lk" 2>/dev/null
+              pkill -P "$lk" 2>/dev/null
+              wait "$lk" 2>/dev/null
+            )
           fi
         fi
         ;;
