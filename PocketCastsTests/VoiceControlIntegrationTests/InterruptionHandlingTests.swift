@@ -17,6 +17,14 @@ final class InterruptionHandlingTests: XCTestCase {
         // isInterrupted is tracked.
         // Post a began notification and verify the service's internal state.
 
+        // The control needs the gate genuinely listening, or the assertion below is
+        // vacuous: a simulator without microphone permission stays at off(noMicrophone)
+        // and isListening is false before any interruption. Assert the precondition so
+        // that fails loudly instead of passing silently.
+        await waitUntil(timeout: 5) { service.isListening }
+        XCTAssertTrue(service.isListening,
+                      "precondition: the gate must be listening (grant microphone on this simulator)")
+
         // Post interruption began
         NotificationCenter.default.post(
             name: AVAudioSession.interruptionNotification,
@@ -40,6 +48,12 @@ final class InterruptionHandlingTests: XCTestCase {
         let service = assembly.buildVoiceControlService()!
 
         service.startIfAllowed()
+
+        // Same precondition as the began case: without microphone permission the gate
+        // never listens and this control would exercise nothing.
+        await waitUntil(timeout: 5) { service.isListening }
+        XCTAssertTrue(service.isListening,
+                      "precondition: the gate must be listening (grant microphone on this simulator)")
 
         // Post interruption ended with shouldResume
         NotificationCenter.default.post(
