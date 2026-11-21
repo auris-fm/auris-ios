@@ -257,6 +257,12 @@ class IOSAudioRouteMonitor: ObservableObject {
         refreshRoute()
         NotificationCenter.default
             .publisher(for: AVAudioSession.routeChangeNotification)
+            // Hop at the SOURCE, where the system notification arrives. Everything
+            // downstream — `refreshRoute()`, every write to `micExposure`, and the
+            // gate chain that reads it — then runs on main and in emission order.
+            // Hopping at a consumer instead would let an older queued emission race
+            // a newer inline one.
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] notification in
                 guard let self,
                       let info = notification.userInfo,

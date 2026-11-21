@@ -106,7 +106,8 @@ final class AudioSessionInterruptionHandlerTests: XCTestCase {
         XCTAssertTrue(observed.value,
                       "interruption handling must be delivered on the main thread, "
                       + "not on whatever thread posted the notification")
-        XCTAssertTrue(handler.isInterrupted)
+        XCTAssertTrue(handler.isInterrupted,
+                      "the published state must be written by the same ordered main delivery")
     }
 
     /// Same requirement for the ended path, which also reactivates the audio session.
@@ -137,6 +138,47 @@ final class AudioSessionInterruptionHandlerTests: XCTestCase {
         wait(for: [posted, delivered], timeout: 5.0)
         XCTAssertTrue(observed.value,
                       "interruption handling must be delivered on the main thread")
+        XCTAssertFalse(handler.isInterrupted,
+                       "the published state must be cleared by the same ordered main delivery")
+    }
+
+    /// Ended WITHOUT shouldResume still clears the published state, and that write
+    /// must also happen on main — it is not gated on the callback firing.
+    func test_endedWithoutShouldResumePostedOffMain_clearsStateOnMain() {
+        let handler = AudioSessionInterruptionHandler()
+        handler.isInterrupted = true
+        let notCalled = expectation(description: "onInterruptionEnded not called")
+        notCalled.isInverted = true
+        let posted = expectation(description: "posted from a background thread")
+
+        handler.onInterruptionEnded = { notCalled.fulfill() }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            NotificationCenter.default.post(
+                name: AVAudioSession.interruptionNotification,
+                object: nil,
+                userInfo: [
+                    AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.ended.rawValue,
+                    AVAudioSessionInterruptionOptionKey: 0
+                ]
+            )
+            posted.fulfill()
+        }
+
+        wait(for: [posted], timeout: 5.0)
+        // The state write is delivered on main; wait for it rather than assuming
+        // the post was synchronous.
+        let cleared = expectation(description: "isInterrupted cleared on main")
+        Task { @MainActor in
+            let deadline = Date().addingTimeInterval(5)
+            while handler.isInterrupted, Date() < deadline {
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+            cleared.fulfill()
+        }
+        wait(for: [cleared, notCalled], timeout: 6.0)
+        XCTAssertFalse(handler.isInterrupted,
+                       "ended without shouldResume still clears the state, on main")
     }
 }
 

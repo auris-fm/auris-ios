@@ -25,7 +25,12 @@ class AudioSessionInterruptionHandler: ObservableObject {
     init() {
         NotificationCenter.default
             .publisher(for: AVAudioSession.interruptionNotification)
-            .sink { [weak self] notification in
+            // Hop at the SOURCE, where the system notification arrives, so the
+            // `isInterrupted` writes and both callbacks run together on main and in
+            // emission order. Hopping only the callbacks would leave the published
+            // state being written on the posting thread.
+            .receive(on: DispatchQueue.main)
+            .sink { @MainActor [weak self] notification in
                 guard let self,
                       let type = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
                       let interruptionType = AVAudioSession.InterruptionType(rawValue: type)
@@ -37,7 +42,7 @@ class AudioSessionInterruptionHandler: ObservableObject {
                     self.isInterrupted = true
                     // The notification handler runs on the posting thread; the callback
                     // and the `@Published` write above are main-actor work.
-                    self.deliverOnMain { $0.onInterruptionBegan?() }
+                    self.onInterruptionBegan?()
 
                 case .ended:
                     // The interruption has ended regardless of the resume option;
@@ -47,7 +52,7 @@ class AudioSessionInterruptionHandler: ObservableObject {
                     let shouldResume = AVAudioSession.InterruptionOptions(rawValue: options).contains(.shouldResume)
                     FileLog.shared.addMessage("[VoicePipeline] Ended (shouldResume: \(shouldResume))")
                     if shouldResume {
-                        self.deliverOnMain { $0.onInterruptionEnded?() }
+                        self.onInterruptionEnded?()
                     }
 
                 @unknown default:
@@ -57,15 +62,4 @@ class AudioSessionInterruptionHandler: ObservableObject {
             .store(in: &cancellables)
     }
 
-    /// Runs main-actor work from the notification handler, which may be on any thread.
-    private func deliverOnMain(_ work: @escaping @MainActor (AudioSessionInterruptionHandler) -> Void) {
-        if Thread.isMainThread {
-            MainActor.assumeIsolated { work(self) }
-        } else {
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                work(self)
-            }
-        }
-    }
 }

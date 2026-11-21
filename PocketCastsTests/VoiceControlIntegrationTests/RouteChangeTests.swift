@@ -147,7 +147,7 @@ final class RouteChangeTests: XCTestCase {
     /// Every route change re-reads the selected input, not only physical device changes: an
     /// `.override`, `.categoryChange` or `.routeConfigurationChange` can move the input to the
     /// built-in microphone, and a stale `.isolated` would leave capture running on it.
-    func test_routeChange_forNonDeviceReasonStillRefreshesExposure() {
+    func test_routeChange_forNonDeviceReasonStillRefreshesExposure() async {
         let session = FakeAudioSessionControlling()
         session.outputs = [port(.bluetoothA2DP, uid: "bt-out")]
         session.inputs = [port(.builtInMic, uid: "built-in")]
@@ -157,6 +157,9 @@ final class RouteChangeTests: XCTestCase {
         let epoch = monitor.physicalDeviceChangeEpoch
         session.inputs = [port(.bluetoothHFP, uid: "bt-mic")]
         postRouteChange(reason: .categoryChange)
+        // Route notifications are received on main at the source, so delivery is
+        // ordered but asynchronous relative to this post.
+        await waitUntil(timeout: 5) { monitor.micExposure == .isolated }
 
         XCTAssertEqual(monitor.micExposure, .isolated,
                        "the selected input is re-read for every route change")
@@ -541,6 +544,7 @@ final class RouteChangeTests: XCTestCase {
             userInfo: [AVAudioSessionRouteChangeReasonKey: AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue]
         )
 
+        await waitUntil(timeout: 5) { monitor.micExposure == .exposed }
         XCTAssertEqual(monitor.micExposure, .exposed, "a disconnected external mic must stop capture eligibility")
     }
 
@@ -961,6 +965,66 @@ final class RouteChangeTests: XCTestCase {
         XCTAssertFalse(service.isListening, "a failed capture start must not report listening")
         XCTAssertEqual(session.configureCount, 1,
                        "teardown hiding availableInputs must not re-arm acquisition for the same device")
+    }
+
+    /// Ordering control for the gate chain.
+    ///
+    /// An older *listening* route is posted from a background thread while a newer
+    /// emission that must turn the gate off follows it. If delivery were unordered —
+    /// an off-main emission queued at the consumer while a newer main-thread one
+    /// applied inline — the older listening posture could start capture after the
+    /// newer off posture had stopped it. Receiving at the source keeps every emission
+    /// in order, so capture must stay stopped.
+    ///
+    /// The gate is forced off with a blocked conflict rather than by removing the
+    /// microphone: the simulator's diagnostic override admits the built-in mic, so a
+    /// speaker-only route still listens and would not give an off starting state.
+    @MainActor
+    func test_gate_olderListeningEmissionCannotStartCaptureAfterNewerOff() async {
+        let session = FakeAudioSessionControlling()
+        session.outputs = [port(.bluetoothA2DP, uid: "bt-out")]
+        session.inputs = [port(.bluetoothHFP, uid: "bt-mic")]
+        session.available = [port(.bluetoothHFP, uid: "bt-mic")]
+        session.selectionTakesEffect = true
+
+        let conditionMonitor = LiveConditionMonitor(gracePeriodSignal: GracePeriodSignal())
+        let service = VoiceControlAssembly()
+            .buildVoiceControlService(audioSession: session,
+                                      conditionMonitor: conditionMonitor,
+                                      capture: SucceedingCapture())!
+        service.startIfAllowed()
+        await waitUntil(timeout: 5) { service.isListening }
+
+        // Older emission, posted off main exactly as the system posts route changes:
+        // the route is re-read while capture is running.
+        let olderPosted = expectation(description: "older listening route posted off main")
+        DispatchQueue.global(qos: .userInitiated).async {
+            NotificationCenter.default.post(
+                name: AVAudioSession.routeChangeNotification,
+                object: nil,
+                userInfo: [AVAudioSessionRouteChangeReasonKey:
+                            AVAudioSession.RouteChangeReason.newDeviceAvailable.rawValue]
+            )
+            olderPosted.fulfill()
+        }
+        await fulfillment(of: [olderPosted], timeout: 5)
+
+        // Newer emission: a call starts, which must stop capture. Published on main.
+        conditionMonitor.conflicts = GateConflicts(
+            notOnCall: .blocked(reason: "call_in_progress"),
+            notCasting: .allowed,
+            batteryOk: .allowed,
+            otherAppPlaying: .allowed
+        )
+
+        await waitUntil(timeout: 5) { !service.gateState.isListening }
+        // Give any out-of-order start from the older emission time to show up.
+        try? await Task.sleep(for: .milliseconds(300))
+
+        XCTAssertFalse(service.gateState.isListening,
+                       "the newest posture wins; the gate must remain off")
+        XCTAssertFalse(service.isListening,
+                       "an older listening emission must not start capture after a newer off emission")
     }
 
     private func postRouteChange(reason: AVAudioSession.RouteChangeReason = .newDeviceAvailable) {

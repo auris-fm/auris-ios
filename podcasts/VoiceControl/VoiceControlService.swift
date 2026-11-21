@@ -452,26 +452,17 @@ class VoiceControlService: ObservableObject {
                 hasExternalMicrophoneCandidate: routeMonitor?.hasExternalMicrophoneCandidate ?? true
             )
         }
-        // Real main-actor delivery, not an assertion. The sources are `@Published`
-        // values assigned from notification callbacks (`routeChangeNotification` in
-        // particular), so this chain emits on whatever thread the system posted on;
-        // the `@MainActor` requirement on `applyGate` declares the need but a
-        // closure annotation would schedule nothing on its own.
-        //
-        // Deliberately not `.receive(on: DispatchQueue.main)`: that defers every
-        // delivery through the queue even when already on main, and acquisition
-        // depends on running inline. Its exposure flip publishes synchronously from
-        // inside `acquireExternalInput`; deferring that re-entrant emission lets it
-        // be handled after the acquisition commits, when `isListening` is still
-        // false, so `.acquired` releases the route it just selected. Hopping only
-        // when actually off main keeps the existing ordering untouched.
-        .sink { [weak self] gate in
+        // Plain synchronous delivery. The thread change happens at the SOURCE —
+        // `IOSAudioRouteMonitor` receives `routeChangeNotification` on main — so every
+        // write to `micExposure`, and therefore every emission here, is already on
+        // main and in order. A hop at this consumer would instead let an older queued
+        // emission race a newer inline one, and `.receive(on:)` here would also defer
+        // the acquisition's own synchronous exposure flip (15 acquisition failures).
+        // `acquireExternalInput` publishes on main directly and never passes through a
+        // notification, so the inline handoff is untouched.
+        .sink { @MainActor [weak self] gate in
             guard let self else { return }
-            guard Thread.isMainThread else {
-                DispatchQueue.main.async { [weak self] in self?.applyGate(gate) }
-                return
-            }
-            MainActor.assumeIsolated { self.applyGate(gate) }
+            self.applyGate(gate)
         }
         .store(in: &cancellables)
 
@@ -485,7 +476,6 @@ class VoiceControlService: ObservableObject {
     /// starts or stops capture; every caller establishes that before entering.
     @MainActor
     private func applyGate(_ gate: VoiceControlGate) {
-        guard !isStopping else { return }
         let previous = gateState
         gateState = gate.state
         gatePosture = gate.posture
@@ -505,6 +495,7 @@ class VoiceControlService: ObservableObject {
             )
         }
 
+        guard !isStopping else { return }
         let wasCapturing = isListening
         switch gate.state {
         case .off:
@@ -919,7 +910,10 @@ class VoiceControlService: ObservableObject {
         }
 
         // Single-flight LFM load — one task even if startIfAllowed were re-entered.
-        intentRouterReadyTask = Task { [weak self] in
+        // Main-actor: `updateModelsReady` publishes `$setup`, which the gate chain
+        // reads on main, so this producer must reach main like the others rather
+        // than writing from the cooperative pool after `ensureReady()` resumes.
+        intentRouterReadyTask = Task { @MainActor [weak self] in
             guard let self else { return }
             let result = await self.intentRouter.ensureReady()
             switch result {

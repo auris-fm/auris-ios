@@ -18,6 +18,9 @@ class BatteryConditionSource: GateConditionSource {
     var publisher: AnyPublisher<GateCondition, Never> {
         NotificationCenter.default
             .publisher(for: .NSProcessInfoPowerStateDidChange)
+            // Hop at the source: this feeds `$conflicts`, which the gate chain reads
+            // on main. Without it the write happens on the posting thread.
+            .receive(on: DispatchQueue.main)
             .map { _ in self.current }
             .eraseToAnyPublisher()
     }
@@ -33,6 +36,10 @@ class CastingConditionSource: GateConditionSource {
     var publisher: AnyPublisher<GateCondition, Never> {
         NotificationCenter.default
             .publisher(for: AVAudioSession.routeChangeNotification)
+            // Same notification the route monitor receives, and it also feeds
+            // `$conflicts` — so it needs the same source hop, or one producer of the
+            // gate chain would still publish off main.
+            .receive(on: DispatchQueue.main)
             .map { _ in self.current }
             .eraseToAnyPublisher()
     }
