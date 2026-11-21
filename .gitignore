@@ -54,6 +54,9 @@ build/
 # CPU llama.cpp pin (built by scripts/build-llama-ios.sh; Metal off)
 ThirdParty/llama.cpp
 ThirdParty/llama-cpp-build/
+# Worktrees symlink the shared build here; the trailing-slash rule above only
+# matches a real directory, so the link itself needs its own entry.
+ThirdParty/llama-cpp-build
 
 # Local-only operator harnesses: live-network probes are never committed
 LocalMintTokenProbe.swift

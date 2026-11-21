@@ -576,6 +576,21 @@ TEST_START_DEADLINE="${BUILDKITE_AURIS_TEST_START_DEADLINE:-900}"
 # and does not limit how many launches there are.
 TEST_PROGRESS_DEADLINE="${BUILDKITE_AURIS_TEST_PROGRESS_DEADLINE:-300}"
 TEST_TOTAL_DEADLINE="${BUILDKITE_AURIS_TEST_TOTAL_DEADLINE:-3600}"
+# A test in flight longer than this is sampled before the execution allowance
+# kills it: the sample is the only record of what a hung test was blocked on.
+# Below the 60s default allowance so the capture lands while the host is still
+# stuck, not after the relaunch. The audio-subsystem log is collected once after
+# the tests, covering the whole test window.
+STUCK_TEST_THRESHOLD="${BUILDKITE_AURIS_STUCK_TEST_THRESHOLD:-45}"
+
+# The machine's load at the start and end of the test window, into the kept
+# artifacts. A timeout under load 300 reads differently from a hang on a quiet
+# machine; without these lines every timeout is ambiguous. Diagnostics only:
+# a failed read never changes the run's result.
+record_load() {
+  echo "$1 loadavg: $(sysctl -n vm.loadavg 2>/dev/null || echo unavailable)" >> "$LOG_DIR/loadavg.log"
+}
+record_load start
 
 set +e
 xcodebuild test-without-building \
@@ -597,6 +612,7 @@ xcodebuild test-without-building \
   SKIP_LINT=1 \
   > "$LOG_DIR/test.log" 2>&1 &
 XCODEBUILD_PID=$!
+TEST_WINDOW_START=$(date +%s)
 
 (
   # errexit and pipefail off: a process vanishing between the listing and its
@@ -650,6 +666,96 @@ XCODEBUILD_PID=$!
 ) &
 WATCHDOG_PID=$!
 
+# Diagnostics only: when one test has been in flight past STUCK_TEST_THRESHOLD,
+# capture `sample <host pid> 10` into artifacts/, once per stuck test. `sample`
+# bounds itself by its duration argument, so there is no timer and no escalation
+# here; Buildkite's step timeout is the backstop if it hangs anyway. The sampler
+# never signals anything and its own failures are swallowed — a sampler that
+# dies must not change the run's result. The loop ends when xcodebuild does. The
+# host pid is read from the log's own process tags (podcasts[pid:tid]), so a
+# relaunch is followed without any extra state. The simulator audio log is
+# collected once after the tests instead, where a slow query cannot stall them.
+(
+  set +e
+  # Bash 3.2 is /bin/bash on this Mac: no associative arrays. The sampled list
+  # is newline-delimited occurrence keys; fgrep -x matches a whole line literally.
+  sampled=""
+  current=""
+  since=0
+  seq=0
+  while kill -0 "$XCODEBUILD_PID" 2>/dev/null; do
+    # XCTest and Swift Testing both appear in the plan: ◇ Test … started. is a
+    # start; only the terminal ✔ … passed after / ✘ … failed after lines are
+    # results. A mid-test "✘ Test … recorded an issue" line is NOT completion —
+    # treating it as one would retire a test that records a failure then hangs.
+    # One scan per poll answers three things at once: the LAST event line, the
+    # line number of the last start (the current occurrence), and the last host
+    # pid written after it. A retried test repeats its start line verbatim, so
+    # the occurrence — not the test name — is what the timer and the sample-once
+    # guard key on; otherwise a relaunch into the same test inherits the earlier
+    # occurrence's elapsed time and its dead host's pid.
+    #
+    # XCTest and Swift Testing both appear in the plan: ◇ Test … started. is a
+    # start; only the terminal ✔ … passed after / ✘ … failed after lines are
+    # results. A mid-test "✘ Test … recorded an issue" line is NOT completion —
+    # treating it as one would retire a test that records a failure then hangs.
+    scan=$(awk '
+      /Test Case .* started\.$/ || /◇ Test .* started\.$/ {
+        last = $0; startLine = NR; pid = ""; next
+      }
+      /Test Case .*(passed|failed) \(/ || /✔ Test .* passed after / || /✘ Test .* failed after / {
+        last = $0; next
+      }
+      startLine && match($0, /podcasts\[[0-9]+/) {
+        p = substr($0, RSTART, RLENGTH); gsub(/[^0-9]/, "", p); pid = p
+      }
+      END { printf "%d\t%s\t%s\n", startLine + 0, pid, last }
+    ' "$LOG_DIR/test.log" 2>/dev/null)
+    occurrence=$(printf '%s' "$scan" | cut -f1)
+    pid=$(printf '%s' "$scan" | cut -f2)
+    line=$(printf '%s' "$scan" | cut -f3-)
+    case "$line" in
+      *" started.")
+        key="${occurrence}:${line}"
+        if [ "$key" != "$current" ]; then
+          current="$key"
+          since=$(date +%s)
+        fi
+        if [ -n "$current" ] && ! printf '%s\n' "$sampled" | grep -Fxq -- "$current" \
+          && [ $(( $(date +%s) - since )) -ge "$STUCK_TEST_THRESHOLD" ]; then
+          # The pid is this occurrence's own: only tags written after its start
+          # line count, so a previous host's pid can never be sampled for it. If
+          # this host has not logged one yet there is nothing to sample, and the
+          # next poll retries.
+          if [ -n "$pid" ]; then
+            # Marked sampled only once a capture actually happened: a test that
+            # hangs before the host writes any pid line stays eligible, so the
+            # next poll retries instead of silently retiring it.
+            sampled="${sampled}${current}
+"
+            seq=$((seq + 1))
+            echo "stuck-test sampler: capturing pid $pid for: $line" >&2
+            # Distinct names per capture: two stuck tests in one host must not
+            # overwrite each other. `sample <pid> 10` bounds itself by its own
+            # duration argument, so it runs in the foreground with no timer and
+            # no escalation: if it hangs anyway, Buildkite's step timeout kills
+            # the whole job tree, which is the backstop for every command here.
+            sample "$pid" 10 -file "$LOG_DIR/stuck-sample-${seq}-${pid}.txt" >/dev/null 2>&1
+            # The load at the moment of capture, appended to the sample itself:
+            # a stack taken on a swamped host is not evidence of a code hang.
+            echo "loadavg: $(sysctl -n vm.loadavg 2>/dev/null || echo unavailable)" >> "$LOG_DIR/stuck-sample-${seq}-${pid}.txt"
+          fi
+        fi
+        ;;
+      *)
+        current=""
+        ;;
+    esac
+    sleep 5
+  done
+) &
+SAMPLER_PID=$!
+
 # The live log gets test results, not the whole run. Two thousand tests each print
 # a start line and a result line, and this agent streams its log in chunks over a
 # link that drops them; a run has been lost to upload retries alone. Filtering here
@@ -675,6 +781,30 @@ kill "$TAIL_PID" 2>/dev/null
 # would report the kill as the watchdog's status and hide a real timeout.
 wait "$WATCHDOG_PID" 2>/dev/null
 WATCHDOG_STATUS=$?
+# The sampler exits on its own once xcodebuild is gone; waiting here reaps it.
+wait "$SAMPLER_PID" 2>/dev/null
+record_load end
+set -e
+
+echo "--- :mag: Collecting the simulator audio log"
+# `log show --last …` has no elapsed-time bound of its own, so it does not run
+# inside the test step where a slow query would stall a running test. It runs
+# once here, after the tests, covering the whole test window; Buildkite's step
+# timeout is its backstop. Its own failure never changes the run's result.
+set +e
+xcrun simctl spawn "$SIMULATOR_ID" log show \
+  --start "$(date -r "$TEST_WINDOW_START" '+%Y-%m-%d %H:%M:%S')" --info --debug \
+  --predicate 'process == "podcasts" AND (subsystem CONTAINS[c] "audio" OR subsystem CONTAINS[c] "speech" OR eventMessage CONTAINS[c] "AQMEIO" OR eventMessage CONTAINS[c] "AVAudioSession")' \
+  > "$LOG_DIR/stuck-audio.log" 2>&1
+AUDIO_LOG_STATUS=$?
+# Gate on the command's status, not the file's size: stderr is merged into the
+# file, so a failed query leaves error text that would otherwise read as a
+# successful collection.
+if [ "$AUDIO_LOG_STATUS" -eq 0 ] && [ -s "$LOG_DIR/stuck-audio.log" ]; then
+  echo "collected $(wc -c < "$LOG_DIR/stuck-audio.log" | tr -d ' ') bytes into stuck-audio.log"
+else
+  echo "audio log collection failed (status $AUDIO_LOG_STATUS); see stuck-audio.log"
+fi
 set -e
 
 case "$WATCHDOG_STATUS" in
@@ -755,6 +885,16 @@ run_bg bash .buildkite/lib/test-watchdog.sh
 WATCHDOG_SELFTEST_STATUS=$?
 set -e
 
+echo "--- :mag: Checking the stuck-test sampler itself"
+# A test in flight past the threshold must be sampled once, with the machine's
+# load recorded in the capture; a healthy run must produce nothing; the sampler
+# must never touch the run. The audio log is a single post-run collection and
+# no case here exercises it.
+set +e
+run_bg bash .buildkite/lib/test-stuck-sampler.sh
+SAMPLER_SELFTEST_STATUS=$?
+set -e
+
 echo "--- :mag: Checking what reaches the live log"
 # The live log is filtered so a dropped chunk cannot cost a whole run. That filter
 # is only safe if it keeps every line a verdict or a diagnosis is read from, which
@@ -806,7 +946,7 @@ fi
 # the pipeline's artifact_paths: this says what should be there, and a missing one
 # is visible in the step's own output rather than noticed later by whoever needs it.
 echo "--- :package: Artifacts"
-for f in "$LOG_DIR"/*.log "$LOG_DIR"/*.xcresult.zip; do
+for f in "$LOG_DIR"/*.log "$LOG_DIR"/*.xcresult.zip "$LOG_DIR"/stuck-sample-*.txt; do
   [ -e "$f" ] && echo "  $(basename "$f")  $(wc -c < "$f" | tr -d ' ') bytes"
 done
 
