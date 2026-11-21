@@ -697,7 +697,17 @@ WATCHDOG_PID=$!
         fi
         if [ -n "$current" ] && ! printf '%s\n' "$sampled" | grep -Fxq -- "$current" \
           && [ $(( $(date +%s) - since )) -ge "$STUCK_TEST_THRESHOLD" ]; then
-          pid=$(grep -oE 'podcasts\[[0-9]+' "$LOG_DIR/test.log" 2>/dev/null | tail -1 | tr -dc '0-9')
+          # Only pid lines written AFTER this test started count. The log spans
+          # host relaunches, so its last `podcasts[pid]` tag can belong to the
+          # previous host: sampling that pid would capture a dead process (or a
+          # recycled one) and name it after this test. Everything from the start
+          # line onwards is this host's own output; if it has not logged a pid
+          # yet, there is nothing to sample and the next poll retries.
+          pid=$(awk -v start="$current" '
+            seen { if (match($0, /podcasts\[[0-9]+/)) { p = substr($0, RSTART, RLENGTH); gsub(/[^0-9]/, "", p); pid = p } }
+            $0 == start { seen = 1 }
+            END { print pid }
+          ' "$LOG_DIR/test.log" 2>/dev/null)
           if [ -n "$pid" ]; then
             # Marked sampled only once a capture actually happened: a test that
             # hangs before the host writes any pid line stays eligible, so the

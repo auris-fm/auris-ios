@@ -163,10 +163,17 @@ log="$dir/artifacts/test.log"; : > "$log"
 make_stubs "$dir"
 export STUB_CALLS="$dir/calls.txt"; : > "$STUB_CALLS"
 extract_sampler "$dir/sampler.sh"
-( sleep 1; echo "Test Case '-[X.Y testA]' started."; echo "2026-11-21 07:34:01.000000+0800 podcasts[424242:1] stub host line"; sleep 6; echo "Test Case '-[X.Y testA]' failed (6.0 seconds)."; echo "Test Case '-[X.Y testB]' started."; sleep 300 ) >> "$log" &
+( sleep 1; echo "Test Case '-[X.Y testA]' started."; echo "2026-11-21 07:34:01.000000+0800 podcasts[424242:1] stub host line"; sleep 300 ) >> "$log" &
 writer=$!
 start_sampler "$dir" 300 3
 ok=0
+# End test A only once its own capture is complete. A fixed delay here could
+# expire before the sampler ever polled, so B would start with A never sampled
+# and the case would pass on one capture instead of two.
+wait_for 120 capture_has_load "$dir/artifacts/stuck-sample-1-424242.txt" || ok=1
+kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
+( echo "Test Case '-[X.Y testA]' failed (6.0 seconds)."; echo "Test Case '-[X.Y testB]' started."; echo "2026-11-21 07:35:01.000000+0800 podcasts[424242:1] stub host line"; sleep 300 ) >> "$log" &
+writer=$!
 wait_for 120 capture_has_load "$dir/artifacts/stuck-sample-2-424242.txt" || ok=1
 [ "$(grep -c '^sample ' "$STUB_CALLS")" -eq 2 ] || ok=1
 [ -s "$dir/artifacts/stuck-sample-1-424242.txt" ] || ok=1
@@ -202,7 +209,11 @@ log="$dir/artifacts/test.log"; : > "$log"
 make_stubs "$dir"
 export STUB_CALLS="$dir/calls.txt"; : > "$STUB_CALLS"
 extract_sampler "$dir/sampler.sh"
-( sleep 1; echo "◇ Test testStuck() started."; echo "2026-11-21 07:34:01.000000+0800 podcasts[424242:1] stub host line"; sleep 4; echo "✘ Test testStuck() recorded an issue"; sleep 300 ) >> "$log" &
+# The issue arrives BEFORE any pid line exists. If a mid-test issue counted as
+# completion, the test would be retired while no capture was possible and none
+# would ever happen — so this ordering makes the case fail against that bug
+# instead of passing on a capture taken before the issue arrived.
+( sleep 1; echo "◇ Test testStuck() started."; sleep 4; echo "✘ Test testStuck() recorded an issue"; echo "2026-11-21 07:34:01.000000+0800 podcasts[424242:1] stub host line"; sleep 300 ) >> "$log" &
 writer=$!
 start_sampler "$dir" 300 3
 ok=0
@@ -255,8 +266,38 @@ grep -q '^end loadavg: { 1.25 2.50 3.75 }$' "$dir/artifacts/loadavg.log" || ok=1
 report "$ok" "the test window's start and end load are recorded into artifacts"
 rm -rf "$dir"
 
+# Case 9: the host relaunched. The log's last pid tag before this test started
+# belongs to the PREVIOUS host; sampling it would capture a dead (or recycled)
+# process and name it after this test. Only pid lines written after the start
+# line count, so the fresh host's pid is the one sampled.
+dir=$(mktemp -d); mkdir -p "$dir/artifacts"
+log="$dir/artifacts/test.log"; : > "$log"
+make_stubs "$dir"
+export STUB_CALLS="$dir/calls.txt"; : > "$STUB_CALLS"
+extract_sampler "$dir/sampler.sh"
+( sleep 1
+  echo "Test Case '-[X.Y testOldHost]' started."
+  echo "2026-11-21 07:34:01.000000+0800 podcasts[111111:1] previous host line"
+  echo "Test Case '-[X.Y testOldHost]' failed (1.0 seconds)."
+  echo "Test Case '-[X.Y testNewHost]' started."
+  # The relaunched host has not logged a pid yet: the only pid in the log is the
+  # dead host's. It appears later, so a whole-log lookup samples 111111 first.
+  sleep 8
+  echo "2026-11-21 07:35:09.000000+0800 podcasts[222222:1] relaunched host line"
+  sleep 300 ) >> "$log" &
+writer=$!
+start_sampler "$dir" 300 3
+ok=0
+wait_for 120 capture_has_load "$dir/artifacts/stuck-sample-1-222222.txt" || ok=1
+[ "$(grep -c '^sample ' "$STUB_CALLS")" -eq 1 ] || ok=1
+grep -q '^sample 222222 10 -file .*stuck-sample-1-222222.txt$' "$STUB_CALLS" || ok=1
+[ ! -e "$dir/artifacts/stuck-sample-1-111111.txt" ] || ok=1
+stop_sampler
+report "$ok" "a stale pid from a previous host is never sampled for the new test"
+rm -rf "$dir"
+
 if [ "$fails" -eq 0 ]; then
-  echo "8/8 stuck-test sampler cases behaved as intended"
+  echo "9/9 stuck-test sampler cases behaved as intended"
 else
   echo "$fails stuck-test sampler case(s) FAILED"
   exit 1
