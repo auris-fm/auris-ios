@@ -89,8 +89,6 @@ private final class StubSpeechSynthesizer: SpeechSynthesizing {
     /// Called with each utterance as `speak` is invoked. Default: deliver
     /// nothing, which is what a synthesizer without a usable audio route does.
     var onSpeak: ((StubSpeechSynthesizer, AVSpeechUtterance) -> Void)?
-    /// When set, speak(_:) blocks on this semaphore after enqueuing, letting a
-    /// test hold the first start inside the synthesizer while a second starts.
     /// Where this stub parks when the engine reports its timeline. The engine
     /// only reports; the stub decides what to do at each point.
     var onPrepare: ((String) async -> Void)?
