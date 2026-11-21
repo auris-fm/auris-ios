@@ -161,9 +161,13 @@ class AVSpeechTtsEngine: NSObject, TtsEngineProtocol {
                 displaced.resume()
             }
             // Resolving happens while the waiter is installed and its window armed.
+            // Only the resolver is held across the lookup. Taking a strong `self`
+            // before the suspension would keep the whole engine alive for as long as
+            // the lookup takes, even after release — and it may never return.
+            let resolver = synthesizer
             Task { @MainActor [weak self] in
+                let voice = await resolver.resolveVoice(for: language)
                 guard let self else { return }
-                let voice = await self.synthesizer.resolveVoice(for: language)
                 // The wait may have ended while the lookup was outstanding: cancel,
                 // release, a later start, or the silence window. Enqueue nothing then.
                 guard generation == self.startGeneration,

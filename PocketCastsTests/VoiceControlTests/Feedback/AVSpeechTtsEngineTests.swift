@@ -512,6 +512,8 @@ final class AVSpeechTtsEngineTests: XCTestCase {
         await waitUntil(timeout: 5) { !synthesizer.resolveOnMain.isEmpty }
         XCTAssertFalse(synthesizer.resolveOnMain.isEmpty,
                        "the resolver was never called, so this proves nothing")
+        XCTAssertTrue(synthesizer.resolveOnMain.allSatisfy { !$0 },
+                      "the voice lookup must not be performed on the main thread")
     }
 
     /// A voice lookup that never returns must not leave the call waiting for ever:
@@ -530,11 +532,20 @@ final class AVSpeechTtsEngineTests: XCTestCase {
         let speaking = Task { await engine.speak(text: "Hello", language: "en-US") }
         await fulfillment(of: [parked], timeout: 5)
 
-        // The lookup is still parked. The silence window must end the call anyway.
+        // The lookup is still parked. The silence window must end the call anyway,
+        // so the return is bounded while the gate stays closed.
         await speaking.value
         XCTAssertTrue(synthesizer.spoken.isEmpty,
-                      "a call ended by the timeout must not enqueue afterwards")
+                      "nothing may be enqueued while the lookup is outstanding")
+
+        // Now let the lookup finish. A late enqueue would appear here, so assert again
+        // after the lookup task has settled — asserting only before the gate opens
+        // would miss exactly the bug this control exists for.
         await gate.open()
+        await waitUntil(timeout: 5) { !synthesizer.resolveOnMain.isEmpty }
+        try? await Task.sleep(for: .milliseconds(100))
+        XCTAssertTrue(synthesizer.spoken.isEmpty,
+                      "a call ended by the timeout must not enqueue when its lookup finally returns")
     }
 
     /// Cancel must end a call whose lookup is still outstanding, immediately, rather
@@ -555,8 +566,15 @@ final class AVSpeechTtsEngineTests: XCTestCase {
         engine.cancel()
         await speaking.value
         XCTAssertTrue(synthesizer.spoken.isEmpty,
-                      "a cancelled call must not enqueue when its lookup finally returns")
+                      "nothing may be enqueued while the lookup is outstanding")
+
+        // Let the lookup finish and settle, then assert again: the late enqueue is
+        // what this control must catch.
         await gate.open()
+        await waitUntil(timeout: 5) { !synthesizer.resolveOnMain.isEmpty }
+        try? await Task.sleep(for: .milliseconds(100))
+        XCTAssertTrue(synthesizer.spoken.isEmpty,
+                      "a cancelled call must not enqueue when its lookup finally returns")
     }
 
     /// Warm-up superseded during its lookup must enqueue nothing: it would otherwise
@@ -623,3 +641,4 @@ final class AVSpeechTtsEngineTests: XCTestCase {
     }
 
 }
+
