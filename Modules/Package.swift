@@ -10,10 +10,6 @@ let package = Package(
     ],
     products: XcodeSupport.products + [
         .library(
-            name: "GRDBMacros",
-            targets: ["GRDBMacros"]
-        ),
-        .library(
             name: "PocketCastsUtils",
             targets: ["PocketCastsUtils"]
         ),
@@ -35,7 +31,7 @@ let package = Package(
         )
     ],
     dependencies: [
-        .package(url: "https://github.com/swiftlang/swift-syntax.git", from: "603.0.0"),
+        .package(path: "../ModulesMacros"),
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0"),
         .package(url: "https://github.com/apple/swift-protobuf.git", from: "1.0.0"),
         .package(url: "https://github.com/danielebogo/Swime", branch: "master"),
@@ -59,27 +55,10 @@ let package = Package(
         .target(
             name: "GRDBMacros",
             dependencies: [
-                "GRDBMacrosPlugin",
+                .product(name: "GRDBMacrosPlugin", package: "ModulesMacros"),
                 .product(name: "GRDB", package: "GRDB.swift"),
             ],
             path: "Sources/GRDBMacros"
-        ),
-        .macro(
-            name: "GRDBMacrosPlugin",
-            dependencies: [
-                .product(name: "SwiftSyntax", package: "swift-syntax"),
-                .product(name: "SwiftSyntaxMacros", package: "swift-syntax"),
-                .product(name: "SwiftCompilerPlugin", package: "swift-syntax"),
-            ],
-            path: "Sources/GRDBMacrosPlugin"
-        ),
-        .testTarget(
-            name: "GRDBMacrosTests",
-            dependencies: [
-                "GRDBMacrosPlugin",
-                .product(name: "SwiftSyntaxMacrosTestSupport", package: "swift-syntax"),
-            ],
-            path: "Tests/GRDBMacrosTests"
         ),
         .target(
             name: "PocketCastsUtils",
@@ -97,8 +76,8 @@ let package = Package(
             name: "PocketCastsDataModel",
             dependencies: [
                 .product(name: "GRDB", package: "GRDB.swift"),
-                "PocketCastsUtils",
                 "GRDBMacros",
+                "PocketCastsUtils",
             ],
             path: "Sources/PocketCastsDataModel",
             swiftSettings: [

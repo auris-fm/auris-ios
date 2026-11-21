@@ -54,6 +54,10 @@ public class Episode: NSObject, BaseEpisode {
     @objc public var deselectedChapters: String?
     @objc public var deselectedChaptersModified = 0 as Int64
     @objc public var wasDeleted = false
+    // An optional Bool cannot be marked @objc, so without the column attribute
+    // the GRDB record macro would silently drop this field from the GRDB save
+    // and load while the legacy SQL path persists it.
+    @GRDBColumn("hasGeneratedTranscript")
     public var hasGeneratedTranscript: Bool? = nil
 
     public var hasBookmarks: Bool {
