@@ -178,8 +178,41 @@ pgrep -f "^sleep 300$" >/dev/null 2>&1 && ok=1
 report "$ok" "a wedged diagnostic is bounded; the sampler still ends with the run"
 rm -rf "$dir"
 
+# Case 7: the diagnostic ignores TERM entirely. Only KILL escalation can end
+# it; the sampler must still reach its end within the bound, and neither the
+# stub nor its child may survive.
+dir=$(mktemp -d); mkdir -p "$dir/artifacts"
+log="$dir/artifacts/test.log"; : > "$log"
+make_stubs "$dir"
+cat > "$dir/bin/sample" <<'STUB'
+#!/bin/bash
+echo "sample $*" >> "$STUB_CALLS"
+trap '' TERM
+sleep 300 &
+child=$!
+wait "$child"
+STUB
+chmod +x "$dir/bin/sample"
+export STUB_CALLS="$dir/calls.txt"; : > "$STUB_CALLS"
+extract_sampler "$dir/sampler.sh"
+( sleep 1; echo "Test Case '-[X.Y testStuck]' started."; echo "2026-11-21 07:34:01.000000+0800 podcasts[424242:1] stub host line" ) >> "$log" &
+writer=$!
+( sleep 8 ) &
+stub=$!
+start=$(date +%s)
+( cd "$dir/artifacts" && PATH="$dir/bin:$PATH" /bin/bash "$dir/sampler.sh" "$dir/artifacts" "$stub" "SIM-TEST" 3 )
+elapsed=$(( $(date +%s) - start ))
+kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
+ok=0
+# Threshold 3s + poll slack + 30s bound + 5s TERM grace + KILL slack.
+[ "$elapsed" -le 50 ] || ok=1
+pgrep -f "^sleep 300$" >/dev/null 2>&1 && ok=1
+pgrep -f "bin/sample 424242" >/dev/null 2>&1 && ok=1
+report "$ok" "a TERM-ignoring diagnostic is KILLed; the sampler still ends with the run"
+rm -rf "$dir"
+
 if [ "$fails" -eq 0 ]; then
-  echo "6/6 stuck-test sampler cases behaved as intended"
+  echo "7/7 stuck-test sampler cases behaved as intended"
 else
   echo "$fails sampler case(s) did not behave as intended"
 fi

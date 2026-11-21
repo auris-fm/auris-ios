@@ -688,14 +688,29 @@ WATCHDOG_PID=$!
             # Distinct names per capture: two stuck tests in one host must not
             # overwrite each other. Each diagnostic is bounded so a wedged
             # sample/log cannot hold the step past the run's end.
+            # Bounded termination: TERM to the diagnostic's children then the
+            # diagnostic, a short grace, then KILL to both. A child that ignores
+            # TERM must not hold the step past the run. The timer's own child
+            # (its sleep) is reaped too.
+            bound_diag() {
+              local dp="$1" grace="$2" waited=0
+              pkill -TERM -P "$dp" 2>/dev/null
+              kill -TERM "$dp" 2>/dev/null
+              while [ "$waited" -lt "$grace" ] && kill -0 "$dp" 2>/dev/null; do
+                sleep 1
+                waited=$((waited + 1))
+              done
+              pkill -KILL -P "$dp" 2>/dev/null
+              kill -KILL "$dp" 2>/dev/null
+            }
             (
               sample "$pid" 10 -file "$LOG_DIR/stuck-sample-${seq}-${pid}.txt" >/dev/null 2>&1 &
               sp=$!
-              ( sleep 30; pkill -P "$sp" 2>/dev/null; kill "$sp" 2>/dev/null ) &
+              ( sleep 30; bound_diag "$sp" 5 ) &
               sk=$!
               wait "$sp" 2>/dev/null
-              kill "$sk" 2>/dev/null
-              pkill -P "$sk" 2>/dev/null
+              pkill -KILL -P "$sk" 2>/dev/null
+              kill -KILL "$sk" 2>/dev/null
               wait "$sk" 2>/dev/null
             )
             (
@@ -703,11 +718,11 @@ WATCHDOG_PID=$!
                 --predicate 'process == "podcasts" AND (subsystem CONTAINS[c] "audio" OR subsystem CONTAINS[c] "speech" OR eventMessage CONTAINS[c] "AQMEIO" OR eventMessage CONTAINS[c] "AVAudioSession")' \
                 > "$LOG_DIR/stuck-audio-${seq}-${pid}.log" 2>&1 &
               lp=$!
-              ( sleep 30; pkill -P "$lp" 2>/dev/null; kill "$lp" 2>/dev/null ) &
+              ( sleep 30; bound_diag "$lp" 5 ) &
               lk=$!
               wait "$lp" 2>/dev/null
-              kill "$lk" 2>/dev/null
-              pkill -P "$lk" 2>/dev/null
+              pkill -KILL -P "$lk" 2>/dev/null
+              kill -KILL "$lk" 2>/dev/null
               wait "$lk" 2>/dev/null
             )
           fi
