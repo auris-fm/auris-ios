@@ -323,6 +323,11 @@ class VoiceControlService: ObservableObject {
     /// failed capture exposes no inputs even while the headset stays connected.
     private var captureStartFailedEpoch: UInt = 0
 
+    // Main-actor because it wires main-actor callbacks: the interruption handler's
+    // callbacks are main-actor-typed, so assigning them from a nonisolated initialiser
+    // would be exactly the race this design removes. The one production caller
+    // (`buildVoiceControlService`) is already main-actor.
+    @MainActor
     init(
         conditionMonitor: LiveConditionMonitor,
         routeMonitor: IOSAudioRouteMonitor,
@@ -447,53 +452,26 @@ class VoiceControlService: ObservableObject {
                 hasExternalMicrophoneCandidate: routeMonitor?.hasExternalMicrophoneCandidate ?? true
             )
         }
-        .sink { @MainActor [weak self] gate in
+        // Real main-actor delivery, not an assertion. The sources are `@Published`
+        // values assigned from notification callbacks (`routeChangeNotification` in
+        // particular), so this chain emits on whatever thread the system posted on;
+        // the `@MainActor` requirement on `applyGate` declares the need but a
+        // closure annotation would schedule nothing on its own.
+        //
+        // Deliberately not `.receive(on: DispatchQueue.main)`: that defers every
+        // delivery through the queue even when already on main, and acquisition
+        // depends on running inline. Its exposure flip publishes synchronously from
+        // inside `acquireExternalInput`; deferring that re-entrant emission lets it
+        // be handled after the acquisition commits, when `isListening` is still
+        // false, so `.acquired` releases the route it just selected. Hopping only
+        // when actually off main keeps the existing ordering untouched.
+        .sink { [weak self] gate in
             guard let self else { return }
-            let previous = self.gateState
-            self.gateState = gate.state
-            self.gatePosture = gate.posture
-
-            if gateDescription(previous) != gateDescription(gate.state) {
-                FileLog.shared.addMessage("[VoicePipeline] Gate: \(gateDescription(previous)) → \(gateDescription(gate.state))")
+            guard Thread.isMainThread else {
+                DispatchQueue.main.async { [weak self] in self?.applyGate(gate) }
+                return
             }
-            // LABEL the diagnostic path (owner requirement): a simulator session that only reached
-            // listening because the built-in microphone was admitted must never be mistaken for a
-            // real isolated-microphone capture when reading logs.
-            if DiagnosticMicOverride.isActive, gate.state.isListening,
-               gate.posture.micExposure == .exposed || gate.posture.micExposure == .noMic {
-                FileLog.shared.addMessage(
-                    "[VoicePipeline] \(DiagnosticMicOverride.logLabel): listening on the BUILT-IN "
-                    + "microphone. The route is genuinely Exposed; this exception exists so the "
-                    + "simulator can exercise capture. Device and Release are unaffected."
-                )
-            }
-
-            guard !self.isStopping else { return }
-            let wasCapturing = self.isListening
-            switch gate.state {
-            case .off:
-                self.stopCapture()
-                self.considerAcquisition(for: gate.posture)
-            case .listening(let mode):
-                // The acquisition's own exposure flip publishes synchronously
-                // from inside `acquireExternalInput`. Cancelling here would
-                // abort the very task committing the route, and its later
-                // cancellation check would clear the selection and drop capture.
-                if !self.isAcquiring {
-                    self.cancelAcquisition()
-                }
-                // DIAGNOSTIC (Debug simulator only): the gate admits the built-in microphone
-                // before any acquisition can run, so the session would never be made
-                // input-capable and the built-in mic would have no usable route. Arm the
-                // diagnostic acquisition on the same path the `.off` case uses. `isAcquiring`
-                // marks the task so the resulting exposure flip cannot cancel it.
-                if DiagnosticMicOverride.isActive,
-                   gate.posture.micExposure == .exposed || gate.posture.micExposure == .noMic {
-                    self.considerAcquisition(for: gate.posture)
-                }
-                self.start(in: mode)
-            }
-            self.logLifecycleTransition(posture: gate.posture, wasCapturing: wasCapturing)
+            MainActor.assumeIsolated { self.applyGate(gate) }
         }
         .store(in: &cancellables)
 
@@ -501,6 +479,57 @@ class VoiceControlService: ObservableObject {
         // re-processes through (spec 0443b70) — armed at FIRST ARM, exactly as before the
         // extraction: same lifecycle, only the function boundary moved.
         wireAsrCallbacks()
+    }
+
+    /// Applies one gate emission. Main-actor because it mutates service state and
+    /// starts or stops capture; every caller establishes that before entering.
+    @MainActor
+    private func applyGate(_ gate: VoiceControlGate) {
+        guard !isStopping else { return }
+        let previous = gateState
+        gateState = gate.state
+        gatePosture = gate.posture
+
+        if gateDescription(previous) != gateDescription(gate.state) {
+            FileLog.shared.addMessage("[VoicePipeline] Gate: \(gateDescription(previous)) → \(gateDescription(gate.state))")
+        }
+        // LABEL the diagnostic path (owner requirement): a simulator session that only reached
+        // listening because the built-in microphone was admitted must never be mistaken for a
+        // real isolated-microphone capture when reading logs.
+        if DiagnosticMicOverride.isActive, gate.state.isListening,
+           gate.posture.micExposure == .exposed || gate.posture.micExposure == .noMic {
+            FileLog.shared.addMessage(
+                "[VoicePipeline] \(DiagnosticMicOverride.logLabel): listening on the BUILT-IN "
+                + "microphone. The route is genuinely Exposed; this exception exists so the "
+                + "simulator can exercise capture. Device and Release are unaffected."
+            )
+        }
+
+        let wasCapturing = isListening
+        switch gate.state {
+        case .off:
+            stopCapture()
+            considerAcquisition(for: gate.posture)
+        case .listening(let mode):
+            // The acquisition's own exposure flip publishes synchronously
+            // from inside `acquireExternalInput`. Cancelling here would
+            // abort the very task committing the route, and its later
+            // cancellation check would clear the selection and drop capture.
+            if !isAcquiring {
+                cancelAcquisition()
+            }
+            // DIAGNOSTIC (Debug simulator only): the gate admits the built-in microphone
+            // before any acquisition can run, so the session would never be made
+            // input-capable and the built-in mic would have no usable route. Arm the
+            // diagnostic acquisition on the same path the `.off` case uses. `isAcquiring`
+            // marks the task so the resulting exposure flip cannot cancel it.
+            if DiagnosticMicOverride.isActive,
+               gate.posture.micExposure == .exposed || gate.posture.micExposure == .noMic {
+                considerAcquisition(for: gate.posture)
+            }
+            start(in: mode)
+        }
+        logLifecycleTransition(posture: gate.posture, wasCapturing: wasCapturing)
     }
 
     /// Enqueues one utterance onto the serial routing chain — the single capture path for ASR

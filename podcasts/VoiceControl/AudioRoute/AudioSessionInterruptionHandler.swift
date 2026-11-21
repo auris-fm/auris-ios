@@ -8,10 +8,19 @@ class AudioSessionInterruptionHandler: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
 
     /// Called when interruption begins — stop capture, discard segment.
-    var onInterruptionBegan: (() -> Void)?
+    ///
+    /// Main-actor-typed on purpose: the system posts interruption notifications on
+    /// an arbitrary thread, so the guarantee has to come from the type. Anyone
+    /// assigning or invoking this from off-main is a compile error rather than a
+    /// race. The one call site below hops.
+    @MainActor var onInterruptionBegan: (@MainActor () -> Void)?
 
     /// Called when interruption ends with shouldResume — reactivate session, recompute mode.
-    var onInterruptionEnded: (() -> Void)?
+    ///
+    /// Main-actor for the same reason as `onInterruptionBegan`: it reactivates the
+    /// audio session and recomputes the mode, both main-actor work, and it is
+    /// invoked from the same arbitrarily-threaded notification.
+    @MainActor var onInterruptionEnded: (@MainActor () -> Void)?
 
     init() {
         NotificationCenter.default
@@ -26,7 +35,9 @@ class AudioSessionInterruptionHandler: ObservableObject {
                 case .began:
                     FileLog.shared.addMessage("[VoicePipeline] Began — stopping capture, discarding segment")
                     self.isInterrupted = true
-                    self.onInterruptionBegan?()
+                    // The notification handler runs on the posting thread; the callback
+                    // and the `@Published` write above are main-actor work.
+                    self.deliverOnMain { $0.onInterruptionBegan?() }
 
                 case .ended:
                     // The interruption has ended regardless of the resume option;
@@ -36,7 +47,7 @@ class AudioSessionInterruptionHandler: ObservableObject {
                     let shouldResume = AVAudioSession.InterruptionOptions(rawValue: options).contains(.shouldResume)
                     FileLog.shared.addMessage("[VoicePipeline] Ended (shouldResume: \(shouldResume))")
                     if shouldResume {
-                        self.onInterruptionEnded?()
+                        self.deliverOnMain { $0.onInterruptionEnded?() }
                     }
 
                 @unknown default:
@@ -44,5 +55,17 @@ class AudioSessionInterruptionHandler: ObservableObject {
                 }
             }
             .store(in: &cancellables)
+    }
+
+    /// Runs main-actor work from the notification handler, which may be on any thread.
+    private func deliverOnMain(_ work: @escaping @MainActor (AudioSessionInterruptionHandler) -> Void) {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { work(self) }
+        } else {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                work(self)
+            }
+        }
     }
 }
