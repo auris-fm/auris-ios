@@ -678,7 +678,7 @@ WATCHDOG_PID=$!
 (
   set +e
   # Bash 3.2 is /bin/bash on this Mac: no associative arrays. The sampled list
-  # is newline-delimited test names; fgrep -x matches a whole line literally.
+  # is newline-delimited occurrence keys; fgrep -x matches a whole line literally.
   sampled=""
   current=""
   since=0
@@ -688,26 +688,45 @@ WATCHDOG_PID=$!
     # start; only the terminal ✔ … passed after / ✘ … failed after lines are
     # results. A mid-test "✘ Test … recorded an issue" line is NOT completion —
     # treating it as one would retire a test that records a failure then hangs.
-    line=$(grep -E "Test Case .* started\.$|Test Case .*(passed|failed) \(|◇ Test .* started\.$|✔ Test .* passed after |✘ Test .* failed after " "$LOG_DIR/test.log" 2>/dev/null | tail -1)
+    # One scan per poll answers three things at once: the LAST event line, the
+    # line number of the last start (the current occurrence), and the last host
+    # pid written after it. A retried test repeats its start line verbatim, so
+    # the occurrence — not the test name — is what the timer and the sample-once
+    # guard key on; otherwise a relaunch into the same test inherits the earlier
+    # occurrence's elapsed time and its dead host's pid.
+    #
+    # XCTest and Swift Testing both appear in the plan: ◇ Test … started. is a
+    # start; only the terminal ✔ … passed after / ✘ … failed after lines are
+    # results. A mid-test "✘ Test … recorded an issue" line is NOT completion —
+    # treating it as one would retire a test that records a failure then hangs.
+    scan=$(awk '
+      /Test Case .* started\.$/ || /◇ Test .* started\.$/ {
+        last = $0; startLine = NR; pid = ""; next
+      }
+      /Test Case .*(passed|failed) \(/ || /✔ Test .* passed after / || /✘ Test .* failed after / {
+        last = $0; next
+      }
+      startLine && match($0, /podcasts\[[0-9]+/) {
+        p = substr($0, RSTART, RLENGTH); gsub(/[^0-9]/, "", p); pid = p
+      }
+      END { printf "%d\t%s\t%s\n", startLine + 0, pid, last }
+    ' "$LOG_DIR/test.log" 2>/dev/null)
+    occurrence=$(printf '%s' "$scan" | cut -f1)
+    pid=$(printf '%s' "$scan" | cut -f2)
+    line=$(printf '%s' "$scan" | cut -f3-)
     case "$line" in
       *" started.")
-        if [ "$line" != "$current" ]; then
-          current="$line"
+        key="${occurrence}:${line}"
+        if [ "$key" != "$current" ]; then
+          current="$key"
           since=$(date +%s)
         fi
         if [ -n "$current" ] && ! printf '%s\n' "$sampled" | grep -Fxq -- "$current" \
           && [ $(( $(date +%s) - since )) -ge "$STUCK_TEST_THRESHOLD" ]; then
-          # Only pid lines written AFTER this test started count. The log spans
-          # host relaunches, so its last `podcasts[pid]` tag can belong to the
-          # previous host: sampling that pid would capture a dead process (or a
-          # recycled one) and name it after this test. Everything from the start
-          # line onwards is this host's own output; if it has not logged a pid
-          # yet, there is nothing to sample and the next poll retries.
-          pid=$(awk -v start="$current" '
-            seen { if (match($0, /podcasts\[[0-9]+/)) { p = substr($0, RSTART, RLENGTH); gsub(/[^0-9]/, "", p); pid = p } }
-            $0 == start { seen = 1 }
-            END { print pid }
-          ' "$LOG_DIR/test.log" 2>/dev/null)
+          # The pid is this occurrence's own: only tags written after its start
+          # line count, so a previous host's pid can never be sampled for it. If
+          # this host has not logged one yet there is nothing to sample, and the
+          # next poll retries.
           if [ -n "$pid" ]; then
             # Marked sampled only once a capture actually happened: a test that
             # hangs before the host writes any pid line stays eligible, so the
@@ -715,7 +734,7 @@ WATCHDOG_PID=$!
             sampled="${sampled}${current}
 "
             seq=$((seq + 1))
-            echo "stuck-test sampler: capturing pid $pid for: $current" >&2
+            echo "stuck-test sampler: capturing pid $pid for: $line" >&2
             # Distinct names per capture: two stuck tests in one host must not
             # overwrite each other. `sample <pid> 10` bounds itself by its own
             # duration argument, so it runs in the foreground with no timer and

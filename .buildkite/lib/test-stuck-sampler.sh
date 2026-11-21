@@ -266,34 +266,49 @@ grep -q '^end loadavg: { 1.25 2.50 3.75 }$' "$dir/artifacts/loadavg.log" || ok=1
 report "$ok" "the test window's start and end load are recorded into artifacts"
 rm -rf "$dir"
 
-# Case 9: the host relaunched. The log's last pid tag before this test started
-# belongs to the PREVIOUS host; sampling it would capture a dead (or recycled)
-# process and name it after this test. Only pid lines written after the start
-# line count, so the fresh host's pid is the one sampled.
+# Case 9: the SAME test runs again after a host relaunch — its start line is
+# repeated verbatim, which is what a retry looks like in the log. The only pid
+# available at first belongs to the dead host. Two things must hold: the old
+# pid is never sampled for the new occurrence, and the new occurrence gets its
+# own timer rather than inheriting the first one's elapsed time.
+#
+# The new pid is withheld until the sampler has completed a poll that saw only
+# the old pid, so a slow runner cannot skip past the window where the bug shows.
 dir=$(mktemp -d); mkdir -p "$dir/artifacts"
 log="$dir/artifacts/test.log"; : > "$log"
 make_stubs "$dir"
 export STUB_CALLS="$dir/calls.txt"; : > "$STUB_CALLS"
 extract_sampler "$dir/sampler.sh"
+# Threshold 3: the first occurrence sticks long enough to be sampled, then the
+# same test starts again on a relaunched host.
 ( sleep 1
-  echo "Test Case '-[X.Y testOldHost]' started."
-  echo "2026-11-21 07:34:01.000000+0800 podcasts[111111:1] previous host line"
-  echo "Test Case '-[X.Y testOldHost]' failed (1.0 seconds)."
-  echo "Test Case '-[X.Y testNewHost]' started."
-  # The relaunched host has not logged a pid yet: the only pid in the log is the
-  # dead host's. It appears later, so a whole-log lookup samples 111111 first.
-  sleep 8
-  echo "2026-11-21 07:35:09.000000+0800 podcasts[222222:1] relaunched host line"
+  echo "Test Case '-[X.Y testRetried]' started."
+  echo "2026-11-21 07:34:01.000000+0800 podcasts[111111:1] first host line"
   sleep 300 ) >> "$log" &
 writer=$!
 start_sampler "$dir" 300 3
 ok=0
-wait_for 120 capture_has_load "$dir/artifacts/stuck-sample-1-222222.txt" || ok=1
-[ "$(grep -c '^sample ' "$STUB_CALLS")" -eq 1 ] || ok=1
-grep -q '^sample 222222 10 -file .*stuck-sample-1-222222.txt$' "$STUB_CALLS" || ok=1
-[ ! -e "$dir/artifacts/stuck-sample-1-111111.txt" ] || ok=1
+wait_for 120 capture_has_load "$dir/artifacts/stuck-sample-1-111111.txt" || ok=1
+kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
+# Second occurrence: identical start line, no result line for the first (a
+# relaunch abandons it), and no pid from the new host yet.
+( echo "Test Case '-[X.Y testRetried]' started."; sleep 300 ) >> "$log" &
+writer=$!
+# Observe a full poll with only the dead host's pid in the log. The sampler
+# polls every second here, so two seconds covers a poll even on a loaded host;
+# this is an absence window, not a deadline for an event.
+sleep 3
+if grep -q '^sample 111111 ' "$STUB_CALLS" && [ "$(grep -c '^sample ' "$STUB_CALLS")" -gt 1 ]; then ok=1; fi
+[ ! -e "$dir/artifacts/stuck-sample-2-111111.txt" ] || ok=1
+# Now the relaunched host logs its own pid.
+( echo "2026-11-21 07:35:09.000000+0800 podcasts[222222:1] relaunched host line"; sleep 300 ) >> "$log" &
+writer2=$!
+wait_for 120 capture_has_load "$dir/artifacts/stuck-sample-2-222222.txt" || ok=1
+[ "$(grep -c '^sample ' "$STUB_CALLS")" -eq 2 ] || ok=1
+grep -q '^sample 222222 10 -file .*stuck-sample-2-222222.txt$' "$STUB_CALLS" || ok=1
+kill "$writer2" 2>/dev/null; wait "$writer2" 2>/dev/null
 stop_sampler
-report "$ok" "a stale pid from a previous host is never sampled for the new test"
+report "$ok" "a retried test's new occurrence never samples the dead host's pid"
 rm -rf "$dir"
 
 if [ "$fails" -eq 0 ]; then
