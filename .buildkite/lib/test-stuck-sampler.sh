@@ -257,8 +257,28 @@ ok=0
 report "$ok" "a hang before the first pid line is retried, not silently retired"
 rm -rf "$dir"
 
+# Case 10: a Swift Testing test records an issue mid-test and then hangs. The
+# "✘ Test … recorded an issue" line is not completion; the test must still be
+# sampled past the threshold.
+dir=$(mktemp -d); mkdir -p "$dir/artifacts"
+log="$dir/artifacts/test.log"; : > "$log"
+make_stubs "$dir"
+export STUB_CALLS="$dir/calls.txt"; : > "$STUB_CALLS"
+extract_sampler "$dir/sampler.sh"
+( sleep 1; echo '◇ Test "Records then hangs" started.'; echo "2026-11-21 07:34:01.000000+0800 podcasts[424242:1] stub host line"; sleep 2; echo '✘ Test "Records then hangs" recorded an issue at Tests.swift:12:6: Expectation failed.'; sleep 30 ) >> "$log" &
+writer=$!
+( sleep 12 ) &
+stub=$!
+( cd "$dir/artifacts" && PATH="$dir/bin:$PATH" /bin/bash "$dir/sampler.sh" "$dir/artifacts" "$stub" "SIM-TEST" 3 )
+kill "$writer" "$stub" 2>/dev/null; wait "$writer" "$stub" 2>/dev/null
+ok=0
+[ "$(grep -c '^sample ' "$STUB_CALLS")" = 1 ] || ok=1
+[ -s "$dir/artifacts/stuck-sample-1-424242.txt" ] || ok=1
+report "$ok" "a mid-test issue line does not retire a test that then hangs"
+rm -rf "$dir"
+
 if [ "$fails" -eq 0 ]; then
-  echo "9/9 stuck-test sampler cases behaved as intended"
+  echo "10/10 stuck-test sampler cases behaved as intended"
 else
   echo "$fails sampler case(s) did not behave as intended"
 fi

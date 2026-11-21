@@ -671,9 +671,10 @@ WATCHDOG_PID=$!
   seq=0
   while kill -0 "$XCODEBUILD_PID" 2>/dev/null; do
     # XCTest and Swift Testing both appear in the plan: ◇ Test … started. is a
-    # start, ✔/✘ Test … after … is a result. Missing either form would leave a
-    # whole framework's hangs unsampled.
-    line=$(grep -E "Test Case .* started\.$|Test Case .*(passed|failed) \(|◇ Test .* started\.$|✔ Test |✘ Test " "$LOG_DIR/test.log" 2>/dev/null | tail -1)
+    # start; only the terminal ✔ … passed after / ✘ … failed after lines are
+    # results. A mid-test "✘ Test … recorded an issue" line is NOT completion —
+    # treating it as one would retire a test that records a failure then hangs.
+    line=$(grep -E "Test Case .* started\.$|Test Case .*(passed|failed) \(|◇ Test .* started\.$|✔ Test .* passed after |✘ Test .* failed after " "$LOG_DIR/test.log" 2>/dev/null | tail -1)
     case "$line" in
       *" started.")
         if [ "$line" != "$current" ]; then
