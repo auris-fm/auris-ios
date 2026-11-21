@@ -85,7 +85,8 @@ final class CloudFingerprinterTests: XCTestCase {
         // until frames past its target zone exist (~9.5 s of audio).
         let samples = deterministicSignal(sampleRate: 16000, seconds: 10.0)
         fp.pushSamples(Array(samples[0..<(16000 * 8)]), channels: 1, sampleRate: 16000)
-        XCTAssertTrue(fp.windowsSoFar.isEmpty, "no window should be emitted after only 8 s")
+        // Asserted through what a consumer receives: nothing is drainable yet.
+        XCTAssertTrue(fp.drainWindows().isEmpty, "no window should be emitted after only 8 s")
     }
 }
 

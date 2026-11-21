@@ -106,9 +106,6 @@ final class CloudFingerprinter {
         return pending
     }
 
-    /// Windows emitted so far (a window is only emitted once its tail lookahead is available).
-    var windowsSoFar: [Window] { windows }
-
     /// Returns the windows emitted since the last call to this method,
     /// releasing the consumed hash lists — `windows` is otherwise the one
     /// unbounded buffer left in the streaming refactor (PR #14 wave-2 review).
