@@ -2,6 +2,7 @@ import XCTest
 import AVFoundation
 @testable import podcasts
 
+@MainActor
 final class InterruptionHandlingTests: XCTestCase {
 
     func test_beganInterruption_stopsService() {

@@ -147,7 +147,7 @@ final class RouteChangeTests: XCTestCase {
     /// Every route change re-reads the selected input, not only physical device changes: an
     /// `.override`, `.categoryChange` or `.routeConfigurationChange` can move the input to the
     /// built-in microphone, and a stale `.isolated` would leave capture running on it.
-    func test_routeChange_forNonDeviceReasonStillRefreshesExposure() {
+    func test_routeChange_forNonDeviceReasonStillRefreshesExposure() async {
         let session = FakeAudioSessionControlling()
         session.outputs = [port(.bluetoothA2DP, uid: "bt-out")]
         session.inputs = [port(.builtInMic, uid: "built-in")]
@@ -157,6 +157,9 @@ final class RouteChangeTests: XCTestCase {
         let epoch = monitor.physicalDeviceChangeEpoch
         session.inputs = [port(.bluetoothHFP, uid: "bt-mic")]
         postRouteChange(reason: .categoryChange)
+        // Route notifications are received on main at the source, so delivery is
+        // ordered but asynchronous relative to this post.
+        await waitUntil(timeout: 5) { monitor.micExposure == .isolated }
 
         XCTAssertEqual(monitor.micExposure, .isolated,
                        "the selected input is re-read for every route change")
@@ -541,6 +544,7 @@ final class RouteChangeTests: XCTestCase {
             userInfo: [AVAudioSessionRouteChangeReasonKey: AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue]
         )
 
+        await waitUntil(timeout: 5) { monitor.micExposure == .exposed }
         XCTAssertEqual(monitor.micExposure, .exposed, "a disconnected external mic must stop capture eligibility")
     }
 
