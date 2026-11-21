@@ -693,44 +693,78 @@ WATCHDOG_PID=$!
             seq=$((seq + 1))
             echo "stuck-test sampler: capturing pid $pid for: $current" >&2
             # Distinct names per capture: two stuck tests in one host must not
-            # overwrite each other. Each diagnostic is bounded so a wedged
-            # sample/log cannot hold the step past the run's end.
-            # Bounded termination: TERM to the diagnostic's children then the
-            # diagnostic, a short grace, then KILL to both. A child that ignores
-            # TERM must not hold the step past the run. The timer's own child
-            # (its sleep) is reaped too.
+            # overwrite each other.
+            #
+            # Owns the diagnostic the way a job cancellation owns a step.
+            #
+            # The wrapper's exit is NOT the end of the capture: a child that
+            # ignores TERM outlives it and is handed to launchd, so the
+            # escalation takes a snapshot of the diagnostic's process tree while
+            # it is still whole and then kills every recorded pid for the whole
+            # grace window, re-scanning for anything newly spawned. Termination
+            # is proven one pid at a time — never by a group check, because a
+            # reparented child can end up outside the group it started in.
+            # Recording is safe: only pids from before the kill are touched, and
+            # a pid cannot be reused while its process is alive.
+            descendants_of() {
+              ps -axo pid,ppid 2>/dev/null | awk -v root="$1" '
+                { parent[$1] = $2; seen[NR] = $1 }
+                END {
+                  # Mark everything reachable from root, walking up at most 64
+                  # links so a malformed snapshot cannot loop.
+                  for (i = 1; i <= NR; i++) {
+                    n = seen[i]; d = 0
+                    while (n != "" && d < 64) {
+                      if (n == root) { print seen[i]; break }
+                      n = parent[n]; d++
+                    }
+                  }
+                }'
+            }
             bound_diag() {
-              local dp="$1" grace="$2" waited=0
-              pkill -TERM -P "$dp" 2>/dev/null
+              local dp="$1" grace="$2" waited=0 p
+              local recorded="$(descendants_of "$dp")"
               kill -TERM "$dp" 2>/dev/null
-              while [ "$waited" -lt "$grace" ] && kill -0 "$dp" 2>/dev/null; do
+              for p in $recorded; do kill -TERM "$p" 2>/dev/null; done
+              while [ "$waited" -lt "$grace" ]; do
+                kill -KILL "$dp" 2>/dev/null
+                recorded="$(printf '%s\n%s\n' "$recorded" "$(descendants_of "$dp")")"
+                local alive=""
+                for p in $recorded; do
+                  [ -n "$p" ] || continue
+                  if kill -0 "$p" 2>/dev/null; then
+                    kill -KILL "$p" 2>/dev/null
+                    kill -0 "$p" 2>/dev/null && alive="$p"
+                  fi
+                done
+                [ -z "$alive" ] && break
                 sleep 1
                 waited=$((waited + 1))
               done
-              pkill -KILL -P "$dp" 2>/dev/null
-              kill -KILL "$dp" 2>/dev/null
             }
             (
               sample "$pid" 10 -file "$LOG_DIR/stuck-sample-${seq}-${pid}.txt" >/dev/null 2>&1 &
               sp=$!
-              ( sleep 30; bound_diag "$sp" 5 ) &
+              ( sleep 30; bound_diag "$sp" 10 ) &
               sk=$!
               wait "$sp" 2>/dev/null
               pkill -KILL -P "$sk" 2>/dev/null
               kill -KILL "$sk" 2>/dev/null
               wait "$sk" 2>/dev/null
+              bound_diag "$sp" 10
             )
             (
               xcrun simctl spawn "$SIMULATOR_ID" log show --last 2m --info --debug \
                 --predicate 'process == "podcasts" AND (subsystem CONTAINS[c] "audio" OR subsystem CONTAINS[c] "speech" OR eventMessage CONTAINS[c] "AQMEIO" OR eventMessage CONTAINS[c] "AVAudioSession")' \
                 > "$LOG_DIR/stuck-audio-${seq}-${pid}.log" 2>&1 &
               lp=$!
-              ( sleep 30; bound_diag "$lp" 5 ) &
+              ( sleep 30; bound_diag "$lp" 10 ) &
               lk=$!
               wait "$lp" 2>/dev/null
               pkill -KILL -P "$lk" 2>/dev/null
               kill -KILL "$lk" 2>/dev/null
               wait "$lk" 2>/dev/null
+              bound_diag "$lp" 10
             )
           fi
         fi

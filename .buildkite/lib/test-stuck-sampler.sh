@@ -148,21 +148,19 @@ ok=0
 report "$ok" "the sampler ends when the run ends"
 rm -rf "$dir"
 
-# Bound cases assert no `sleep 300` survives; clear any stray from an earlier
-# aborted run first so the assertion is about this case only.
-pkill -f '^sleep 300$' 2>/dev/null
-sleep 1
-
 # Case 6: a wedged diagnostic command must not hold the sampler past the run.
 # The stub `sample` sleeps far longer than the bound; the run ends while it is
 # still "capturing". The sampler must kill it and exit promptly.
 dir=$(mktemp -d); mkdir -p "$dir/artifacts"
 log="$dir/artifacts/test.log"; : > "$log"
 make_stubs "$dir"
-cat > "$dir/bin/sample" <<'STUB'
+# The child records its own pid, so the assertion is about this fixture only.
+cat > "$dir/bin/sample" <<STUB
 #!/bin/bash
-echo "sample $*" >> "$STUB_CALLS"
-sleep 300
+echo "sample \$*" >> "\$STUB_CALLS"
+sleep 300 &
+echo \$! >> "$dir/child-pids.txt"
+wait
 STUB
 chmod +x "$dir/bin/sample"
 export STUB_CALLS="$dir/calls.txt"; : > "$STUB_CALLS"
@@ -178,24 +176,28 @@ kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
 ok=0
 # Threshold 3s + poll slack, then the 30s bound on the wedged sample.
 [ "$elapsed" -le 45 ] || ok=1
-# The stub's own sleep must be gone too, not just the stub script.
-pgrep -f "^sleep 300$" >/dev/null 2>&1 && ok=1
+# The capture must actually have started, or "nothing survived" proves nothing.
+[ -s "$dir/child-pids.txt" ] || ok=1
+# The stub's own child must be gone too, not just the stub script.
+while IFS= read -r p; do
+  [ -n "$p" ] && kill -0 "$p" 2>/dev/null && ok=1
+done < "$dir/child-pids.txt" 2>/dev/null
 report "$ok" "a wedged diagnostic is bounded; the sampler still ends with the run"
 rm -rf "$dir"
 
-# Case 7: the diagnostic ignores TERM entirely. Only KILL escalation can end
-# it; the sampler must still reach its end within the bound, and neither the
-# stub nor its child may survive.
+# Case 7: the wrapper dies on TERM but its child ignores TERM. The wrapper's
+# exit must not end the escalation — the orphaned child is reparented and would
+# otherwise survive the whole run. Both must be gone within the bound.
 dir=$(mktemp -d); mkdir -p "$dir/artifacts"
 log="$dir/artifacts/test.log"; : > "$log"
 make_stubs "$dir"
-cat > "$dir/bin/sample" <<'STUB'
+cat > "$dir/bin/sample" <<STUB
 #!/bin/bash
-echo "sample $*" >> "$STUB_CALLS"
-trap '' TERM
-sleep 300 &
-child=$!
-wait "$child"
+echo "sample \$*" >> "\$STUB_CALLS"
+# Child ignores TERM; the wrapper does not, so it exits on the first TERM.
+bash -c 'trap "" TERM; sleep 300' &
+echo \$! >> "$dir/child-pids.txt"
+wait
 STUB
 chmod +x "$dir/bin/sample"
 export STUB_CALLS="$dir/calls.txt"; : > "$STUB_CALLS"
@@ -211,9 +213,14 @@ kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
 ok=0
 # Threshold 3s + poll slack + 30s bound + 5s TERM grace + KILL slack.
 [ "$elapsed" -le 50 ] || ok=1
-pgrep -f "^sleep 300$" >/dev/null 2>&1 && ok=1
-pgrep -f "bin/sample 424242" >/dev/null 2>&1 && ok=1
-report "$ok" "a TERM-ignoring diagnostic is KILLed; the sampler still ends with the run"
+# The capture must have started before "nothing survived" means anything.
+[ -s "$dir/child-pids.txt" ] || ok=1
+while IFS= read -r p; do
+  [ -n "$p" ] && kill -0 "$p" 2>/dev/null && ok=1
+done < "$dir/child-pids.txt" 2>/dev/null
+report "$ok" "a TERM-ignoring child behind a TERM-responsive wrapper is KILLed too"
+# Clean up this fixture only, if anything did survive.
+while IFS= read -r p; do [ -n "$p" ] && kill -KILL "$p" 2>/dev/null; done < "$dir/child-pids.txt" 2>/dev/null
 rm -rf "$dir"
 
 # Case 8: a Swift Testing test (◇ Test … started.) hangs — it must be sampled
