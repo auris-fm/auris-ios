@@ -148,6 +148,11 @@ ok=0
 report "$ok" "the sampler ends when the run ends"
 rm -rf "$dir"
 
+# Bound cases assert no `sleep 300` survives; clear any stray from an earlier
+# aborted run first so the assertion is about this case only.
+pkill -f '^sleep 300$' 2>/dev/null
+sleep 1
+
 # Case 6: a wedged diagnostic command must not hold the sampler past the run.
 # The stub `sample` sleeps far longer than the bound; the run ends while it is
 # still "capturing". The sampler must kill it and exit promptly.
@@ -211,8 +216,49 @@ pgrep -f "bin/sample 424242" >/dev/null 2>&1 && ok=1
 report "$ok" "a TERM-ignoring diagnostic is KILLed; the sampler still ends with the run"
 rm -rf "$dir"
 
+# Case 8: a Swift Testing test (◇ Test … started.) hangs — it must be sampled
+# exactly like an XCTest one, and its ✔ result line must clear the in-flight
+# state so a later stuck test is seen.
+dir=$(mktemp -d); mkdir -p "$dir/artifacts"
+log="$dir/artifacts/test.log"; : > "$log"
+make_stubs "$dir"
+export STUB_CALLS="$dir/calls.txt"; : > "$STUB_CALLS"
+extract_sampler "$dir/sampler.sh"
+( sleep 1; echo '◇ Test "Year over year compare" started.'; echo "2026-11-21 07:34:01.000000+0800 podcasts[424242:1] stub host line"; sleep 8; echo '✔ Test "Year over year compare" passed after 8.0 seconds.'; echo '◇ Test "Reload scheduler" started.'; sleep 30 ) >> "$log" &
+writer=$!
+( sleep 20 ) &
+stub=$!
+( cd "$dir/artifacts" && PATH="$dir/bin:$PATH" /bin/bash "$dir/sampler.sh" "$dir/artifacts" "$stub" "SIM-TEST" 3 )
+kill "$writer" "$stub" 2>/dev/null; wait "$writer" "$stub" 2>/dev/null
+ok=0
+[ "$(grep -c '^sample ' "$STUB_CALLS")" = 2 ] || ok=1
+[ -s "$dir/artifacts/stuck-sample-1-424242.txt" ] || ok=1
+[ -s "$dir/artifacts/stuck-sample-2-424242.txt" ] || ok=1
+report "$ok" "Swift Testing starts and results are tracked like XCTest ones"
+rm -rf "$dir"
+
+# Case 9: the test hangs before the host has written any pid line. Nothing can
+# be captured yet, so the test must stay eligible: when the pid line appears,
+# the next poll captures it instead of having silently retired the test.
+dir=$(mktemp -d); mkdir -p "$dir/artifacts"
+log="$dir/artifacts/test.log"; : > "$log"
+make_stubs "$dir"
+export STUB_CALLS="$dir/calls.txt"; : > "$STUB_CALLS"
+extract_sampler "$dir/sampler.sh"
+( sleep 1; echo "Test Case '-[X.Y testEarly]' started."; sleep 8; echo "2026-11-21 07:34:01.000000+0800 podcasts[424242:1] first host line"; sleep 30 ) >> "$log" &
+writer=$!
+( sleep 16 ) &
+stub=$!
+( cd "$dir/artifacts" && PATH="$dir/bin:$PATH" /bin/bash "$dir/sampler.sh" "$dir/artifacts" "$stub" "SIM-TEST" 3 )
+kill "$writer" "$stub" 2>/dev/null; wait "$writer" "$stub" 2>/dev/null
+ok=0
+[ "$(grep -c '^sample ' "$STUB_CALLS")" = 1 ] || ok=1
+[ -s "$dir/artifacts/stuck-sample-1-424242.txt" ] || ok=1
+report "$ok" "a hang before the first pid line is retried, not silently retired"
+rm -rf "$dir"
+
 if [ "$fails" -eq 0 ]; then
-  echo "7/7 stuck-test sampler cases behaved as intended"
+  echo "9/9 stuck-test sampler cases behaved as intended"
 else
   echo "$fails sampler case(s) did not behave as intended"
 fi

@@ -57,7 +57,7 @@ step_result() {
   echo "guard self-test exit: $SELFTEST_STATUS"
   echo "build-step self-test exit: $BUILD_STEP_SELFTEST_STATUS"
   echo "watchdog self-test exit: $WATCHDOG_SELFTEST_STATUS"
-  echo "stuck-test sampler self-test exit: ${SAMPLER_SELFTEST_STATUS:-0}"
+  echo "stuck-test sampler self-test exit: $SAMPLER_SELFTEST_STATUS"
   echo "build-watchdog self-test exit: $BUILD_WATCHDOG_SELFTEST_STATUS"
   echo "Interface Builder cleanup self-test exit: $IB_SELFTEST_STATUS"
   echo "cancel-cleanup self-test exit: $CANCEL_SELFTEST_STATUS"
@@ -73,7 +73,7 @@ step_result() {
   [ "$SELFTEST_STATUS" -eq 0 ] || { echo "the coverage guard did not prove it can fail"; exit "$SELFTEST_STATUS"; }
   [ "$BUILD_STEP_SELFTEST_STATUS" -eq 0 ] || { echo "the build step did not prove it can be killed and still report why"; exit "$BUILD_STEP_SELFTEST_STATUS"; }
   [ "$WATCHDOG_SELFTEST_STATUS" -eq 0 ] || { echo "the watchdog did not prove it can stop a run"; exit "$WATCHDOG_SELFTEST_STATUS"; }
-  [ "${SAMPLER_SELFTEST_STATUS:-0}" -eq 0 ] || { echo "the stuck-test sampler did not prove it captures a hung test once"; exit "$SAMPLER_SELFTEST_STATUS"; }
+  [ "$SAMPLER_SELFTEST_STATUS" -eq 0 ] || { echo "the stuck-test sampler did not prove it captures a hung test once"; exit "$SAMPLER_SELFTEST_STATUS"; }
   [ "$BUILD_WATCHDOG_SELFTEST_STATUS" -eq 0 ] || { echo "the build watchdog did not prove it can stop a build"; exit "$BUILD_WATCHDOG_SELFTEST_STATUS"; }
   [ "$IB_SELFTEST_STATUS" -eq 0 ] || { echo "the Interface Builder cleanup did not prove it kills only what it recorded"; exit "$IB_SELFTEST_STATUS"; }
   [ "$CANCEL_SELFTEST_STATUS" -eq 0 ] || { echo "a cancelled job would skip the exit cleanup"; exit "$CANCEL_SELFTEST_STATUS"; }

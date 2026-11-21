@@ -670,7 +670,10 @@ WATCHDOG_PID=$!
   since=0
   seq=0
   while kill -0 "$XCODEBUILD_PID" 2>/dev/null; do
-    line=$(grep -E "Test Case .* started\.$|Test Case .*(passed|failed) \(" "$LOG_DIR/test.log" 2>/dev/null | tail -1)
+    # XCTest and Swift Testing both appear in the plan: ◇ Test … started. is a
+    # start, ✔/✘ Test … after … is a result. Missing either form would leave a
+    # whole framework's hangs unsampled.
+    line=$(grep -E "Test Case .* started\.$|Test Case .*(passed|failed) \(|◇ Test .* started\.$|✔ Test |✘ Test " "$LOG_DIR/test.log" 2>/dev/null | tail -1)
     case "$line" in
       *" started.")
         if [ "$line" != "$current" ]; then
@@ -679,11 +682,14 @@ WATCHDOG_PID=$!
         fi
         if [ -n "$current" ] && ! printf '%s\n' "$sampled" | grep -Fxq -- "$current" \
           && [ $(( $(date +%s) - since )) -ge "$STUCK_TEST_THRESHOLD" ]; then
-          sampled="${sampled}${current}
-"
-          seq=$((seq + 1))
           pid=$(grep -oE 'podcasts\[[0-9]+' "$LOG_DIR/test.log" 2>/dev/null | tail -1 | tr -dc '0-9')
           if [ -n "$pid" ]; then
+            # Marked sampled only once a capture actually happened: a test that
+            # hangs before the host writes any pid line stays eligible, so the
+            # next poll retries instead of silently retiring it.
+            sampled="${sampled}${current}
+"
+            seq=$((seq + 1))
             echo "stuck-test sampler: capturing pid $pid for: $current" >&2
             # Distinct names per capture: two stuck tests in one host must not
             # overwrite each other. Each diagnostic is bounded so a wedged
