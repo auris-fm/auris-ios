@@ -576,6 +576,11 @@ TEST_START_DEADLINE="${BUILDKITE_AURIS_TEST_START_DEADLINE:-900}"
 # and does not limit how many launches there are.
 TEST_PROGRESS_DEADLINE="${BUILDKITE_AURIS_TEST_PROGRESS_DEADLINE:-300}"
 TEST_TOTAL_DEADLINE="${BUILDKITE_AURIS_TEST_TOTAL_DEADLINE:-3600}"
+# A test in flight longer than this is sampled before the execution allowance
+# kills it: the sample and an audio-subsystem log are the only record of what a
+# hung test was blocked on. Below the 60s default allowance so the capture lands
+# while the host is still stuck, not after the relaunch.
+STUCK_TEST_THRESHOLD="${BUILDKITE_AURIS_STUCK_TEST_THRESHOLD:-45}"
 
 set +e
 xcodebuild test-without-building \
@@ -650,6 +655,47 @@ XCODEBUILD_PID=$!
 ) &
 WATCHDOG_PID=$!
 
+# Diagnostics only: when one test has been in flight past STUCK_TEST_THRESHOLD,
+# capture `sample <host pid> 10` and a filtered simulator log into artifacts/,
+# once per stuck test. It never signals anything and its own failures are
+# swallowed — a sampler that dies must not change the run's result. The loop
+# ends when xcodebuild does. The host pid is read from the log's own process
+# tags (podcasts[pid:tid]), so a relaunch is followed without any extra state.
+(
+  set +e
+  declare -A sampled=()
+  current=""
+  since=0
+  while kill -0 "$XCODEBUILD_PID" 2>/dev/null; do
+    line=$(grep -E "Test Case .* started\.$|Test Case .*(passed|failed) \(" "$LOG_DIR/test.log" 2>/dev/null | tail -1)
+    case "$line" in
+      *" started.")
+        if [ "$line" != "$current" ]; then
+          current="$line"
+          since=$(date +%s)
+        fi
+        if [ -n "$current" ] && [ -z "${sampled[$current]:-}" ] \
+          && [ $(( $(date +%s) - since )) -ge "$STUCK_TEST_THRESHOLD" ]; then
+          sampled["$current"]=1
+          pid=$(grep -oE 'podcasts\[[0-9]+' "$LOG_DIR/test.log" 2>/dev/null | tail -1 | tr -dc '0-9')
+          if [ -n "$pid" ]; then
+            echo "stuck-test sampler: capturing pid $pid for: $current" >&2
+            sample "$pid" 10 -file "$LOG_DIR/stuck-sample-${pid}.txt" >/dev/null 2>&1
+            xcrun simctl spawn "$SIMULATOR_ID" log show --last 2m --info --debug \
+              --predicate 'process == "podcasts" AND (subsystem CONTAINS[c] "audio" OR subsystem CONTAINS[c] "speech" OR eventMessage CONTAINS[c] "AQMEIO" OR eventMessage CONTAINS[c] "AVAudioSession")' \
+              > "$LOG_DIR/stuck-audio-${pid}.log" 2>&1
+          fi
+        fi
+        ;;
+      *)
+        current=""
+        ;;
+    esac
+    sleep 5
+  done
+) &
+SAMPLER_PID=$!
+
 # The live log gets test results, not the whole run. Two thousand tests each print
 # a start line and a result line, and this agent streams its log in chunks over a
 # link that drops them; a run has been lost to upload retries alone. Filtering here
@@ -675,6 +721,8 @@ kill "$TAIL_PID" 2>/dev/null
 # would report the kill as the watchdog's status and hide a real timeout.
 wait "$WATCHDOG_PID" 2>/dev/null
 WATCHDOG_STATUS=$?
+# The sampler exits on its own once xcodebuild is gone; waiting here reaps it.
+wait "$SAMPLER_PID" 2>/dev/null
 set -e
 
 case "$WATCHDOG_STATUS" in
@@ -755,6 +803,14 @@ run_bg bash .buildkite/lib/test-watchdog.sh
 WATCHDOG_SELFTEST_STATUS=$?
 set -e
 
+echo "--- :mag: Checking the stuck-test sampler itself"
+# A test in flight past the threshold must be sampled once with an audio log;
+# a healthy run must produce nothing; the sampler must never touch the run.
+set +e
+run_bg bash .buildkite/lib/test-stuck-sampler.sh
+SAMPLER_SELFTEST_STATUS=$?
+set -e
+
 echo "--- :mag: Checking what reaches the live log"
 # The live log is filtered so a dropped chunk cannot cost a whole run. That filter
 # is only safe if it keeps every line a verdict or a diagnosis is read from, which
@@ -806,7 +862,7 @@ fi
 # the pipeline's artifact_paths: this says what should be there, and a missing one
 # is visible in the step's own output rather than noticed later by whoever needs it.
 echo "--- :package: Artifacts"
-for f in "$LOG_DIR"/*.log "$LOG_DIR"/*.xcresult.zip; do
+for f in "$LOG_DIR"/*.log "$LOG_DIR"/*.xcresult.zip "$LOG_DIR"/stuck-sample-*.txt; do
   [ -e "$f" ] && echo "  $(basename "$f")  $(wc -c < "$f" | tr -d ' ') bytes"
 done
 
