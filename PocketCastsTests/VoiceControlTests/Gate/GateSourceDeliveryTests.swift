@@ -140,7 +140,10 @@ final class GateSourceDeliveryTests: XCTestCase {
                 emitted.fulfill()
             }
 
-        await postInterruptionOffMain(type: .ended, options: nil)
+        // The option key is present with no flags set, which is how the system reports
+        // an interruption that ended without resuming. Omitting the key entirely would
+        // exercise a different case, and the app's own PlaybackManager force-unwraps it.
+        await postInterruptionOffMain(type: .ended, options: [])
 
         await fulfillment(of: [emitted], timeout: 5)
         subscription.cancel()
