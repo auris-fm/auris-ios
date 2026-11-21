@@ -84,6 +84,12 @@ final class CloudReferenceMatcherStorageTests: XCTestCase {
                        Float(2) / 3, accuracy: 0.000001)
         // Min-side case: query {7,9} fully inside -> 2/2 = 1.0.
         XCTAssertEqual(matcher.findTopMatches(queryHashes: [7, 9], maxResults: 1)[0].score, 1.0)
+        // Reverse case (core PR 212): the checkpoint is the smaller side.
+        // Distinct checkpoint {7,9}, window {7,9,42}: found 2, min(3,2)=2 -> 1.0.
+        // A window-only denominator would give 2/3.
+        let reverse = CloudReferenceMatcher()
+        reverse.add(timestampSeconds: 0, hashes: [7, 7, 9], durationSeconds: 8)
+        XCTAssertEqual(reverse.findTopMatches(queryHashes: [7, 9, 42], maxResults: 1)[0].score, 1.0)
     }
 
     /// Storage bound: building a matcher over `n` hashes must not grow the
