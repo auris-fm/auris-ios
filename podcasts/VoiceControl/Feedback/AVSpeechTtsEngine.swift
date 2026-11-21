@@ -116,7 +116,15 @@ class AVSpeechTtsEngine: NSObject, TtsEngineProtocol {
     }
 
     func warmUp(language: String) async {
+        let generation = startGeneration
         let voice = await synthesizer.resolveVoice(for: language)
+        // A real start or a release may have happened while the lookup was outstanding.
+        // Warming then would enqueue behind — or after — the speech it was meant to
+        // precede, so it enqueues nothing instead.
+        guard generation == startGeneration else {
+            FileLog.shared.addMessage("[VoicePipeline] TTS warm-up superseded while resolving its voice")
+            return
+        }
         let utterance = AVSpeechUtterance(string: "")
         utterance.voice = voice
         utterance.volume = 0
@@ -124,17 +132,21 @@ class AVSpeechTtsEngine: NSObject, TtsEngineProtocol {
     }
 
     func speak(text: String, language: String) async {
-        FileLog.shared.addMessage("[VoicePipeline] Speaking: \"\(text)\" (\(language))")
+        FileLog.shared.addMessage("[VoicePipeline] Speaking: \"(text)\" (\(language))")
         startGeneration &+= 1
         let generation = startGeneration
         await synthesizer.engineWillPrepareUtterance(text: text)
-        let voice = await synthesizer.resolveVoice(for: language)
+
         let utterance = AVSpeechUtterance(string: text)
-        utterance.voice = voice
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate
+
+        // The waiter and its silence window are installed BEFORE the voice lookup, so
+        // one deadline covers the whole call. Resolving reaches the system speech
+        // service and may never return; installing the wait only afterwards would leave
+        // this call pending for ever, and the renderer would never unduck. Installed
+        // first, a stuck lookup ends through the same timeout path as a silent
+        // synthesizer, and cancel or release ends it immediately.
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            // Re-checked after the preparation point: a later start or a cancel
-            // may have overtaken this one while it was preparing.
             guard generation == startGeneration else {
                 FileLog.shared.addMessage("[VoicePipeline] TTS start superseded before it spoke")
                 cont.resume()
@@ -143,13 +155,29 @@ class AVSpeechTtsEngine: NSObject, TtsEngineProtocol {
             let displaced = takeWaiter()
             continuation = cont
             awaitedUtterance = utterance
-            synthesizer.stopSpeaking(at: .immediate)
-            synthesizer.speak(utterance)
+            armFallback(for: utterance)
             if let displaced {
                 FileLog.shared.addMessage("[VoicePipeline] TTS speak resumed (superseded)")
                 displaced.resume()
             }
-            armFallback(for: utterance)
+            // Resolving happens while the waiter is installed and its window armed.
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let voice = await self.synthesizer.resolveVoice(for: language)
+                // The wait may have ended while the lookup was outstanding: cancel,
+                // release, a later start, or the silence window. Enqueue nothing then.
+                guard generation == self.startGeneration,
+                      self.awaitedUtterance === utterance,
+                      self.continuation != nil else {
+                    FileLog.shared.addMessage("[VoicePipeline] TTS start ended while resolving its voice")
+                    return
+                }
+                utterance.voice = voice
+                self.synthesizer.stopSpeaking(at: .immediate)
+                self.synthesizer.speak(utterance)
+                // The window armed before the lookup still covers this utterance;
+                // arming again here would add a second window for the same wait.
+            }
         }
     }
 

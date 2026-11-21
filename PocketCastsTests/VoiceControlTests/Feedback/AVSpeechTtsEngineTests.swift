@@ -115,23 +115,11 @@ private final class StubSpeechSynthesizer: SpeechSynthesizing {
         if let onResolve { await onResolve() }
         let onMain = Thread.isMainThread
         voiceLock.lock(); _resolveOnMain.append(onMain); voiceLock.unlock()
-        return StubSpeechSynthesizer.cachedVoice
+        // No voice, and no call into the speech service. A unit stub must not reach
+        // the system at all: caching only reduces how often it is called, it does not
+        // remove the possibility of blocking on it.
+        return nil
     }
-
-    /// Resolved once for the whole suite, away from the main actor.
-    private static let cachedVoice: AVSpeechSynthesisVoice? = {
-        let lock = NSLock()
-        var voice: AVSpeechSynthesisVoice?
-        let done = DispatchSemaphore(value: 0)
-        DispatchQueue.global(qos: .userInitiated).async {
-            let resolved = AVSpeechSynthesisVoice(language: "en-US")
-            lock.lock(); voice = resolved; lock.unlock()
-            done.signal()
-        }
-        done.wait()
-        lock.lock(); defer { lock.unlock() }
-        return voice
-    }()
 
     func engineWillPrepareUtterance(text: String) async {
         if let onPrepare { await onPrepare(text) }
@@ -400,6 +388,8 @@ final class AVSpeechTtsEngineTests: XCTestCase {
         await fulfillment(of: [parked], timeout: 5)
 
         // Progress rearms underneath the parked expiry, arming a second window.
+        // The enqueue follows the voice lookup, so wait for it rather than assuming it.
+        await waitUntil(timeout: 5) { !synthesizer.spoken.isEmpty }
         let utterance = synthesizer.spoken[0]
         synthesizer.deliverWillSpeak(utterance)
         let secondExpiry = await scheduler.waitForWindow(count: 2)
@@ -491,20 +481,108 @@ final class AVSpeechTtsEngineTests: XCTestCase {
         await fulfillment(of: [winnerDone], timeout: 5)
     }
 
-    /// Resolving a voice reaches the system speech service synchronously, so it must
-    /// not run on the main queue: `warmUp` runs during service construction at launch,
-    /// and a slow or unresponsive service would freeze the app rather than delay speech.
-    /// Measured 42 ms cold versus 0.1 ms warm, with no upper bound when it is unresponsive.
-    ///
-    /// Called on the real implementation from the main actor. `SystemSpeechSynthesizer`
-    /// asserts `.notOnQueue(.main)` where it resolves, so the old design — resolving on
-    /// the caller's thread — traps here, while resolving in a detached task passes.
-    /// A stub cannot show this: an `await` frees the main actor whichever thread it was
-    /// called from, and a non-main-actor stub's async methods do not run on main at all.
-    func test_systemSynthesizer_resolvesVoiceOffTheMainQueue() async {
-        let synthesizer = SystemSpeechSynthesizer()
-        let voice = await synthesizer.resolveVoice(for: "en-US")
-        XCTAssertNotNil(voice, "resolution returned no voice")
+    /// The engine must await the injected resolver rather than resolving on its own
+    /// main actor. Observed through the resolver: it records the thread it was called
+    /// on, and the engine's own main-actor work must still be able to run while a
+    /// lookup is outstanding. The production invariant itself is
+    /// `dispatchPrecondition(.notOnQueue(.main))` at the system lookup, which needs no
+    /// test: it holds in debug builds wherever that code runs.
+    func test_speak_awaitsTheInjectedResolver_andLeavesTheMainActorFree() async {
+        let synthesizer = StubSpeechSynthesizer()
+        let parked = expectation(description: "lookup parked")
+        let gate = AsyncGate()
+        synthesizer.onResolve = {
+            parked.fulfill()
+            await gate.wait()
+        }
+        let engine = AVSpeechTtsEngine(synthesizer: synthesizer, silenceTimeout: 60)
+        let speaking = Task { await engine.speak(text: "Hello", language: "en-US") }
+        await fulfillment(of: [parked], timeout: 5)
+
+        // While the lookup is outstanding the main actor must still run other work —
+        // cancel among it, which is what ends this call.
+        let ranOnMain = expectation(description: "main actor still runs work")
+        Task { @MainActor in ranOnMain.fulfill() }
+        await fulfillment(of: [ranOnMain], timeout: 5)
+
+        engine.cancel()
+        await speaking.value
+        await gate.open()
+        // The record is written after the gate opens, so wait for it.
+        await waitUntil(timeout: 5) { !synthesizer.resolveOnMain.isEmpty }
+        XCTAssertFalse(synthesizer.resolveOnMain.isEmpty,
+                       "the resolver was never called, so this proves nothing")
+    }
+
+    /// A voice lookup that never returns must not leave the call waiting for ever:
+    /// the renderer ducks before speaking and only unducks when speak returns, so a
+    /// stuck lookup would leave the app's audio ducked permanently. The waiter and its
+    /// silence window are installed before the lookup, so the window ends the call.
+    func test_speak_voiceLookupNeverReturns_endsOnTheSilenceTimeout() async {
+        let synthesizer = StubSpeechSynthesizer()
+        let parked = expectation(description: "lookup parked")
+        let gate = AsyncGate()
+        synthesizer.onResolve = {
+            parked.fulfill()
+            await gate.wait()
+        }
+        let engine = AVSpeechTtsEngine(synthesizer: synthesizer, silenceTimeout: 0.2)
+        let speaking = Task { await engine.speak(text: "Hello", language: "en-US") }
+        await fulfillment(of: [parked], timeout: 5)
+
+        // The lookup is still parked. The silence window must end the call anyway.
+        await speaking.value
+        XCTAssertTrue(synthesizer.spoken.isEmpty,
+                      "a call ended by the timeout must not enqueue afterwards")
+        await gate.open()
+    }
+
+    /// Cancel must end a call whose lookup is still outstanding, immediately, rather
+    /// than waiting for the lookup or the silence window.
+    func test_speak_voiceLookupNeverReturns_cancelEndsTheCall() async {
+        let synthesizer = StubSpeechSynthesizer()
+        let parked = expectation(description: "lookup parked")
+        let gate = AsyncGate()
+        synthesizer.onResolve = {
+            parked.fulfill()
+            await gate.wait()
+        }
+        // A long window, so ending the call can only be attributed to cancel.
+        let engine = AVSpeechTtsEngine(synthesizer: synthesizer, silenceTimeout: 60)
+        let speaking = Task { await engine.speak(text: "Hello", language: "en-US") }
+        await fulfillment(of: [parked], timeout: 5)
+
+        engine.cancel()
+        await speaking.value
+        XCTAssertTrue(synthesizer.spoken.isEmpty,
+                      "a cancelled call must not enqueue when its lookup finally returns")
+        await gate.open()
+    }
+
+    /// Warm-up superseded during its lookup must enqueue nothing: it would otherwise
+    /// speak behind, or after, the real start it was meant to precede.
+    func test_warmUp_supersededDuringVoiceLookup_enqueuesNothing() async {
+        let synthesizer = StubSpeechSynthesizer()
+        let parked = expectation(description: "warm-up lookup parked")
+        let gate = AsyncGate()
+        synthesizer.onResolve = {
+            parked.fulfill()
+            await gate.wait()
+        }
+        let engine = AVSpeechTtsEngine(synthesizer: synthesizer)
+        let warming = Task { await engine.warmUp(language: "en-US") }
+        await fulfillment(of: [parked], timeout: 5)
+
+        // A real start replaces the warm-up while its lookup is outstanding.
+        synthesizer.onResolve = nil
+        synthesizer.onSpeak = { stub, utterance in stub.deliverDidFinish(utterance) }
+        await engine.speak(text: "Real speech", language: "en-US")
+        let spokenAfterStart = synthesizer.spoken.count
+
+        await gate.open()
+        await warming.value
+        XCTAssertEqual(synthesizer.spoken.count, spokenAfterStart,
+                       "the superseded warm-up must not enqueue after the real start")
     }
 
     /// A start overtaken while its voice is still resolving must not speak. The
