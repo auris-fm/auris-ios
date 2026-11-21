@@ -40,15 +40,8 @@ private struct ManualToken: SilenceTimerToken {
     func cancel() {}
 }
 
-/// A flag an async test can read without a lock.
-private actor FinishedFlag {
-    private var done = false
-    var value: Bool { done }
-    func set() { done = true }
-}
-
-/// A boolean a main-actor task can set and any test can read afterwards.
-private final class MainActorFlag {
+/// A completion flag readable from a synchronous polling closure.
+private final class CompletionFlag {
     private let lock = NSLock()
     private var _value = false
     var value: Bool {
@@ -59,6 +52,14 @@ private final class MainActorFlag {
         lock.lock(); _value = true; lock.unlock()
     }
 }
+
+/// A flag an async test can read without a lock.
+private actor FinishedFlag {
+    private var done = false
+    var value: Bool { done }
+    func set() { done = true }
+}
+
 
 /// A one-shot gate an async test can park on and open explicitly, so an
 /// interleaving is forced rather than approximated with a sleep.
@@ -79,7 +80,6 @@ private actor AsyncGate {
 
 private final class StubSpeechSynthesizer: SpeechSynthesizing {
     var delegate: AVSpeechSynthesizerDelegate?
-    var isSpeaking = false
     private let lock = NSLock()
     private var _spoken: [AVSpeechUtterance] = []
     var spoken: [AVSpeechUtterance] {
@@ -91,7 +91,6 @@ private final class StubSpeechSynthesizer: SpeechSynthesizing {
     var onSpeak: ((StubSpeechSynthesizer, AVSpeechUtterance) -> Void)?
     /// When set, speak(_:) blocks on this semaphore after enqueuing, letting a
     /// test hold the first start inside the synthesizer while a second starts.
-    var holdSpeak: DispatchSemaphore?
     /// Where this stub parks when the engine reports its timeline. The engine
     /// only reports; the stub decides what to do at each point.
     var onPrepare: ((String) async -> Void)?
@@ -136,13 +135,10 @@ private final class StubSpeechSynthesizer: SpeechSynthesizing {
         lock.lock()
         _spoken.append(utterance)
         lock.unlock()
-        isSpeaking = true
         onSpeak?(self, utterance)
-        holdSpeak?.wait()
     }
 
     func stopSpeaking(at boundary: AVSpeechBoundary) -> Bool {
-        isSpeaking = false
         return true
     }
 
@@ -293,12 +289,21 @@ final class AVSpeechTtsEngineTests: XCTestCase {
     /// callback for the stopped utterance.
     func test_cancel_endsTheWaiterEvenWithoutACallback() async {
         let synthesizer = StubSpeechSynthesizer()
-        let engine = AVSpeechTtsEngine(synthesizer: synthesizer)
+        // The scheduler never fires on its own, so the silence window cannot end this
+        // call. On the default window the timeout would resume the waiter even with
+        // cancel()'s resume removed, and the control would pass against the bug.
+        let scheduler = ManualSilenceScheduler()
+        let engine = AVSpeechTtsEngine(synthesizer: synthesizer, scheduler: scheduler)
+        let ended = CompletionFlag()
         let speaking = Task {
             await engine.speak(text: "Hello", language: "en-US")
+            ended.set()
         }
         await waitUntil(timeout: 5) { !synthesizer.spoken.isEmpty }
         engine.cancel()
+        // Cancel must end it promptly, not merely eventually.
+        await waitUntil(timeout: 2) { ended.value }
+        XCTAssertTrue(ended.value, "cancel must end the waiter without a callback or a timeout")
         await speaking.value
     }
 
@@ -337,33 +342,15 @@ final class AVSpeechTtsEngineTests: XCTestCase {
         await task.value
     }
 
-    /// A silence timer whose window has already expired must not resume a
-    /// waiter that a progress callback rearms afterwards. The progress is held
-    /// inside the synthesizer's speak until the first window has fully passed,
-    /// so the stale timer is guaranteed to be at or past its expiry when the
-    /// rearm happens; freshness is decided under the continuation lock.
     /// A silence timer that expired must not resume a waiter that progress has
     /// since rearmed.
     ///
-    /// The order is fixed by the stub, not by timing: `didStart` arms a real
-    /// timer *before* the synthesizer blocks, so a window genuinely expires
-    /// while the start is held. Progress then rearms it, and only afterwards is
-    /// the held start released — so the expired timer's claim is attempted
-    /// against a generation that progress has already replaced.
-    /// A silence timer that expired must not resume a waiter that progress has
-    /// since rearmed.
-    ///
-    /// The interleaving is forced, not timed: the expiry is held after its
-    /// cancellation check and before it claims the waiter, progress rearms
-    /// while it is held, and only then is it released. A timer that ignores the
-    /// generation it was armed with resumes the waiter here.
-    /// A silence timer that expired must not resume a waiter that progress has
-    /// since rearmed.
-    ///
-    /// Nothing here waits on a clock. The injected scheduler hands the test
-    /// each window's expiry as a closure it fires by hand, so the stale expiry
-    /// is run to completion — and observed to claim nothing — before the next
-    /// window is fired at all.
+    /// Nothing here waits on a clock. The injected scheduler hands the test each
+    /// window's expiry as a closure it fires by hand. The stale expiry is held at
+    /// the point where it is about to claim the waiter, progress rearms underneath
+    /// it, and only then is it released — so it attempts its claim against a
+    /// generation progress has already replaced, and must claim nothing. The
+    /// current window is then fired to end the wait.
     func test_speak_expiredTimerDoesNotResumeAfterProgressRearms() async {
         let synthesizer = StubSpeechSynthesizer()
         let scheduler = ManualSilenceScheduler()
@@ -411,37 +398,14 @@ final class AVSpeechTtsEngineTests: XCTestCase {
 
     /// A start that a later start overtook must not reach the synthesizer.
     ///
-    /// `AudioFeedbackRenderer.render` cancels the render task it replaces
-    /// without joining it, and nothing in that chain is actor-isolated, so two
-    /// starts can be inside the engine's start sequence at once. The engine
-    /// must settle that at its own boundary: the overtaken start neither speaks
-    /// over the winner nor leaves a waiter behind.
+    /// The engine and its callers share one main-actor domain, so starts are
+    /// serialised there; what still needs proving is that a start already past
+    /// its generation claim yields to a later one instead of speaking over it or
+    /// leaving a waiter behind.
     ///
-    /// The overtaking start is launched from the seam the overtaken one is
-    /// still blocked in, so the order is fixed rather than timed.
-    /// A start that a later start overtook must not reach the synthesizer.
-    ///
-    /// `AudioFeedbackRenderer.render` cancels the render task it replaces
-    /// without joining it, and nothing in that chain is actor-isolated, so two
-    /// starts can be inside the engine's start sequence at once. The engine
-    /// settles that at its own boundary: the overtaken start neither speaks
-    /// over the winner nor leaves a waiter behind.
-    ///
-    /// The order is forced by an explicit handoff through the stub, not by
-    /// sleeping: the loser blocks inside `stopSpeaking` until the winner has
-    /// actually enqueued its utterance.
-    /// A start that a later start overtook must not reach the synthesizer.
-    ///
-    /// `AudioFeedbackRenderer.render` cancels the render task it replaces
-    /// without joining it, and nothing in that chain is actor-isolated, so two
-    /// starts can be inside the engine's start sequence at once. The engine
-    /// settles that at its own boundary: the overtaken start neither speaks
-    /// over the winner nor leaves a waiter behind.
-    ///
-    /// The order is forced by an explicit handoff, not by sleeping. The loser
-    /// claims its generation and then parks before entering the boundary; the
-    /// winner runs to completion — including its actual enqueue — and only then
-    /// is the loser released.
+    /// The order is forced by an explicit handoff, not by sleeping: the loser
+    /// parks at `engineWillPrepareUtterance`, the winner runs to completion —
+    /// including its real enqueue — and only then is the loser released.
     func test_speak_overtakenStartDoesNotReachTheSynthesizer() async {
         let synthesizer = StubSpeechSynthesizer()
         let engine = AVSpeechTtsEngine(synthesizer: synthesizer, silenceTimeout: 30)

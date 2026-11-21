@@ -6,7 +6,6 @@ import PocketCastsUtils
 /// produces, where the hang is real rather than simulated.
 protocol SpeechSynthesizing: AnyObject {
     var delegate: AVSpeechSynthesizerDelegate? { get set }
-    var isSpeaking: Bool { get }
     func speak(_ utterance: AVSpeechUtterance)
     @discardableResult func stopSpeaking(at boundary: SpeechBoundary) -> Bool
 
@@ -132,7 +131,7 @@ class AVSpeechTtsEngine: NSObject, TtsEngineProtocol {
     }
 
     func speak(text: String, language: String) async {
-        FileLog.shared.addMessage("[VoicePipeline] Speaking: \"(text)\" (\(language))")
+        FileLog.shared.addMessage("[VoicePipeline] Speaking: \"\(text)\" (\(language))")
         startGeneration &+= 1
         let generation = startGeneration
         await synthesizer.engineWillPrepareUtterance(text: text)
@@ -244,8 +243,6 @@ class AVSpeechTtsEngine: NSObject, TtsEngineProtocol {
         guard generation == fallbackGeneration, utterance === awaitedUtterance else { return }
         resumeCurrent(reason: "silence timeout")
     }
-
-    // MARK: - Voice Selection
 
 }
 
