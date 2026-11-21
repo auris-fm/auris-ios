@@ -9,15 +9,26 @@ import XCTest
 private final class StubSpeechSynthesizer: SpeechSynthesizing {
     var delegate: AVSpeechSynthesizerDelegate?
     var isSpeaking = false
-    private(set) var spoken: [AVSpeechUtterance] = []
+    private let lock = NSLock()
+    private var _spoken: [AVSpeechUtterance] = []
+    var spoken: [AVSpeechUtterance] {
+        lock.lock(); defer { lock.unlock() }
+        return _spoken
+    }
     /// Called with each utterance as `speak` is invoked. Default: deliver
     /// nothing, which is what a synthesizer without a usable audio route does.
     var onSpeak: ((StubSpeechSynthesizer, AVSpeechUtterance) -> Void)?
+    /// When set, speak(_:) blocks on this semaphore after enqueuing, letting a
+    /// test hold the first start inside the synthesizer while a second starts.
+    var holdSpeak: DispatchSemaphore?
 
     func speak(_ utterance: AVSpeechUtterance) {
-        spoken.append(utterance)
+        lock.lock()
+        _spoken.append(utterance)
+        lock.unlock()
         isSpeaking = true
         onSpeak?(self, utterance)
+        holdSpeak?.wait()
     }
 
     func stopSpeaking(at boundary: AVSpeechBoundary) -> Bool {
@@ -28,28 +39,22 @@ private final class StubSpeechSynthesizer: SpeechSynthesizing {
     /// The delegate methods are ObjC-optional, so delivery goes through
     /// perform rather than an existential call.
     func deliverDidFinish(_ utterance: AVSpeechUtterance) {
-        delegate?.perform(#selector(AVSpeechSynthesizerDelegate.speechSynthesizer(_:didFinish:)),
-                          with: AVSpeechSynthesizer(), with: utterance)
+        delegate?.speechSynthesizer?(AVSpeechSynthesizer(), didFinish: utterance)
     }
 
     func deliverDidCancel(_ utterance: AVSpeechUtterance) {
-        delegate?.perform(#selector(AVSpeechSynthesizerDelegate.speechSynthesizer(_:didCancel:)),
-                          with: AVSpeechSynthesizer(), with: utterance)
+        delegate?.speechSynthesizer?(AVSpeechSynthesizer(), didCancel: utterance)
     }
 
     func deliverDidStart(_ utterance: AVSpeechUtterance) {
-        delegate?.perform(#selector(AVSpeechSynthesizerDelegate.speechSynthesizer(_:didStart:)),
-                          with: AVSpeechSynthesizer(), with: utterance)
+        delegate?.speechSynthesizer?(AVSpeechSynthesizer(), didStart: utterance)
     }
 
     func deliverWillSpeak(_ utterance: AVSpeechUtterance) {
-        // The delegate method takes a struct NSRange, which perform(with:)
-        // cannot pass — invoke it through its C function pointer instead.
-        guard let obj = delegate as? NSObject else { return }
-        let sel = #selector(AVSpeechSynthesizerDelegate.speechSynthesizer(_:willSpeakRangeOfSpeechString:utterance:))
-        typealias Fn = @convention(c) (AnyObject, Selector, AVSpeechSynthesizer, NSRange, AVSpeechUtterance) -> Void
-        let fn = unsafeBitCast(obj.method(for: sel), to: Fn.self)
-        fn(obj, sel, AVSpeechSynthesizer(), NSRange(location: 0, length: min(5, (utterance.speechString as NSString).length)), utterance)
+        // Typed optional call: the delegate methods are ObjC-optional, so the
+        // existential exposes them as optional requirements — no unsafe casts.
+        let range = NSRange(location: 0, length: min(5, (utterance.speechString as NSString).length))
+        delegate?.speechSynthesizer?(AVSpeechSynthesizer(), willSpeakRangeOfSpeechString: range, utterance: utterance)
     }
 
 }
@@ -210,6 +215,42 @@ final class AVSpeechTtsEngineTests: XCTestCase {
         XCTAssertFalse(done,
                        "speak must not end while the synthesizer is still reporting progress")
         let utterance = synthesizer.spoken[0]
+        synthesizer.deliverDidFinish(utterance)
+        await task.value
+    }
+
+    /// A silence timer whose window has already expired must not resume a
+    /// waiter that a progress callback rearms afterwards. The progress is held
+    /// inside the synthesizer's speak until the first window has fully passed,
+    /// so the stale timer is guaranteed to be at or past its expiry when the
+    /// rearm happens; freshness is decided under the continuation lock.
+    func test_speak_expiredTimerDoesNotResumeAfterProgressRearms() async {
+        let synthesizer = StubSpeechSynthesizer()
+        let engine = AVSpeechTtsEngine(synthesizer: synthesizer, silenceTimeout: 0.2)
+        let gate = DispatchSemaphore(value: 0)
+        synthesizer.onSpeak = { _, _ in
+            // Hold the start until the first silence window has expired.
+            gate.wait()
+        }
+        let lock = NSLock()
+        var finished = false
+        let task = Task.detached(priority: .userInitiated) {
+            await engine.speak(text: "Hello", language: "en-US")
+            lock.lock(); finished = true; lock.unlock()
+        }
+        // Wait until the utterance is enqueued and the first window expires.
+        while synthesizer.spoken.isEmpty { try? await Task.sleep(nanoseconds: 10_000_000) }
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        // Release the start; deliver progress immediately after, rearming the
+        // timer while the stale one may already be racing for the lock.
+        gate.signal()
+        let utterance = synthesizer.spoken[0]
+        for _ in 0..<5 {
+            synthesizer.deliverWillSpeak(utterance)
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        lock.lock(); let done = finished; lock.unlock()
+        XCTAssertFalse(done, "an expired timer resumed a waiter that progress had rearmed")
         synthesizer.deliverDidFinish(utterance)
         await task.value
     }

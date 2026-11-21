@@ -29,6 +29,12 @@ class AVSpeechTtsEngine: NSObject, TtsEngineProtocol {
     /// `didCancel` for the old utterance arrives while the new utterance's
     /// continuation is already stored.
     private var awaitedUtterance: AVSpeechUtterance?
+    /// Bumped on every arm/rearm and every resume. A timer captures the
+    /// generation it was armed with and may only fire while that generation is
+    /// still current — checked under the same lock that claims the
+    /// continuation, so a timer that expired just before a progress callback
+    /// rearmed can never resume early.
+    private var fallbackGeneration: UInt64 = 0
     private var fallbackTask: Task<Void, Never>?
     private let stateLock = NSLock()
 
@@ -77,15 +83,21 @@ class AVSpeechTtsEngine: NSObject, TtsEngineProtocol {
     /// once. Every resume path — delegate callback, fallback timer, cancel,
     /// a superseding speak — goes through here, so a callback racing a
     /// fallback can never resume a continuation twice.
-    private func resumeIfCurrent(_ utterance: AVSpeechUtterance?, reason: String) {
+    private func resumeIfCurrent(_ utterance: AVSpeechUtterance?, reason: String, generation: UInt64? = nil) {
         stateLock.lock()
         guard continuation != nil, utterance === awaitedUtterance else {
+            stateLock.unlock()
+            return
+        }
+        if let generation, generation != fallbackGeneration {
+            // The timer expired, but progress rearmed since: not our window.
             stateLock.unlock()
             return
         }
         let cont = continuation
         continuation = nil
         awaitedUtterance = nil
+        fallbackGeneration &+= 1
         fallbackTask?.cancel()
         fallbackTask = nil
         stateLock.unlock()
@@ -99,11 +111,21 @@ class AVSpeechTtsEngine: NSObject, TtsEngineProtocol {
     /// the new waiter.
     private func storeContinuation(_ cont: CheckedContinuation<Void, Never>, for utterance: AVSpeechUtterance) {
         synthesizer.stopSpeaking(at: .immediate)
-        resumeIfCurrent(awaitedUtterance, reason: "superseded")
+        // Swap atomically: two overlapping starts must not both see an empty
+        // slot and overwrite each other's waiter. The displaced waiter is
+        // resumed outside the lock.
         stateLock.lock()
+        let displaced = continuation
         continuation = cont
         awaitedUtterance = utterance
+        fallbackGeneration &+= 1
+        fallbackTask?.cancel()
+        fallbackTask = nil
         stateLock.unlock()
+        if displaced != nil {
+            FileLog.shared.addMessage("[VoicePipeline] TTS speak resumed (superseded)")
+            displaced?.resume()
+        }
     }
 
     /// Arms (or rearms) the silence timer for `utterance`. Every sign of
@@ -116,11 +138,13 @@ class AVSpeechTtsEngine: NSObject, TtsEngineProtocol {
             return
         }
         fallbackTask?.cancel()
+        fallbackGeneration &+= 1
+        let generation = fallbackGeneration
         let timeout = silenceTimeout
         fallbackTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
             guard !Task.isCancelled else { return }
-            self?.resumeIfCurrent(utterance, reason: "silence timeout")
+            self?.resumeIfCurrent(utterance, reason: "silence timeout", generation: generation)
         }
         stateLock.unlock()
     }
