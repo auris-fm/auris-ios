@@ -36,7 +36,24 @@ class AVSpeechTtsEngine: NSObject, TtsEngineProtocol {
     /// rearmed can never resume early.
     private var fallbackGeneration: UInt64 = 0
     private var fallbackTask: Task<Void, Never>?
+    /// The boundary every start, stop, cancel and release goes through.
+    ///
+    /// `AudioFeedbackRenderer.render` cancels the previous render task and
+    /// starts a new one without joining it, and neither this engine nor that
+    /// renderer is actor-isolated, so two starts genuinely can be inside the
+    /// start sequence at once. Serializing here — rather than at the renderer
+    /// — is what makes "a start that has been superseded must not speak" true
+    /// regardless of which caller got there second.
     private let stateLock = NSLock()
+    /// Identifies the newest start. A start claims a number at entry and may
+    /// only enqueue speech and store its waiter while that number is still the
+    /// newest, so a start that a later start overtook becomes a no-op instead
+    /// of speaking over it or displacing its waiter.
+    ///
+    /// Claimed through `stateLock` at the top of `speak`, before the boundary
+    /// is taken for the store, so a start that is still preparing can be
+    /// overtaken by one that arrives later.
+    private var startGeneration: UInt64 = 0
 
     init(synthesizer: SpeechSynthesizing = SystemSpeechSynthesizer(),
          silenceTimeout: TimeInterval = 10) {
@@ -55,26 +72,37 @@ class AVSpeechTtsEngine: NSObject, TtsEngineProtocol {
 
     func speak(text: String, language: String) async {
         FileLog.shared.addMessage("[VoicePipeline] Speaking: \"\(text)\" (\(language))")
+        let generation = self.claimStart()
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             let utterance = AVSpeechUtterance(string: text)
             utterance.voice = self.bestVoice(for: language)
             utterance.rate = AVSpeechUtteranceDefaultSpeechRate
-            self.storeContinuation(cont, for: utterance)
-            self.synthesizer.speak(utterance)
-            self.scheduleFallbackResume(for: utterance)
+            self.start(cont, utterance: utterance, generation: generation)
         }
+    }
+
+    /// Claims the next start number. Taken before the utterance is built and
+    /// before the boundary, so a start that is overtaken while preparing can
+    /// tell that it lost.
+    private func claimStart() -> UInt64 {
+        stateLock.lock()
+        startGeneration &+= 1
+        let claimed = startGeneration
+        stateLock.unlock()
+        return claimed
     }
 
     func cancel() {
         synthesizer.stopSpeaking(at: .immediate)
         // .immediate does not reliably deliver didCancel; the waiter must not
-        // outlive the cancel that ended its utterance.
-        resumeIfCurrent(awaitedUtterance, reason: "cancel")
+        // outlive the cancel that ended its utterance. The waiter is claimed
+        // inside the boundary rather than read first and compared after.
+        resumeCurrent(reason: "cancel")
     }
 
     func releaseEngine() {
         synthesizer.stopSpeaking(at: .immediate)
-        resumeIfCurrent(awaitedUtterance, reason: "release")
+        resumeCurrent(reason: "release")
     }
 
     // MARK: - Continuation state
@@ -105,27 +133,101 @@ class AVSpeechTtsEngine: NSObject, TtsEngineProtocol {
         cont?.resume()
     }
 
-    /// A new `speak` abandons the previous waiter: the synthesizer has moved
-    /// on, so its callbacks now describe a different utterance, and leaving
-    /// the old waiter stored would let the old utterance's callbacks resume
-    /// the new waiter.
-    private func storeContinuation(_ cont: CheckedContinuation<Void, Never>, for utterance: AVSpeechUtterance) {
-        synthesizer.stopSpeaking(at: .immediate)
-        // Swap atomically: two overlapping starts must not both see an empty
-        // slot and overwrite each other's waiter. The displaced waiter is
-        // resumed outside the lock.
+    /// The start sequence, run entirely inside the boundary.
+    ///
+    /// Two starts can enter this concurrently — `AudioFeedbackRenderer.render`
+    /// cancels the render task it is replacing without joining it, and nothing
+    /// in that chain is actor-isolated — so the boundary, not the caller, is
+    /// what orders them.
+    ///
+    /// Each start claims a generation number at entry and only enqueues speech
+    /// and stores its waiter while that number is still the newest. The claim
+    /// happens on the first line, before the work, so a start that a later
+    /// start overtook while it was building its utterance becomes a no-op: it
+    /// neither talks over the winner nor installs a waiter nothing would
+    /// resume.
+    private func start(_ cont: CheckedContinuation<Void, Never>,
+                       utterance: AVSpeechUtterance,
+                       generation: UInt64) {
         stateLock.lock()
+        // A later start claimed while this one was building its utterance: do
+        // nothing at all, and settle this waiter rather than leaving it
+        // suspended with nothing to resume it.
+        guard generation == startGeneration else {
+            stateLock.unlock()
+            FileLog.shared.addMessage("[VoicePipeline] TTS start superseded before it spoke")
+            cont.resume()
+            return
+        }
+        // Supersede whoever held the slot. Their waiter is resumed after the
+        // lock is released, so a continuation that resumes inline cannot
+        // deadlock against this boundary.
         let displaced = continuation
         continuation = cont
         awaitedUtterance = utterance
-        fallbackGeneration &+= 1
         fallbackTask?.cancel()
         fallbackTask = nil
+        // The synthesizer is stopped and started AFTER the lock is released.
+        // AVSpeechSynthesizer delivers `didStart` to its delegate
+        // synchronously from `speak`, and that delegate callback re-enters this
+        // boundary to arm the silence timer — calling out under the lock
+        // self-deadlocks on a non-recursive NSLock. The state above is already
+        // fully published, so a callback arriving at any point after this sees
+        // the new waiter and utterance.
         stateLock.unlock()
+        synthesizer.stopSpeaking(at: .immediate)
+        // Re-check after the stop. Stopping the synthesizer can take real time,
+        // and a start that arrives during it claims a newer generation; if that
+        // happened, this start has been overtaken and must not speak. The
+        // winner has already stored its own waiter, so this one has nothing
+        // left to install and is simply settled.
+        stateLock.lock()
+        let overtaken = generation != startGeneration
+        // An overtaken start may already have had its waiter displaced and
+        // resumed by the winner, so it must only settle a waiter it still owns.
+        let stillOurs = awaitedUtterance === utterance
+        if overtaken, stillOurs {
+            continuation = nil
+            awaitedUtterance = nil
+            fallbackTask?.cancel()
+            fallbackTask = nil
+        }
+        stateLock.unlock()
+        // Speak OUTSIDE the lock: `didStart` arrives synchronously from
+        // `speak` and re-enters this boundary to arm the timer.
+        if !overtaken {
+            synthesizer.speak(utterance)
+        }
         if displaced != nil {
             FileLog.shared.addMessage("[VoicePipeline] TTS speak resumed (superseded)")
             displaced?.resume()
         }
+        if overtaken {
+            FileLog.shared.addMessage("[VoicePipeline] TTS start superseded before it spoke")
+            if stillOurs { cont.resume() }
+            return
+        }
+        scheduleFallbackResume(for: utterance)
+    }
+
+    /// Resumes whatever waiter is current, claiming it inside the boundary.
+    /// The waiter is identified by the boundary's own state rather than by an
+    /// `awaitedUtterance` value read before the lock was taken.
+    private func resumeCurrent(reason: String) {
+        stateLock.lock()
+        guard continuation != nil else {
+            stateLock.unlock()
+            return
+        }
+        let cont = continuation
+        continuation = nil
+        awaitedUtterance = nil
+        fallbackGeneration &+= 1
+        fallbackTask?.cancel()
+        fallbackTask = nil
+        stateLock.unlock()
+        FileLog.shared.addMessage("[VoicePipeline] TTS speak resumed (\(reason))")
+        cont?.resume()
     }
 
     /// Arms (or rearms) the silence timer for `utterance`. Every sign of

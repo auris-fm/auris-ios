@@ -6,6 +6,56 @@ import XCTest
 /// delivers exactly the delegate callbacks the test names, so the callback
 /// sequences a real AVSpeechSynthesizer produces — including the never-calls-
 /// back case a headless runner produces — are reproducible deterministically.
+private let seamKey = DispatchSpecificKey<Int>()
+
+/// Stub that lets a test run code at a precise point inside the engine's start
+/// sequence: `stopSpeaking` is called by the engine while a start is in
+/// progress, so a callback there can overtake that start deterministically.
+private final class InterleavingStubSynthesizer: SpeechSynthesizing {
+    var delegate: AVSpeechSynthesizerDelegate?
+    var isSpeaking = false
+    /// Called with the 1-based count of `stopSpeaking` calls.
+    var onStop: ((Int) -> Void)?
+    /// Serial queue the seam callbacks run on, so the overtaking start does not
+    /// re-enter the engine's boundary on the thread already inside it.
+    var seam: DispatchQueue? {
+        didSet { seam?.setSpecific(key: seamKey, value: 1) }
+    }
+    private let lock = NSLock()
+    private var _spoken: [AVSpeechUtterance] = []
+    private var _stopCount = 0
+    var spoken: [AVSpeechUtterance] {
+        lock.lock(); defer { lock.unlock() }
+        return _spoken
+    }
+
+    func speak(_ utterance: AVSpeechUtterance) {
+        lock.lock()
+        _spoken.append(utterance)
+        lock.unlock()
+        isSpeaking = true
+    }
+
+    func stopSpeaking(at boundary: AVSpeechBoundary) -> Bool {
+        isSpeaking = false
+        lock.lock()
+        _stopCount += 1
+        let count = _stopCount
+        lock.unlock()
+        let callback = { [self] in onStop?(count) }
+        if let seam, DispatchQueue.getSpecific(key: seamKey) == nil {
+            seam.sync(execute: callback)
+        } else {
+            callback()
+        }
+        return true
+    }
+
+    func deliverDidFinish(_ utterance: AVSpeechUtterance) {
+        delegate?.speechSynthesizer?(AVSpeechSynthesizer(), didFinish: utterance)
+    }
+}
+
 private final class StubSpeechSynthesizer: SpeechSynthesizing {
     var delegate: AVSpeechSynthesizerDelegate?
     var isSpeaking = false
@@ -253,5 +303,54 @@ final class AVSpeechTtsEngineTests: XCTestCase {
         XCTAssertFalse(done, "an expired timer resumed a waiter that progress had rearmed")
         synthesizer.deliverDidFinish(utterance)
         await task.value
+    }
+
+    /// A start that a later start overtook must not reach the synthesizer.
+    ///
+    /// `AudioFeedbackRenderer.render` cancels the render task it replaces
+    /// without joining it, and nothing in that chain is actor-isolated, so two
+    /// starts can be inside the engine's start sequence at once. The engine
+    /// must settle that at its own boundary: the overtaken start neither speaks
+    /// over the winner nor leaves a waiter behind.
+    ///
+    /// The overtaking start is launched from the seam the overtaken one is
+    /// still blocked in, so the order is fixed rather than timed.
+    func test_speak_overtakenStartDoesNotReachTheSynthesizer() async {
+        let synthesizer = InterleavingStubSynthesizer()
+        let engine = AVSpeechTtsEngine(synthesizer: synthesizer, silenceTimeout: 30)
+        let loserDone = expectation(description: "overtaken start settled")
+        let winnerDone = expectation(description: "winning start settled")
+        synthesizer.seam = DispatchQueue(label: "tts-overtake-seam")
+
+        synthesizer.onStop = { stopCount in
+            // Stop #1 belongs to the first start. Overtake it here, while it is
+            // still inside the engine and has not yet spoken.
+            guard stopCount == 1 else { return }
+            Task {
+                await engine.speak(text: "Winner", language: "en-US")
+                winnerDone.fulfill()
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        Task {
+            await engine.speak(text: "Loser", language: "en-US")
+            loserDone.fulfill()
+        }
+        // The loser settles as soon as it discovers it was overtaken; the
+        // winner is a real utterance and settles on its own didFinish.
+        await fulfillment(of: [loserDone], timeout: 5)
+        let spokenSoFar = synthesizer.spoken.map(\.speechString)
+        XCTAssertEqual(spokenSoFar, ["Winner"],
+                       "only the winning start should have reached the synthesizer")
+        if let winnerUtterance = synthesizer.spoken.first {
+            synthesizer.deliverDidFinish(winnerUtterance)
+        }
+        await fulfillment(of: [winnerDone], timeout: 5)
+
+        let spoken = synthesizer.spoken.map(\.speechString)
+        XCTAssertFalse(spoken.contains("Loser"),
+                       "an overtaken start spoke over the start that superseded it")
+        XCTAssertEqual(spoken, ["Winner"],
+                       "only the winning start should have reached the synthesizer")
     }
 }
