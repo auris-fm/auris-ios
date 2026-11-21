@@ -54,6 +54,40 @@ STUB
 fails=0
 report() { if [ "$1" -eq 0 ]; then echo "PASS  $2"; else echo "FAIL  $2"; fails=$((fails+1)); fi; }
 
+# Wait for a condition to become true, polling briefly under a generous
+# ceiling. Cases wait on the event itself (a capture appearing, a call being
+# recorded), never on a fixed sleep: under load the sampler's polls are slow,
+# and a fixed deadline turns that into a false failure — this suite flaked
+# exactly that way at load ~30 before this helper existed. Returns 1 only when
+# the ceiling expires, which is a real failure, not a slow machine.
+wait_for() {
+  local ceiling="$1"; shift
+  local waited=0
+  while ! "$@"; do
+    if [ "$waited" -ge "$ceiling" ]; then return 1; fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  return 0
+}
+capture_has_load() { grep -q '^loadavg: ' "$1" 2>/dev/null; }
+sample_called_n() { [ "$(grep -c '^sample ' "$STUB_CALLS" 2>/dev/null)" -eq "$1" ]; }
+# Start the sampler watching a stub run that lives `secs` seconds. The run is
+# long enough that every event a case waits for arrives before it ends, even
+# under load; the case ends the run itself once its assertions are done.
+start_sampler() {
+  local dir="$1" secs="$2" threshold="$3"
+  ( sleep "$secs" ) &
+  stub=$!
+  ( cd "$dir/artifacts" && PATH="$dir/bin:$PATH" /bin/bash "$dir/sampler.sh" "$dir/artifacts" "$stub" "SIM-TEST" "$threshold" ) &
+  sampler=$!
+}
+stop_sampler() {
+  kill "$stub" 2>/dev/null; wait "$stub" 2>/dev/null
+  wait "$sampler" 2>/dev/null
+  kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
+}
+
 # Case 1: one test stays in flight past the threshold -> exactly one sample
 # naming the run's host pid; the stub run is never killed.
 dir=$(mktemp -d); mkdir -p "$dir/artifacts"
@@ -64,15 +98,15 @@ export STUB_SAMPLE_SECONDS=2
 extract_sampler "$dir/sampler.sh"
 ( sleep 1; echo "Test Case '-[X.Y testStuck]' started."; echo "2026-11-21 07:34:01.000000+0800 podcasts[424242:1] stub host line"; sleep 30 ) >> "$log" &
 writer=$!
-( sleep 20 ) &
-stub=$!
 # The sampler lives as long as the run does; what matters is that it sampled
 # once, named the right pid and file, and never signalled the run. Run it in
 # the background and stop it by ending the stub run, as production does.
-( cd "$dir/artifacts" && PATH="$dir/bin:$PATH" /bin/bash "$dir/sampler.sh" "$dir/artifacts" "$stub" "SIM-TEST" 3 ) &
-sampler=$!
-sleep 8
+start_sampler "$dir" 300 3
+# Wait for the capture to be complete — the load line is appended after the
+# sample returns — not for a fixed number of seconds. The stub run outlives
+# the ceiling, so under any load the event arrives before the run ends.
 ok=0
+wait_for 120 capture_has_load "$dir/artifacts/stuck-sample-1-424242.txt" || ok=1
 kill -0 "$sampler" 2>/dev/null || ok=1   # still watching the live run
 kill -0 "$stub" 2>/dev/null || ok=1      # run untouched
 [ "$(grep -c '^sample ' "$STUB_CALLS")" -eq 1 ] || ok=1
@@ -82,9 +116,7 @@ grep -q '^sample 424242 10 -file .*stuck-sample-1-424242.txt$' "$STUB_CALLS" || 
 # taken on a swamped host reads differently from one taken on a quiet one.
 grep -q '^loadavg: { 1.25 2.50 3.75 }$' "$dir/artifacts/stuck-sample-1-424242.txt" || ok=1
 grep -q '^sysctl -n vm.loadavg$' "$STUB_CALLS" || ok=1
-kill "$stub" 2>/dev/null; wait "$stub" 2>/dev/null
-wait "$sampler" 2>/dev/null
-kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
+stop_sampler
 report "$ok" "a stuck test is sampled once and the run continues"
 rm -rf "$dir"
 
@@ -94,14 +126,17 @@ log="$dir/artifacts/test.log"; : > "$log"
 make_stubs "$dir"
 export STUB_CALLS="$dir/calls.txt"; : > "$STUB_CALLS"
 extract_sampler "$dir/sampler.sh"
-( sleep 1; echo "Test Case '-[X.Y testStuck]' started."; echo "2026-11-21 07:34:01.000000+0800 podcasts[424242:1] stub host line"; sleep 60 ) >> "$log" &
+( sleep 1; echo "Test Case '-[X.Y testStuck]' started."; echo "2026-11-21 07:34:01.000000+0800 podcasts[424242:1] stub host line"; sleep 300 ) >> "$log" &
 writer=$!
-( sleep 12 ) &
-stub=$!
-( cd "$dir/artifacts" && PATH="$dir/bin:$PATH" /bin/bash "$dir/sampler.sh" "$dir/artifacts" "$stub" "SIM-TEST" 3 )
-kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
+start_sampler "$dir" 300 3
 ok=0
+wait_for 120 sample_called_n 1 || ok=1
+# Let several more polls pass with the same test still in flight: the count
+# must stay at one. This wait proves absence over a window, so it is a fixed
+# observation period, not a deadline for an event.
+sleep 5
 [ "$(grep -c '^sample ' "$STUB_CALLS")" -eq 1 ] || ok=1
+stop_sampler
 report "$ok" "one stuck test is sampled once, not every poll"
 rm -rf "$dir"
 
@@ -111,14 +146,14 @@ log="$dir/artifacts/test.log"; : > "$log"
 make_stubs "$dir"
 export STUB_CALLS="$dir/calls.txt"; : > "$STUB_CALLS"
 extract_sampler "$dir/sampler.sh"
-( sleep 1; for i in 1 2 3 4 5 6; do echo "Test Case '-[X.Y test$i]' started."; echo "Test Case '-[X.Y test$i]' passed (0.1 seconds)."; sleep 1; done ) >> "$log" &
+( sleep 1; for i in 1 2 3 4 5 6; do echo "Test Case '-[X.Y test$i]' started."; echo "Test Case '-[X.Y test$i]' passed (0.1 seconds)."; sleep 1; done; echo "ALL_TESTS_DONE" ) >> "$log" &
 writer=$!
-( sleep 9 ) &
-stub=$!
-( cd "$dir/artifacts" && PATH="$dir/bin:$PATH" /bin/bash "$dir/sampler.sh" "$dir/artifacts" "$stub" "SIM-TEST" 3 )
-kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
+start_sampler "$dir" 300 3
 ok=0
+# Wait until every healthy test has finished, then assert nothing was sampled.
+wait_for 120 grep -q ALL_TESTS_DONE "$log" || ok=1
 [ ! -s "$STUB_CALLS" ] || ok=1
+stop_sampler
 report "$ok" "a healthy run is never sampled"
 rm -rf "$dir"
 
@@ -128,16 +163,15 @@ log="$dir/artifacts/test.log"; : > "$log"
 make_stubs "$dir"
 export STUB_CALLS="$dir/calls.txt"; : > "$STUB_CALLS"
 extract_sampler "$dir/sampler.sh"
-( sleep 1; echo "Test Case '-[X.Y testA]' started."; echo "2026-11-21 07:34:01.000000+0800 podcasts[424242:1] stub host line"; sleep 6; echo "Test Case '-[X.Y testA]' failed (6.0 seconds)."; echo "Test Case '-[X.Y testB]' started."; sleep 30 ) >> "$log" &
+( sleep 1; echo "Test Case '-[X.Y testA]' started."; echo "2026-11-21 07:34:01.000000+0800 podcasts[424242:1] stub host line"; sleep 6; echo "Test Case '-[X.Y testA]' failed (6.0 seconds)."; echo "Test Case '-[X.Y testB]' started."; sleep 300 ) >> "$log" &
 writer=$!
-( sleep 25 ) &
-stub=$!
-( cd "$dir/artifacts" && PATH="$dir/bin:$PATH" /bin/bash "$dir/sampler.sh" "$dir/artifacts" "$stub" "SIM-TEST" 3 )
-kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
+start_sampler "$dir" 300 3
 ok=0
+wait_for 120 capture_has_load "$dir/artifacts/stuck-sample-2-424242.txt" || ok=1
 [ "$(grep -c '^sample ' "$STUB_CALLS")" -eq 2 ] || ok=1
 [ -s "$dir/artifacts/stuck-sample-1-424242.txt" ] || ok=1
 [ -s "$dir/artifacts/stuck-sample-2-424242.txt" ] || ok=1
+stop_sampler
 report "$ok" "two stuck tests are sampled once each, both files survive"
 rm -rf "$dir"
 
@@ -168,15 +202,14 @@ log="$dir/artifacts/test.log"; : > "$log"
 make_stubs "$dir"
 export STUB_CALLS="$dir/calls.txt"; : > "$STUB_CALLS"
 extract_sampler "$dir/sampler.sh"
-( sleep 1; echo "◇ Test testStuck() started."; echo "2026-11-21 07:34:01.000000+0800 podcasts[424242:1] stub host line"; sleep 4; echo "✘ Test testStuck() recorded an issue"; sleep 30 ) >> "$log" &
+( sleep 1; echo "◇ Test testStuck() started."; echo "2026-11-21 07:34:01.000000+0800 podcasts[424242:1] stub host line"; sleep 4; echo "✘ Test testStuck() recorded an issue"; sleep 300 ) >> "$log" &
 writer=$!
-( sleep 12 ) &
-stub=$!
-( cd "$dir/artifacts" && PATH="$dir/bin:$PATH" /bin/bash "$dir/sampler.sh" "$dir/artifacts" "$stub" "SIM-TEST" 3 )
-kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
+start_sampler "$dir" 300 3
 ok=0
+wait_for 120 capture_has_load "$dir/artifacts/stuck-sample-1-424242.txt" || ok=1
 [ "$(grep -c '^sample ' "$STUB_CALLS")" -eq 1 ] || ok=1
 [ -s "$dir/artifacts/stuck-sample-1-424242.txt" ] || ok=1
+stop_sampler
 report "$ok" "Swift Testing starts and results are tracked like XCTest ones"
 rm -rf "$dir"
 
@@ -188,15 +221,14 @@ log="$dir/artifacts/test.log"; : > "$log"
 make_stubs "$dir"
 export STUB_CALLS="$dir/calls.txt"; : > "$STUB_CALLS"
 extract_sampler "$dir/sampler.sh"
-( sleep 1; echo "Test Case '-[X.Y testEarly]' started."; sleep 8; echo "2026-11-21 07:34:01.000000+0800 podcasts[424242:1] first host line"; sleep 30 ) >> "$log" &
+( sleep 1; echo "Test Case '-[X.Y testEarly]' started."; sleep 8; echo "2026-11-21 07:34:01.000000+0800 podcasts[424242:1] first host line"; sleep 300 ) >> "$log" &
 writer=$!
-( sleep 16 ) &
-stub=$!
-( cd "$dir/artifacts" && PATH="$dir/bin:$PATH" /bin/bash "$dir/sampler.sh" "$dir/artifacts" "$stub" "SIM-TEST" 3 )
-kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
+start_sampler "$dir" 300 3
 ok=0
+wait_for 120 capture_has_load "$dir/artifacts/stuck-sample-1-424242.txt" || ok=1
 [ "$(grep -c '^sample ' "$STUB_CALLS")" -eq 1 ] || ok=1
 [ -s "$dir/artifacts/stuck-sample-1-424242.txt" ] || ok=1
+stop_sampler
 report "$ok" "a hang before the first pid line is retried, not silently retired"
 rm -rf "$dir"
 
