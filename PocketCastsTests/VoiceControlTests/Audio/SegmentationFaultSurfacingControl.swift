@@ -581,6 +581,7 @@ final class SegmentationFaultSurfacingControl: XCTestCase {
 /// `arch/ios.md` requires a surfaced interruption. Published state that nothing renders leaves
 /// the user with unexplained silence, so this asserts the product's actual feedback consumer:
 /// the earcon the service asks the renderer to play.
+@MainActor
 final class SegmentationFaultAudibleFeedbackControl: XCTestCase {
     func testPresentingAFaultRequestsAudibleFeedbackAndPublishesState() {
         let service = VoiceControlAssembly().buildVoiceControlService(

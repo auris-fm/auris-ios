@@ -31,6 +31,9 @@ class VoiceControlAssembly {
         return factory
     }
 
+    /// Main-actor isolated because it constructs and warms the TTS engine and
+    /// the renderer, which are main-actor types.
+    @MainActor
     func buildVoiceControlService(
         audioSession: AudioSessionControlling = RealAudioSession(),
         conditionMonitor: LiveConditionMonitor? = nil,

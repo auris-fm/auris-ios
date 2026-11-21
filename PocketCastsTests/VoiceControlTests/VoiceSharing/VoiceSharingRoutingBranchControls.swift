@@ -11,6 +11,7 @@ import XCTest
 /// Established here: which branch ran, what it reported, and how the executor's returned response was
 /// interpreted. not established here: how the real model classifies — that needs the model, and these
 /// controls do not stand in for it.
+@MainActor
 final class VoiceSharingRoutingBranchControls: XCTestCase {
 
     // MARK: - Injected seam

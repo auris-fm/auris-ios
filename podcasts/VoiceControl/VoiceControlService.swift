@@ -229,6 +229,7 @@ class VoiceControlService: ObservableObject {
     /// Extracted so the presentation itself is assertable: published state alone leaves the
     /// silence unexplained, so the fault is also given audible feedback through the product's
     /// existing error earcon.
+    @MainActor
     func presentSegmentationFault(_ fault: VoiceAsrEngine.SegmentationFault) {
         segmentationFault = fault
         FileLog.shared.addMessage(
@@ -266,8 +267,8 @@ class VoiceControlService: ObservableObject {
     /// Observer for earcon requests, for controls that assert the user-facing presentation rather
     /// than only the internal state change.
     var earconObserverForTesting: ((EarconId) -> Void)? {
-        get { audioRenderer.earconObserverForTesting }
-        set { audioRenderer.earconObserverForTesting = newValue }
+        get { MainActor.assumeIsolated { audioRenderer.earconObserverForTesting } }
+        set { MainActor.assumeIsolated { audioRenderer.earconObserverForTesting = newValue } }
     }
     private var latestRouterMetrics: RouterClassificationMetrics?
 
@@ -373,7 +374,7 @@ class VoiceControlService: ObservableObject {
         self.preparedObserverFactory = preparedObserverFactory
         self.testInputBarrier = testInputBarrier
 
-        interruptionHandler.onInterruptionBegan = { [weak self] in
+        interruptionHandler.onInterruptionBegan = { @MainActor [weak self] in
             guard let self else { return }
             let wasCapturing = self.isListening
             self.stop()  // stops capture, discards current pipeline state
@@ -446,7 +447,7 @@ class VoiceControlService: ObservableObject {
                 hasExternalMicrophoneCandidate: routeMonitor?.hasExternalMicrophoneCandidate ?? true
             )
         }
-        .sink { [weak self] gate in
+        .sink { @MainActor [weak self] gate in
             guard let self else { return }
             let previous = self.gateState
             self.gateState = gate.state
@@ -809,7 +810,7 @@ class VoiceControlService: ObservableObject {
 
         asrEngine.onWakeWordDetected = { [weak self] in
             self?.gracePeriodSignal.onWakeWordDetected()
-            self?.audioRenderer.playEarcon(.wakeWord)
+            Task { @MainActor in self?.audioRenderer.playEarcon(.wakeWord) }
         }
         // Trailing silence on an addressed utterance is when the connection should open: the user
         // appears to have finished, the endpoint has not fired, so the handshake overlaps the
@@ -865,7 +866,7 @@ class VoiceControlService: ObservableObject {
         // left nil so the intent is visible at the call site.)
         asrEngine.onWakeOnly = {}
         asrEngine.onUnroutable = { [weak self] in
-            self?.audioRenderer.playEarcon(.error)
+            Task { @MainActor in self?.audioRenderer.playEarcon(.error) }
         }
 
         asrEngine.onStageTiming = { [weak self] timing in
@@ -882,7 +883,7 @@ class VoiceControlService: ObservableObject {
         // silence unexplained, so this follows the product's existing feedback pattern: the same
         // error earcon already used when a capture could not be turned into a request.
         asrEngine.onSegmentationFault = { [weak self] fault in
-            self?.presentSegmentationFault(fault)
+            Task { @MainActor in self?.presentSegmentationFault(fault) }
         }
         intentRouter.onMetrics = { [weak self] metrics in
             self?.latestRouterMetrics = metrics
@@ -905,6 +906,7 @@ class VoiceControlService: ObservableObject {
         }
     }
 
+    @MainActor
     private func start(in mode: ListeningMode) {
         guard !isListening else {
             if listeningMode != mode {
@@ -937,6 +939,7 @@ class VoiceControlService: ObservableObject {
         }
     }
 
+    @MainActor
     func stop() {
         guard !isStopping else { return }
         isStopping = true
@@ -945,6 +948,7 @@ class VoiceControlService: ObservableObject {
         stopCapture()
     }
 
+    @MainActor
     private func stopCapture() {
         guard isListening else { return }
         FileLog.shared.addMessage("[VoicePipeline] stop listening")
@@ -1306,7 +1310,7 @@ class VoiceControlService: ObservableObject {
             }
             lastIntentType = intentType
             lastExecutionTime = Date()
-            audioRenderer.render(response)
+            await audioRenderer.render(response)
 
         case .dialogControl(let action):
             FileLog.shared.addMessage("[VoicePipeline] dialog \(action) ← '\(transcript)'")
@@ -1333,7 +1337,7 @@ class VoiceControlService: ObservableObject {
                 gracePeriodSignal.onCommandRecognized()
                 lastIntentType = String(describing: type(of: intent))
                 lastExecutionTime = Date()
-                audioRenderer.render(response)
+                await audioRenderer.render(response)
             } else if let reprocessValue = dialogResult.reprocessValue {
                 // REPROCESS vs SPEAK (spec 0443b70): a `new_command` control cancels the dialog
                 // and re-processes its value as a FRESH transcript — the value is a command the
@@ -1366,7 +1370,7 @@ class VoiceControlService: ObservableObject {
                     stage: "execution",
                     outcome: .init(state: "not_run", reason: "client_refused"),
                     context: captureContext)
-                audioRenderer.render(.spoken(question))
+                await audioRenderer.render(.spoken(question))
             }
             // If dialogResult has no intent and no question (e.g., cancel), nothing was executed —
             // but the record still needs releasing.
@@ -1434,7 +1438,7 @@ class VoiceControlService: ObservableObject {
                     "[VoicePipeline] cloud escalation refused (\(cause)) ← '\(transcript)' (reason=\(reason ?? "?"))"
                 )
                 if gracePeriodSignal.claimRefusalTone() {
-                    audioRenderer.playEarcon(.error)
+                    await audioRenderer.playEarcon(.error)
                 }
                 return .routed
             }
@@ -1473,7 +1477,7 @@ class VoiceControlService: ObservableObject {
                 // The escalation path resolves interruptions too: a barge-in that itself
                 // escalates must still submit its follow-up once acknowledged.
                 await submitRetainedFollowUpIfAny()
-                audioRenderer.render(response)
+                await audioRenderer.render(response)
                 return .routed
             }
 
@@ -1487,7 +1491,7 @@ class VoiceControlService: ObservableObject {
             // test). What is left are the capability failures — reasons where
             // the router could not do its job — and each speaks: the user asked
             // a real question and got nothing.
-            audioRenderer.playEarcon(.error)
+            await audioRenderer.playEarcon(.error)
             // Nothing was executed and no dispatch happened; release the record.
             settleOwnedCapture(captureContext, cancelled: false, reason: "client_refused")
         }

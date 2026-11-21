@@ -6,6 +6,47 @@ import XCTest
 /// delivers exactly the delegate callbacks the test names, so the callback
 /// sequences a real AVSpeechSynthesizer produces — including the never-calls-
 /// back case a headless runner produces — are reproducible deterministically.
+/// Hands each silence window to the test as a closure instead of running it on
+/// a clock, so a test decides exactly when a window expires and can wait for
+/// that expiry to finish before doing anything else.
+private actor ManualSilenceScheduler: SilenceScheduling {
+    private var windows: [@MainActor () async -> Void] = []
+    private var waiters: [(Int, CheckedContinuation<Void, Never>)] = []
+
+    nonisolated func schedule(after seconds: TimeInterval,
+                              _ work: @escaping @MainActor () async -> Void) -> SilenceTimerToken {
+        Task { await self.append(work) }
+        return ManualToken()
+    }
+
+    private func append(_ work: @escaping @MainActor () async -> Void) {
+        windows.append(work)
+        let ready = waiters.filter { $0.0 <= windows.count }
+        waiters.removeAll { $0.0 <= windows.count }
+        ready.forEach { $0.1.resume() }
+    }
+
+    /// Waits until at least `count` windows have been armed, then returns the
+    /// last one's expiry.
+    func waitForWindow(count: Int) async -> @MainActor () async -> Void {
+        if windows.count < count {
+            await withCheckedContinuation { waiters.append((count, $0)) }
+        }
+        return windows[count - 1]
+    }
+}
+
+private struct ManualToken: SilenceTimerToken {
+    func cancel() {}
+}
+
+/// A flag an async test can read without a lock.
+private actor FinishedFlag {
+    private var done = false
+    var value: Bool { done }
+    func set() { done = true }
+}
+
 /// A one-shot gate an async test can park on and open explicitly, so an
 /// interleaving is forced rather than approximated with a sleep.
 private actor AsyncGate {
@@ -38,6 +79,22 @@ private final class StubSpeechSynthesizer: SpeechSynthesizing {
     /// When set, speak(_:) blocks on this semaphore after enqueuing, letting a
     /// test hold the first start inside the synthesizer while a second starts.
     var holdSpeak: DispatchSemaphore?
+    /// Where this stub parks when the engine reports its timeline. The engine
+    /// only reports; the stub decides what to do at each point.
+    var onPrepare: ((String) async -> Void)?
+    var onClaimExpiry: (() async -> Void)?
+    private var claimedExpiry = false
+
+    func engineWillPrepareUtterance(text: String) async {
+        if let onPrepare { await onPrepare(text) }
+    }
+
+    func engineWillClaimSilenceExpiry() async {
+        // Only the first expiry is held, so later windows run normally.
+        guard !claimedExpiry else { return }
+        claimedExpiry = true
+        if let onClaimExpiry { await onClaimExpiry() }
+    }
 
     func speak(_ utterance: AVSpeechUtterance) {
         lock.lock()
@@ -76,6 +133,7 @@ private final class StubSpeechSynthesizer: SpeechSynthesizing {
 
 }
 
+@MainActor
 final class AVSpeechTtsEngineTests: XCTestCase {
 
     func test_warmUp_doesNotThrow() {
@@ -256,39 +314,54 @@ final class AVSpeechTtsEngineTests: XCTestCase {
     /// cancellation check and before it claims the waiter, progress rearms
     /// while it is held, and only then is it released. A timer that ignores the
     /// generation it was armed with resumes the waiter here.
+    /// A silence timer that expired must not resume a waiter that progress has
+    /// since rearmed.
+    ///
+    /// Nothing here waits on a clock. The injected scheduler hands the test
+    /// each window's expiry as a closure it fires by hand, so the stale expiry
+    /// is run to completion — and observed to claim nothing — before the next
+    /// window is fired at all.
     func test_speak_expiredTimerDoesNotResumeAfterProgressRearms() async {
         let synthesizer = StubSpeechSynthesizer()
-        let engine = AVSpeechTtsEngine(synthesizer: synthesizer, silenceTimeout: 0.2)
-        let expiryParked = expectation(description: "expiry held before its claim")
-        let release = AsyncGate()
-        await engine.setExpirySeamForTesting {
-            expiryParked.fulfill()
-            await release.wait()
-        }
-        let lock = NSLock()
-        var finished = false
+        let scheduler = ManualSilenceScheduler()
+        let engine = AVSpeechTtsEngine(synthesizer: synthesizer,
+                                       silenceTimeout: 0.2,
+                                       scheduler: scheduler)
+        let finished = FinishedFlag()
         let task = Task {
             await engine.speak(text: "Hello", language: "en-US")
-            lock.lock(); finished = true; lock.unlock()
+            await finished.set()
         }
-        // The window expires and parks before claiming anything.
-        await fulfillment(of: [expiryParked], timeout: 5)
-        // Progress rearms underneath the parked expiry.
+        // The first window is armed by the start. Fire it, but hold it at the
+        // point where it is about to claim the waiter.
+        let firstExpiry = await scheduler.waitForWindow(count: 1)
+        let release = AsyncGate()
+        let parked = expectation(description: "expiry held before its claim")
+        synthesizer.onClaimExpiry = {
+            parked.fulfill()
+            await release.wait()
+        }
+        let staleRun = Task { await firstExpiry() }
+        await fulfillment(of: [parked], timeout: 5)
+
+        // Progress rearms underneath the parked expiry, arming a second window.
         let utterance = synthesizer.spoken[0]
         synthesizer.deliverWillSpeak(utterance)
+        let secondExpiry = await scheduler.waitForWindow(count: 2)
+
+        // Let the stale expiry finish its claim attempt, and wait for it.
         await release.open()
-        // Give the stale expiry every chance to claim the waiter, while keeping
-        // progress flowing so the freshly armed window cannot itself expire —
-        // otherwise a legitimate timeout would be mistaken for the stale one.
-        for _ in 0..<6 {
-            try? await Task.sleep(nanoseconds: 50_000_000)
-            synthesizer.deliverWillSpeak(utterance)
-        }
-        lock.lock(); let done = finished; lock.unlock()
-        XCTAssertFalse(done, "an expired timer resumed a waiter that progress had rearmed")
-        await engine.setExpirySeamForTesting(nil)
-        synthesizer.deliverDidFinish(utterance)
+        await staleRun.value
+        let endedEarly = await finished.value
+        XCTAssertFalse(endedEarly, "an expired timer resumed a waiter that progress had rearmed")
+
+        // The current window is still live: firing it is what may end the wait.
+        synthesizer.onClaimExpiry = nil
+        await secondExpiry()
         await task.value
+        let endedByCurrentWindow = await finished.value
+        XCTAssertTrue(endedByCurrentWindow,
+                      "the current silence window must still be able to end a silent utterance")
     }
 
     /// A start that a later start overtook must not reach the synthesizer.
@@ -332,7 +405,7 @@ final class AVSpeechTtsEngineTests: XCTestCase {
         let loserDone = expectation(description: "overtaken start settled")
         let winnerDone = expectation(description: "winning start settled")
         let release = AsyncGate()
-        engine.setPreparationSeamForTesting { text in
+        synthesizer.onPrepare = { text in
             guard text == "Loser" else { return }
             loserParked.fulfill()
             await release.wait()
@@ -357,7 +430,6 @@ final class AVSpeechTtsEngineTests: XCTestCase {
         await fulfillment(of: [loserDone], timeout: 5)
         XCTAssertEqual(synthesizer.spoken.map(\.speechString), ["Winner"],
                        "an overtaken start reached the synthesizer")
-        engine.setPreparationSeamForTesting(nil)
         if let winnerUtterance = synthesizer.spoken.first {
             synthesizer.deliverDidFinish(winnerUtterance)
         }

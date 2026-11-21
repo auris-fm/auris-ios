@@ -14,6 +14,7 @@ import AVFoundation
 /// deliver a real route-change notification. They assert the effect on the engine's own
 /// classification rather than on a helper called directly, because calling the helper would
 /// pass whether or not any subscription exists.
+@MainActor
 final class RouteSubscriptionLifetimeTests: XCTestCase {
 
     /// The positive control: with the assembly alive, a route change reaches the grace signal.

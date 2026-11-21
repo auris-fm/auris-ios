@@ -29,6 +29,7 @@ import XCTest
 /// of the *same* notification, unchanged/non-physical observations, and a failed
 /// attempt's own completion/cleanup must all fail to re-arm. These cases pin both
 /// halves.
+@MainActor
 final class ReconnectReacquisitionTests: XCTestCase {
 
     private func port(_ type: AVAudioSession.Port, uid: String) -> AudioPort {
