@@ -695,76 +695,53 @@ WATCHDOG_PID=$!
             # Distinct names per capture: two stuck tests in one host must not
             # overwrite each other.
             #
-            # Owns the diagnostic the way a job cancellation owns a step.
-            #
-            # The wrapper's exit is NOT the end of the capture: a child that
-            # ignores TERM outlives it and is handed to launchd, so the
-            # escalation takes a snapshot of the diagnostic's process tree while
-            # it is still whole and then kills every recorded pid for the whole
-            # grace window, re-scanning for anything newly spawned. Termination
-            # is proven one pid at a time — never by a group check, because a
-            # reparented child can end up outside the group it started in.
-            # Recording is safe: only pids from before the kill are touched, and
-            # a pid cannot be reused while its process is alive.
-            descendants_of() {
-              ps -axo pid,ppid 2>/dev/null | awk -v root="$1" '
-                { parent[$1] = $2; seen[NR] = $1 }
-                END {
-                  # Mark everything reachable from root, walking up at most 64
-                  # links so a malformed snapshot cannot loop.
-                  for (i = 1; i <= NR; i++) {
-                    n = seen[i]; d = 0
-                    while (n != "" && d < 64) {
-                      if (n == root) { print seen[i]; break }
-                      n = parent[n]; d++
-                    }
-                  }
-                }'
-            }
+            # Ownership: each diagnostic runs in its OWN process group, started
+            # and killed through that group id. A process group cannot be
+            # recycled while any member is alive, and every process the
+            # diagnostic starts inherits it — including one reparented to launchd
+            # when the wrapper exits — so the group is a lifetime handle that
+            # outlives the pid it was created from. Nothing here ever signals a
+            # number that a process has already exited from.
             bound_diag() {
-              local dp="$1" grace="$2" waited=0 p
-              local recorded="$(descendants_of "$dp")"
-              kill -TERM "$dp" 2>/dev/null
-              for p in $recorded; do kill -TERM "$p" 2>/dev/null; done
+              local pgid="$1" grace="$2" waited=0
+              kill -TERM "-$pgid" 2>/dev/null
               while [ "$waited" -lt "$grace" ]; do
-                kill -KILL "$dp" 2>/dev/null
-                recorded="$(printf '%s\n%s\n' "$recorded" "$(descendants_of "$dp")")"
-                local alive=""
-                for p in $recorded; do
-                  [ -n "$p" ] || continue
-                  if kill -0 "$p" 2>/dev/null; then
-                    kill -KILL "$p" 2>/dev/null
-                    kill -0 "$p" 2>/dev/null && alive="$p"
-                  fi
-                done
-                [ -z "$alive" ] && break
+                kill -KILL "-$pgid" 2>/dev/null
+                # ESRCH: no process left in the group, so it may be reused.
+                kill -0 "-$pgid" 2>/dev/null || return 0
                 sleep 1
                 waited=$((waited + 1))
               done
             }
             (
+              # Separate group so the whole diagnostic, wrapper to orphans, is
+              # one handle and nothing else on the runner shares it.
+              set -m
               sample "$pid" 10 -file "$LOG_DIR/stuck-sample-${seq}-${pid}.txt" >/dev/null 2>&1 &
               sp=$!
-              ( sleep 30; bound_diag "$sp" 10 ) &
+              dpg="$(ps -o pgid= -p "$sp" 2>/dev/null | tr -d ' ')"
+              ( sleep 30; bound_diag "$dpg" 10 ) &
               sk=$!
               wait "$sp" 2>/dev/null
               pkill -KILL -P "$sk" 2>/dev/null
               kill -KILL "$sk" 2>/dev/null
               wait "$sk" 2>/dev/null
-              bound_diag "$sp" 10
+              bound_diag "$dpg" 10
             )
             (
+              set -m
               xcrun simctl spawn "$SIMULATOR_ID" log show --last 2m --info --debug \
                 --predicate 'process == "podcasts" AND (subsystem CONTAINS[c] "audio" OR subsystem CONTAINS[c] "speech" OR eventMessage CONTAINS[c] "AQMEIO" OR eventMessage CONTAINS[c] "AVAudioSession")' \
                 > "$LOG_DIR/stuck-audio-${seq}-${pid}.log" 2>&1 &
               lp=$!
-              ( sleep 30; bound_diag "$lp" 10 ) &
+              lpg="$(ps -o pgid= -p "$lp" 2>/dev/null | tr -d ' ')"
+              ( sleep 30; bound_diag "$lpg" 10 ) &
               lk=$!
               wait "$lp" 2>/dev/null
               pkill -KILL -P "$lk" 2>/dev/null
               kill -KILL "$lk" 2>/dev/null
               wait "$lk" 2>/dev/null
-              bound_diag "$lp" 10
+              bound_diag "$lpg" 10
             )
           fi
         fi

@@ -223,6 +223,41 @@ report "$ok" "a TERM-ignoring child behind a TERM-responsive wrapper is KILLed t
 while IFS= read -r p; do [ -n "$p" ] && kill -KILL "$p" 2>/dev/null; done < "$dir/child-pids.txt" 2>/dev/null
 rm -rf "$dir"
 
+# Case 11: the wrapper finishes on its own while its child keeps running and
+# ignores TERM. The escalation must still reach the orphan through the group,
+# and must never signal the wrapper's already-reaped pid.
+dir=$(mktemp -d); mkdir -p "$dir/artifacts"
+log="$dir/artifacts/test.log"; : > "$log"
+make_stubs "$dir"
+cat > "$dir/bin/sample" <<STUB
+#!/bin/bash
+echo "sample \$*" >> "\$STUB_CALLS"
+bash -c 'trap "" TERM; sleep 300' &
+echo \$! >> "$dir/child-pids.txt"
+# Wrapper exits immediately, leaving the child behind.
+exit 0
+STUB
+chmod +x "$dir/bin/sample"
+export STUB_CALLS="$dir/calls.txt"; : > "$STUB_CALLS"
+extract_sampler "$dir/sampler.sh"
+( sleep 1; echo "Test Case '-[X.Y testStuck]' started."; echo "2026-11-21 07:34:01.000000+0800 podcasts[424242:1] stub host line" ) >> "$log" &
+writer=$!
+( sleep 8 ) &
+stub=$!
+start=$(date +%s)
+( cd "$dir/artifacts" && PATH="$dir/bin:$PATH" /bin/bash "$dir/sampler.sh" "$dir/artifacts" "$stub" "SIM-TEST" 3 )
+elapsed=$(( $(date +%s) - start ))
+kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
+ok=0
+[ "$elapsed" -le 50 ] || ok=1
+[ -s "$dir/child-pids.txt" ] || ok=1
+while IFS= read -r p; do
+  [ -n "$p" ] && kill -0 "$p" 2>/dev/null && ok=1
+done < "$dir/child-pids.txt" 2>/dev/null
+report "$ok" "a wrapper that exits on its own leaves no surviving child"
+while IFS= read -r p; do [ -n "$p" ] && kill -KILL "$p" 2>/dev/null; done < "$dir/child-pids.txt" 2>/dev/null
+rm -rf "$dir"
+
 # Case 8: a Swift Testing test (◇ Test … started.) hangs — it must be sampled
 # exactly like an XCTest one, and its ✔ result line must clear the in-flight
 # state so a later stuck test is seen.
@@ -285,7 +320,7 @@ report "$ok" "a mid-test issue line does not retire a test that then hangs"
 rm -rf "$dir"
 
 if [ "$fails" -eq 0 ]; then
-  echo "10/10 stuck-test sampler cases behaved as intended"
+  echo "11/11 stuck-test sampler cases behaved as intended"
 else
   echo "$fails sampler case(s) did not behave as intended"
 fi
