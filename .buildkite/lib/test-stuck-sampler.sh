@@ -41,6 +41,14 @@ if [ -n "$out" ]; then echo "stub sample of pid $pid" > "$out"; else echo "stub 
 sleep "${STUB_SAMPLE_SECONDS:-0}"
 STUB
   chmod +x "$dir/bin/sample"
+  # `sysctl` records its arguments and answers with a fixed load average, so
+  # the cases can assert what was recorded without depending on the host.
+  cat > "$dir/bin/sysctl" <<'STUB'
+#!/bin/bash
+echo "sysctl $*" >> "$STUB_CALLS"
+echo "{ 1.25 2.50 3.75 }"
+STUB
+  chmod +x "$dir/bin/sysctl"
 }
 
 fails=0
@@ -70,6 +78,10 @@ kill -0 "$stub" 2>/dev/null || ok=1      # run untouched
 [ "$(grep -c '^sample ' "$STUB_CALLS")" -eq 1 ] || ok=1
 grep -q '^sample 424242 10 -file .*stuck-sample-1-424242.txt$' "$STUB_CALLS" || ok=1
 [ -s "$dir/artifacts/stuck-sample-1-424242.txt" ] || ok=1
+# The capture carries the machine's load at the moment it fired: a sample
+# taken on a swamped host reads differently from one taken on a quiet one.
+grep -q '^loadavg: { 1.25 2.50 3.75 }$' "$dir/artifacts/stuck-sample-1-424242.txt" || ok=1
+grep -q '^sysctl -n vm.loadavg$' "$STUB_CALLS" || ok=1
 kill "$stub" 2>/dev/null; wait "$stub" 2>/dev/null
 wait "$sampler" 2>/dev/null
 kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
@@ -188,8 +200,31 @@ ok=0
 report "$ok" "a hang before the first pid line is retried, not silently retired"
 rm -rf "$dir"
 
+# Case 8: the step records the machine's load at the start and end of the test
+# window, into the kept artifacts. A run that times out under load 300 must be
+# distinguishable from one that hangs on a quiet machine; without these two
+# lines every timeout is ambiguous. The recording lines are extracted from the
+# pipeline script, so this exercises the code that runs.
+dir=$(mktemp -d); mkdir -p "$dir/artifacts"
+make_stubs "$dir"
+export STUB_CALLS="$dir/calls.txt"; : > "$STUB_CALLS"
+awk '/^record_load\(\) \{/{f=1} f{print} f && /^\}$/{exit}' "$SCRIPT" > "$dir/record-load.sh"
+(
+  LOG_DIR="$dir/artifacts"
+  PATH="$dir/bin:$PATH"
+  . "$dir/record-load.sh"
+  record_load start
+  record_load end
+)
+ok=0
+[ "$(grep -c '^sysctl -n vm.loadavg$' "$STUB_CALLS")" -eq 2 ] || ok=1
+grep -q '^start loadavg: { 1.25 2.50 3.75 }$' "$dir/artifacts/loadavg.log" || ok=1
+grep -q '^end loadavg: { 1.25 2.50 3.75 }$' "$dir/artifacts/loadavg.log" || ok=1
+report "$ok" "the test window's start and end load are recorded into artifacts"
+rm -rf "$dir"
+
 if [ "$fails" -eq 0 ]; then
-  echo "7/7 stuck-test sampler cases behaved as intended"
+  echo "8/8 stuck-test sampler cases behaved as intended"
 else
   echo "$fails stuck-test sampler case(s) FAILED"
   exit 1

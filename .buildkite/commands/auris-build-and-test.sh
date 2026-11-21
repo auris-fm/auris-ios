@@ -583,6 +583,15 @@ TEST_TOTAL_DEADLINE="${BUILDKITE_AURIS_TEST_TOTAL_DEADLINE:-3600}"
 # the tests, covering the whole test window.
 STUCK_TEST_THRESHOLD="${BUILDKITE_AURIS_STUCK_TEST_THRESHOLD:-45}"
 
+# The machine's load at the start and end of the test window, into the kept
+# artifacts. A timeout under load 300 reads differently from a hang on a quiet
+# machine; without these lines every timeout is ambiguous. Diagnostics only:
+# a failed read never changes the run's result.
+record_load() {
+  echo "$1 loadavg: $(sysctl -n vm.loadavg 2>/dev/null || echo unavailable)" >> "$LOG_DIR/loadavg.log"
+}
+record_load start
+
 set +e
 xcodebuild test-without-building \
   -project podcasts.xcodeproj \
@@ -703,6 +712,9 @@ WATCHDOG_PID=$!
             # no escalation: if it hangs anyway, Buildkite's step timeout kills
             # the whole job tree, which is the backstop for every command here.
             sample "$pid" 10 -file "$LOG_DIR/stuck-sample-${seq}-${pid}.txt" >/dev/null 2>&1
+            # The load at the moment of capture, appended to the sample itself:
+            # a stack taken on a swamped host is not evidence of a code hang.
+            echo "loadavg: $(sysctl -n vm.loadavg 2>/dev/null || echo unavailable)" >> "$LOG_DIR/stuck-sample-${seq}-${pid}.txt"
           fi
         fi
         ;;
@@ -742,6 +754,7 @@ wait "$WATCHDOG_PID" 2>/dev/null
 WATCHDOG_STATUS=$?
 # The sampler exits on its own once xcodebuild is gone; waiting here reaps it.
 wait "$SAMPLER_PID" 2>/dev/null
+record_load end
 set -e
 
 echo "--- :mag: Collecting the simulator audio log"
