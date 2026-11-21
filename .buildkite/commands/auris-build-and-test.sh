@@ -577,9 +577,10 @@ TEST_START_DEADLINE="${BUILDKITE_AURIS_TEST_START_DEADLINE:-900}"
 TEST_PROGRESS_DEADLINE="${BUILDKITE_AURIS_TEST_PROGRESS_DEADLINE:-300}"
 TEST_TOTAL_DEADLINE="${BUILDKITE_AURIS_TEST_TOTAL_DEADLINE:-3600}"
 # A test in flight longer than this is sampled before the execution allowance
-# kills it: the sample and an audio-subsystem log are the only record of what a
-# hung test was blocked on. Below the 60s default allowance so the capture lands
-# while the host is still stuck, not after the relaunch.
+# kills it: the sample is the only record of what a hung test was blocked on.
+# Below the 60s default allowance so the capture lands while the host is still
+# stuck, not after the relaunch. The audio-subsystem log is collected once after
+# the tests, covering the whole test window.
 STUCK_TEST_THRESHOLD="${BUILDKITE_AURIS_STUCK_TEST_THRESHOLD:-45}"
 
 set +e
@@ -602,6 +603,7 @@ xcodebuild test-without-building \
   SKIP_LINT=1 \
   > "$LOG_DIR/test.log" 2>&1 &
 XCODEBUILD_PID=$!
+TEST_WINDOW_START=$(date +%s)
 
 (
   # errexit and pipefail off: a process vanishing between the listing and its
@@ -656,11 +658,14 @@ XCODEBUILD_PID=$!
 WATCHDOG_PID=$!
 
 # Diagnostics only: when one test has been in flight past STUCK_TEST_THRESHOLD,
-# capture `sample <host pid> 10` and a filtered simulator log into artifacts/,
-# once per stuck test. It never signals anything and its own failures are
-# swallowed — a sampler that dies must not change the run's result. The loop
-# ends when xcodebuild does. The host pid is read from the log's own process
-# tags (podcasts[pid:tid]), so a relaunch is followed without any extra state.
+# capture `sample <host pid> 10` into artifacts/, once per stuck test. `sample`
+# bounds itself by its duration argument, so there is no timer and no escalation
+# here; Buildkite's step timeout is the backstop if it hangs anyway. The sampler
+# never signals anything and its own failures are swallowed — a sampler that
+# dies must not change the run's result. The loop ends when xcodebuild does. The
+# host pid is read from the log's own process tags (podcasts[pid:tid]), so a
+# relaunch is followed without any extra state. The simulator audio log is
+# collected once after the tests instead, where a slow query cannot stall them.
 (
   set +e
   # Bash 3.2 is /bin/bash on this Mac: no associative arrays. The sampled list
@@ -693,56 +698,11 @@ WATCHDOG_PID=$!
             seq=$((seq + 1))
             echo "stuck-test sampler: capturing pid $pid for: $current" >&2
             # Distinct names per capture: two stuck tests in one host must not
-            # overwrite each other.
-            #
-            # Ownership: each diagnostic runs in its OWN process group, started
-            # and killed through that group id. A process group cannot be
-            # recycled while any member is alive, and every process the
-            # diagnostic starts inherits it — including one reparented to launchd
-            # when the wrapper exits — so the group is a lifetime handle that
-            # outlives the pid it was created from. Nothing here ever signals a
-            # number that a process has already exited from.
-            bound_diag() {
-              local pgid="$1" grace="$2" waited=0
-              kill -TERM "-$pgid" 2>/dev/null
-              while [ "$waited" -lt "$grace" ]; do
-                kill -KILL "-$pgid" 2>/dev/null
-                # ESRCH: no process left in the group, so it may be reused.
-                kill -0 "-$pgid" 2>/dev/null || return 0
-                sleep 1
-                waited=$((waited + 1))
-              done
-            }
-            (
-              # Separate group so the whole diagnostic, wrapper to orphans, is
-              # one handle and nothing else on the runner shares it.
-              set -m
-              sample "$pid" 10 -file "$LOG_DIR/stuck-sample-${seq}-${pid}.txt" >/dev/null 2>&1 &
-              sp=$!
-              dpg="$(ps -o pgid= -p "$sp" 2>/dev/null | tr -d ' ')"
-              ( sleep 30; bound_diag "$dpg" 10 ) &
-              sk=$!
-              wait "$sp" 2>/dev/null
-              pkill -KILL -P "$sk" 2>/dev/null
-              kill -KILL "$sk" 2>/dev/null
-              wait "$sk" 2>/dev/null
-              bound_diag "$dpg" 10
-            )
-            (
-              set -m
-              xcrun simctl spawn "$SIMULATOR_ID" log show --last 2m --info --debug \
-                --predicate 'process == "podcasts" AND (subsystem CONTAINS[c] "audio" OR subsystem CONTAINS[c] "speech" OR eventMessage CONTAINS[c] "AQMEIO" OR eventMessage CONTAINS[c] "AVAudioSession")' \
-                > "$LOG_DIR/stuck-audio-${seq}-${pid}.log" 2>&1 &
-              lp=$!
-              lpg="$(ps -o pgid= -p "$lp" 2>/dev/null | tr -d ' ')"
-              ( sleep 30; bound_diag "$lpg" 10 ) &
-              lk=$!
-              wait "$lp" 2>/dev/null
-              pkill -KILL -P "$lk" 2>/dev/null
-              kill -KILL "$lk" 2>/dev/null
-              wait "$lk" 2>/dev/null
-              bound_diag "$lpg" 10
-            )
+            # overwrite each other. `sample <pid> 10` bounds itself by its own
+            # duration argument, so it runs in the foreground with no timer and
+            # no escalation: if it hangs anyway, Buildkite's step timeout kills
+            # the whole job tree, which is the backstop for every command here.
+            sample "$pid" 10 -file "$LOG_DIR/stuck-sample-${seq}-${pid}.txt" >/dev/null 2>&1
           fi
         fi
         ;;
@@ -782,6 +742,23 @@ wait "$WATCHDOG_PID" 2>/dev/null
 WATCHDOG_STATUS=$?
 # The sampler exits on its own once xcodebuild is gone; waiting here reaps it.
 wait "$SAMPLER_PID" 2>/dev/null
+set -e
+
+echo "--- :mag: Collecting the simulator audio log"
+# `log show --last …` has no elapsed-time bound of its own, so it does not run
+# inside the test step where a slow query would stall a running test. It runs
+# once here, after the tests, covering the whole test window; Buildkite's step
+# timeout is its backstop. Its own failure never changes the run's result.
+set +e
+xcrun simctl spawn "$SIMULATOR_ID" log show \
+  --start "$(date -r "$TEST_WINDOW_START" '+%Y-%m-%d %H:%M:%S')" --info --debug \
+  --predicate 'process == "podcasts" AND (subsystem CONTAINS[c] "audio" OR subsystem CONTAINS[c] "speech" OR eventMessage CONTAINS[c] "AQMEIO" OR eventMessage CONTAINS[c] "AVAudioSession")' \
+  > "$LOG_DIR/stuck-audio.log" 2>&1
+if [ -s "$LOG_DIR/stuck-audio.log" ]; then
+  echo "collected $(wc -c < "$LOG_DIR/stuck-audio.log" | tr -d ' ') bytes into stuck-audio.log"
+else
+  echo "audio log collection produced nothing; see stuck-audio.log"
+fi
 set -e
 
 case "$WATCHDOG_STATUS" in
