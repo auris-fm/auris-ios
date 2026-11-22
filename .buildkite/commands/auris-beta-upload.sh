@@ -27,7 +27,12 @@ export PATH="$HOME/.rbenv/shims:$PATH"
 # one: with LANG/LC_ALL unset, `locale charmap` reports US-ASCII and fastlane
 # errors on every run. Set it here so the step does not depend on the agent's
 # environment hook happening to provide it.
-export LANG="${LANG:-en_US.UTF-8}" LC_ALL="${LC_ALL:-en_US.UTF-8}"
+# Override by value, not only when unset: an inherited `C` would otherwise
+# survive and reintroduce the very locale this removes.
+case "${LC_ALL:-${LANG:-}}" in
+  *UTF-8|*utf8) ;;
+  *) export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 ;;
+esac
 
 assert_toolchain() {
   local want_xcode want_ruby out
@@ -54,6 +59,37 @@ assert_toolchain() {
 # from CREDENTIALS_JSON_PATH (config/PocketCasts.base.xcconfig), which is how an
 # internal contributor's machine is provisioned. Either is fine; neither, or a
 # stub-shaped one, is not.
+# `replace_secrets.rb` does `line % secrets`, so every %{key} in the template
+# must exist AND be non-empty: a missing key raises KeyError deep inside the
+# build phase, and an empty one substitutes "" as readily as a real value —
+# producing exactly the blank-credentials build this step exists to refuse.
+# `timestamp` is supplied by the script itself, not by the secrets file.
+assert_complete_secrets() {
+  local json="$1" tpl=podcasts/Credentials/ApiCredentials.tpl
+  python3 - "$json" "$tpl" <<'PYSECRETS'
+import json, re, sys
+json_path, tpl_path = sys.argv[1], sys.argv[2]
+try:
+    secrets = json.load(open(json_path))
+except Exception as e:
+    print(f"{json_path} is not readable JSON: {e}")
+    sys.exit(1)
+if not isinstance(secrets, dict):
+    print(f"{json_path} must be a JSON object of credentials")
+    sys.exit(1)
+keys = set(re.findall(r'%\{([a-z_]+)\}', open(tpl_path).read())) - {'timestamp'}
+missing = sorted(k for k in keys if k not in secrets)
+empty = sorted(k for k in keys if k in secrets and not str(secrets[k]).strip())
+if missing or empty:
+    if missing:
+        print(f"{json_path} is missing credentials: {', '.join(missing)}")
+    if empty:
+        print(f"{json_path} has empty credentials: {', '.join(empty)}")
+    print("refusing to archive a build testers cannot use")
+    sys.exit(1)
+PYSECRETS
+}
+
 assert_real_credentials() {
   local f=podcasts/Credentials/LocalApiCredentials.swift
   local json="$HOME/.configure/pocketcasts-ios/secrets/pocket_casts_credentials.json"
@@ -66,11 +102,7 @@ assert_real_credentials() {
     return 0
   fi
   if [[ -r "$json" ]]; then
-    # An object with no entries would generate blank values just as the stub does.
-    if tr -d '[:space:]' < "$json" | grep -qE '^\{\}$'; then
-      echo "$json holds no credentials; refusing to archive a build testers cannot use"
-      return 1
-    fi
+    assert_complete_secrets "$json" || return 1
     return 0
   fi
   echo "missing $f (or $json): a beta archive needs real API credentials, not the empty stub"

@@ -209,6 +209,20 @@ run_env() { # $1.. = extra env assignments
 
 env_calls() { cat "$TMP/env/calls.txt" 2>/dev/null || true; }
 
+# Writes an internal secrets JSON covering every %{key} the template needs.
+# $1 = value for each key (default real-value); $2 = optional key to omit.
+write_secrets() {
+  mkdir -p "$TMP/.configure/pocketcasts-ios/secrets"
+  python3 - "$TMP/.configure/pocketcasts-ios/secrets/pocket_casts_credentials.json" \
+    "$TMP/env/podcasts/Credentials/ApiCredentials.tpl" "${1-real-value}" "${2:-}" <<'PYJSON'
+import json,re,sys
+out,tpl,value,omit=sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4]
+keys=set(re.findall(r'%\{([a-z_]+)\}', open(tpl).read()))-{'timestamp'}
+if omit: keys.discard(omit); open(out+'.missing','w').write(omit)
+json.dump({k:value for k in keys}, open(out,'w'))
+PYJSON
+}
+
 # 7. Gems are checked, not assumed: no vendor/bundle means `bundle install`
 #    runs before any fastlane lane. The old preflight demanded a global
 #    `fastlane` binary this pipeline never installs.
@@ -319,8 +333,7 @@ report "checks the signing key before any heavy input preparation"
 #     Refusing that agent would refuse a build that gets real values.
 make_env_repo
 rm -f "$TMP/env/podcasts/Credentials/LocalApiCredentials.swift"
-mkdir -p "$TMP/.configure/pocketcasts-ios/secrets"
-echo '{"sentry_dsn":"https://example.invalid/1"}' > "$TMP/.configure/pocketcasts-ios/secrets/pocket_casts_credentials.json"
+write_secrets
 run_env
 [[ "$status" == 0 ]] || fail "refused the internal secrets source (got: $out)"
 [[ "$(env_calls)" == *"auris_beta_build"* ]] || fail "did not archive with internal secrets (calls: $(env_calls))"
@@ -336,6 +349,39 @@ run_env
 [[ "$status" != 0 ]] || fail "archived from an empty internal secrets file"
 [[ "$(env_calls)" != *"auris_beta_build"* ]] || fail "archived from empty internal secrets (calls: $(env_calls))"
 report "refuses an internal secrets file with no values"
+
+# 14d. Keys present but EMPTY is the same blank-credentials build the stub
+#      produces: replace_secrets.rb substitutes "" as readily as a real value,
+#      so shape alone is not enough. Mutant: accepting any non-`{}` object.
+make_env_repo
+rm -f "$TMP/env/podcasts/Credentials/LocalApiCredentials.swift"
+write_secrets ""
+run_env
+[[ "$status" != 0 ]] || fail "archived from empty-valued internal secrets"
+[[ "$(env_calls)" != *"auris_beta_build"* ]] || fail "archived from empty-valued internal secrets (calls: $(env_calls))"
+report "refuses internal secrets whose keys hold empty values"
+
+# 14e. A MISSING key is worse than an empty one: `line % secrets` raises KeyError,
+#      so the archive would fail deep inside the build phase. Refuse up front and
+#      name the key. Mutant: checking only the keys that happen to be present.
+make_env_repo
+rm -f "$TMP/env/podcasts/Credentials/LocalApiCredentials.swift"
+write_secrets real-value zendesk_url
+run_env
+[[ "$status" != 0 ]] || fail "accepted internal secrets missing a template key"
+[[ "$out" == *"$(cat "$TMP/.configure/pocketcasts-ios/secrets/pocket_casts_credentials.json.missing")"* ]] \
+  || fail "missing key not named (got: $out)"
+report "refuses internal secrets missing a template key, naming it"
+
+# 14f. Every template key present with a real value: archives. Pins that the
+#      check is about completeness and non-emptiness, not a blanket refusal.
+make_env_repo
+rm -f "$TMP/env/podcasts/Credentials/LocalApiCredentials.swift"
+write_secrets
+run_env
+[[ "$status" == 0 ]] || fail "refused complete internal secrets (got: $out)"
+[[ "$(env_calls)" == *"auris_beta_build"* ]] || fail "did not archive with complete internal secrets (calls: $(env_calls))"
+report "archives when every template key has a real value"
 
 # 14c. Neither source present: still refuses, and names both so the reader knows
 #      either route works. Pins that adding the second source did not remove the refusal.
@@ -357,6 +403,15 @@ run_env
 [[ "$status" == 0 ]] || fail "run failed (got: $out)"
 grep -q 'UTF-8' "$TMP/env/locale.txt" 2>/dev/null || fail "no UTF-8 locale exported to the lanes (got: $(cat "$TMP/env/locale.txt" 2>/dev/null))"
 report "exports a UTF-8 locale for fastlane"
+
+# 15b. An inherited NON-UTF-8 locale must be overridden, not merely defaulted:
+#      `${LC_ALL:-...}` keeps a `C` that the agent exported, reintroducing exactly
+#      the US-ASCII locale this line exists to remove. Mutant: the `:-` form.
+make_env_repo
+run_env LC_ALL=C LANG=C
+[[ "$status" == 0 ]] || fail "run failed (got: $out)"
+grep -q 'UTF-8' "$TMP/env/locale.txt" 2>/dev/null || fail "inherited non-UTF-8 locale survived (got: $(cat "$TMP/env/locale.txt" 2>/dev/null))"
+report "overrides an inherited non-UTF-8 locale"
 
 echo "$cases/$cases upload-gate and environment cases passed"
 
