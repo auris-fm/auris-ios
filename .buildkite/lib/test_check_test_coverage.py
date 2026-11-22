@@ -420,7 +420,10 @@ def main():
     # cleared as the synthetic cases do. Unioning with `reported` would let a
     # recording that already holds an unlisted failure make this half pass
     # whatever the list says: the run would be red for the recording, not for
-    # the guard. One name at a time, so listing either is caught on its own.
+    # the guard. No case here detects that edit — on a clean recording both
+    # forms agree — so the reason lives in this comment rather than behind a
+    # control that cannot fail for it. One name at a time, so listing either is
+    # caught on its own.
     saved_known_for_unlisted = dict(check.KNOWN_FAILURES)
     check.KNOWN_FAILURES.clear()
     for name in unlisted:
@@ -432,10 +435,12 @@ def main():
             print(f"        -> listed={name in check.FLAKY_TESTS}, "
                   f"fails_run={fails_alone}")
         results.append(ok)
-    # And the trap that made the first version of these cases weak: with a
-    # recording that already holds an unlisted failure, `reported | {name}` is
-    # red whatever the list says, so the consequence half would pass against a
-    # put-back entry. Asserted directly, on a listed name and a dirty set.
+    # Pins the guard's per-name semantics, which is what makes the assertion
+    # above meaningful: a listed name is accepted on its own, and an unlisted
+    # failure beside it is still rejected. It does NOT detect the union form
+    # being reintroduced in the case above — both values here come from
+    # literals, so that edit would leave this green. The union's blindness is
+    # recorded in the comment above instead, not guarded by a case.
     probe = unlisted[0]
     saved_probe = check.FLAKY_TESTS.get(probe)
     check.FLAKY_TESTS[probe] = "listed by this case to prove the union is blind"
@@ -447,8 +452,8 @@ def main():
     else:
         check.FLAKY_TESTS[probe] = saved_probe
     ok = union_blind and alone_sees_it
-    print(f"{'PASS' if ok else 'FAIL'}  a dirty recording cannot stand in for the "
-          "consequence: only the name alone shows a listing")
+    print(f"{'PASS' if ok else 'FAIL'}  a listed name is accepted alone, and an "
+          "unlisted failure beside it is still rejected")
     if not ok:
         print(f"        -> union_blind={union_blind}, alone_sees_it={alone_sees_it}")
     results.append(ok)
