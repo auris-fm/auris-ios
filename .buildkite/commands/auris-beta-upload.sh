@@ -2,6 +2,9 @@
 # Upload the Auris app to TestFlight internal testers after a green
 # build-and-test step on main.
 #
+# Unlike build-and-test, this step never stubs the API credentials: a beta
+# archive must carry real ones or it refuses to build.
+#
 # Runs `fastlane auris_beta_build` (device archive with automatic signing
 # via the App Store Connect API key) on every main run. Publishing to
 # TestFlight is separate: only a build carrying `BETA_UPLOAD=1` also runs
@@ -35,10 +38,23 @@ assert_toolchain() {
 # Inputs the archive needs that a fresh checkout does not carry. Each is
 # created here rather than assumed present: the sibling job builds them into
 # its own checkout, and this step runs in a different one.
-prepare_inputs() {
-  if [[ ! -f podcasts/Credentials/LocalApiCredentials.swift ]]; then
-    make external_contributor
+# A release archive must carry REAL API credentials. `make external_contributor`
+# writes the template with every placeholder stripped to an empty string, which
+# is right for build-and-test and wrong here: a TestFlight build from it would
+# reach testers with blank keys. So this step never generates the file — it
+# refuses, before any archive, unless the file exists AND holds non-empty values.
+assert_real_credentials() {
+  local f=podcasts/Credentials/LocalApiCredentials.swift
+  [[ -f "$f" ]] || {
+    echo "missing $f: a beta archive needs real API credentials, not the empty stub"; return 1; }
+  # Empty-valued (the stub) or still-placeholder (the raw template) both fail.
+  if grep -qE '"(%\{[^}]*\})?"' "$f"; then
+    echo "$f holds empty or placeholder credentials; refusing to archive a build testers cannot use"
+    return 1
   fi
+}
+
+prepare_inputs() {
   if [[ ! -d ThirdParty/llama-cpp-build/ios-device/lfm ]]; then
     "${LLAMA_BUILD_SCRIPT:-./scripts/build-llama-ios.sh}"
   fi
@@ -65,6 +81,7 @@ fi
 
 : "${BUILDKITE_BUILD_NUMBER:?must run under Buildkite}"
 assert_toolchain
+assert_real_credentials
 prepare_inputs
 preflight
 

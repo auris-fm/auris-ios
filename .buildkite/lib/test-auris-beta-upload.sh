@@ -77,7 +77,7 @@ make_upload_repo() {
   mkdir -p "$TMP/up/.buildkite/commands" "$TMP/up/ThirdParty/llama-cpp-build/ios-device/lfm" "$TMP/up/bin" "$TMP/up/podcasts/Credentials"
   cp "$CMD" "$TMP/up/.buildkite/commands/"
   cp "$ROOT/.ruby-version" "$ROOT/.xcode-version" "$TMP/up/"
-  : > "$TMP/up/podcasts/Credentials/LocalApiCredentials.swift"
+  sed 's/%{[^}]*}/real-value/g' "$ROOT/podcasts/Credentials/ApiCredentials.tpl" > "$TMP/up/podcasts/Credentials/LocalApiCredentials.swift"
   printf '#!/bin/sh\necho "$@" >> "%s/lanes.txt"\nexit 0\n' "$TMP/up" > "$TMP/up/bin/bundle"
   printf '#!/bin/sh\nif [ "$1" = "-version" ]; then echo "Xcode %s"; exit 0; fi\nexit 0\n' "$(sed -E 's/^~> ?//' "$ROOT/.xcode-version")" > "$TMP/up/bin/xcodebuild"
   printf '#!/bin/sh\necho "ruby %s"\n' "$(cat "$ROOT/.ruby-version")" > "$TMP/up/bin/ruby"
@@ -160,6 +160,7 @@ make_env_repo() {
   cp "$CMD" "$TMP/env/.buildkite/commands/"
   cp "$ROOT/.ruby-version" "$ROOT/.xcode-version" "$TMP/env/"
   cp "$ROOT/podcasts/Credentials/ApiCredentials.tpl" "$TMP/env/podcasts/Credentials/"
+  sed 's/%{[^}]*}/real-value/g' "$ROOT/podcasts/Credentials/ApiCredentials.tpl" > "$TMP/env/podcasts/Credentials/LocalApiCredentials.swift"
   # bundle: records the invocation, and `bundle check` reports missing gems.
   cat > "$TMP/env/bin/bundle" <<STUB
 #!/bin/sh
@@ -234,12 +235,46 @@ run_env BUNDLE_CHECK_EXIT=0
 [[ "$(env_calls)" != *"bundle install"* ]] || fail "reinstalled gems that were present (calls: $(env_calls))"
 report "does not reinstall gems that are already present"
 
-# 9. The credentials stub is generated when absent — the archive's build
-#    phase needs it and only `make external_contributor` creates it.
+# 9. A release archive must never be built from the empty credentials stub:
+#    that would ship testers an app with blank API keys. Absent file ⇒ refuse,
+#    before any archive, and never generate a stub here.
 make_env_repo
+rm -f "$TMP/env/podcasts/Credentials/LocalApiCredentials.swift"
 run_env
-[[ -f "$TMP/env/podcasts/Credentials/LocalApiCredentials.swift" ]] || fail "credentials stub not generated (calls: $(env_calls))"
-report "generates the credentials stub the archive's build phase requires"
+[[ "$status" != 0 ]] || fail "archived without real credentials"
+[[ "$out" == *"LocalApiCredentials.swift"* ]] || fail "missing credentials not named (got: $out)"
+[[ "$(env_calls)" != *"auris_beta_build"* ]] || fail "archived despite missing credentials (calls: $(env_calls))"
+[[ "$(env_calls)" != *"external_contributor"* ]] || fail "generated a stub for a release archive (calls: $(env_calls))"
+report "refuses to archive without real credentials, and never stubs them"
+
+# 9b. A file that EXISTS but is the stub must also be refused: the placeholder
+#     values are what makes it a stub, not its absence. Mutant: checking only
+#     for the file's existence.
+make_env_repo
+cp "$TMP/env/podcasts/Credentials/ApiCredentials.tpl" "$TMP/env/podcasts/Credentials/LocalApiCredentials.swift"
+run_env
+[[ "$status" != 0 ]] || fail "archived from the placeholder template"
+[[ "$(env_calls)" != *"auris_beta_build"* ]] || fail "archived from the template (calls: $(env_calls))"
+report "refuses a credentials file that still holds template placeholders"
+
+# 9c. An EMPTY-valued credentials file is a stub too: `make external_contributor`
+#     strips the placeholders to empty strings, so emptiness is the real shape
+#     of the stub this step must refuse.
+make_env_repo
+sed 's/%{[^}]*}//g' "$TMP/env/podcasts/Credentials/ApiCredentials.tpl" > "$TMP/env/podcasts/Credentials/LocalApiCredentials.swift"
+run_env
+[[ "$status" != 0 ]] || fail "archived from the empty-valued stub"
+[[ "$(env_calls)" != *"auris_beta_build"* ]] || fail "archived from the empty stub (calls: $(env_calls))"
+report "refuses the empty-valued stub make external_contributor produces"
+
+# 9d. Real credentials present: the archive proceeds. Pins that the refusal is
+#     about the values, not a blanket ban on the file.
+make_env_repo
+sed 's/%{[^}]*}/real-value/g' "$TMP/env/podcasts/Credentials/ApiCredentials.tpl" > "$TMP/env/podcasts/Credentials/LocalApiCredentials.swift"
+run_env
+[[ "$status" == 0 ]] || fail "refused real credentials (got: $out)"
+[[ "$(env_calls)" == *"auris_beta_build"* ]] || fail "did not archive with real credentials (calls: $(env_calls))"
+report "archives when the credentials file holds real values"
 
 # 10. The device llama slice is built when absent, rather than failing the
 #     preflight on an artifact the sibling job builds into its own checkout.
