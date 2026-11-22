@@ -217,7 +217,7 @@ write_secrets() {
     "$TMP/env/podcasts/Credentials/ApiCredentials.tpl" "${1-real-value}" "${2:-}" <<'PYJSON'
 import json,re,sys
 out,tpl,value,omit=sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4]
-keys=set(re.findall(r'%\{([a-z_]+)\}', open(tpl).read()))-{'timestamp'}
+keys=set(re.findall(r'%\{([^}]*)\}', open(tpl).read()))-{'timestamp'}
 if omit: keys.discard(omit); open(out+'.missing','w').write(omit)
 json.dump({k:value for k in keys}, open(out,'w'))
 PYJSON
@@ -382,6 +382,37 @@ run_env
 [[ "$status" == 0 ]] || fail "refused complete internal secrets (got: $out)"
 [[ "$(env_calls)" == *"auris_beta_build"* ]] || fail "did not archive with complete internal secrets (calls: $(env_calls))"
 report "archives when every template key has a real value"
+
+# 14g. A JSON null or false is not a credential. `str(None)` is "None", so a
+#      truthiness check on the stringified value passes and Ruby interpolates an
+#      empty string for nil / "false" for false — a blank or bogus credential in
+#      a build testers install. Mutant: `not str(secrets[k]).strip()`.
+make_env_repo
+rm -f "$TMP/env/podcasts/Credentials/LocalApiCredentials.swift"
+write_secrets
+python3 - "$TMP/.configure/pocketcasts-ios/secrets/pocket_casts_credentials.json" <<'PYJSON'
+import json,sys
+d=json.load(open(sys.argv[1])); d['sentry_dsn']=None; d['zendesk_url']=False
+json.dump(d, open(sys.argv[1],'w'))
+PYJSON
+run_env
+[[ "$status" != 0 ]] || fail "archived with null/false credentials"
+[[ "$(env_calls)" != *"auris_beta_build"* ]] || fail "archived with null/false credentials (calls: $(env_calls))"
+report "refuses non-string credential values (null, false)"
+
+# 14h. The required keys come from the TEMPLATE, so the pattern must match any
+#      placeholder Ruby would substitute, not just lowercase-and-underscore.
+#      A future key with a digit or capital would otherwise escape the guard.
+#      Mutant: `%\{([a-z_]+)\}` in either the guard or this derivation.
+make_env_repo
+rm -f "$TMP/env/podcasts/Credentials/LocalApiCredentials.swift"
+printf 'let extra = "%%{api_key_v2}"\n' >> "$TMP/env/podcasts/Credentials/ApiCredentials.tpl"
+# Write the secrets WITHOUT the new key: the guard must notice it is required.
+write_secrets real-value api_key_v2
+run_env
+[[ "$status" != 0 ]] || fail "a template key with a digit escaped the check"
+[[ "$out" == *"api_key_v2"* ]] || fail "the escaped key was not named (got: $out)"
+report "covers template keys containing digits or capitals"
 
 # 14c. Neither source present: still refuses, and names both so the reader knows
 #      either route works. Pins that adding the second source did not remove the refusal.

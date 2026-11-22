@@ -77,9 +77,14 @@ except Exception as e:
 if not isinstance(secrets, dict):
     print(f"{json_path} must be a JSON object of credentials")
     sys.exit(1)
-keys = set(re.findall(r'%\{([a-z_]+)\}', open(tpl_path).read())) - {'timestamp'}
+# Match any placeholder Ruby would substitute, not just lowercase names: a key
+# with a digit or capital must not escape the check.
+keys = set(re.findall(r'%\{([^}]*)\}', open(tpl_path).read())) - {'timestamp'}
 missing = sorted(k for k in keys if k not in secrets)
-empty = sorted(k for k in keys if k in secrets and not str(secrets[k]).strip())
+# A credential is a non-empty STRING. `null` interpolates to "" and `false` to
+# "false" in Ruby, and str(None) == "None" would pass a truthiness check.
+empty = sorted(k for k in keys
+               if k in secrets and not (isinstance(secrets[k], str) and secrets[k].strip()))
 if missing or empty:
     if missing:
         print(f"{json_path} is missing credentials: {', '.join(missing)}")
