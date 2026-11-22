@@ -14,3 +14,32 @@
    in every language; they are one line by decision, not two that may drift. */
 "cloud_error_speech_unavailable" = "Désolé, je n'ai pas pu répondre à cela pour le moment. Veuillez réessayer.";
 "cloud_error_internal_error" = "Désolé, je n'ai pas pu répondre à cela pour le moment. Veuillez réessayer.";
+
+/* The connection dropped mid-turn. A plain statement of what happened and a retry,
+   matching the other locales' tone; no mention of sockets or servers. */
+"cloud_error_connection_lost" = "La connexion a été perdue. Veuillez réessayer.";
+
+/* No answer was found — a content outcome, not a malfunction: say so and invite a
+   different phrasing rather than apologising for an outage. */
+"cloud_error_no_answer" = "Désolé, je n'ai pas trouvé de réponse à cela. Essayez de le demander autrement.";
+
+/* The evidence could not be fetched. The reason is not the user's, so name what
+   failed in their terms and offer a retry. */
+"cloud_error_retrieval_unavailable" = "Désolé, je n'ai pas pu le vérifier pour le moment. Veuillez réessayer.";
+
+/* Audio arrived faster than it could be played, so the answer may be partial. To the
+   listener this is an unfinished answer; the queue itself is never named. */
+"cloud_error_queue_overflow" = "Désolé, je n'ai pas pu terminer ma réponse. Veuillez réessayer.";
+
+/* A shared deadline ran out (spec 5ab7b0aa): the cause is TIME, not question length,
+   so the line must not send the user after a shorter question. No reset time invented. */
+"cloud_error_budget_exceeded" = "Désolé, la réponse a pris trop de temps. Veuillez réessayer.";
+
+/* Another turn is still answering. Nothing failed, so no apology: say why and when to
+   retry. */
+"cloud_error_turn_conflict" = "Je suis encore en train de répondre à votre dernière question. Veuillez réessayer dans un instant.";
+
+/* Prior context is unreadable. Report the loss and require a fresh conversation; a voice
+   user starts one by ASKING AGAIN, since the client clears the handle (spec 5ab7b0aa).
+   Never mentions records or storage. */
+"cloud_error_corrupt_record" = "Désolé, j'ai perdu le fil de notre conversation. Reposez votre question pour en commencer une nouvelle.";

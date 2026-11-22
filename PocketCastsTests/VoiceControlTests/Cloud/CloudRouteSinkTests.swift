@@ -6552,6 +6552,232 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
     }
 }
 
+/// THE RECORDING GAP (cloud-assistant.md: "Record Required codes whose local template is
+/// missing"). A Required code with no template in the user's locale falls back to the earcon —
+/// correct speech behaviour, but the client GAP itself must be OBSERVABLE in the log, or a
+/// missing translation is indistinguishable from a code that was never meant to speak.
+///
+/// The three cases separate the two axes so none of them can pass for the wrong reason:
+///   - Required + missing template  ⇒ earcon AND a gap line
+///   - Required + present template  ⇒ spoken AND NO gap line (the line means "missing", not "error")
+///   - Generic  + missing template  ⇒ earcon AND NO gap line (an internal diagnostic is not a gap)
+final class CloudRequiredErrorGapRecordingTests: SocketCapturingTestCase {
+    private var playback: RecordingPlaybackSink!
+    private var suiteName: String!
+    private var defaults: UserDefaults!
+
+    override func setUp() {
+        super.setUp()
+        playback = RecordingPlaybackSink()
+        suiteName = "cloud_req_gap_\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suiteName)!
+        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+    }
+
+    override func tearDown() {
+        CloudRouteTestURLProtocol.reset()
+        defaults.removePersistentDomain(forName: suiteName)
+        super.tearDown()
+    }
+
+    /// `ca.lproj` is a REAL shipped localization carrying no VoiceTemplates table — the
+    /// production shape of "this user's language has no template", not an empty directory.
+    private func localeWithoutTemplates() -> Bundle {
+        let path = Bundle.main.path(forResource: "ca", ofType: "lproj")
+        return path.flatMap { Bundle(path: $0) } ?? Bundle(for: type(of: self))
+    }
+
+    private func englishBundle() -> Bundle {
+        Bundle(path: Bundle.main.path(forResource: "en", ofType: "lproj") ?? "") ?? Bundle.main
+    }
+
+    private func makeSink(localeBundle: Bundle) -> CloudRouteSink {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        let cloudConfig = CloudConfig(defaults: defaults)
+        return CloudRouteSink(
+            clientFactory: {
+                let built = CloudRouteClient.stubbed(baseURL: cloudConfig.baseUrl, fixture: self.nextFixture())
+                self.capturedTask = built.task
+                return built.client
+            },
+            isConfigured: { !cloudConfig.baseUrl.isEmpty },
+            playbackSink: playback,
+            fingerprintMapper: RecordingFingerprintMapper(),
+            playbackPositionMs: { 0 },
+            cloudPlaybackContextState: CloudPlaybackContextState(),
+            spokenTemplates: SpokenTemplateResolver(localeBundle: localeBundle),
+            conversationManager: testConversationManager()
+        )
+    }
+
+    /// Runs one error turn and returns THIS turn's gap lines. The log is shared by the whole
+    /// run, so the filter is scoped to this control's own utterance id — counting globally
+    /// would measure the suite rather than the turn.
+    private func runTurn(code: String, bundle: Bundle, utterance: String) async -> (CloudRouteResult, [String]) {
+        self.pendingFixture =
+            """
+            event: error
+            data: {"code":"\(code)","message":""}
+
+            """
+        let response = await makeSink(localeBundle: bundle).routeToCloud(
+            request: "x", tier: .free, context: context(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: utterance)
+        let log = await FileLog.shared.logFileAsString()
+        let mine = log.split(separator: "\n")
+            .filter { $0.contains("cloudErrorTemplateMissing") && $0.contains(utterance) }
+            .map(String.init)
+        return (response, mine)
+    }
+
+    private func context() -> PlaybackContext {
+        PlaybackContext(episodeId: "ep", podcastId: "pod", referencePositionMs: 1_000,
+                        clientPositionMs: 1_100, recentReferencePositions: [],
+                        previousReferencePositionMs: nil)
+    }
+
+    func test_aRequiredCodeWithNoLocalTemplateIsRecordedAsAGap() async {
+        let utterance = "req-gap-\(UUID().uuidString)"
+        // PREMISE: this locale really has no template for the code, so the earcon below is
+        // the missing-template branch and not some other failure.
+        XCTAssertTrue(
+            SpokenTemplateResolver(localeBundle: localeWithoutTemplates())
+                .resolveForUserLocale("cloud_error_no_answer").isEmpty,
+            "the chosen locale must genuinely lack the template"
+        )
+        let (response, lines) = await runTurn(code: "no_answer", bundle: localeWithoutTemplates(), utterance: utterance)
+        XCTAssertEqual(response.response, .earcon(.error), "speech behaviour is unchanged: still the earcon")
+        XCTAssertEqual(lines.count, 1, "a Required code with no local template must record exactly one gap line: \(lines)")
+        // Guarded so a missing line reports as a FAILURE rather than crashing the runner on
+        // an out-of-range index — the crash would hide which assertion actually failed.
+        guard let line = lines.first else { return XCTFail("no gap line was recorded for this turn") }
+        XCTAssertTrue(line.contains("no_answer"), "the line must name the code: \(line)")
+    }
+
+    func test_aRequiredCodeWithATemplateRecordsNoGap() async {
+        let utterance = "req-ok-\(UUID().uuidString)"
+        XCTAssertFalse(
+            SpokenTemplateResolver(localeBundle: englishBundle())
+                .resolveForUserLocale("cloud_error_limit_exceeded").isEmpty,
+            "premise: English carries this template"
+        )
+        let (response, lines) = await runTurn(code: "limit_exceeded", bundle: englishBundle(), utterance: utterance)
+        XCTAssertEqual(
+            response.response,
+            .spoken("You have reached your Auris free daily limit. Please try again tomorrow.")
+        )
+        XCTAssertTrue(lines.isEmpty, "a translated Required code is not a gap: \(lines)")
+    }
+
+    func test_aGenericCodeWithNoTemplateRecordsNoGap() async {
+        let utterance = "gen-gap-\(UUID().uuidString)"
+        let (response, lines) = await runTurn(code: "invalid_response", bundle: localeWithoutTemplates(), utterance: utterance)
+        XCTAssertEqual(response.response, .earcon(.error), "an internal diagnostic stays an earcon")
+        XCTAssertTrue(lines.isEmpty, "a Generic code has no required template, so its absence is not a gap: \(lines)")
+    }
+}
+
+/// EVERY Required code carries a template in EVERY locale that ships a VoiceTemplates table
+/// (cloud-assistant.md: "the client must have a code-specific template in the user's language").
+/// The locale list is DISCOVERED from the app bundle rather than hard-coded, so adding a
+/// localization cannot silently skip this control.
+final class CloudRequiredErrorTemplateCoverageTests: XCTestCase {
+    /// The contract's Required rows, plus the two client-side codes that are spoken feedback the
+    /// user is owed: `conversation_expired` (Required and rendered) and `connection_lost`
+    /// (client-authored, no server row, but PR 83 maps duplicate_request onto it).
+    /// Every code the contract marks Required, plus the two client-side spoken codes. Copy
+    /// approved by spec 5ab7b0aa; this list mirrors `CloudRouteSink.requiredTemplateCodes`, so a
+    /// code recorded as a gap and a code asserted as translated cannot drift apart.
+    private let requiredCodes = [
+        "limit_exceeded", "no_answer", "retrieval_unavailable", "speech_unavailable",
+        "queue_overflow", "budget_exceeded", "turn_conflict", "corrupt_record",
+        "conversation_expired", "connection_lost",
+    ]
+
+    /// Every shipped `.lproj` that carries a VoiceTemplates table. A locale with no table at all
+    /// is out of scope here — it has no voice vocabulary yet, which is a separate decision.
+    private func localesWithVoiceTemplates() -> [(name: String, bundle: Bundle)] {
+        let dir = Bundle.main.bundleURL
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path))?
+            .filter { $0.hasSuffix(".lproj") }
+            .sorted() ?? []
+        return names.compactMap { name in
+            let base = String(name.dropLast(".lproj".count))
+            guard let path = Bundle.main.path(forResource: base, ofType: "lproj"),
+                  let bundle = Bundle(path: path),
+                  bundle.path(forResource: "VoiceTemplates", ofType: "strings") != nil else { return nil }
+            return (base, bundle)
+        }
+    }
+
+    func test_everyRequiredCodeResolvesInEveryVoiceLocale() throws {
+        let locales = localesWithVoiceTemplates()
+        // PREMISE: discovery found the shipped tables. Without this the loop could iterate
+        // nothing and pass while asserting no coverage at all.
+        XCTAssertGreaterThanOrEqual(locales.count, 11, "expected the shipped voice locales, got \(locales.map(\.name))")
+        XCTAssertTrue(locales.contains { $0.name == "en" }, "English must be among them")
+        for locale in locales {
+            let resolver = SpokenTemplateResolver(localeBundle: locale.bundle)
+            for code in requiredCodes {
+                let text = resolver.resolveForUserLocale("cloud_error_\(code)")
+                XCTAssertFalse(
+                    text.isEmpty,
+                    "\(locale.name) has no template for Required code \(code): that user hears only an earcon"
+                )
+            }
+        }
+    }
+
+    /// The coverage list and the production recording set must name the SAME codes: a code
+    /// asserted as translated but absent from the recorder would never report a regression, and
+    /// one recorded but never asserted could ship untranslated unnoticed.
+    func test_coverageListMatchesTheProductionRecordingSet() {
+        XCTAssertEqual(
+            Set(requiredCodes), CloudRouteSink.requiredTemplateCodes,
+            "the tested vocabulary and the recorded vocabulary must be one set"
+        )
+    }
+
+    /// The two codes that speak ONE line by decision (`speech_unavailable` / `internal_error`)
+    /// must stay identical in every language — they are one sentence, not two that may drift.
+    func test_theSharedFailureLineStaysIdenticalInEveryVoiceLocale() throws {
+        for locale in localesWithVoiceTemplates() {
+            let resolver = SpokenTemplateResolver(localeBundle: locale.bundle)
+            let speech = resolver.resolveForUserLocale("cloud_error_speech_unavailable")
+            let internalError = resolver.resolveForUserLocale("cloud_error_internal_error")
+            XCTAssertFalse(speech.isEmpty, "\(locale.name) lost the shared failure line")
+            XCTAssertEqual(speech, internalError, "\(locale.name): the two keys must speak one identical line")
+        }
+    }
+
+    /// No spoken line may name the machinery — **checked for the Latin-script locales only**.
+    ///
+    /// HONEST SCOPE: a substring search for English words cannot detect a system term written in
+    /// Japanese, Korean or Chinese. Verified by mutation: replacing the ja `queue_overflow` line
+    /// with "サーバーのキューがあふれました" ("the server queue overflowed") left this control
+    /// GREEN, while the same sentence in ASCII turned it red. So the non-Latin lines are reviewed
+    /// by a reader, not by this control, and claiming otherwise would be a blind assertion.
+    func test_noRequiredLineNamesTheMachineryInLatinScriptLocales() throws {
+        let forbidden = ["server", "service", "provider", "websocket", "api", "queue", "budget"]
+        // Latin-script locales only: en/de/es/es-MX/fr/fr-CA. The CJK and yue tables are checked
+        // by review, because an English substring test cannot see their scripts.
+        let latinLocales = localesWithVoiceTemplates().filter {
+            ["en", "de", "es", "es-MX", "fr", "fr-CA"].contains($0.name)
+        }
+        XCTAssertEqual(latinLocales.count, 6, "expected the six Latin-script voice locales")
+        for locale in latinLocales {
+            let resolver = SpokenTemplateResolver(localeBundle: locale.bundle)
+            for code in requiredCodes {
+                let text = resolver.resolveForUserLocale("cloud_error_\(code)").lowercased()
+                for word in forbidden where text.contains(word) {
+                    XCTFail("\(locale.name)/\(code) speaks the system term '\(word)': \(text)")
+                }
+            }
+        }
+    }
+}
+
 /// A whitespace-only server message is treated as absent (PR #19 review): it must
 /// not be spoken as silence, and it follows the same localized-template/earcon
 /// route as a missing message.

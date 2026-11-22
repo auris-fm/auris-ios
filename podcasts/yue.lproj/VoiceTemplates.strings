@@ -14,3 +14,32 @@
    in every language; they are one line by decision, not two that may drift. */
 "cloud_error_speech_unavailable" = "唔好意思，我啱啱答唔到你呢個問題。唔該再試一次。";
 "cloud_error_internal_error" = "唔好意思，我啱啱答唔到你呢個問題。唔該再試一次。";
+
+/* The connection dropped mid-turn. A plain statement of what happened and a retry,
+   matching the other locales' tone; no mention of sockets or servers. */
+"cloud_error_connection_lost" = "連線斷咗。唔該再試一次。";
+
+/* No answer was found — a content outcome, not a malfunction: say so and invite a
+   different phrasing rather than apologising for an outage. */
+"cloud_error_no_answer" = "唔好意思，我搵唔到呢個問題嘅答案。唔該試吓用第二種問法。";
+
+/* The evidence could not be fetched. The reason is not the user's, so name what
+   failed in their terms and offer a retry. */
+"cloud_error_retrieval_unavailable" = "唔好意思，我啱啲查唔到呢樣嘢。唔該再試一次。";
+
+/* Audio arrived faster than it could be played, so the answer may be partial. To the
+   listener this is an unfinished answer; the queue itself is never named. */
+"cloud_error_queue_overflow" = "唔好意思，我答唔晒呢個問題。唔該再試一次。";
+
+/* A shared deadline ran out (spec 5ab7b0aa): the cause is TIME, not question length,
+   so the line must not send the user after a shorter question. No reset time invented. */
+"cloud_error_budget_exceeded" = "唔好意思，答咗太耐都答唔完。唔該再試一次。";
+
+/* Another turn is still answering. Nothing failed, so no apology: say why and when to
+   retry. */
+"cloud_error_turn_conflict" = "我仲答緊你上一個問題。唔該等一陣再試一次。";
+
+/* Prior context is unreadable. Report the loss and require a fresh conversation; a voice
+   user starts one by ASKING AGAIN, since the client clears the handle (spec 5ab7b0aa).
+   Never mentions records or storage. */
+"cloud_error_corrupt_record" = "唔好意思，我唔記得咗我哋傾到邊。唔該再問一次，咁就會開新嘅對話。";

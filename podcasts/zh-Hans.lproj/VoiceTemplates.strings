@@ -14,3 +14,32 @@
    in every language; they are one line by decision, not two that may drift. */
 "cloud_error_speech_unavailable" = "抱歉，我刚才没能回答这个问题。请再试一次。";
 "cloud_error_internal_error" = "抱歉，我刚才没能回答这个问题。请再试一次。";
+
+/* The connection dropped mid-turn. A plain statement of what happened and a retry,
+   matching the other locales' tone; no mention of sockets or servers. */
+"cloud_error_connection_lost" = "连接已断开。请再试一次。";
+
+/* No answer was found — a content outcome, not a malfunction: say so and invite a
+   different phrasing rather than apologising for an outage. */
+"cloud_error_no_answer" = "抱歉，我没找到这个问题的答案。请换一种问法试试。";
+
+/* The evidence could not be fetched. The reason is not the user's, so name what
+   failed in their terms and offer a retry. */
+"cloud_error_retrieval_unavailable" = "抱歉，我刚才没能查到这个内容。请再试一次。";
+
+/* Audio arrived faster than it could be played, so the answer may be partial. To the
+   listener this is an unfinished answer; the queue itself is never named. */
+"cloud_error_queue_overflow" = "抱歉，我没能把这个回答说完。请再试一次。";
+
+/* A shared deadline ran out (spec 5ab7b0aa): the cause is TIME, not question length,
+   so the line must not send the user after a shorter question. No reset time invented. */
+"cloud_error_budget_exceeded" = "抱歉，回答这个问题用的时间太长了。请再试一次。";
+
+/* Another turn is still answering. Nothing failed, so no apology: say why and when to
+   retry. */
+"cloud_error_turn_conflict" = "我还在回答你上一个问题。请稍等一下再试。";
+
+/* Prior context is unreadable. Report the loss and require a fresh conversation; a voice
+   user starts one by ASKING AGAIN, since the client clears the handle (spec 5ab7b0aa).
+   Never mentions records or storage. */
+"cloud_error_corrupt_record" = "抱歉，我跟不上我们这段对话了。请再问一次，这样就会开始新的对话。";
