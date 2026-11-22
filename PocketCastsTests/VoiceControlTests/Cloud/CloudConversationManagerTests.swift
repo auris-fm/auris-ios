@@ -415,18 +415,18 @@ final class CloudConversationManagerTests: XCTestCase {
 
     // MARK: - Acknowledged conversations
 
-    /// A conversation handle is RESUMABLE only once the server has acknowledged the turn that
-    /// opened it by sending `connected` — the frame is sent after admission, and admission is
-    /// what makes a conversation real (`cloud-assistant.md` -> "Conversations").
+    /// A conversation is RESUMABLE only once the server has acknowledged a turn in it by sending
+    /// `connected` — that frame is sent after admission, and admission is what makes a
+    /// conversation real (`cloud-assistant.md` -> "Conversations").
     ///
-    /// The defect this locks down: after a create that ended before `connected` (a refused
-    /// spend, a lost transport), the client kept the handle and sent the NEXT utterance as
-    /// `resume`. The server had a record but no admitted creation, so history held only the
-    /// follow-up while the user believed the earlier turn was still part of the thread.
+    /// The defect this locks down: after a create that ended before `connected` (a refused spend,
+    /// a lost transport), the client kept treating the handle as the window's conversation, so the
+    /// NEXT utterance continued a conversation the server had never admitted. The window then
+    /// holds only a DRAFT, which its own retry may name and nothing else can.
     ///
-    /// Both halves are asserted together because either alone passes for the wrong reason: a
-    /// follow-up that always creates would leave the second half green while breaking every
-    /// ordinary follow-up, and one that always resumes leaves the first half unchanged.
+    /// Both halves are asserted because either alone passes for the wrong reason: a follow-up that
+    /// never resumes leaves the second half green while breaking every ordinary follow-up, and one
+    /// that always resumes leaves the first half unchanged.
     func testAFollowUpOnlyResumesAConversationTheServerAcknowledged() throws {
         let create = try XCTUnwrap(
             manager.prepare(selection: .wakeWord, origin: 1, utteranceId: "ack-1"),
@@ -434,51 +434,36 @@ final class CloudConversationManagerTests: XCTestCase {
         )
         XCTAssertEqual(create.mode, "create")
 
-        // Premise: nothing has been acknowledged yet, so there is nothing to resume.
-        // The negative premise: this conversation is held, but nothing acknowledged it.
+        // The negative premise, asserted on the state itself: nothing has been acknowledged, so
+        // the handle is a draft the window holds but will not continue.
         XCTAssertFalse(
             manager.isAcknowledgedForTesting(conversationId: create.conversationId),
             "premise: the opening turn has not been acknowledged"
         )
-        // WHAT A DRAFT IS: the unacknowledged conversation is not the window's conversation, so
-        // nothing may resume it.
-        XCTAssertFalse(
-            manager.holdsHandleForTesting(conversationId: create.conversationId),
-            "an unacknowledged create was published as the window's conversation"
-        )
-        // A DIFFERENT question first: does the unacknowledged handle get RESUMED? Same logical
-        // request, so nothing else (retention, origin) can explain a `resume` here; if this
-        // branch is taken the assertion below fails on the mode, which is the defect itself.
-        let resumedAnyway = try XCTUnwrap(
+
+        // A follow-up in the same window continues the in-flight create's conversation — it only
+        // names a conversation the window already opened — but it must not do so before the
+        // server has said the conversation exists. This is the assertion the defect fails.
+        let early = try XCTUnwrap(
             manager.prepare(selection: .followUp, origin: 1, utteranceId: "ack-2"),
             "a follow-up before the first acknowledgement was refused outright"
         )
         XCTAssertEqual(
-            resumedAnyway.mode, "create",
-            "a follow-up resumed a conversation the server never acknowledged"
+            early.mode, "resume",
+            "a follow-up during an in-flight create opened a SECOND conversation beside it"
         )
-        // The same logical request would come back as a resume, which is what makes the mode
-        // assertion in the previous check the property under test rather than a side effect.
-        XCTAssertEqual(
-            manager.prepare(selection: .followUp, origin: 1, utteranceId: "ack-2"),
-            resumedAnyway,
-            "a repeated preparation did not return the prepared request"
+        XCTAssertEqual(early.conversationId, create.conversationId)
+
+        // The server answers: `connected` arrives for the create's conversation.
+        manager.acknowledge(conversationId: create.conversationId)
+        XCTAssertTrue(
+            manager.isAcknowledgedForTesting(conversationId: create.conversationId),
+            "the acknowledgement did not make the conversation real"
         )
 
-        // The acknowledgement arrives for the FIRST turn's conversation.
-        manager.acknowledge(conversationId: create.conversationId)
-
-    }
-
-    /// CONTROL for the rule above, and the reason it is a separate case: it must be possible for
-    /// an acknowledged conversation to be resumed, or "never resume anything" would satisfy the
-    /// unacknowledged half while destroying every ordinary follow-up.
-    func testAnAcknowledgedConversationIsResumedByTheNextFollowUp() throws {
-        let create = try XCTUnwrap(manager.prepare(selection: .wakeWord, origin: 1, utteranceId: "ack-7"))
-        manager.acknowledge(conversationId: create.conversationId)
-
+        // CONTROL: an acknowledged conversation is resumed, and by the same id.
         let followUp = try XCTUnwrap(
-            manager.prepare(selection: .followUp, origin: 1, utteranceId: "ack-8"),
+            manager.prepare(selection: .followUp, origin: 1, utteranceId: "ack-3"),
             "a follow-up after acknowledgement was refused"
         )
         XCTAssertEqual(
@@ -489,6 +474,65 @@ final class CloudConversationManagerTests: XCTestCase {
             followUp.conversationId, create.conversationId,
             "the follow-up did not continue the acknowledged conversation"
         )
+    }
+
+    /// TWO WINDOWS CAN EACH HAVE A CREATE IN FLIGHT, and both must be acknowledged.
+    ///
+    /// A delayed admitted turn prepares under its OWN origin while the live window is already
+    /// opening a conversation, so two unacknowledged creates coexist. Keeping one of them is
+    /// enough for the second `connected` to land on nothing: that window's conversation is never
+    /// recorded, and every follow-up in it opens a new conversation, losing the thread.
+    ///
+    /// The test drives the real authority (`GracePeriodSignal`) so the delayed turn is admitted
+    /// work rather than a hand-set flag.
+    func testEveryWindowWithACreateInFlightCanBeAcknowledged() throws {
+        let signal = GracePeriodSignal(timeout: 30)
+        manager.admittedWorkAuthority = { signal.admittedWorkAuthority }
+
+        // The older window opens its conversation while its own turn is in flight…
+        signal.onWakeWordDetected()
+        let olderOrigin = signal.currentGeneration()
+        manager.registerLiveOrigin(olderOrigin)
+        signal.admitInFlightTurn(utteranceId: "old-create", origin: olderOrigin)
+        let older = try XCTUnwrap(
+            manager.prepare(selection: .wakeWord, origin: olderOrigin, utteranceId: "old-create")
+        )
+
+        // …and the live window opens ITS conversation before either is acknowledged.
+        signal.onWakeWordDetected()
+        let liveOrigin = signal.currentGeneration()
+        manager.registerLiveOrigin(liveOrigin)
+        let live = try XCTUnwrap(
+            manager.prepare(selection: .wakeWord, origin: liveOrigin, utteranceId: "live-create")
+        )
+        XCTAssertNotEqual(older.conversationId, live.conversationId, "premise: two conversations")
+
+        // Both creates are acknowledged, in the order the server answered them.
+        manager.acknowledge(conversationId: older.conversationId)
+        manager.acknowledge(conversationId: live.conversationId)
+
+        XCTAssertTrue(
+            manager.isAcknowledgedForTesting(conversationId: older.conversationId),
+            "the earlier window's create was dropped when a second window prepared one"
+        )
+        XCTAssertTrue(
+            manager.isAcknowledgedForTesting(conversationId: live.conversationId),
+            "the live window's create was not recorded"
+        )
+
+        // And both windows can now continue their OWN conversation.
+        signal.admitInFlightTurnForTesting(utteranceId: "old-next", origin: olderOrigin)
+        let olderNext = try XCTUnwrap(
+            manager.prepare(selection: .followUp, origin: olderOrigin, utteranceId: "old-next")
+        )
+        XCTAssertEqual(olderNext.mode, "resume")
+        XCTAssertEqual(olderNext.conversationId, older.conversationId, "the older window lost its thread")
+
+        let liveNext = try XCTUnwrap(
+            manager.prepare(selection: .followUp, origin: liveOrigin, utteranceId: "live-next")
+        )
+        XCTAssertEqual(liveNext.mode, "resume")
+        XCTAssertEqual(liveNext.conversationId, live.conversationId, "the live window lost its thread")
     }
 
     /// A transport retry of the SAME logical request keeps its request id, conversation id and
@@ -511,20 +555,18 @@ final class CloudConversationManagerTests: XCTestCase {
     /// Acknowledging a conversation this manager is not holding changes nothing, so a late or
     /// mismatched acknowledgement cannot convert a live newer conversation into a resumable one.
     func testAnAcknowledgementForAnUnknownHandleOpensNothing() throws {
-        let newer = try XCTUnwrap(manager.prepare(selection: .wakeWord, origin: 1, utteranceId: "ack-5"))
+        let opened = try XCTUnwrap(manager.prepare(selection: .wakeWord, origin: 1, utteranceId: "ack-5"))
         manager.acknowledge(conversationId: "a-conversation-this-client-never-opened")
 
-        // A later follow-up names the window's own handle, not the unknown one.
-        let later = try XCTUnwrap(manager.prepare(selection: .followUp, origin: 1, utteranceId: "ack-6"))
-        XCTAssertNotEqual(
-            later.conversationId, "a-conversation-this-client-never-opened",
-            "a follow-up named a handle the server never acknowledged"
-        )
         XCTAssertFalse(
             manager.isAcknowledgedForTesting(conversationId: "a-conversation-this-client-never-opened"),
             "an unknown handle was recorded as acknowledged"
         )
-        XCTAssertNotEqual(later.conversationId, newer.conversationId)
+        // The window's OWN handle is untouched: an unrecognised acknowledgement neither clears the
+        // draft nor invents a conversation.
+        let later = try XCTUnwrap(manager.prepare(selection: .followUp, origin: 1, utteranceId: "ack-6"))
+        XCTAssertEqual(later.mode, "resume", "an unknown id cleared the window's own draft")
+        XCTAssertEqual(later.conversationId, opened.conversationId)
     }
 
     /// A queued follow-up keeps the window it was registered under. Once that window is replaced,

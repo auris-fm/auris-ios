@@ -1318,10 +1318,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // The conversation this turn carries, used to stamp an interruption report so the report
         // can be discarded if the user abandons that conversation.
         let turnConversationId = conversation.conversationId
-        var sawConnected = false
-        // This turn's conversation is a CANDIDATE for attribution; it is stamped only once the
-        // server acknowledges it, and withdrawn below if the turn ends without that.
-        lastAdmittedConversationId = turnConversationId
         // Every terminal exit finalizes this request's unresolved hold. Done/refusal already
         // resolve it; cancellation and truncated streams must discard it rather than strand B.
         defer {
@@ -1334,9 +1330,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 )
             )
             turnToken.markAcknowledgement(.failed)
-            // A turn that ended without `connected` never established the conversation it named,
-            // so it must not become the conversation a pending report is attributed to.
-            if !sawConnected { lastAdmittedConversationId = nil }
         }
 
         // NOTHING is retained for replay. An earlier version kept the prepared request so a retry
@@ -1538,7 +1531,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // had changed and threw the report away.
                     lastAdmittedConversationId = turnConversationId
                     conversationManager.acknowledge(conversationId: turnConversationId)
-                    sawConnected = true
                 case let .audioFrame(frame):
                     // Owner cancellation gates buffered audio admission too: a frame drained
                     // after cancel must not reach the player.
@@ -2277,7 +2269,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // The refusal discards the held follow-up and retains a report naming the INTERRUPTED turn.
         // The server applies the report to already-settled history, so it must name a turn the
         // server knows we interrupted — which is the interrupted turn, not the refused one.
-        let reportConversationId = lastAdmittedConversationId
+        // The stamp names the conversation the report describes — one the server ASKED for, i.e.
+        // one that already received `connected` — so it is left alone here. Writing THIS turn's
+        // conversation over it would point a report at a conversation the server never admitted,
+        // which is exactly the case this change exists to remove.
+        let reportConversationId = interruptionState.pendingReportConversationId
+            ?? lastAdmittedConversationId
         let discarded = interruptionState.recordRefusal(
             forRequestId: interruptedRequestId ?? requestId,
             retainingReport: CloudInterruptionState.PendingReport(

@@ -2908,12 +2908,17 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
             }.filter { $0["type"] as? String == "authenticate" } ?? []
             let followUp = try XCTUnwrap(auths.last)
             XCTAssertEqual(followUp["request_id"] as? String, "u-next-\(acknowledge)")
+            // `resume` either way, and for a reason worth stating: a follow-up continues the
+            // conversation the window opened, INCLUDING one whose create is still in flight —
+            // opening a second conversation beside it would split the thread. What must not
+            // happen is a follow-up naming a handle the window has since moved on from, which is
+            // what `CloudConversationManagerTests` covers.
             XCTAssertEqual(
                 followUp["conversation_mode"] as? String,
-                acknowledge ? "resume" : "create",
+                "resume",
                 acknowledge
                     ? "an acknowledged conversation was not resumed, so the thread restarts"
-                    : "a follow-up resumed a conversation the server never acknowledged"
+                    : "a follow-up opened a second conversation beside an in-flight create"
             )
         }
     }
