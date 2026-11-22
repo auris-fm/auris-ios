@@ -52,7 +52,8 @@ STUB
 }
 
 fails=0
-report() { if [ "$1" -eq 0 ]; then echo "PASS  $2"; else echo "FAIL  $2"; fails=$((fails+1)); fi; }
+cases=0
+report() { cases=$((cases+1)); if [ "$1" -eq 0 ]; then echo "PASS  $2"; else echo "FAIL  $2"; fails=$((fails+1)); fi; }
 
 # Wait for a condition to become true, polling briefly under a generous
 # ceiling. Cases wait on the event itself (a capture appearing, a call being
@@ -266,6 +267,68 @@ grep -q '^end loadavg: { 1.25 2.50 3.75 }$' "$dir/artifacts/loadavg.log" || ok=1
 report "$ok" "the test window's start and end load are recorded into artifacts"
 rm -rf "$dir"
 
+# Case 10: a test that hangs before writing anything of its own is still sampled
+# against the pid its host logged earlier — a pid lives as long as its host, not
+# as long as one test. Clearing it at every start would leave exactly this case,
+# a silent hang, with no capture at all.
+dir=$(mktemp -d); mkdir -p "$dir/artifacts"
+log="$dir/artifacts/test.log"; : > "$log"
+make_stubs "$dir"
+export STUB_CALLS="$dir/calls.txt"; : > "$STUB_CALLS"
+extract_sampler "$dir/sampler.sh"
+( echo "2026-11-21 07:40:01.000000+0800 podcasts[333333:1] host line from an earlier test"
+  sleep 1
+  echo "Test Case '-[X.Y testSilentHang]' started."
+  sleep 300 ) >> "$log" &
+writer=$!
+start_sampler "$dir" 300 3
+ok=0
+wait_for 120 capture_has_load "$dir/artifacts/stuck-sample-1-333333.txt" || ok=1
+grep -q '^sample 333333 10 -file .*stuck-sample-1-333333.txt$' "$STUB_CALLS" || ok=1
+kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
+stop_sampler
+report "$ok" "a silent hang is sampled against the live host's earlier pid"
+rm -rf "$dir"
+
+# Case 11: after a relaunch the previous host's pid must NOT be used, even though
+# the new occurrence writes nothing itself. The relaunch marker is what
+# invalidates it; a later tag from the new host restores sampling.
+dir=$(mktemp -d); mkdir -p "$dir/artifacts"
+log="$dir/artifacts/test.log"; : > "$log"
+make_stubs "$dir"
+export STUB_CALLS="$dir/calls.txt"; : > "$STUB_CALLS"
+extract_sampler "$dir/sampler.sh"
+( echo "2026-11-21 07:41:01.000000+0800 podcasts[444444:1] first host line"
+  echo "Test Case '-[X.Y testBeforeCrash]' started."
+  sleep 300 ) >> "$log" &
+writer=$!
+start_sampler "$dir" 300 3
+ok=0
+# Let the first occurrence be sampled, so a stale-pid bug would show up as a
+# SECOND sample rather than as the only one.
+wait_for 120 sample_called_n 1 || ok=1
+kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
+( echo "Restarting after unexpected exit, crash, or test timeout; summary will include totals from previous launches."
+  echo "Test Case '-[X.Y testAfterCrash]' started."
+  sleep 300 ) >> "$log" &
+writer=$!
+# The absence window has to outlast the occurrence's own threshold plus a poll,
+# or a stale-pid bug could pass simply by not having been reached yet. Ten
+# seconds against a three-second threshold and a one-second poll leaves room
+# even when the host is loaded; this window proves absence, so it is fixed.
+sleep 10
+[ "$(grep -c '^sample ' "$STUB_CALLS")" -eq 1 ] || ok=1
+[ ! -e "$dir/artifacts/stuck-sample-2-444444.txt" ] || ok=1
+( echo "2026-11-21 07:42:09.000000+0800 podcasts[555555:1] relaunched host line"; sleep 300 ) >> "$log" &
+writer2=$!
+wait_for 120 capture_has_load "$dir/artifacts/stuck-sample-2-555555.txt" || ok=1
+grep -q '^sample 555555 10 -file .*stuck-sample-2-555555.txt$' "$STUB_CALLS" || ok=1
+[ "$(grep -c '^sample ' "$STUB_CALLS")" -eq 2 ] || ok=1
+kill "$writer2" 2>/dev/null; wait "$writer2" 2>/dev/null
+stop_sampler
+report "$ok" "a relaunch retires the previous host's pid until the new host logs one"
+rm -rf "$dir"
+
 # Case 9: the SAME test runs again after a host relaunch — its start line is
 # repeated verbatim, which is what a retry looks like in the log. The only pid
 # available at first belongs to the dead host. Two things must hold: the old
@@ -312,7 +375,7 @@ report "$ok" "a retried test's new occurrence never samples the dead host's pid"
 rm -rf "$dir"
 
 if [ "$fails" -eq 0 ]; then
-  echo "9/9 stuck-test sampler cases behaved as intended"
+  echo "$cases/$cases stuck-test sampler cases behaved as intended"
 else
   echo "$fails stuck-test sampler case(s) FAILED"
   exit 1

@@ -684,29 +684,32 @@ WATCHDOG_PID=$!
   since=0
   seq=0
   while kill -0 "$XCODEBUILD_PID" 2>/dev/null; do
-    # XCTest and Swift Testing both appear in the plan: ◇ Test … started. is a
-    # start; only the terminal ✔ … passed after / ✘ … failed after lines are
-    # results. A mid-test "✘ Test … recorded an issue" line is NOT completion —
-    # treating it as one would retire a test that records a failure then hangs.
     # One scan per poll answers three things at once: the LAST event line, the
-    # line number of the last start (the current occurrence), and the last host
-    # pid written after it. A retried test repeats its start line verbatim, so
-    # the occurrence — not the test name — is what the timer and the sample-once
-    # guard key on; otherwise a relaunch into the same test inherits the earlier
-    # occurrence's elapsed time and its dead host's pid.
+    # line number of the last start (the current occurrence), and the host pid
+    # that belongs to it. A retried test repeats its start line verbatim, so the
+    # occurrence — not the test name — is what the timer and the sample-once
+    # guard key on; otherwise a retry inherits the earlier attempt's elapsed
+    # time.
     #
     # XCTest and Swift Testing both appear in the plan: ◇ Test … started. is a
     # start; only the terminal ✔ … passed after / ✘ … failed after lines are
     # results. A mid-test "✘ Test … recorded an issue" line is NOT completion —
     # treating it as one would retire a test that records a failure then hangs.
+    #
+    # A pid stays valid for the whole life of its host, so a test that hangs
+    # before writing anything of its own is still sampled against the pid the
+    # host logged earlier. Only a relaunch invalidates it: the marker xcodebuild
+    # prints when it restarts the host clears the tracked pid, so a new
+    # occurrence can never be sampled against the dead host's process.
     scan=$(awk '
+      /Restarting after unexpected exit/ { pid = ""; next }
       /Test Case .* started\.$/ || /◇ Test .* started\.$/ {
-        last = $0; startLine = NR; pid = ""; next
+        last = $0; startLine = NR; next
       }
       /Test Case .*(passed|failed) \(/ || /✔ Test .* passed after / || /✘ Test .* failed after / {
         last = $0; next
       }
-      startLine && match($0, /podcasts\[[0-9]+/) {
+      match($0, /podcasts\[[0-9]+/) {
         p = substr($0, RSTART, RLENGTH); gsub(/[^0-9]/, "", p); pid = p
       }
       END { printf "%d\t%s\t%s\n", startLine + 0, pid, last }
@@ -723,10 +726,10 @@ WATCHDOG_PID=$!
         fi
         if [ -n "$current" ] && ! printf '%s\n' "$sampled" | grep -Fxq -- "$current" \
           && [ $(( $(date +%s) - since )) -ge "$STUCK_TEST_THRESHOLD" ]; then
-          # The pid is this occurrence's own: only tags written after its start
-          # line count, so a previous host's pid can never be sampled for it. If
-          # this host has not logged one yet there is nothing to sample, and the
-          # next poll retries.
+          # The pid belongs to the live host: a relaunch cleared it, so a dead
+          # host's process can never be sampled for this occurrence. If no host
+          # has logged one yet there is nothing to sample, and the next poll
+          # retries.
           if [ -n "$pid" ]; then
             # Marked sampled only once a capture actually happened: a test that
             # hangs before the host writes any pid line stays eligible, so the
