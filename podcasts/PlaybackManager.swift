@@ -2400,7 +2400,11 @@ class PlaybackManager: ServerPlaybackDelegate {
 
         guard let userInfo = notification.userInfo else { return }
 
-        let interruptionType = userInfo[AVAudioSessionInterruptionTypeKey] as! NSNumber
+        // Same reasoning as the option key below: this is a plain
+        // NotificationCenter message, so an in-process post can omit the type
+        // too. A notification that does not say which interruption it is
+        // carries nothing to act on.
+        guard let interruptionType = userInfo[AVAudioSessionInterruptionTypeKey] as? NSNumber else { return }
         #if os(tvOS)
         let interruptionReason: UInt? = nil
         #else
