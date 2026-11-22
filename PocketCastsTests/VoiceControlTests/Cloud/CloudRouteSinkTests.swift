@@ -6729,6 +6729,132 @@ final class CloudRequiredErrorTemplateCoverageTests: XCTestCase {
         }
     }
 
+    /// The APPROVED copy, verbatim (spec 5ab7b0aa). Presence alone is not the contract: a
+    /// locale carrying English text would satisfy a non-empty check while speaking the wrong
+    /// language. Proven by mutation — English placed in the de `no_answer` string left the
+    /// coverage control GREEN. So each line is asserted exactly, and Android asserts the same
+    /// strings, which is what keeps the two apps saying one thing.
+    private let approvedCopy: [String: [String: String]] = [
+        "en": [
+            "no_answer": "Sorry, I couldn't find an answer to that. Please try asking another way.",
+            "retrieval_unavailable": "Sorry, I couldn't look that up just now. Please try again.",
+            "queue_overflow": "Sorry, I couldn't finish answering that. Please try again.",
+            "budget_exceeded": "Sorry, that took too long to answer. Please try again.",
+            "turn_conflict": "I'm still answering your last question. Please try again in a moment.",
+            "corrupt_record": "Sorry, I've lost track of our conversation. Please ask again to start a new one.",
+            "connection_lost": "Connection lost. Please try again.",
+        ],
+        "de": [
+            "no_answer": "Entschuldigung, ich konnte darauf keine Antwort finden. Bitte versuche es anders zu fragen.",
+            "retrieval_unavailable": "Entschuldigung, ich konnte das gerade nicht nachschlagen. Bitte versuche es noch einmal.",
+            "queue_overflow": "Entschuldigung, ich konnte die Antwort nicht zu Ende geben. Bitte versuche es noch einmal.",
+            "budget_exceeded": "Entschuldigung, die Antwort hat zu lange gedauert. Bitte versuche es noch einmal.",
+            "turn_conflict": "Ich beantworte gerade noch deine letzte Frage. Bitte versuche es gleich noch einmal.",
+            "corrupt_record": "Entschuldigung, ich habe den Überblick über unser Gespräch verloren. Bitte frag noch einmal, dann beginnt ein neues.",
+            "connection_lost": "Die Verbindung wurde unterbrochen. Bitte versuche es noch einmal.",
+        ],
+        "es": [
+            "no_answer": "Lo siento, no he encontrado una respuesta a eso. Prueba a preguntarlo de otra manera.",
+            "retrieval_unavailable": "Lo siento, no he podido consultarlo ahora mismo. Inténtalo de nuevo.",
+            "queue_overflow": "Lo siento, no he podido terminar de responder. Inténtalo de nuevo.",
+            "budget_exceeded": "Lo siento, responder ha tardado demasiado. Inténtalo de nuevo.",
+            "turn_conflict": "Todavía estoy respondiendo a tu última pregunta. Inténtalo de nuevo en un momento.",
+            "corrupt_record": "Lo siento, he perdido el hilo de nuestra conversación. Vuelve a preguntar para empezar una nueva.",
+            "connection_lost": "Se ha perdido la conexión. Inténtalo de nuevo.",
+        ],
+        "es-MX": [
+            "no_answer": "Lo siento, no he encontrado una respuesta a eso. Prueba a preguntarlo de otra manera.",
+            "retrieval_unavailable": "Lo siento, no he podido consultarlo ahora mismo. Inténtalo de nuevo.",
+            "queue_overflow": "Lo siento, no he podido terminar de responder. Inténtalo de nuevo.",
+            "budget_exceeded": "Lo siento, responder ha tardado demasiado. Inténtalo de nuevo.",
+            "turn_conflict": "Todavía estoy respondiendo a tu última pregunta. Inténtalo de nuevo en un momento.",
+            "corrupt_record": "Lo siento, he perdido el hilo de nuestra conversación. Vuelve a preguntar para empezar una nueva.",
+            "connection_lost": "Se perdió la conexión. Inténtalo de nuevo.",
+        ],
+        "fr": [
+            "no_answer": "Désolé, je n'ai pas trouvé de réponse à cela. Essayez de le demander autrement.",
+            "retrieval_unavailable": "Désolé, je n'ai pas pu le vérifier pour le moment. Veuillez réessayer.",
+            "queue_overflow": "Désolé, je n'ai pas pu terminer ma réponse. Veuillez réessayer.",
+            "budget_exceeded": "Désolé, la réponse a pris trop de temps. Veuillez réessayer.",
+            "turn_conflict": "Je suis encore en train de répondre à votre dernière question. Veuillez réessayer dans un instant.",
+            "corrupt_record": "Désolé, j'ai perdu le fil de notre conversation. Reposez votre question pour en commencer une nouvelle.",
+            "connection_lost": "La connexion a été perdue. Veuillez réessayer.",
+        ],
+        "fr-CA": [
+            "no_answer": "Désolé, je n'ai pas trouvé de réponse à cela. Essayez de le demander autrement.",
+            "retrieval_unavailable": "Désolé, je n'ai pas pu le vérifier pour le moment. Veuillez réessayer.",
+            "queue_overflow": "Désolé, je n'ai pas pu terminer ma réponse. Veuillez réessayer.",
+            "budget_exceeded": "Désolé, la réponse a pris trop de temps. Veuillez réessayer.",
+            "turn_conflict": "Je suis encore en train de répondre à votre dernière question. Veuillez réessayer dans un instant.",
+            "corrupt_record": "Désolé, j'ai perdu le fil de notre conversation. Reposez votre question pour en commencer une nouvelle.",
+            "connection_lost": "La connexion a été perdue. Veuillez réessayer.",
+        ],
+        "ja": [
+            "no_answer": "申し訳ありません。それに対する答えが見つかりませんでした。別の聞き方でお試しください。",
+            "retrieval_unavailable": "申し訳ありません。今は調べられませんでした。もう一度お試しください。",
+            "queue_overflow": "申し訳ありません。最後までお答えできませんでした。もう一度お試しください。",
+            "budget_exceeded": "申し訳ありません。お答えするのに時間がかかりすぎました。もう一度お試しください。",
+            "turn_conflict": "前の質問にまだお答えしています。少し待ってからもう一度お試しください。",
+            "corrupt_record": "申し訳ありません。会話の流れがわからなくなってしまいました。もう一度話しかけていただくと、新しい会話が始まります。",
+            "connection_lost": "接続が切れました。もう一度お試しください。",
+        ],
+        "ko": [
+            "no_answer": "죄송합니다. 그에 대한 답을 찾지 못했습니다. 다른 방식으로 물어봐 주세요.",
+            "retrieval_unavailable": "죄송합니다. 지금은 확인하지 못했습니다. 다시 시도해 주세요.",
+            "queue_overflow": "죄송합니다. 답변을 끝까지 드리지 못했습니다. 다시 시도해 주세요.",
+            "budget_exceeded": "죄송합니다. 답변하는 데 시간이 너무 오래 걸렸습니다. 다시 시도해 주세요.",
+            "turn_conflict": "이전 질문에 아직 답변하고 있습니다. 잠시 후에 다시 시도해 주세요.",
+            "corrupt_record": "죄송합니다. 대화의 흐름을 놓쳤습니다. 다시 말씀해 주시면 새 대화를 시작합니다.",
+            "connection_lost": "연결이 끊어졌습니다. 다시 시도해 주세요.",
+        ],
+        "yue": [
+            "no_answer": "唔好意思，我搵唔到呢個問題嘅答案。唔該試吓用第二種問法。",
+            "retrieval_unavailable": "唔好意思，我啱啱查唔到呢樣嘢。唔該再試一次。",
+            "queue_overflow": "唔好意思，我答唔晒呢個問題。唔該再試一次。",
+            "budget_exceeded": "唔好意思，答咗太耐都答唔完。唔該再試一次。",
+            "turn_conflict": "我仲答緊你上一個問題。唔該等一陣再試一次。",
+            "corrupt_record": "唔好意思，我唔記得咗我哋傾到邊。唔該再問一次，咁就會開新嘅對話。",
+            "connection_lost": "連線斷咗。唔該再試一次。",
+        ],
+        "zh-Hans": [
+            "no_answer": "抱歉，我没找到这个问题的答案。请换一种问法试试。",
+            "retrieval_unavailable": "抱歉，我刚才没能查到这个内容。请再试一次。",
+            "queue_overflow": "抱歉，我没能把这个回答说完。请再试一次。",
+            "budget_exceeded": "抱歉，回答这个问题用的时间太长了。请再试一次。",
+            "turn_conflict": "我还在回答你上一个问题。请稍等一下再试。",
+            "corrupt_record": "抱歉，我跟不上我们这段对话了。请再问一次，这样就会开始新的对话。",
+            "connection_lost": "连接已断开。请再试一次。",
+        ],
+        "zh-Hant": [
+            "no_answer": "抱歉，我沒找到這個問題的答案。請換一種問法試試。",
+            "retrieval_unavailable": "抱歉，我剛才沒能查到這個內容。請再試一次。",
+            "queue_overflow": "抱歉，我沒能把這個回答說完。請再試一次。",
+            "budget_exceeded": "抱歉，回答這個問題用的時間太長了。請再試一次。",
+            "turn_conflict": "我還在回答你上一個問題。請稍等一下再試。",
+            "corrupt_record": "抱歉，我跟不上我們這段對話了。請再問一次，這樣就會開始新的對話。",
+            "connection_lost": "連線已中斷。請再試一次。",
+        ],
+    ]
+
+    /// Every locale speaks the APPROVED line, not merely a non-empty one. A translation that
+    /// exists but says the wrong thing — or says it in English — is the defect this catches.
+    func test_everyVoiceLocaleSpeaksTheApprovedLineVerbatim() throws {
+        let locales = localesWithVoiceTemplates()
+        XCTAssertEqual(Set(locales.map(\.name)), Set(approvedCopy.keys),
+                       "the shipped voice locales and the approved copy table must be the same set")
+        for locale in locales {
+            let resolver = SpokenTemplateResolver(localeBundle: locale.bundle)
+            let expected = try XCTUnwrap(approvedCopy[locale.name], locale.name)
+            for code in requiredCodes where expected[code] != nil {
+                XCTAssertEqual(
+                    resolver.resolveForUserLocale("cloud_error_\(code)"),
+                    expected[code],
+                    "\(locale.name)/\(code) does not speak the approved line"
+                )
+            }
+        }
+    }
+
     /// The coverage list and the production recording set must name the SAME codes: a code
     /// asserted as translated but absent from the recorder would never report a regression, and
     /// one recorded but never asserted could ship untranslated unnoticed.

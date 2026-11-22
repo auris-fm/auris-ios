@@ -25,7 +25,7 @@
 
 /* The evidence could not be fetched. The reason is not the user's, so name what
    failed in their terms and offer a retry. */
-"cloud_error_retrieval_unavailable" = "唔好意思，我啱啲查唔到呢樣嘢。唔該再試一次。";
+"cloud_error_retrieval_unavailable" = "唔好意思，我啱啱查唔到呢樣嘢。唔該再試一次。";
 
 /* Audio arrived faster than it could be played, so the answer may be partial. To the
    listener this is an unfinished answer; the queue itself is never named. */
