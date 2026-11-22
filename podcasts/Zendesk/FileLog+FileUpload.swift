@@ -45,6 +45,9 @@ extension FileLog: @retroactive EventLoggingDelegate {
 
     public func encryptedLogUUID() async -> String {
         do {
+            // Refuse before generating: merging the logs is work whose result would be discarded,
+            // and it leaves the merged file behind for a build that can never upload it.
+            try Self.assertUsableEncryptionKey(ApiCredentials.loggingEncryptionKey)
             return try queueFileUpload(try await logFileForUpload())
         } catch {
             return FileLog.genericErrorMessage
@@ -75,6 +78,8 @@ extension FileLog: @retroactive EventLoggingDelegate {
 
     public func encryptedWatchLogUUID() async -> String {
         do {
+            // Same reason: do not ask the watch for its log if it cannot be uploaded.
+            try Self.assertUsableEncryptionKey(ApiCredentials.loggingEncryptionKey)
             guard let filePath = try await watchLogFileForUpload() else {
                 return Self.noWearableLogsAvailable
             }

@@ -72,6 +72,31 @@ final class EmptyCredentialsGuardTests: XCTestCase {
         try FileLog.assertUsableEncryptionKey(key)
     }
 
+    /// Refusing must happen BEFORE the log is generated, not after. `logFileForUpload()` merges
+    /// main.log and old.log into Documents/debug_log/uploadDebug.log; doing that on a build that
+    /// can never upload makes the person wait on work that is discarded and leaves the merged file
+    /// behind. This drives the real entry point with the credentials this test build carries.
+    ///
+    /// Red: with the refusal only inside `queueFileUpload`, the merged file exists after the call.
+    func test_unusableKeyRefusesBeforeGeneratingTheLog() async throws {
+        let key = ApiCredentials.loggingEncryptionKey
+        try XCTSkipIf(LogUploadCredentials.isUsableEncryptionKey(key),
+                      "this build has a usable key, so there is nothing to refuse")
+
+        let merged = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent("Documents/debug_log/uploadDebug.log")
+        try? FileManager.default.removeItem(at: merged)
+
+        FileLog.shared.addMessage("empty-credentials control: marker before upload attempt")
+        FileLog.shared.forceFlush()
+
+        let result = await FileLog.shared.encryptedLogUUID()
+
+        XCTAssertEqual(result, FileLog.genericErrorMessage, "an unusable key must report the generic error")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: merged.path),
+                       "the log was generated even though the upload was refused")
+    }
+
     // MARK: - Google sign-in availability
 
     /// `GIDSignIn` raises NSInvalidArgumentException when the configured client ID is empty, and an
