@@ -6836,6 +6836,25 @@ final class CloudRequiredErrorTemplateCoverageTests: XCTestCase {
         ],
     ]
 
+    /// The Cantonese adverb is 啱啱 ("just now"), not 啱啲. Pinned as its own word because every
+    /// other assertion compares a line to a copy of itself — which is exactly why this typo
+    /// survived in both apps: the expected table was written from the same wrong source.
+    ///
+    /// SCOPE: this checks one word in one language. It does not validate Cantonese grammar, and
+    /// it is not a substitute for a reader on the yue lines.
+    func test_theCantoneseJustNowAdverbIsSpelledCorrectly() throws {
+        let yue = localesWithVoiceTemplates().first { $0.name == "yue" }
+        let bundle = try XCTUnwrap(yue?.bundle, "yue.lproj must ship a VoiceTemplates table")
+        let resolver = SpokenTemplateResolver(localeBundle: bundle)
+        // The three lines that say "just now" in Cantonese.
+        for code in ["speech_unavailable", "internal_error", "retrieval_unavailable"] {
+            let text = resolver.resolveForUserLocale("cloud_error_\(code)")
+            XCTAssertFalse(text.isEmpty, "yue/\(code) lost its line")
+            XCTAssertTrue(text.contains("啱啱"), "yue/\(code) must use 啱啱: \(text)")
+            XCTAssertFalse(text.contains("啱啲"), "yue/\(code) uses the misspelling 啱啲: \(text)")
+        }
+    }
+
     /// Every locale speaks the APPROVED line, not merely a non-empty one. A translation that
     /// exists but says the wrong thing — or says it in English — is the defect this catches.
     func test_everyVoiceLocaleSpeaksTheApprovedLineVerbatim() throws {
