@@ -760,7 +760,11 @@ platform :ios do
         },
         archive_path: AURIS_XCARCHIVE_PATH,
         output_directory: ARTIFACTS_FOLDER,
-        output_name: AURIS_BUILD_OUTPUT_NAME
+        output_name: AURIS_BUILD_OUTPUT_NAME,
+        # gym's default log directory is outside the checkout, so the step's
+        # artifacts/*.log glob would collect nothing. Keep the xcodebuild log
+        # with the archive it describes.
+        buildlog_path: ARTIFACTS_FOLDER
       )
 
       # `build_app` writes the ipa and its dSYM zip but leaves the .xcarchive

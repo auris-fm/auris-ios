@@ -463,6 +463,11 @@ awk '/^  lane :auris_beta_build/,/^  end/' "$FASTFILE" | grep -q 'zip(path: AURI
   || fail "pipeline declares artifacts/*.xcarchive.zip but the lane never zips the archive"
 awk '/key: beta-upload/,/^  - label:|^$/' "$PIPE" | grep -q 'artifacts/\*.app.dSYM.zip' \
   || fail "dSYMs are written beside the ipa but not declared as artifacts"
+# The log glob is only honest if the lane writes a log there. gym's default
+# buildlog_path is ~/Library/Logs/gym, outside the checkout, so nothing would
+# be collected. Mutant: dropping buildlog_path from build_app.
+awk '/^  lane :auris_beta_build/,/^  end/' "$FASTFILE" | grep -q 'buildlog_path: ARTIFACTS_FOLDER' \
+  || fail "pipeline declares artifacts/*.log but the lane writes its build log elsewhere"
 echo "ok: pipeline gates the upload step correctly and keeps the archive"
 
 echo "all auris-beta-upload self-tests passed"
