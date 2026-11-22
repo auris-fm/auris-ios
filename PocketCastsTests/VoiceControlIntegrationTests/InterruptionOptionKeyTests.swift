@@ -10,15 +10,18 @@ import XCTest
 /// absent key ends the interruption without resuming, never crashes the app.
 final class InterruptionOptionKeyTests: XCTestCase {
 
-    /// Posts an ended interruption with no option key at all and asserts the
-    /// handler both survives it and does not resume playback.
+    /// Begins an interruption so the in-progress flag is set, then ends it with
+    /// no option key at all: the handler must survive that and clear the flag.
     ///
     /// The manager is driven through the real notification it observes, so this
-    /// exercises the same path a system (or in-process) post takes. Playback is
-    /// not running here, so a resume would be wrong for two independent reasons;
-    /// the assertion that matters is that handling completes at all.
-    func test_endedInterruptionWithoutOptionKey_doesNotCrashAndDoesNotResume() {
+    /// exercises the same path a system (or in-process) post takes. Beginning
+    /// first is what makes the flag assertion mean something — without it the
+    /// flag is already false and a handler that never ran would pass too.
+    func test_endedInterruptionWithoutOptionKey_doesNotCrashAndClearsTheInterruption() {
         let manager = PlaybackManager.shared
+        beginInterruption()
+        XCTAssertTrue(manager.interruptionInProgress(),
+                      "precondition: the began notification set the in-progress flag")
         let wasPlayingBefore = manager.isPlaying
 
         NotificationCenter.default.post(
@@ -43,6 +46,8 @@ final class InterruptionOptionKeyTests: XCTestCase {
     /// resume", rather than a new behaviour.
     func test_endedInterruptionWithZeroOptions_behavesLikeAnAbsentKey() {
         let manager = PlaybackManager.shared
+        beginInterruption()
+        XCTAssertTrue(manager.interruptionInProgress())
         let wasPlayingBefore = manager.isPlaying
 
         NotificationCenter.default.post(
@@ -56,5 +61,18 @@ final class InterruptionOptionKeyTests: XCTestCase {
 
         XCTAssertFalse(manager.interruptionInProgress())
         XCTAssertEqual(manager.isPlaying, wasPlayingBefore)
+    }
+
+    /// A began interruption with no reason, which is what the system posts when
+    /// something else takes the audio session. Leaves the manager mid-
+    /// interruption so an ended notification has a flag to clear.
+    private func beginInterruption() {
+        NotificationCenter.default.post(
+            name: AVAudioSession.interruptionNotification,
+            object: nil,
+            userInfo: [
+                AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.began.rawValue
+            ]
+        )
     }
 }
