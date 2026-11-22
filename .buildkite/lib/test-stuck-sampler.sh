@@ -335,8 +335,11 @@ rm -rf "$dir"
 # pid is never sampled for the new occurrence, and the new occurrence gets its
 # own timer rather than inheriting the first one's elapsed time.
 #
-# The new pid is withheld until the sampler has completed a poll that saw only
-# the old pid, so a slow runner cannot skip past the window where the bug shows.
+# The relaunch marker is what retires the old pid under the current model (a pid
+# outlives a start line), so it belongs here for the same reason case 11 posts
+# it: without it, this case would be asserting the opposite of the rule. The new
+# pid is withheld until the sampler has completed polls that saw only the old
+# pid, so a slow runner cannot skip past the window where the bug shows.
 dir=$(mktemp -d); mkdir -p "$dir/artifacts"
 log="$dir/artifacts/test.log"; : > "$log"
 make_stubs "$dir"
@@ -353,14 +356,16 @@ start_sampler "$dir" 300 3
 ok=0
 wait_for 120 capture_has_load "$dir/artifacts/stuck-sample-1-111111.txt" || ok=1
 kill "$writer" 2>/dev/null; wait "$writer" 2>/dev/null
-# Second occurrence: identical start line, no result line for the first (a
+# Second occurrence: identical start line, no result line for the first (the
 # relaunch abandons it), and no pid from the new host yet.
-( echo "Test Case '-[X.Y testRetried]' started."; sleep 300 ) >> "$log" &
+( echo "Restarting after unexpected exit, crash, or test timeout; summary will include totals from previous launches."
+  echo "Test Case '-[X.Y testRetried]' started."
+  sleep 300 ) >> "$log" &
 writer=$!
-# Observe a full poll with only the dead host's pid in the log. The sampler
-# polls every second here, so two seconds covers a poll even on a loaded host;
-# this is an absence window, not a deadline for an event.
-sleep 3
+# Observe several polls with only the dead host's pid in the log. The threshold
+# is 3 s and the poll is 1 s, so anything shorter than the threshold ends before
+# the occurrence is even eligible; this window is deliberately well past it.
+sleep 6
 if grep -q '^sample 111111 ' "$STUB_CALLS" && [ "$(grep -c '^sample ' "$STUB_CALLS")" -gt 1 ]; then ok=1; fi
 [ ! -e "$dir/artifacts/stuck-sample-2-111111.txt" ] || ok=1
 # Now the relaunched host logs its own pid.
