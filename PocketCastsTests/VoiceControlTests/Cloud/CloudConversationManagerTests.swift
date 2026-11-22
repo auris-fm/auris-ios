@@ -421,8 +421,7 @@ final class CloudConversationManagerTests: XCTestCase {
     ///
     /// The defect this locks down: after a create that ended before `connected` (a refused spend,
     /// a lost transport), the client kept treating the handle as the window's conversation, so the
-    /// NEXT utterance continued a conversation the server had never admitted. The window then
-    /// holds only a DRAFT, which its own retry may name and nothing else can.
+    /// NEXT utterance continued a conversation the server had never admitted.
     ///
     /// Both halves are asserted because either alone passes for the wrong reason: a follow-up that
     /// never resumes leaves the second half green while breaking every ordinary follow-up, and one
@@ -434,46 +433,81 @@ final class CloudConversationManagerTests: XCTestCase {
         )
         XCTAssertEqual(create.mode, "create")
 
-        // The negative premise, asserted on the state itself: nothing has been acknowledged, so
-        // the handle is a draft the window holds but will not continue.
+        // The negative premise, asserted on the state itself: nothing has been acknowledged.
         XCTAssertFalse(
             manager.isAcknowledgedForTesting(conversationId: create.conversationId),
             "premise: the opening turn has not been acknowledged"
         )
 
-        // A follow-up in the same window continues the in-flight create's conversation — it only
-        // names a conversation the window already opened — but it must not do so before the
-        // server has said the conversation exists. This is the assertion the defect fails.
-        let early = try XCTUnwrap(
+        // THE DEFECT, at the point it is decided: the mode this turn DIALS with. Preparation
+        // happens before the sink waits for a predecessor to quiesce, so `connected` may arrive in
+        // between; deciding at prepare sent `resume` for a conversation that was still a draft when
+        // it went out. Here nothing has been acknowledged, so the dialled turn opens its own
+        // conversation under its OWN request id — the window climbs out rather than extending a
+        // thread the server never held.
+        let prepared = try XCTUnwrap(
             manager.prepare(selection: .followUp, origin: 1, utteranceId: "ack-2"),
             "a follow-up before the first acknowledgement was refused outright"
         )
+        let dialed = manager.dialed(prepared: prepared, selection: .followUp)
         XCTAssertEqual(
-            early.mode, "resume",
-            "a follow-up during an in-flight create opened a SECOND conversation beside it"
+            dialed.mode, "create",
+            "a follow-up resumed a conversation the server never acknowledged"
         )
-        XCTAssertEqual(early.conversationId, create.conversationId)
+        XCTAssertNotEqual(dialed.conversationId, create.conversationId)
+        XCTAssertEqual(dialed.requestId, "ack-2", "the follow-up carries its own request identity")
 
-        // The server answers: `connected` arrives for the create's conversation.
+        // CONTROL: an acknowledged conversation IS resumed, and by the same id. Without this half
+        // "never resume anything" would satisfy the assertion above.
         manager.acknowledge(conversationId: create.conversationId)
         XCTAssertTrue(
             manager.isAcknowledgedForTesting(conversationId: create.conversationId),
             "the acknowledgement did not make the conversation real"
         )
-
-        // CONTROL: an acknowledged conversation is resumed, and by the same id.
-        let followUp = try XCTUnwrap(
+        let nextPrepared = try XCTUnwrap(
             manager.prepare(selection: .followUp, origin: 1, utteranceId: "ack-3"),
             "a follow-up after acknowledgement was refused"
         )
+        let nextDialed = manager.dialed(prepared: nextPrepared, selection: .followUp)
         XCTAssertEqual(
-            followUp.mode, "resume",
+            nextDialed.mode, "resume",
             "an acknowledged conversation was not resumed, so the thread restarts"
         )
-        XCTAssertEqual(
-            followUp.conversationId, create.conversationId,
-            "the follow-up did not continue the acknowledged conversation"
+        XCTAssertEqual(nextDialed.conversationId, create.conversationId)
+    }
+
+    /// THE MODE IS DECIDED AT THE SEND, and a frame that arrives in between is honoured.
+    ///
+    /// Preparation happens before the sink waits for a predecessor to quiesce, so `connected` for
+    /// the conversation being continued can arrive during that wait. This case prepares while the
+    /// handle is still unacknowledged, acknowledges it — as the arriving frame does — and then
+    /// dials: the turn must resume, because by the time it goes out the conversation is real.
+    /// Deciding at prepare sent `create` here and split the thread.
+    func testAnAcknowledgementThatArrivesBeforeTheSendIsHonoured() throws {
+        let create = try XCTUnwrap(manager.prepare(selection: .wakeWord, origin: 1, utteranceId: "late-1"))
+        let prepared = try XCTUnwrap(
+            manager.prepare(selection: .followUp, origin: 1, utteranceId: "late-2")
         )
+
+        // The frame lands after preparation and before the send.
+        manager.acknowledge(conversationId: create.conversationId)
+
+        let dialed = manager.dialed(prepared: prepared, selection: .followUp)
+        XCTAssertEqual(dialed.mode, "resume", "an acknowledgement that arrived before the send was ignored")
+        XCTAssertEqual(dialed.conversationId, create.conversationId)
+        XCTAssertEqual(dialed.requestId, "late-2", "the request identity is unchanged")
+    }
+
+    /// A WAKE never resumes, whatever the window holds. The mode decision must not turn a wake into
+    /// a continuation just because a conversation happens to be acknowledged.
+    func testAWakeDialsCreateEvenWhenAConversationIsAcknowledged() throws {
+        let first = try XCTUnwrap(manager.prepare(selection: .wakeWord, origin: 1, utteranceId: "wake-1"))
+        manager.acknowledge(conversationId: first.conversationId)
+
+        let prepared = try XCTUnwrap(manager.prepare(selection: .wakeWord, origin: 1, utteranceId: "wake-2"))
+        let dialed = manager.dialed(prepared: prepared, selection: .wakeWord)
+        XCTAssertEqual(dialed.mode, "create", "a wake resumed an open conversation")
+        XCTAssertNotEqual(dialed.conversationId, first.conversationId)
     }
 
     /// TWO WINDOWS CAN EACH HAVE A CREATE IN FLIGHT, and both must be acknowledged.
@@ -564,9 +598,14 @@ final class CloudConversationManagerTests: XCTestCase {
         )
         // The window's OWN handle is untouched: an unrecognised acknowledgement neither clears the
         // draft nor invents a conversation.
-        let later = try XCTUnwrap(manager.prepare(selection: .followUp, origin: 1, utteranceId: "ack-6"))
-        XCTAssertEqual(later.mode, "resume", "an unknown id cleared the window's own draft")
-        XCTAssertEqual(later.conversationId, opened.conversationId)
+        // The window's own handle is untouched — an unrecognised acknowledgement neither clears it
+        // nor invents a conversation — and the mode still says what the evidence says at send time.
+        let later = manager.dialed(
+            prepared: try XCTUnwrap(manager.prepare(selection: .followUp, origin: 1, utteranceId: "ack-6")),
+            selection: .followUp
+        )
+        XCTAssertEqual(later.mode, "create", "an unknown acknowledgement made a draft resumable")
+        XCTAssertNotEqual(later.conversationId, opened.conversationId)
     }
 
     /// A queued follow-up keeps the window it was registered under. Once that window is replaced,

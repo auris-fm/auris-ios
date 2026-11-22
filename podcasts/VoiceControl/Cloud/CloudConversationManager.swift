@@ -67,20 +67,6 @@ final class CloudConversationManager {
     /// resumes the conversation that window opened, which is what the window-scoped rule is for.
     /// Retired with its origin (see `registerLiveOrigin`), so this is not an immortal second map.
     private var byOrigin: [Int: OpenConversation] = [:]
-    /// Creates this client has prepared and the server has not acknowledged yet, keyed by the
-    /// ORIGIN they were prepared under.
-    ///
-    /// Keyed rather than a single slot because two windows can each have a create in flight — a
-    /// delayed admitted turn preparing under its own origin is the case the `byOrigin` handoff
-    /// exists for — and one slot would drop the first draft the moment the second was prepared,
-    /// so its `connected` would land on nothing and that window would lose its conversation. The
-    /// map is bounded the way `byOrigin` is: an entry is removed on acknowledgement, replaced by a
-    /// newer create of the same window, and retired with its window in `registerLiveOrigin`.
-    ///
-    /// A draft is resumable — a follow-up that arrives while the create is in flight must not
-    /// open a second conversation beside it — while an OLDER unacknowledged handle is not, which
-    /// is why the two live in different places.
-    private var draftByOrigin: [Int: OpenConversation] = [:]
     /// REQUEST OWNERSHIP: utterance id -> prepared logical request, for utterances prepared in
     /// the LIVE window. Retired wholesale with the window (registerLiveOrigin change) — one
     /// entry per real utterance, never evicted mid-window.
@@ -143,22 +129,11 @@ final class CloudConversationManager {
         // The conversation this turn carries: the one opened FOR ITS OWN ORIGIN, so a delayed
         // admitted turn continues its own window's conversation and never the successor's.
         //
-        // ONLY AN ACKNOWLEDGED HANDLE DOES. `connected` is sent after admission, and admission is
-        // what makes a conversation real, so an unacknowledged handle is a DRAFT: the transport
-        // may still be running, or the server may have refused this very create without admitting
-        // anything. Naming a draft resumes a thread the user believes in and the server never
-        // held, so it behaves as no handle at all and the turn opens a fresh conversation under
-        // its own request id — the way the window climbs out rather than extending the hole. A
-        // retry of the SAME request never comes through here: it is served from the retained
-        // preparation above, still naming its draft, which is the one case where that is right.
-        // A window's conversation is its ACKNOWLEDGED handle; failing that, its own create that has
-        // not been acknowledged yet — a follow-up that arrives while that create is still in
-        // flight keeps its conversation rather than opening a second one alongside it. A draft
-        // that a later create of the same window replaced is gone from this map, so it is never a
-        // candidate: the window has moved on and only the newer conversation can be continued.
-        let existingForOrigin = (originIsLive ? current : byOrigin[origin]).flatMap {
-            $0.acknowledged ? $0 : nil
-        } ?? draftByOrigin[origin]
+        // The window's conversation, whatever its acknowledgement state: preparation names it and
+        // the mode is decided at the SEND (`dialed`), because `connected` may arrive while this turn
+        // waits for a predecessor to quiesce. A create replaces it — the window has moved on — so
+        // only its latest conversation can be continued.
+        let existingForOrigin = originIsLive ? current : byOrigin[origin]
         if case .followUp = selection, let existing = existingForOrigin, existing.origin == origin {
             prepared = CloudPreparedConversation(
                 requestId: utteranceId,
@@ -174,7 +149,10 @@ final class CloudConversationManager {
                 creationRequestId: utteranceId,
                 acknowledged: false
             )
-            draftByOrigin[origin] = opened
+            // The window's own conversation, unacknowledged. A later create of the same window
+            // replaces it — the window has moved on — and `connected` for a replaced one lands on
+            // nothing, which is right: that conversation was never continued.
+            if originIsLive { current = opened } else { byOrigin[origin] = opened }
             prepared = CloudPreparedConversation(
                 requestId: utteranceId,
                 conversationId: opened.id,
@@ -231,14 +209,35 @@ final class CloudConversationManager {
             byOrigin = byOrigin.filter { key, _ in
                 key == origin || authority?.hasAdmittedWork(key) == true
             }
-            // Drafts retire the same way. A draft of an origin that is neither live nor still
-            // admitted work can never receive its acknowledgement, so keeping it is the unbounded
-            // retention the sweep exists to avoid.
-            draftByOrigin = draftByOrigin.filter { key, _ in
-                key == origin || authority?.hasAdmittedWork(key) == true
-            }
         }
         liveOrigin = origin
+    }
+
+    /// The conversation a prepared turn DIALS with, decided at the SEND rather than at preparation.
+    ///
+    /// The rule is one line — a follow-up may only resume a conversation the server has
+    /// acknowledged — but it cannot be answered when the turn is prepared. Preparation happens
+    /// before the sink waits for a predecessor to quiesce, and `connected` for the conversation
+    /// being continued may arrive during that wait: deciding early meant sending `resume` for a
+    /// conversation that was still a draft at the moment it went out.
+    ///
+    /// The prepared REQUEST identity is kept exactly as it is. A transport retry of the same
+    /// logical request must present the same `request_id`, and a request the contract lets us
+    /// retry must keep its conversation and its mode too — so this only ever changes which mode a
+    /// turn is sent with, never the identity of a request already handed out.
+    func dialed(
+        prepared: CloudPreparedConversation,
+        selection: CloudConversationSelection
+    ) -> CloudPreparedConversation {
+        guard selection == .followUp, prepared.mode == Self.resume,
+              !isAcknowledgedForTesting(conversationId: prepared.conversationId)
+        else { return prepared }
+        // Still a draft at the moment of sending: this turn opens its own conversation instead.
+        return CloudPreparedConversation(
+            requestId: prepared.requestId,
+            conversationId: UUID().uuidString,
+            mode: Self.create
+        )
     }
 
     /// Records that the server acknowledged a turn in this conversation by sending `connected`,
@@ -249,18 +248,8 @@ final class CloudConversationManager {
     /// successor window already replaced must not convert the live conversation into something a
     /// follow-up resumes, and it must not resurrect a handle `forget` released.
     func acknowledge(conversationId: String) {
-        // A draft the server just made real becomes ITS window's conversation.
-        if let key = draftByOrigin.first(where: { $0.value.id == conversationId })?.key {
-            let draft = draftByOrigin.removeValue(forKey: key)!
-            let admitted = OpenConversation(
-                id: draft.id, origin: draft.origin, creationRequestId: draft.creationRequestId,
-                acknowledged: true
-            )
-            if draft.origin == liveOrigin { current = admitted } else { byOrigin[draft.origin] = admitted }
-            return
-        }
-        // A conversation ALREADY held was resumed by this turn; mark it rather than replace it, so
-        // a retry's creation request id and an earlier window's handle survive.
+        // Marked IN PLACE, wherever the window holds it, so a retry's creation request id and an
+        // earlier window's handle both survive. An id this client is not holding matches nothing.
         if let live = current, live.id == conversationId {
             current = OpenConversation(
                 id: live.id, origin: live.origin, creationRequestId: live.creationRequestId,
@@ -273,12 +262,6 @@ final class CloudConversationManager {
                 acknowledged: true
             )
         }
-    }
-
-    /// TEST SEAM: whether the manager is holding this conversation at all.
-    func holdsHandleForTesting(conversationId: String) -> Bool {
-        if let live = current, live.id == conversationId { return true }
-        return byOrigin.values.contains { $0.id == conversationId }
     }
 
     /// TEST SEAM: whether the manager currently holds this conversation as resumable.
@@ -295,7 +278,6 @@ final class CloudConversationManager {
     func forget(conversationId: String) {
         if current?.id == conversationId { current = nil }
         byOrigin = byOrigin.filter { $0.value.id != conversationId }
-        draftByOrigin = draftByOrigin.filter { $0.value.id != conversationId }
         // A retained preparation naming the released conversation would hand the same dead id
         // back to a repeated callback for that utterance.
         preparedByUtteranceId = preparedByUtteranceId.filter { $0.value.conversationId != conversationId }
@@ -306,7 +288,6 @@ final class CloudConversationManager {
     func forget() {
         current = nil
         byOrigin.removeAll()
-        draftByOrigin.removeAll()
         preparedByUtteranceId.removeAll()
     }
 

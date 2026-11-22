@@ -1307,17 +1307,29 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // (review 4fc59e2c).
             returnedEarly = false
         }
+        // THE MODE IS DECIDED HERE, at the send, from what this turn actually continues.
+        //
+        // Preparation happens at the top of this function, before the supersede block above waits
+        // for a predecessor to quiesce: a conversation is only resumable once the server has
+        // acknowledged ONE of its turns, and that frame may arrive while this turn waits. Preparing
+        // the mode therefore decided on evidence that was stale by the time the turn went out. The
+        // identity (request id, conversation id) is still the prepared one — a retry must reuse it
+        // — but whether it is a `resume` is read now.
+        let sentConversation = conversationManager.dialed(
+            prepared: conversation,
+            selection: effectiveSelection
+        )
         let turn = CloudTurnEnvelope.make(
             capabilities: CloudClientCapabilities.advertised(rendersStructuredResults: rendersStructuredResults),
             routeHint: routeHintProvider(),
-            conversation: conversation
+            conversation: sentConversation
         )
         // This turn's wire identity, used by the interruption state to bind an acknowledgement or a
         // refusal to the follow-up it resolves.
         let turnRequestId = turn.requestId
         // The conversation this turn carries, used to stamp an interruption report so the report
         // can be discarded if the user abandons that conversation.
-        let turnConversationId = conversation.conversationId
+        let turnConversationId = sentConversation.conversationId
         // Every terminal exit finalizes this request's unresolved hold. Done/refusal already
         // resolve it; cancellation and truncated streams must discard it rather than strand B.
         defer {
