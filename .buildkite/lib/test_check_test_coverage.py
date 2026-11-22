@@ -406,6 +406,30 @@ def main():
     check.KNOWN_FAILURES.clear()
     check.KNOWN_FAILURES.update(saved_known)
 
+    # A tolerance for a failure nobody can reproduce hides the next real one.
+    # These two names passed in six consecutive full-plan CI runs (#143-#148),
+    # including both runs that failed overall, so they are no longer listed and
+    # a failure of either must fail the run like any other. Asserted against the
+    # real list rather than a synthetic entry: putting them back is the defect
+    # this catches, and a synthetic entry would stay green through it.
+    unlisted = (
+        "VoiceSharingGateLossScopeControls/test_iAWithdrawalOvertakenByAnotherMutationIsStillReported",
+        "InterruptionOrderingControl/testRefusalFirstDiscardsAndSubmitsNothing",
+    )
+    for name in unlisted:
+        # One name at a time, so a listing of either is caught on its own rather
+        # than both cases going red together for whichever was put back.
+        # This name alone: a listing of the OTHER name must not make this case
+        # red, or one put-back entry would be blamed on both.
+        ok = (name not in check.FLAKY_TESTS
+              and bool(check.check_failures(reported | {name})))
+        print(f"{'PASS' if ok else 'FAIL'}  {name.rsplit('/', 1)[-1]} is not tolerated: "
+              "a failure of it fails the run")
+        if not ok:
+            print(f"        -> listed={name in check.FLAKY_TESTS}, "
+                  f"fails_run={bool(check.check_failures(reported | {name}))}")
+        results.append(ok)
+
     print(f"\n{sum(results)}/{len(results)} cases behaved as intended")
     return 0 if all(results) else 1
 
