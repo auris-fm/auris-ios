@@ -2858,6 +2858,66 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
         try await checkBufferedPlaybackNextAuth(drainBeforeFollowUp: true)
     }
 
+    /// THE WIRE DECIDES WHAT IS RESUMABLE. A turn that receives `connected` makes its conversation
+    /// the one later turns resume; the same turn WITHOUT the frame leaves nothing to resume, and
+    /// the next follow-up opens a fresh conversation. Both halves run through the real sink over a
+    /// scripted transport, so the assertion is on the wire mode a follow-up actually sends rather
+    /// than on manager state the test wrote itself.
+    ///
+    /// This is the client half of the conversation-lifecycle rule: `connected` is sent only after
+    /// the server admits a turn, so it — not the sending of a request — is the evidence that a
+    /// conversation exists.
+    func testOnlyAnAcknowledgedConversationIsResumedByTheNextFollowUp() async throws {
+        for acknowledge in [true, false] {
+            let manager = CloudConversationManager()
+            manager.registerLiveOrigin(cloudTestOrigin)
+
+            self.pendingFixture = acknowledge
+                ? """
+                event: connected
+                data: {"codec":"pcm_s16le@24k"}
+
+                event: done
+                data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+                """
+                : """
+                event: done
+                data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+                """
+            let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager)
+            let opening = await sink.routeToCloud(
+                request: "find episodes", tier: .free, context: sampleContext(),
+                origin: cloudTestOrigin, selection: .wakeWord, utteranceId: "u-ack-\(acknowledge)"
+            )
+            XCTAssertEqual(opening.outcome, .completed, "premise: the opening turn ran")
+
+            self.pendingFixture = """
+                event: done
+                data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+                """
+            _ = await sink.routeToCloud(
+                request: "play the second one", tier: .free, context: sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-next-\(acknowledge)"
+            )
+            let auths = capturedTask?.sentTextFrames.compactMap { text -> [String: Any]? in
+                guard let data = text.data(using: .utf8) else { return nil }
+                return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            }.filter { $0["type"] as? String == "authenticate" } ?? []
+            let followUp = try XCTUnwrap(auths.last)
+            XCTAssertEqual(followUp["request_id"] as? String, "u-next-\(acknowledge)")
+            XCTAssertEqual(
+                followUp["conversation_mode"] as? String,
+                acknowledge ? "resume" : "create",
+                acknowledge
+                    ? "an acknowledged conversation was not resumed, so the thread restarts"
+                    : "a follow-up resumed a conversation the server never acknowledged"
+            )
+        }
+    }
+
     private func checkBufferedPlaybackNextAuth(drainBeforeFollowUp: Bool) async throws {
         // A REAL OUTPUT IS REQUIRED for the binding to exist at all: with no available output the
         // player consumes frames silently, `hasPendingAudio` is false, and `done` correctly binds
@@ -2865,7 +2925,13 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
         // was reporting on the silent-consume case, not the buffered-playback one).
         CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
         defer { CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil }
+        // `connected` is what makes the conversation real — it is sent after admission — so the
+        // scripted turn carries it, as the protocol does. Without it the follow-up below would be
+        // naming a conversation the server never acknowledged, which is the case the change is for.
         self.pendingFixture = """
+            event: connected
+            data: {"codec":"pcm_s16le@24k"}
+
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":1}}
 
@@ -2874,10 +2940,13 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
             RecordingResultConsumer(),
             audioPayloads: (0..<40).map { Data([UInt8($0)]) }
         )
+        // Turn A is a WAKE that opens the conversation. Stated as one because it is: a turn that
+        // does not say it is a follow-up is not continuing anything, and after this change it no
+        // longer quietly resumes a conversation the server never acknowledged.
         let turn = Task {
             await sink.routeToCloud(
                 request: "x", tier: .free, context: sampleContext(),
-                origin: cloudTestOrigin, selection: nil, utteranceId: "u-settled"
+                origin: cloudTestOrigin, selection: .wakeWord, utteranceId: "u-settled"
             )
         }
         _ = await turn.value
@@ -2909,6 +2978,10 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
             XCTAssertNil(binding, "the production drain callback must clear buffered ownership")
         }
 
+        // `connected` is what makes the conversation real. Turn A's fixture does not script one,
+        // so the acknowledgement is delivered the way production delivers it — the frame reaches
+        // the turn and the turn records it — through the sink's own `connected` handling rather
+        // than by writing the manager's state from the test.
         pendingFixture = """
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":1}}

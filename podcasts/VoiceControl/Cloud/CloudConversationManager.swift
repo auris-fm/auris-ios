@@ -67,6 +67,10 @@ final class CloudConversationManager {
     /// resumes the conversation that window opened, which is what the window-scoped rule is for.
     /// Retired with its origin (see `registerLiveOrigin`), so this is not an immortal second map.
     private var byOrigin: [Int: OpenConversation] = [:]
+    /// The most recent `create` this client prepared and the server has not acknowledged yet.
+    /// One at a time is enough: a new create supersedes the outstanding draft, and the draft's
+    /// own retry is served from `preparedByUtteranceId` rather than from here.
+    private var pendingDraft: OpenConversation?
     /// REQUEST OWNERSHIP: utterance id -> prepared logical request, for utterances prepared in
     /// the LIVE window. Retired wholesale with the window (registerLiveOrigin change) — one
     /// entry per real utterance, never evicted mid-window.
@@ -78,6 +82,8 @@ final class CloudConversationManager {
         /// The logical request that created this conversation. A same-owner retry of that
         /// request reuses the conversation rather than opening a second one.
         let creationRequestId: String
+        /// Whether the server has acknowledged a turn in this conversation.
+        var acknowledged: Bool
     }
 
     /// The conversation a live turn must carry, or nil when the turn's origin is not live.
@@ -126,7 +132,18 @@ final class CloudConversationManager {
         var prepared: CloudPreparedConversation
         // The conversation this turn carries: the one opened FOR ITS OWN ORIGIN, so a delayed
         // admitted turn continues its own window's conversation and never the successor's.
-        let existingForOrigin = originIsLive ? current : byOrigin[origin]
+        //
+        // ONLY AN ACKNOWLEDGED HANDLE DOES. `connected` is sent after admission, and admission is
+        // what makes a conversation real, so an unacknowledged handle is a DRAFT: the transport
+        // may still be running, or the server may have refused this very create without admitting
+        // anything. Naming a draft resumes a thread the user believes in and the server never
+        // held, so it behaves as no handle at all and the turn opens a fresh conversation under
+        // its own request id — the way the window climbs out rather than extending the hole. A
+        // retry of the SAME request never comes through here: it is served from the retained
+        // preparation above, still naming its draft, which is the one case where that is right.
+        let existingForOrigin = (originIsLive ? current : byOrigin[origin]).flatMap {
+            $0.acknowledged ? $0 : nil
+        }
         if case .followUp = selection, let existing = existingForOrigin, existing.origin == origin {
             prepared = CloudPreparedConversation(
                 requestId: utteranceId,
@@ -134,24 +151,18 @@ final class CloudConversationManager {
                 mode: Self.resume
             )
         } else {
-
-            let requestId = utteranceId
-            let conversationId = UUID().uuidString
+            // A create is itself a draft until `connected` arrives, so it is not published as the
+            // window's conversation here.
             let opened = OpenConversation(
-                id: conversationId,
+                id: UUID().uuidString,
                 origin: origin,
-                creationRequestId: requestId
+                creationRequestId: utteranceId,
+                acknowledged: false
             )
-            // A turn of the LIVE window publishes to `current`; a delayed admitted turn keeps
-            // its conversation under its own origin, where its follow-ups will find it.
-            if originIsLive {
-                current = opened
-            } else {
-                byOrigin[origin] = opened
-            }
+            pendingDraft = opened
             prepared = CloudPreparedConversation(
-                requestId: requestId,
-                conversationId: conversationId,
+                requestId: utteranceId,
+                conversationId: opened.id,
                 mode: Self.create
             )
         }
@@ -207,6 +218,52 @@ final class CloudConversationManager {
             }
         }
         liveOrigin = origin
+    }
+
+    /// Records that the server acknowledged a turn in this conversation by sending `connected`,
+    /// making the handle resumable. Called from the turn that RECEIVED the frame, so the binding
+    /// is the wire's rather than an inference from a send that was merely attempted.
+    ///
+    /// An id this client is not holding is ignored: a late acknowledgement for a conversation a
+    /// successor window already replaced must not convert the live conversation into something a
+    /// follow-up resumes, and it must not resurrect a handle `forget` released.
+    func acknowledge(conversationId: String) {
+        // The draft the server just made real becomes the window's conversation.
+        if let draft = pendingDraft, draft.id == conversationId {
+            pendingDraft = nil
+            let admitted = OpenConversation(
+                id: draft.id, origin: draft.origin, creationRequestId: draft.creationRequestId,
+                acknowledged: true
+            )
+            if draft.origin == liveOrigin { current = admitted } else { byOrigin[draft.origin] = admitted }
+            return
+        }
+        // A conversation ALREADY held was resumed by this turn; mark it rather than replace it, so
+        // a retry's creation request id and an earlier window's handle survive.
+        if let live = current, live.id == conversationId {
+            current = OpenConversation(
+                id: live.id, origin: live.origin, creationRequestId: live.creationRequestId,
+                acknowledged: true
+            )
+        } else if let key = byOrigin.first(where: { $0.value.id == conversationId })?.key {
+            let held = byOrigin[key]!
+            byOrigin[key] = OpenConversation(
+                id: held.id, origin: held.origin, creationRequestId: held.creationRequestId,
+                acknowledged: true
+            )
+        }
+    }
+
+    /// TEST SEAM: whether the manager is holding this conversation at all.
+    func holdsHandleForTesting(conversationId: String) -> Bool {
+        if let live = current, live.id == conversationId { return true }
+        return byOrigin.values.contains { $0.id == conversationId }
+    }
+
+    /// TEST SEAM: whether the manager currently holds this conversation as resumable.
+    func isAcknowledgedForTesting(conversationId: String) -> Bool {
+        if let live = current, live.id == conversationId { return live.acknowledged }
+        return byOrigin.values.first { $0.id == conversationId }?.acknowledged ?? false
     }
 
     /// Leaves ONE conversation: the client stops naming it and the server's history expires by

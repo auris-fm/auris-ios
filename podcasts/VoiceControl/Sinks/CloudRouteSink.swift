@@ -317,9 +317,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// the sink. On expiry the hold is dropped and the expiry is logged, never assumed away.
     static let interruptionAcknowledgementTimeout: TimeInterval = 10
 
-    /// The conversation of the most recently admitted turn. A refusal is recorded from the FAILING
+    /// The conversation a report may be attributed to. A refusal is recorded from the FAILING
     /// turn, which is the same conversation as the turn it interrupted (a barge-in continues the
     /// conversation), so this is the id the retained report must carry.
+    ///
+    /// Stamped when `connected` arrives, not when a turn is sent: an id for a conversation the
+    /// server has not admitted is provisional, and a stamp taken from it made the next turn treat
+    /// a live conversation as changed and discard a report it owed.
     @MainActor private var lastAdmittedConversationId: String?
 
     /// The turn socket currently open, so an ordering control can establish that a PRIOR turn is
@@ -1314,6 +1318,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // The conversation this turn carries, used to stamp an interruption report so the report
         // can be discarded if the user abandons that conversation.
         let turnConversationId = conversation.conversationId
+        var sawConnected = false
+        // This turn's conversation is a CANDIDATE for attribution; it is stamped only once the
+        // server acknowledges it, and withdrawn below if the turn ends without that.
         lastAdmittedConversationId = turnConversationId
         // Every terminal exit finalizes this request's unresolved hold. Done/refusal already
         // resolve it; cancellation and truncated streams must discard it rather than strand B.
@@ -1327,6 +1334,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 )
             )
             turnToken.markAcknowledgement(.failed)
+            // A turn that ended without `connected` never established the conversation it named,
+            // so it must not become the conversation a pending report is attributed to.
+            if !sawConnected { lastAdmittedConversationId = nil }
         }
 
         // NOTHING is retained for replay. An earlier version kept the prepared request so a retry
@@ -1516,6 +1526,19 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // The server names the codec for this turn's binary frames;
                     // the player decodes at that rate rather than the hardware's.
                     audioPlayer.setNegotiatedCodec(codec)
+                    // THE CONVERSATION BECAME REAL. `connected` is sent only after admission, so
+                    // this frame — not the send that preceded it — is the client's only evidence
+                    // that the server holds the conversation this turn named. Recorded where the
+                    // frame arrives: a create the server refused is never made the window's
+                    // conversation, and the next utterance opens a fresh one instead of resuming
+                    // a thread that never existed.
+                    // The STAMP follows the same rule. It lives on the interruption state and
+                    // decides whether a pending report is abandoned as belonging to a different
+                    // conversation; stamping it at send time told the next turn its conversation
+                    // had changed and threw the report away.
+                    lastAdmittedConversationId = turnConversationId
+                    conversationManager.acknowledge(conversationId: turnConversationId)
+                    sawConnected = true
                 case let .audioFrame(frame):
                     // Owner cancellation gates buffered audio admission too: a frame drained
                     // after cancel must not reach the player.
