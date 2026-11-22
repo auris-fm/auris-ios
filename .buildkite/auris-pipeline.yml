@@ -61,4 +61,5 @@ steps:
     artifact_paths:
       - "artifacts/*.ipa"
       - "artifacts/*.xcarchive.zip"
+      - "artifacts/*.app.dSYM.zip"
       - "artifacts/*.log"

@@ -43,15 +43,32 @@ assert_toolchain() {
 # is right for build-and-test and wrong here: a TestFlight build from it would
 # reach testers with blank keys. So this step never generates the file — it
 # refuses, before any archive, unless the file exists AND holds non-empty values.
+# Two sources are legitimate. A local LocalApiCredentials.swift wins in the
+# build phase; otherwise scripts/build-phases/generate-credentials.sh generates
+# from CREDENTIALS_JSON_PATH (config/PocketCasts.base.xcconfig), which is how an
+# internal contributor's machine is provisioned. Either is fine; neither, or a
+# stub-shaped one, is not.
 assert_real_credentials() {
   local f=podcasts/Credentials/LocalApiCredentials.swift
-  [[ -f "$f" ]] || {
-    echo "missing $f: a beta archive needs real API credentials, not the empty stub"; return 1; }
-  # Empty-valued (the stub) or still-placeholder (the raw template) both fail.
-  if grep -qE '"(%\{[^}]*\})?"' "$f"; then
-    echo "$f holds empty or placeholder credentials; refusing to archive a build testers cannot use"
-    return 1
+  local json="$HOME/.configure/pocketcasts-ios/secrets/pocket_casts_credentials.json"
+  if [[ -f "$f" ]]; then
+    # Empty-valued (the stub) or still-placeholder (the raw template) both fail.
+    if grep -qE '"(%\{[^}]*\})?"' "$f"; then
+      echo "$f holds empty or placeholder credentials; refusing to archive a build testers cannot use"
+      return 1
+    fi
+    return 0
   fi
+  if [[ -r "$json" ]]; then
+    # An object with no entries would generate blank values just as the stub does.
+    if tr -d '[:space:]' < "$json" | grep -qE '^\{\}$'; then
+      echo "$json holds no credentials; refusing to archive a build testers cannot use"
+      return 1
+    fi
+    return 0
+  fi
+  echo "missing $f (or $json): a beta archive needs real API credentials, not the empty stub"
+  return 1
 }
 
 prepare_inputs() {
@@ -64,14 +81,21 @@ prepare_inputs() {
   bundle check >/dev/null 2>&1 || bundle install --quiet
 }
 
-preflight() {
+# The signing key is checked FIRST, before any input preparation: a cold
+# checkout must not spend a full llama.cpp build and gem install discovering
+# that the agent has no key.
+assert_signing_env() {
   fail=0
-  [[ -d ThirdParty/llama-cpp-build/ios-device/lfm ]] || { echo "device llama build missing"; fail=1; }
   for v in APP_STORE_CONNECT_API_KEY_KEY_ID APP_STORE_CONNECT_API_KEY_ISSUER_ID APP_STORE_CONNECT_API_KEY_KEY; do
     [[ -n "${!v:-}" ]] || { echo "missing env: $v"; fail=1; }
   done
-  [[ "$fail" == 0 ]] && echo "auris-beta-upload: preflight OK"
   return "$fail"
+}
+
+preflight() {
+  assert_signing_env || return 1
+  [[ -d ThirdParty/llama-cpp-build/ios-device/lfm ]] || { echo "device llama build missing"; return 1; }
+  echo "auris-beta-upload: preflight OK"
 }
 
 if [[ "${1:-}" == "--check" ]]; then
@@ -80,6 +104,7 @@ if [[ "${1:-}" == "--check" ]]; then
 fi
 
 : "${BUILDKITE_BUILD_NUMBER:?must run under Buildkite}"
+assert_signing_env
 assert_toolchain
 assert_real_credentials
 prepare_inputs

@@ -713,6 +713,7 @@ platform :ios do
   AURIS_BUILD_OUTPUT_NAME = 'auris'
   AURIS_XCARCHIVE_PATH = File.join(ARTIFACTS_FOLDER, "#{AURIS_BUILD_OUTPUT_NAME}.xcarchive")
   AURIS_IPA_PATH = File.join(ARTIFACTS_FOLDER, "#{AURIS_BUILD_OUTPUT_NAME}.ipa")
+  AURIS_XCARCHIVE_ZIP_PATH = File.join(ARTIFACTS_FOLDER, "#{AURIS_BUILD_OUTPUT_NAME}.xcarchive.zip")
 
   # Writes the App Store Connect API key (from the three env vars the
   # upload uses) into a fresh temporary directory so xcodebuild can read
@@ -761,6 +762,11 @@ platform :ios do
         output_directory: ARTIFACTS_FOLDER,
         output_name: AURIS_BUILD_OUTPUT_NAME
       )
+
+      # `build_app` writes the ipa and its dSYM zip but leaves the .xcarchive
+      # unzipped. Zip it so a gate-off dry run keeps an installable, inspectable
+      # archive — the pipeline declares artifacts/*.xcarchive.zip.
+      zip(path: AURIS_XCARCHIVE_PATH, output_path: AURIS_XCARCHIVE_ZIP_PATH)
     ensure
       FileUtils.remove_entry_secure(key_dir)
     end

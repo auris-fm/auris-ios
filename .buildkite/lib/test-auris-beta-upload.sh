@@ -302,6 +302,50 @@ run_env FAKE_XCODE=15.0
 [[ "$(env_calls)" != *"auris_beta_build"* ]] || fail "archived under the wrong Xcode (calls: $(env_calls))"
 report "refuses an Xcode other than the repo pin, before archiving"
 
+# 13. A missing signing key must fail in seconds, not after a full llama.cpp
+#     build and gem install. The header promises this; the order must deliver it.
+#     Mutant: `prepare_inputs` before the env-var check.
+make_env_repo
+run_env APP_STORE_CONNECT_API_KEY_KEY=
+[[ "$status" != 0 ]] || fail "missing key accepted"
+[[ "$(env_calls)" != *"llama-build"* ]] || fail "built llama before checking the signing key (calls: $(env_calls))"
+[[ "$(env_calls)" != *"bundle install"* ]] || fail "installed gems before checking the signing key (calls: $(env_calls))"
+report "checks the signing key before any heavy input preparation"
+
+# 14. The repo's documented INTERNAL credential source must be accepted: the
+#     build phase generates ApiCredentials.swift from CREDENTIALS_JSON_PATH when
+#     LocalApiCredentials.swift is absent (scripts/build-phases/generate-credentials.sh).
+#     Refusing that agent would refuse a build that gets real values.
+make_env_repo
+rm -f "$TMP/env/podcasts/Credentials/LocalApiCredentials.swift"
+mkdir -p "$TMP/.configure/pocketcasts-ios/secrets"
+echo '{"sentry_dsn":"https://example.invalid/1"}' > "$TMP/.configure/pocketcasts-ios/secrets/pocket_casts_credentials.json"
+run_env
+[[ "$status" == 0 ]] || fail "refused the internal secrets source (got: $out)"
+[[ "$(env_calls)" == *"auris_beta_build"* ]] || fail "did not archive with internal secrets (calls: $(env_calls))"
+report "accepts the repo's internal secrets JSON as a credentials source"
+
+# 14b. An EMPTY internal secrets file is no better than the stub: it would
+#      generate blank values. Mutant: accepting the path on existence alone.
+make_env_repo
+rm -f "$TMP/env/podcasts/Credentials/LocalApiCredentials.swift"
+mkdir -p "$TMP/.configure/pocketcasts-ios/secrets"
+echo '{}' > "$TMP/.configure/pocketcasts-ios/secrets/pocket_casts_credentials.json"
+run_env
+[[ "$status" != 0 ]] || fail "archived from an empty internal secrets file"
+[[ "$(env_calls)" != *"auris_beta_build"* ]] || fail "archived from empty internal secrets (calls: $(env_calls))"
+report "refuses an internal secrets file with no values"
+
+# 14c. Neither source present: still refuses, and names both so the reader knows
+#      either route works. Pins that adding the second source did not remove the refusal.
+make_env_repo
+rm -f "$TMP/env/podcasts/Credentials/LocalApiCredentials.swift"
+rm -rf "$TMP/.configure"
+run_env
+[[ "$status" != 0 ]] || fail "archived with no credentials source at all"
+[[ "$out" == *"pocket_casts_credentials.json"* ]] || fail "internal source not named as an alternative (got: $out)"
+report "refuses when neither credentials source is present, naming both"
+
 echo "$cases/$cases upload-gate and environment cases passed"
 
 # Pipeline: the upload step exists, runs only on main, and waits for the
@@ -313,6 +357,14 @@ grep -q "depends_on: build-and-test" "$PIPE" || fail "beta-upload step does not 
 # nothing anyone can inspect or install.
 awk '/key: beta-upload/,/^  - label:|^$/' "$PIPE" | grep -q 'artifacts/\*.ipa' \
   || fail "beta-upload step keeps no archive artifact"
+# Every declared glob must match something the lane actually writes, or the
+# claim "the archive is kept" is only partly true. `build_app` alone writes the
+# ipa and the dSYM zip; the .xcarchive.zip needs an explicit `zip` call.
+FASTFILE="$ROOT/fastlane/Fastfile"
+awk '/^  lane :auris_beta_build/,/^  end/' "$FASTFILE" | grep -q 'zip(path: AURIS_XCARCHIVE_PATH' \
+  || fail "pipeline declares artifacts/*.xcarchive.zip but the lane never zips the archive"
+awk '/key: beta-upload/,/^  - label:|^$/' "$PIPE" | grep -q 'artifacts/\*.app.dSYM.zip' \
+  || fail "dSYMs are written beside the ipa but not declared as artifacts"
 echo "ok: pipeline gates the upload step correctly and keeps the archive"
 
 echo "all auris-beta-upload self-tests passed"
