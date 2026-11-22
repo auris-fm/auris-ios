@@ -132,12 +132,6 @@ KNOWN_FAILURES = {
 # fail instead of hiding the frequency. They are not in KNOWN_FAILURES: that
 # list means "fails every time", and a test that also passes would break its
 # own entry.
-#
-# A name belongs here only while it is actually seen failing. Two were removed
-# after passing in six consecutive full-plan runs (#143-#148), including both
-# runs that failed overall: a tolerance for a failure nobody can reproduce
-# hides the next real one. If either fails again it is a live reproduction, and
-# the run goes red rather than printing a frequency.
 FLAKY_TESTS = {
     # Runs on both builds but only fails on some runs: it passed in the unsigned
     # recording and failed in the signed one. Either outcome is accepted and the

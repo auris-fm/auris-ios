@@ -416,19 +416,43 @@ def main():
         "VoiceSharingGateLossScopeControls/test_iAWithdrawalOvertakenByAnotherMutationIsStillReported",
         "InterruptionOrderingControl/testRefusalFirstDiscardsAndSubmitsNothing",
     )
+    # The consequence is asserted on {name} ALONE, with KNOWN_FAILURES saved and
+    # cleared as the synthetic cases do. Unioning with `reported` would let a
+    # recording that already holds an unlisted failure make this half pass
+    # whatever the list says: the run would be red for the recording, not for
+    # the guard. One name at a time, so listing either is caught on its own.
+    saved_known_for_unlisted = dict(check.KNOWN_FAILURES)
+    check.KNOWN_FAILURES.clear()
     for name in unlisted:
-        # One name at a time, so a listing of either is caught on its own rather
-        # than both cases going red together for whichever was put back.
-        # This name alone: a listing of the OTHER name must not make this case
-        # red, or one put-back entry would be blamed on both.
-        ok = (name not in check.FLAKY_TESTS
-              and bool(check.check_failures(reported | {name})))
+        fails_alone = bool(check.check_failures({name}))
+        ok = name not in check.FLAKY_TESTS and fails_alone
         print(f"{'PASS' if ok else 'FAIL'}  {name.rsplit('/', 1)[-1]} is not tolerated: "
               "a failure of it fails the run")
         if not ok:
             print(f"        -> listed={name in check.FLAKY_TESTS}, "
-                  f"fails_run={bool(check.check_failures(reported | {name}))}")
+                  f"fails_run={fails_alone}")
         results.append(ok)
+    # And the trap that made the first version of these cases weak: with a
+    # recording that already holds an unlisted failure, `reported | {name}` is
+    # red whatever the list says, so the consequence half would pass against a
+    # put-back entry. Asserted directly, on a listed name and a dirty set.
+    probe = unlisted[0]
+    saved_probe = check.FLAKY_TESTS.get(probe)
+    check.FLAKY_TESTS[probe] = "listed by this case to prove the union is blind"
+    dirty = reported | {"SomethingTests/testUnlistedInThisCase()"}
+    union_blind = bool(check.check_failures(dirty | {probe}))
+    alone_sees_it = not bool(check.check_failures({probe}))
+    if saved_probe is None:
+        del check.FLAKY_TESTS[probe]
+    else:
+        check.FLAKY_TESTS[probe] = saved_probe
+    ok = union_blind and alone_sees_it
+    print(f"{'PASS' if ok else 'FAIL'}  a dirty recording cannot stand in for the "
+          "consequence: only the name alone shows a listing")
+    if not ok:
+        print(f"        -> union_blind={union_blind}, alone_sees_it={alone_sees_it}")
+    results.append(ok)
+    check.KNOWN_FAILURES.update(saved_known_for_unlisted)
 
     print(f"\n{sum(results)}/{len(results)} cases behaved as intended")
     return 0 if all(results) else 1
