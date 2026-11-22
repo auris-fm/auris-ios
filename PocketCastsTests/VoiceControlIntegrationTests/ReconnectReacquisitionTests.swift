@@ -282,10 +282,17 @@ final class ReconnectReacquisitionTests: XCTestCase {
         )
     }
 
-    @MainActor
-    private func waitUntil(timeout: TimeInterval, _ condition: () -> Bool) async {
+    /// Polls off the main actor.
+    ///
+    /// The work these cases wait on runs on the main actor, so polling there
+    /// competes with it: under load the window is spent on the poll and the work
+    /// never gets to run. The conditions read only the fake session's counters,
+    /// which are safe from any thread.
+    private nonisolated func waitUntil(timeout: TimeInterval,
+                                       _ condition: @escaping @MainActor () -> Bool) async {
         let deadline = Date().addingTimeInterval(timeout)
-        while !condition(), Date() < deadline {
+        while Date() < deadline {
+            if await MainActor.run(body: condition) { return }
             try? await Task.sleep(for: .milliseconds(10))
         }
     }
