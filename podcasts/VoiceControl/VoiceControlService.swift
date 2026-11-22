@@ -889,9 +889,16 @@ class VoiceControlService: ObservableObject {
         }
 
         // Single-flight LFM load — one task even if startIfAllowed were re-entered.
+        // Capture the ROUTER, not `self`, across the download. `guard let self` above an `await`
+        // keeps the whole service alive for as long as the model fetch takes — on a cold cache that
+        // outlives `stop()`, so a stopped service could not deallocate until the download finished.
+        // The router is what the await actually needs; everything after it re-binds weakly and does
+        // nothing if the service is gone. The download itself is deliberately NOT cancelled: it is
+        // single-flight and shared, so cancelling it would penalise the next start.
+        let router = intentRouter
         intentRouterReadyTask = Task { [weak self] in
+            let result = await router.ensureReady()
             guard let self else { return }
-            let result = await self.intentRouter.ensureReady()
             switch result {
             case .success:
                 FileLog.shared.addMessage("[VoicePipeline] Intent router ready")
