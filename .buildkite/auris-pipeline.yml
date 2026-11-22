@@ -55,3 +55,10 @@ steps:
     allow_dependency_failure: false
     timeout_in_minutes: 60
     command: .buildkite/commands/auris-beta-upload.sh
+    # A run without BETA_UPLOAD=1 leaves a signed archive and nothing else.
+    # Keep it: it is the artifact a person installs to check a build, and the
+    # only evidence of what was signed when the upload is deliberately off.
+    artifact_paths:
+      - "artifacts/*.ipa"
+      - "artifacts/*.xcarchive.zip"
+      - "artifacts/*.log"

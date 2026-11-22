@@ -710,7 +710,6 @@ platform :ios do
   # used, and nothing here touches the enterprise/prototype configuration.
   # ------------------------------------------------------------------
 
-  AURIS_APP_BUNDLE_IDENTIFIER = 'fm.auris'
   AURIS_BUILD_OUTPUT_NAME = 'auris'
   AURIS_XCARCHIVE_PATH = File.join(ARTIFACTS_FOLDER, "#{AURIS_BUILD_OUTPUT_NAME}.xcarchive")
   AURIS_IPA_PATH = File.join(ARTIFACTS_FOLDER, "#{AURIS_BUILD_OUTPUT_NAME}.ipa")

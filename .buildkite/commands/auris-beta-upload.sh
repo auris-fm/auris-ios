@@ -14,9 +14,42 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
+# Same toolchain reasoning as the sibling build-and-test step: the agent's
+# service PATH is Homebrew plus system directories, so `ruby` would resolve to
+# macOS's own while the repo pins another version. Shims first, then assert the
+# pins — an archive built by another toolchain does not vouch for this one.
+export PATH="$HOME/.rbenv/shims:$PATH"
+
+assert_toolchain() {
+  local want_xcode want_ruby out
+  want_xcode="$(sed -E 's/^~> ?//' .xcode-version)"
+  out="$(xcodebuild -version)"
+  grep -q "Xcode $want_xcode" <<< "$out" || {
+    echo "expected Xcode $want_xcode (from .xcode-version), got: $out"; return 1; }
+  want_ruby="$(cat .ruby-version)"
+  out="$(ruby --version)"
+  grep -q "$want_ruby" <<< "$out" || {
+    echo "expected Ruby $want_ruby (from .ruby-version), got: $out"; return 1; }
+}
+
+# Inputs the archive needs that a fresh checkout does not carry. Each is
+# created here rather than assumed present: the sibling job builds them into
+# its own checkout, and this step runs in a different one.
+prepare_inputs() {
+  if [[ ! -f podcasts/Credentials/LocalApiCredentials.swift ]]; then
+    make external_contributor
+  fi
+  if [[ ! -d ThirdParty/llama-cpp-build/ios-device/lfm ]]; then
+    "${LLAMA_BUILD_SCRIPT:-./scripts/build-llama-ios.sh}"
+  fi
+  # Gems live in vendor/bundle (.bundle/config), so `fastlane` is never on
+  # PATH here: check the bundle rather than a global binary, and install only
+  # when something is actually missing.
+  bundle check >/dev/null 2>&1 || bundle install --quiet
+}
+
 preflight() {
   fail=0
-  command -v fastlane >/dev/null || { echo "no fastlane on PATH"; fail=1; }
   [[ -d ThirdParty/llama-cpp-build/ios-device/lfm ]] || { echo "device llama build missing"; fail=1; }
   for v in APP_STORE_CONNECT_API_KEY_KEY_ID APP_STORE_CONNECT_API_KEY_ISSUER_ID APP_STORE_CONNECT_API_KEY_KEY; do
     [[ -n "${!v:-}" ]] || { echo "missing env: $v"; fail=1; }
@@ -31,11 +64,10 @@ if [[ "${1:-}" == "--check" ]]; then
 fi
 
 : "${BUILDKITE_BUILD_NUMBER:?must run under Buildkite}"
+assert_toolchain
+prepare_inputs
 preflight
 
-if [[ ! -d vendor/bundle ]]; then
-  bundle install --quiet
-fi
 bundle exec fastlane auris_beta_build build_number:"$BUILDKITE_BUILD_NUMBER"
 
 # Archiving and signing happen on every main run; publishing to TestFlight
