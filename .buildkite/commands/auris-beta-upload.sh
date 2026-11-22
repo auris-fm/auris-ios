@@ -23,6 +23,12 @@ cd "$(dirname "$0")/../.."
 # pins — an archive built by another toolchain does not vouch for this one.
 export PATH="$HOME/.rbenv/shims:$PATH"
 
+# fastlane requires a UTF-8 locale and a Buildkite job has no login shell to set
+# one: with LANG/LC_ALL unset, `locale charmap` reports US-ASCII and fastlane
+# errors on every run. Set it here so the step does not depend on the agent's
+# environment hook happening to provide it.
+export LANG="${LANG:-en_US.UTF-8}" LC_ALL="${LC_ALL:-en_US.UTF-8}"
+
 assert_toolchain() {
   local want_xcode want_ruby out
   want_xcode="$(sed -E 's/^~> ?//' .xcode-version)"

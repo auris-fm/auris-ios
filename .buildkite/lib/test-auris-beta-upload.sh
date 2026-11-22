@@ -165,6 +165,7 @@ make_env_repo() {
   cat > "$TMP/env/bin/bundle" <<STUB
 #!/bin/sh
 echo "bundle \$@" >> "$TMP/env/calls.txt"
+echo "\${LC_ALL:-\${LANG:-unset}}" > "$TMP/env/locale.txt"
 if [ "\$1" = "check" ]; then exit \${BUNDLE_CHECK_EXIT:-1}; fi
 exit 0
 STUB
@@ -345,6 +346,17 @@ run_env
 [[ "$status" != 0 ]] || fail "archived with no credentials source at all"
 [[ "$out" == *"pocket_casts_credentials.json"* ]] || fail "internal source not named as an alternative (got: $out)"
 report "refuses when neither credentials source is present, naming both"
+
+# 15. fastlane needs a UTF-8 locale and a Buildkite job has no login shell to
+#     provide one: with LANG/LC_ALL unset, `locale charmap` is US-ASCII and
+#     fastlane prints its "requires your locale to be set to UTF-8" error on
+#     every run. The step must set it itself rather than depend on the agent's
+#     hook happening to do so. Mutant: dropping the export.
+make_env_repo
+run_env
+[[ "$status" == 0 ]] || fail "run failed (got: $out)"
+grep -q 'UTF-8' "$TMP/env/locale.txt" 2>/dev/null || fail "no UTF-8 locale exported to the lanes (got: $(cat "$TMP/env/locale.txt" 2>/dev/null))"
+report "exports a UTF-8 locale for fastlane"
 
 echo "$cases/$cases upload-gate and environment cases passed"
 
