@@ -259,6 +259,16 @@ final class CloudRouteClient {
         /// turn is still unheard, so it is still abandonable, not a transport loss.
         private var abandonedBeforeAuthentication = false
 
+        /// Whether this lifetime was closed BY a winning abandonment, as opposed to any other close.
+        /// Read at the bind-rejection site: an abandonment closes before the producer binds, so that
+        /// is the path a won abandonment takes, and it must not report a connection failure for a turn
+        /// that was deliberately taken away before it sent anything.
+        fileprivate var wasAbandonedBeforeAuthentication: Bool {
+            closeLock.lock()
+            defer { closeLock.unlock() }
+            return abandonedBeforeAuthentication
+        }
+
         /// True once the lifetime has closed. Read by the binding site so a socket that closed
         /// before its transport registered retires immediately at bind time instead of leaking.
         fileprivate var isClosed: Bool {
@@ -777,8 +787,23 @@ final class CloudRouteClient {
             if !lifetime.bind(requestId: turn.requestId, identity: socketRegistration, client: self, wsTask: wsTask) {
                 retireSocket(requestId: turn.requestId, identity: socketRegistration)
                 wsTask.cancel(with: .goingAway, reason: nil)
-                FileLog.shared.addMessage("[CloudRoute] connection_lost: the socket closed before the turn was submitted")
-                continuation.yield(.error(source: .requestConstruction, code: "connection_lost", message: "turn closed before submission"))
+                // WHY THE BIND WAS REJECTED DECIDES WHETHER THIS IS A FAILURE.
+                //
+                // An ABANDONMENT closes the lifetime before the producer reaches this bind, so this
+                // is the path a won abandonment actually takes — not the later auth-send refusal,
+                // which it never reaches. Reporting `connection_lost` here would speak a connection
+                // failure for a turn that was deliberately taken away before it sent anything.
+                //
+                // Any OTHER rejection is a real late bind against a settled lifetime and must still
+                // surface as a terminal transport fact, never as a silent no-op.
+                if lifetime.wasAbandonedBeforeAuthentication {
+                    FileLog.shared.addMessage(
+                        "[CloudRoute] turn abandoned before authentication — nothing submitted (request_id=\(turn.requestId))"
+                    )
+                } else {
+                    FileLog.shared.addMessage("[CloudRoute] connection_lost: the socket closed before the turn was submitted")
+                    continuation.yield(.error(source: .requestConstruction, code: "connection_lost", message: "turn closed before submission"))
+                }
                 continuation.finish()
                 return true
             }
