@@ -5306,7 +5306,8 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
         XCTAssertTrue(bound, "premise: the sink must have published its result binding")
-        let priorSocket = try XCTUnwrap(await MainActor.run { sink.activeResultSocketForTesting })
+        let observedSocket = await MainActor.run { sink.activeResultSocketForTesting }
+        let priorSocket = try XCTUnwrap(observedSocket)
 
         // FIRST abandonment wins: nothing of this turn was submitted.
         let first = await MainActor.run { priorSocket.abandonBeforeAuthentication() }
@@ -5333,6 +5334,12 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// settled history that turn created.
     func testATurnThatAuthenticatedAndThenClosedIsNotAbandonable() async throws {
         self.nextTurnFixture = Self.doneOnlyFixture
+        // HOLD the terminal until the handle has been captured. A done-only turn authenticates and
+        // finishes in well under a millisecond (measured: 0.3 ms from auth frame to terminal), so an
+        // unheld run publishes and clears its binding between two polls and the premise finds
+        // nothing — a fixture race, not a behaviour.
+        let gate = holdNextTurn()
+        addTeardownBlock { gate.release() }
         let sink = makeSink()
 
         // A runs to its terminal on its own: it authenticates, completes, and its lifetime closes
@@ -5354,6 +5361,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
         let priorSocket = try XCTUnwrap(captured, "premise: the sink must publish its result binding")
+        gate.release()
         let priorResult = await prior.value
         XCTAssertEqual(priorResult.outcome, .completed, "premise: the predecessor must have run to a terminal")
         let priorTask = try XCTUnwrap(capturedTask)
