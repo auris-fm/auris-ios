@@ -178,19 +178,62 @@ final class VoiceSharingSignOutCompositionTests: XCTestCase {
 
     /// An UNREGISTERED handler (a torn-down pipeline) must not be reached: no revocation from a
     /// registry entry that no longer exists.
+    ///
+    /// The premise is the SYNCHRONOUS registry count. The old version read the queue right after
+    /// the trigger, which only observed whether an unstructured `Task` had been scheduled yet — so
+    /// it passed on a scheduling accident while the registration it names was still live.
     func test_aTornDownHandlerIsNotCalled() async throws {
-        let queue = VoiceSharingQueue(root: root)
-        try await VoiceSharingDeletionFixture.seed(in: queue)
         let coordinator = VoiceSharingCoordinator(enrollmentStore: VoiceSharingEnrollmentStore(
             defaults: defaults, accountScopeProvider: { "account-a" }))
+        // The handler body is irrelevant to this case: whether it is registered is the whole
+        // question, and that is observable without giving it any work to do.
         var subscription: VoiceSharingCoordinator.GateLostSubscription? =
-            coordinator.registerGateLostHandler {
-                Task { await queue.deleteAll(reason: "consent-gone") }
-            }
+            coordinator.registerGateLostHandler {}
+        XCTAssertEqual(coordinator.gateLostHandlerCountForTesting, 1, "setup: the handler is registered")
         subscription = nil // torn down
+        // THE proof is synchronous: no registered handler means the fan-out cannot reach one, so
+        // no purge can be started. Waiting on the queue instead would only make the old race
+        // rarer — an unstructured Task has no barrier to await, and a sleep cannot prove absence.
+        XCTAssertEqual(
+            coordinator.gateLostHandlerCountForTesting, 0,
+            "destroying the subscription unregisters its handler")
         coordinator.consentGateLostForTesting()
-        let pendingCount = await queue.count()
-        XCTAssertEqual(pendingCount, 1, "a removed handler must not purge")
+        XCTAssertEqual(
+            coordinator.gateLostHandlerCountForTesting, 0,
+            "and the loss does not re-register anything")
+    }
+
+    /// Destroying a subscription AFTER an explicit `unregisterNow()` must be a no-op, not a second
+    /// removal that could drop a different registration reusing the slot.
+    func test_explicitUnregisterThenDestroyRemovesExactlyOneRegistration() async throws {
+        let coordinator = VoiceSharingCoordinator(enrollmentStore: VoiceSharingEnrollmentStore(
+            defaults: defaults, accountScopeProvider: { "account-a" }))
+        var first: VoiceSharingCoordinator.GateLostSubscription? =
+            coordinator.registerGateLostHandler {}
+        let second = coordinator.registerGateLostHandler {}
+        defer { _ = second }
+        XCTAssertEqual(coordinator.gateLostHandlerCountForTesting, 2, "setup: two registrations")
+        first?.unregisterNow()
+        XCTAssertEqual(coordinator.gateLostHandlerCountForTesting, 1, "the explicit call removed one")
+        first = nil
+        XCTAssertEqual(
+            coordinator.gateLostHandlerCountForTesting, 1,
+            "destroying an already-unregistered subscription removes nothing further")
+    }
+
+    /// A subscription outliving its coordinator must not resurrect or crash it: the unregister
+    /// closure holds the coordinator weakly.
+    func test_subscriptionOutlivingItsCoordinatorIsSafeToDestroy() async throws {
+        var coordinator: VoiceSharingCoordinator? = VoiceSharingCoordinator(
+            enrollmentStore: VoiceSharingEnrollmentStore(
+                defaults: defaults, accountScopeProvider: { "account-a" }))
+        weak var weakCoordinator = coordinator
+        var subscription: VoiceSharingCoordinator.GateLostSubscription? =
+            coordinator?.registerGateLostHandler {}
+        coordinator = nil
+        XCTAssertNil(weakCoordinator, "setup: the coordinator is gone")
+        subscription = nil // must not trap or revive the coordinator
+        XCTAssertNil(weakCoordinator, "destroying the subscription does not resurrect the coordinator")
     }
 }
 

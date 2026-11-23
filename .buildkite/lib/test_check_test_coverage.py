@@ -111,10 +111,14 @@ def main():
         coverage_lost = [f for f in baseline_failures if "failed and is not a known" not in f
                          and "listed as a known failure but passed" not in f]
         if coverage_lost:
-            print("FAIL  baseline run is not complete; the cases below prove nothing")
+            # The floor/skip cases below compare against this run, so a
+            # truncated baseline voids them; the package-guard cases are
+            # synthetic and stand on their own, so they still run and are
+            # still counted.
+            print("FAIL  baseline run is not complete; floor and skip cases are void")
             for f in coverage_lost:
                 print(f"        -> {f}")
-            return 1
+            results.append(False)
         print("      this recording has failures the guard does not recognise:")
         for f in baseline_failures:
             print(f"        -> {f}")
@@ -150,20 +154,100 @@ def main():
                         json.dumps(narrowed), expect_failure=True,
                         expected_text="narrowed to", signed=signed, bundle=bundle))
 
-    # A blocked target comes back to the plan without being made required.
-    restored = json.loads(PLAN)
-    restored["testTargets"].append({
-        "target": {
-            "containerPath": "container:Modules",
-            "identifier": "PocketCastsDataModelTests",
-            "name": "PocketCastsDataModelTests",
-        }
-    })
-    failures = run_guard(base, json.dumps(restored), bundle=bundle)
-    ok = any("still listed as blocked" in f for f in failures)
-    for f in failures:
+    # No target may silently vanish. Each target this PR made required — the
+    # three new simulator bundles and the host-runner macro bundle — is dropped
+    # in turn, and the guard must name it.
+    for target in ("PocketCastsDataModelTests", "PocketCastsServerTests",
+                   "ModulesTests"):
+        dropped_target = copy.deepcopy(base)
+        node = dropped_target["testNodes"][0]
+        node["children"] = [c for c in node["children"] if c["name"] != target]
+        results.append(case(f"newly required target {target} runs nothing",
+                            dropped_target, PLAN, expect_failure=True,
+                            expected_text=target, signed=signed, bundle=bundle))
+
+    # The host bundle: identity must be exact (a renamed bundle is missing, not
+    # partially found), a run under the floor fails, a failing macro test fails,
+    # and a skip is a failure — the macro tests have no environment to lack.
+    def synthetic_host(result="Passed", names=None):
+        default = [f"GRDBRecordMacroTests/test{i}()" for i in range(22)]
+        names = default if names is None else names
+        return {"testNodes": [{
+            "nodeType": "Test Plan", "name": "All", "children": [{
+                "nodeType": "Unit test bundle", "name": "GRDBMacrosTests",
+                "children": [{
+                    "nodeType": "Test Case", "result": result,
+                    "nodeIdentifier": n,
+                } for n in names],
+            }],
+        }]}
+    good_host = synthetic_host()
+    host_failures = check.check_package_coverage(good_host, check.count_tests(good_host))
+    ok = not host_failures
+    print(f"{'PASS' if ok else 'FAIL'}  complete host bundle passes the package guard")
+    for f in host_failures:
         print(f"        -> {f}")
-    print(f"{'PASS' if ok else 'FAIL'}  blocked target returns without being required")
+    results.append(ok)
+
+    missing_host = synthetic_host(names=[])
+    host_failures = check.check_package_coverage(missing_host, check.count_tests(missing_host))
+    ok = any("executed 0 tests" in f for f in host_failures)
+    print(f"{'PASS' if ok else 'FAIL'}  host bundle running nothing fails on its floor")
+    for f in host_failures:
+        print(f"        -> {f}")
+    results.append(ok)
+
+    renamed_host = synthetic_host()
+    renamed_host["testNodes"][0]["children"][0]["name"] = "GRDBMacrosTests.xctest"
+    host_failures = check.check_package_coverage(renamed_host, check.count_tests(renamed_host))
+    ok = any("produced no result bundle entries" in f for f in host_failures)
+    print(f"{'PASS' if ok else 'FAIL'}  renamed host bundle counts as missing, not partial")
+    for f in host_failures:
+        print(f"        -> {f}")
+    results.append(ok)
+
+    skipped_host = synthetic_host()
+    skipped_host["testNodes"][0]["children"][0]["children"][-1]["result"] = "Skipped"
+    host_failures = check.check_package_coverage(skipped_host, check.count_tests(skipped_host))
+    ok = any("skipped" in f for f in host_failures)
+    print(f"{'PASS' if ok else 'FAIL'}  21 passes plus one skip is not green")
+    for f in host_failures:
+        print(f"        -> {f}")
+    results.append(ok)
+
+    # A skip whose record carries only a name, no identifier: the same reader
+    # the plan's skips use must catch it, not an identifier-shaped filter.
+    nameskip_host = synthetic_host()
+    nameskip = nameskip_host["testNodes"][0]["children"][0]["children"][-1]
+    nameskip["result"] = "Skipped"
+    del nameskip["nodeIdentifier"]
+    nameskip["name"] = "GRDBRecordMacroTests/testTwentyTwo()"
+    host_failures = check.check_package_coverage(nameskip_host, check.count_tests(nameskip_host))
+    ok = any("host-runner package tests skipped" in f for f in host_failures)
+    print(f"{'PASS' if ok else 'FAIL'}  a name-only skip in the host bundle fails")
+    for f in host_failures:
+        print(f"        -> {f}")
+    results.append(ok)
+
+    # The bundle omitted entirely: the guard must name its absence by calling
+    # the same helper the CI step calls, not by searching its own source.
+    absent = check.package_bundle_failures(None)
+    ok = any("no package result bundle" in f for f in absent) and "macOS" in absent[0]
+    print(f"{'PASS' if ok else 'FAIL'}  missing package bundle is rejected by the guard itself")
+    for f in absent:
+        print(f"        -> {f}")
+    results.append(ok)
+    ok = not check.package_bundle_failures("/tmp/whatever.xcresult")
+    print(f"{'PASS' if ok else 'FAIL'}  a given package bundle passes the presence check")
+    results.append(ok)
+
+    failed_host = synthetic_host()
+    failed_host["testNodes"][0]["children"][0]["children"][0]["result"] = "Failed"
+    host_failures = check.check_package_coverage(failed_host, check.count_tests(failed_host))
+    ok = any("host-runner package tests failed" in f for f in host_failures)
+    print(f"{'PASS' if ok else 'FAIL'}  a failing macro test fails the guard")
+    for f in host_failures:
+        print(f"        -> {f}")
     results.append(ok)
 
     # Listing the tests that legitimately skip must not let a broken build skip
@@ -405,6 +489,59 @@ def main():
                   "the comparison would be red for the recording, not for the guard")
     check.KNOWN_FAILURES.clear()
     check.KNOWN_FAILURES.update(saved_known)
+
+    # A tolerance for a failure nobody can reproduce hides the next real one.
+    # These two names passed in six consecutive full-plan CI runs (#143-#148),
+    # including both runs that failed overall, so they are no longer listed and
+    # a failure of either must fail the run like any other. Asserted against the
+    # real list rather than a synthetic entry: putting them back is the defect
+    # this catches, and a synthetic entry would stay green through it.
+    unlisted = (
+        "VoiceSharingGateLossScopeControls/test_iAWithdrawalOvertakenByAnotherMutationIsStillReported",
+        "InterruptionOrderingControl/testRefusalFirstDiscardsAndSubmitsNothing",
+    )
+    # The consequence is asserted on {name} ALONE, with KNOWN_FAILURES saved and
+    # cleared as the synthetic cases do. Unioning with `reported` would let a
+    # recording that already holds an unlisted failure make this half pass
+    # whatever the list says: the run would be red for the recording, not for
+    # the guard. No case here detects that edit — on a clean recording both
+    # forms agree — so the reason lives in this comment rather than behind a
+    # control that cannot fail for it. One name at a time, so listing either is
+    # caught on its own.
+    saved_known_for_unlisted = dict(check.KNOWN_FAILURES)
+    check.KNOWN_FAILURES.clear()
+    for name in unlisted:
+        fails_alone = bool(check.check_failures({name}))
+        ok = name not in check.FLAKY_TESTS and fails_alone
+        print(f"{'PASS' if ok else 'FAIL'}  {name.rsplit('/', 1)[-1]} is not tolerated: "
+              "a failure of it fails the run")
+        if not ok:
+            print(f"        -> listed={name in check.FLAKY_TESTS}, "
+                  f"fails_run={fails_alone}")
+        results.append(ok)
+    # Pins the guard's per-name semantics, which is what makes the assertion
+    # above meaningful: a listed name is accepted on its own, and an unlisted
+    # failure beside it is still rejected. It does NOT detect the union form
+    # being reintroduced in the case above — both values here come from
+    # literals, so that edit would leave this green. The union's blindness is
+    # recorded in the comment above instead, not guarded by a case.
+    probe = unlisted[0]
+    saved_probe = check.FLAKY_TESTS.get(probe)
+    check.FLAKY_TESTS[probe] = "listed by this case to prove the union is blind"
+    dirty = reported | {"SomethingTests/testUnlistedInThisCase()"}
+    union_blind = bool(check.check_failures(dirty | {probe}))
+    alone_sees_it = not bool(check.check_failures({probe}))
+    if saved_probe is None:
+        del check.FLAKY_TESTS[probe]
+    else:
+        check.FLAKY_TESTS[probe] = saved_probe
+    ok = union_blind and alone_sees_it
+    print(f"{'PASS' if ok else 'FAIL'}  a listed name is accepted alone, and an "
+          "unlisted failure beside it is still rejected")
+    if not ok:
+        print(f"        -> union_blind={union_blind}, alone_sees_it={alone_sees_it}")
+    results.append(ok)
+    check.KNOWN_FAILURES.update(saved_known_for_unlisted)
 
     print(f"\n{sum(results)}/{len(results)} cases behaved as intended")
     return 0 if all(results) else 1
