@@ -4884,6 +4884,22 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         return completed
     }
 
+    /// Bounded wait for the successor to have TAKEN its hold on the given predecessor. That is the
+    /// observable instant of its interruption decision: the hold is recorded before the send, so a
+    /// control can release a parked predecessor exactly after the decision and not before.
+    private func waitForHeldFollowUp(
+        _ state: CloudInterruptionState, requestId: String, utteranceId: String = "u-turn-b",
+        timeout: TimeInterval
+    ) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let taken = await MainActor.run { state.interruptedRequestId(forHeldUtterance: utteranceId) == requestId }
+            if taken { return true }
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+        return await MainActor.run { state.interruptedRequestId(forHeldUtterance: utteranceId) == requestId }
+    }
+
     private func holdNextTurn() -> Gate {
         let gate = Gate()
         pendingHeldGate = gate
@@ -5090,8 +5106,17 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                 origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-turn-a"
             )
         }
-        // The sink has published its binding; the producer is parked before authentication.
+        // The sink has published its binding; the producer is parked before authentication. Wait
+        // for the BINDING too, not just the seam: the producer runs off the main actor, so it can
+        // reach the seam before the sink's own publication lands.
         await seamEntered.value()
+        var bound = false
+        let bindDeadline = Date().addingTimeInterval(5)
+        while Date() < bindDeadline {
+            if await MainActor.run(body: { sink.activeResultSocketForTesting != nil }) { bound = true; break }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertTrue(bound, "premise: the sink must have published its result binding")
         let observedSocket = await MainActor.run { sink.activeResultSocketForTesting }
         let priorSocket = try XCTUnwrap(observedSocket)
         let priorTask = try XCTUnwrap(capturedTask)
@@ -5107,19 +5132,14 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                 origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-turn-b"
             )
         }
-        // Let the abandonment land, then let A's producer proceed: it must find itself abandoned
-        // and never send its authentication frame.
-        var decided = false
-        let decisionDeadline = Date().addingTimeInterval(5)
-        while Date() < decisionDeadline {
-            let moved = await MainActor.run { sink.activeResultSocketForTesting?.requestId != priorSocket.requestId }
-            if moved { decided = true; break }
-            try? await Task.sleep(nanoseconds: 2_000_000)
-        }
+        // Wait for B to REACH its interruption decision — observable as the hold it takes on A —
+        // and only then let A's producer proceed. Releasing earlier would let A authenticate before
+        // B ever decided, which is the other arm of the race and not what this case pins.
+        let held = await waitForHeldFollowUp(state, requestId: priorSocket.requestId, timeout: 5)
+        XCTAssertTrue(held, "premise: B must reach its interruption decision while A is still pre-authentication")
         abandonObserved.markClosed()
         abandonObserved.resolve(())
         let priorResult = await prior.value
-        XCTAssertTrue(decided, "the successor must take ownership rather than wait on a turn that never authenticated")
 
         // A NEVER AUTHENTICATED: nothing of it reached the server.
         XCTAssertTrue(
