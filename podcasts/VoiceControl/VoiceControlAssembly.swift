@@ -31,6 +31,9 @@ class VoiceControlAssembly {
         return factory
     }
 
+    /// Main-actor isolated because it constructs and warms the TTS engine and
+    /// the renderer, which are main-actor types.
+    @MainActor
     func buildVoiceControlService(
         audioSession: AudioSessionControlling = RealAudioSession(),
         conditionMonitor: LiveConditionMonitor? = nil,
@@ -428,7 +431,9 @@ class VoiceControlAssembly {
         // Pre-warm TTS engine so first speak has no init penalty.
         // Language matches the device locale (same as ASR pipeline).
         let language = Locale.current.language.languageCode?.identifier ?? "en"
-        ttsEngine.warmUp(language: language)
+        // Warmed off the launch path: resolving a voice reaches the system speech
+        // service, so awaiting it here would hold up service construction.
+        Task { @MainActor in await ttsEngine.warmUp(language: language) }
 
         let service = VoiceControlService(
             conditionMonitor: conditionMonitor,

@@ -155,10 +155,6 @@ FLAKY_TESTS = {
     # outcome is printed, so a run where it fails is visible rather than excused.
     "FingerprintPreparationTests/testPreparationAbsorbsADynamicAdInsertedIntoTheEpisode":
         "nothing anchors after the inserted ad on some runs; passes on others",
-    "VoiceSharingGateLossScopeControls/test_iAWithdrawalOvertakenByAnotherMutationIsStillReported":
-        "fails in a full run, passes alone or in a smaller selection",
-    "InterruptionOrderingControl/testRefusalFirstDiscardsAndSubmitsNothing":
-        "fails in a full run, passes alone or in a smaller selection",
 }
 
 # No target is blocked any more: the host-only macro plugin lives in the
