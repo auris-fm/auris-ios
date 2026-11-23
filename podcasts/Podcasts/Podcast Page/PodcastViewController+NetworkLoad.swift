@@ -33,7 +33,7 @@ extension PodcastViewController {
     }
 
     private func processPodcastAdded(added: Bool, uuid: String?) {
-        guard let uuid, let podcast = DataManager.sharedManager.findPodcast(uuid: uuid, includeUnsubscribed: true) else {
+        guard let uuid, let podcast = DataManager.shared.findPodcast(uuid: uuid, includeUnsubscribed: true) else {
             loadingEnded(successfully: false)
 
             return

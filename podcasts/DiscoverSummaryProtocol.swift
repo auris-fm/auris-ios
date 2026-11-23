@@ -1,5 +1,6 @@
 import PocketCastsDataModel
 import PocketCastsServer
+import UIKit
 
 protocol DiscoverSummaryProtocol: AnyObject {
     func registerDiscoverDelegate(_ delegate: DiscoverDelegate)
@@ -25,8 +26,6 @@ protocol DiscoverDelegate: AnyObject {
     func show(discoverEpisode: DiscoverEpisode, podcast: Podcast)
 
     func failedToLoadEpisode()
-
-    func invalidate(item: DiscoverItem)
 
     func navigateTo(category: String)
 

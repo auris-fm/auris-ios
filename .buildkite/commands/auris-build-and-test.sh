@@ -539,31 +539,11 @@ echo "--- :test_tube: Running the full test plan"
 RESULT_BUNDLE="$LOG_DIR/auris-${BUILDKITE_BUILD_NUMBER:-local}-${BUILDKITE_JOB_ID:-job}.xcresult"
 rm -rf "$RESULT_BUNDLE"
 
-# The host-only macro package's tests run outside the simulator plan: they
-# exercise a compiler plugin, which is host code. They run on this Mac as a
-# macOS destination so the run produces a real result bundle: this toolchain's
-# `swift test` has no --xcresult-output, and an unverified host run would be
-# exactly the coverage this pipeline exists to catch. A nonzero exit here ends
-# the step before the plan runs: a broken macro build is not a partial result
-# to be judged by a floor, it is no result at all.
-PACKAGE_BUNDLE="$LOG_DIR/modules-macros-${BUILDKITE_BUILD_NUMBER:-local}-${BUILDKITE_JOB_ID:-job}.xcresult"
-rm -rf "$PACKAGE_BUNDLE"
-set +e
-# The scheme lives in the package, not in podcasts.xcodeproj: run from inside
-# the package directory or xcodebuild resolves the app project and finds no
-# ModulesMacros scheme.
-{ (cd ModulesMacros && xcodebuild test -scmProvider system -scheme ModulesMacros -destination 'platform=macOS' \
-    -derivedDataPath "${MACRO_DERIVED_DATA:-$DERIVED/macros-host}" \
-    -clonedSourcePackagesDirPath "$DERIVED/SourcePackages" \
-    -disableAutomaticPackageResolution \
-    -resultBundlePath "$PACKAGE_BUNDLE") \
-    2>&1 | tee "$LOG_DIR/modules-macros-tests.log"; } & wait $!
-MACRO_TEST_STATUS=$?
-set -e
-if [ "$MACRO_TEST_STATUS" -ne 0 ]; then
-  echo "macro package tests failed (xcodebuild exit $MACRO_TEST_STATUS); see $LOG_DIR/modules-macros-tests.log" >&2
-  exit 1
-fi
+# The host-only macro package (ModulesMacros, with its GRDBMacrosTests) is gone:
+# upstream removed the GRDBRecord macro, so the macro plugin that Auris had split
+# into its own package to keep it off the simulator link has no consumers left.
+# There is no host bundle to run and nothing for the package guard to check.
+PACKAGE_BUNDLE=""
 
 # `-testPlan UnitTests` names the plan explicitly. Marking a plan `default = YES`
 # in the scheme is not enough on the command line: without this flag xcodebuild
@@ -825,7 +805,7 @@ if [ -d "$RESULT_BUNDLE" ]; then
   # otherwise upload thousands of loose files.
   (cd "$LOG_DIR" && zip -qry "$(basename "$RESULT_BUNDLE").zip" "$(basename "$RESULT_BUNDLE")")
 fi
-if [ -d "$PACKAGE_BUNDLE" ]; then
+if [ -n "$PACKAGE_BUNDLE" ] && [ -d "$PACKAGE_BUNDLE" ]; then
   (cd "$LOG_DIR" && zip -qry "$(basename "$PACKAGE_BUNDLE").zip" "$(basename "$PACKAGE_BUNDLE")")
 fi
 

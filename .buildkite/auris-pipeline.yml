@@ -13,12 +13,11 @@
 # from the result bundle rather than inferred from a green run.
 #
 # Coverage is the full simulator plan — PocketCastsTests, PocketCastsUtilsTests,
-# PocketCastsDataModelTests, PocketCastsServerTests and ModulesTests — plus the
-# macro tests (GRDBMacrosTests) on the macOS host via the ModulesMacros package
-# scheme, which is what a compiler plugin can run on. The host-only macro plugin
-# lives in that package, which is why the DataModel and Server bundles now link
-# for the simulator. Each target has a floor, a zero-failure rule, and (simulator
-# only) a skip list: the guard fails when coverage goes missing.
+# PocketCastsDataModelTests, PocketCastsAnalyticsTests, PocketCastsServerTests and
+# ModulesTests. Each target has a floor, a zero-failure rule, and (simulator
+# only) a skip list: the guard fails when coverage goes missing. There is no
+# host-runner bundle: upstream removed the GRDBRecord macro, so the ModulesMacros
+# package that carried GRDBMacrosTests is gone.
 
 agents:
   queue: auris-ios

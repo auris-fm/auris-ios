@@ -6,7 +6,7 @@ import PocketCastsUtils
 class PodcastManager: NSObject {
     private static let maxAutoDownloadSeperationTime = 12.hours
 
-    @objc static let shared = PodcastManager(dataManager: DataManager.sharedManager, downloadManager: DownloadManager.shared)
+    @objc static let shared = PodcastManager(dataManager: DataManager.shared, downloadManager: DownloadManager.shared)
 
     lazy var isoFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
@@ -63,17 +63,17 @@ class PodcastManager: NSObject {
         }
     #endif
 
-    func allPodcastsSorted(in sortOrder: LibrarySort, reloadFromDatabase: Bool = false) -> [Podcast] {
+    func allPodcastsSorted(in sortOrder: LibrarySort) -> [Podcast] {
         if sortOrder == .titleAtoZ {
-            return dataManager.allPodcastsOrderedByTitle(reloadFromDatabase: reloadFromDatabase)
+            return dataManager.allPodcastsOrderedByTitle()
         } else if sortOrder == .episodeDateNewestToOldest {
-            return dataManager.allPodcastsOrderedByNewestEpisodes(reloadFromDatabase: reloadFromDatabase)
+            return dataManager.allPodcastsOrderedByNewestEpisodes()
         } else if sortOrder == .dateAddedNewestToOldest {
-            return dataManager.allPodcastsOrderedByAddedDate(reloadFromDatabase: reloadFromDatabase)
+            return dataManager.allPodcastsOrderedByAddedDate()
         } else if sortOrder == .recentlyPlayed {
-            return dataManager.allPodcastsOrderedByLastPlayedEpisodes(reloadFromDatabase: reloadFromDatabase)
+            return dataManager.allPodcastsOrderedByLastPlayedEpisodes()
         } else {
-            return dataManager.allPodcasts(includeUnsubscribed: false, reloadFromDatabase: reloadFromDatabase)
+            return dataManager.allPodcasts(includeUnsubscribed: false)
         }
     }
 
@@ -140,7 +140,7 @@ class PodcastManager: NSObject {
 
     private func checkForEpisodesToDownload(podcast: Podcast) {
         if !podcast.autoDownloadOn() { return }
-        let episodesLimit = FeatureFlag.autoDownloadOnSubscribe.enabled ? Settings.autoDownloadLimits().rawValue : 4
+        let episodesLimit = FeatureFlag.autoDownloadOnSubscribe.enabled ? Settings.autoDownloadLimits.rawValue : 4
         let latestEpisodes = dataManager.findEpisodesWhere(customWhere: "podcast_id == ? ORDER BY publishedDate DESC, addedDate DESC LIMIT ?", arguments: [podcast.id, episodesLimit])
         guard let latestEpisode = latestEpisodes.first else { return } // no episodes to download
 
@@ -184,10 +184,10 @@ class PodcastManager: NSObject {
         }
     #endif
 
-    class func episodeCountForPodcast(_ podcast: Podcast, excludeArchive: Bool) -> Int {
+    class func episodeCount(for podcast: Podcast, excludeArchive: Bool) -> Int {
         let archivedFilter = excludeArchive ? " AND archived = 0" : ""
         let query = "SELECT COUNT(*) FROM \(DataManager.episodeTableName) WHERE podcast_id = ?\(archivedFilter)"
 
-        return DataManager.sharedManager.count(query: query, values: [podcast.id])
+        return DataManager.shared.count(query: query, values: [podcast.id])
     }
 }

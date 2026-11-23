@@ -4,6 +4,7 @@ import Intents
 import JLRoutes
 import PocketCastsDataModel
 import PocketCastsUtils
+import UIKit
 
 extension AppDelegate {
     func application(_ application: UIApplication, continue userActivity: NSUserActivity, restorationHandler: @escaping ([UIUserActivityRestoring]?) -> Void) -> Bool {
@@ -41,7 +42,7 @@ extension AppDelegate {
 
             if path == "/discover" || path.startsWith(string: "/discover/") {
                 if let url = URL(string: "pktc:/\(path)") {
-                    NavigationManager.sharedManager.dismissPresentedViewController()
+                    NavigationManager.shared.dismissPresentedViewController()
                     JLRoutes.routeURL(url)
                 }
                 return
@@ -49,7 +50,7 @@ extension AppDelegate {
 
             if path == "/pair" || path.startsWith(string: "/pair/") {
                 if let url = URL(string: "pktc:/\(path)?\(components.query ?? "")") {
-                    NavigationManager.sharedManager.dismissPresentedViewController()
+                    NavigationManager.shared.dismissPresentedViewController()
                     JLRoutes.routeURL(url)
                 }
                 return
@@ -116,17 +117,20 @@ extension AppDelegate {
         super.restoreUserActivityState(activity)
     }
 
-    func application(_ application: UIApplication, handle: INIntent, completionHandler: (INIntentResponse) -> Void) {
+    func application(_ application: UIApplication, handle: INIntent, completionHandler: @escaping (INIntentResponse) -> Void) {
         if let handle = handle as? INPlayMediaIntent {
             FileLog.shared.addMessage("Handling Siri PlayMediaIntent: \(handle.identifier ?? "unknown")")
-            let responseCode = handlePlayMediaIntent(intent: handle)
+            Task { @MainActor in
+                let responseCode = await handlePlayMediaIntent(intent: handle)
 
-            let response = INPlayMediaIntentResponse(code: responseCode, userActivity: nil)
-            completionHandler(response)
+                let response = INPlayMediaIntentResponse(code: responseCode, userActivity: nil)
+                completionHandler(response)
+            }
         }
     }
 
-    func handlePlayMediaIntent(intent: INPlayMediaIntent) -> INPlayMediaIntentResponseCode {
+    @MainActor
+    func handlePlayMediaIntent(intent: INPlayMediaIntent) async -> INPlayMediaIntentResponseCode {
         var thisIntent = intent
         var responseCode: INPlayMediaIntentResponseCode = .continueInApp
 
@@ -138,7 +142,7 @@ extension AppDelegate {
 
         if let identifier = thisIntent.mediaItems?.first?.identifier {
             if identifier == Constants.SiriActions.playSuggestedId {
-                responseCode = SiriShortcutsManager.shared.playSuggested()
+                responseCode = await SiriShortcutsManager.shared.playSuggested()
             } else if identifier == Constants.SiriActions.playUpNextId {
                 responseCode = SiriShortcutsManager.shared.playUpNext()
             } else if identifier == Constants.SiriActions.playPodcastId {
@@ -196,7 +200,7 @@ extension AppDelegate {
         // This may result in incorrectly overriding the existing speed set in the player
         // See https://github.com/Automattic/pocket-casts-ios/issues/41
         if let spokenSpeed = thisIntent.playbackSpeed, spokenSpeed != 1.0, responseCode == .success {
-            let effects = PlaybackManager.shared.effects()
+            let effects = PlaybackManager.shared.effects
             effects.playbackSpeed = spokenSpeed
 
             PlaybackManager.shared.changeEffects(effects)
@@ -222,13 +226,13 @@ extension AppDelegate {
     func handleOpenFilterIntent(intent: INIntent) {
         if intent is SJOpenFilterIntent {
             let filterIntent = intent as! SJOpenFilterIntent
-            guard let filterId = filterIntent.filterUuid, let filter = DataManager.sharedManager.findPlaylist(uuid: filterId) else { return }
+            guard let filterId = filterIntent.filterUuid, let filter = DataManager.shared.findPlaylist(uuid: filterId) else { return }
 
-            NavigationManager.sharedManager.navigateTo(NavigationManager.filterPageKey, data: [NavigationManager.filterUuidKey: filter.uuid])
+            NavigationManager.shared.navigateTo(NavigationManager.filterPageKey, data: [NavigationManager.filterUuidKey: filter.uuid])
         }
     }
 
     func handleReferralsDeepLink(url: URL) {
-        NavigationManager.sharedManager.navigateTo(NavigationManager.settingsRedeemGuestPassKey, data: [NavigationManager.redeemGuestPassURLKey: url])
+        NavigationManager.shared.navigateTo(NavigationManager.settingsRedeemGuestPassKey, data: [NavigationManager.redeemGuestPassURLKey: url])
     }
 }

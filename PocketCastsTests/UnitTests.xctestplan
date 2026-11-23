@@ -28,13 +28,9 @@
       }
     },
     {
-      "target" : {
-        "containerPath" : "container:Modules",
-        "identifier" : "PocketCastsUtilsTests",
-        "name" : "PocketCastsUtilsTests"
-      }
-    },
-    {
+      "skippedTests" : [
+        "AutoAddCandidatesDataManagerTests\/testQueryPerformance()"
+      ],
       "target" : {
         "containerPath" : "container:Modules",
         "identifier" : "PocketCastsDataModelTests",
@@ -44,8 +40,22 @@
     {
       "target" : {
         "containerPath" : "container:Modules",
+        "identifier" : "PocketCastsAnalyticsTests",
+        "name" : "PocketCastsAnalyticsTests"
+      }
+    },
+    {
+      "target" : {
+        "containerPath" : "container:Modules",
         "identifier" : "PocketCastsServerTests",
         "name" : "PocketCastsServerTests"
+      }
+    },
+    {
+      "target" : {
+        "containerPath" : "container:Modules",
+        "identifier" : "PocketCastsUtilsTests",
+        "name" : "PocketCastsUtilsTests"
       }
     },
     {

@@ -155,10 +155,10 @@ def main():
                         expected_text="narrowed to", signed=signed, bundle=bundle))
 
     # No target may silently vanish. Each target this PR made required — the
-    # three new simulator bundles and the host-runner macro bundle — is dropped
-    # in turn, and the guard must name it.
-    for target in ("PocketCastsDataModelTests", "PocketCastsServerTests",
-                   "ModulesTests"):
+    # simulator bundles and the host-runner macro bundle — is dropped in turn,
+    # and the guard must name it.
+    for target in ("PocketCastsDataModelTests", "PocketCastsAnalyticsTests",
+                   "PocketCastsServerTests", "ModulesTests"):
         dropped_target = copy.deepcopy(base)
         node = dropped_target["testNodes"][0]
         node["children"] = [c for c in node["children"] if c["name"] != target]
@@ -169,85 +169,107 @@ def main():
     # The host bundle: identity must be exact (a renamed bundle is missing, not
     # partially found), a run under the floor fails, a failing macro test fails,
     # and a skip is a failure — the macro tests have no environment to lack.
-    def synthetic_host(result="Passed", names=None):
-        default = [f"GRDBRecordMacroTests/test{i}()" for i in range(22)]
-        names = default if names is None else names
-        return {"testNodes": [{
-            "nodeType": "Test Plan", "name": "All", "children": [{
-                "nodeType": "Unit test bundle", "name": "GRDBMacrosTests",
-                "children": [{
-                    "nodeType": "Test Case", "result": result,
-                    "nodeIdentifier": n,
-                } for n in names],
-            }],
-        }]}
-    good_host = synthetic_host()
-    host_failures = check.check_package_coverage(good_host, check.count_tests(good_host))
-    ok = not host_failures
-    print(f"{'PASS' if ok else 'FAIL'}  complete host bundle passes the package guard")
-    for f in host_failures:
-        print(f"        -> {f}")
-    results.append(ok)
+    #
+    # No host bundle is required at the moment (upstream removed the GRDBRecord
+    # macro, and with it the ModulesMacros package), and an empty
+    # PACKAGE_REQUIRED_TARGETS would make every case below pass for the wrong
+    # reason. So the requirements are stood up for this section only, then put
+    # back: the guard must still be shown to catch a host bundle that is missing,
+    # truncated, renamed, skipped or failing.
+    package_required = {
+        "GRDBMacrosTests": {
+            "minimum": 21,
+        },
+    }
+    saved_package_required = check.PACKAGE_REQUIRED_TARGETS
+    check.PACKAGE_REQUIRED_TARGETS = package_required
+    try:
+        def synthetic_host(result="Passed", names=None):
+            default = [f"GRDBRecordMacroTests/test{i}()" for i in range(22)]
+            names = default if names is None else names
+            return {"testNodes": [{
+                "nodeType": "Test Plan", "name": "All", "children": [{
+                    "nodeType": "Unit test bundle", "name": "GRDBMacrosTests",
+                    "children": [{
+                        "nodeType": "Test Case", "result": result,
+                        "nodeIdentifier": n,
+                    } for n in names],
+                }],
+            }]}
+        good_host = synthetic_host()
+        host_failures = check.check_package_coverage(good_host, check.count_tests(good_host))
+        ok = not host_failures
+        print(f"{'PASS' if ok else 'FAIL'}  complete host bundle passes the package guard")
+        for f in host_failures:
+            print(f"        -> {f}")
+        results.append(ok)
 
-    missing_host = synthetic_host(names=[])
-    host_failures = check.check_package_coverage(missing_host, check.count_tests(missing_host))
-    ok = any("executed 0 tests" in f for f in host_failures)
-    print(f"{'PASS' if ok else 'FAIL'}  host bundle running nothing fails on its floor")
-    for f in host_failures:
-        print(f"        -> {f}")
-    results.append(ok)
+        missing_host = synthetic_host(names=[])
+        host_failures = check.check_package_coverage(missing_host, check.count_tests(missing_host))
+        ok = any("executed 0 tests" in f for f in host_failures)
+        print(f"{'PASS' if ok else 'FAIL'}  host bundle running nothing fails on its floor")
+        for f in host_failures:
+            print(f"        -> {f}")
+        results.append(ok)
 
-    renamed_host = synthetic_host()
-    renamed_host["testNodes"][0]["children"][0]["name"] = "GRDBMacrosTests.xctest"
-    host_failures = check.check_package_coverage(renamed_host, check.count_tests(renamed_host))
-    ok = any("produced no result bundle entries" in f for f in host_failures)
-    print(f"{'PASS' if ok else 'FAIL'}  renamed host bundle counts as missing, not partial")
-    for f in host_failures:
-        print(f"        -> {f}")
-    results.append(ok)
+        renamed_host = synthetic_host()
+        renamed_host["testNodes"][0]["children"][0]["name"] = "GRDBMacrosTests.xctest"
+        host_failures = check.check_package_coverage(renamed_host, check.count_tests(renamed_host))
+        ok = any("produced no result bundle entries" in f for f in host_failures)
+        print(f"{'PASS' if ok else 'FAIL'}  renamed host bundle counts as missing, not partial")
+        for f in host_failures:
+            print(f"        -> {f}")
+        results.append(ok)
 
-    skipped_host = synthetic_host()
-    skipped_host["testNodes"][0]["children"][0]["children"][-1]["result"] = "Skipped"
-    host_failures = check.check_package_coverage(skipped_host, check.count_tests(skipped_host))
-    ok = any("skipped" in f for f in host_failures)
-    print(f"{'PASS' if ok else 'FAIL'}  21 passes plus one skip is not green")
-    for f in host_failures:
-        print(f"        -> {f}")
-    results.append(ok)
+        skipped_host = synthetic_host()
+        skipped_host["testNodes"][0]["children"][0]["children"][-1]["result"] = "Skipped"
+        host_failures = check.check_package_coverage(skipped_host, check.count_tests(skipped_host))
+        ok = any("skipped" in f for f in host_failures)
+        print(f"{'PASS' if ok else 'FAIL'}  21 passes plus one skip is not green")
+        for f in host_failures:
+            print(f"        -> {f}")
+        results.append(ok)
 
-    # A skip whose record carries only a name, no identifier: the same reader
-    # the plan's skips use must catch it, not an identifier-shaped filter.
-    nameskip_host = synthetic_host()
-    nameskip = nameskip_host["testNodes"][0]["children"][0]["children"][-1]
-    nameskip["result"] = "Skipped"
-    del nameskip["nodeIdentifier"]
-    nameskip["name"] = "GRDBRecordMacroTests/testTwentyTwo()"
-    host_failures = check.check_package_coverage(nameskip_host, check.count_tests(nameskip_host))
-    ok = any("host-runner package tests skipped" in f for f in host_failures)
-    print(f"{'PASS' if ok else 'FAIL'}  a name-only skip in the host bundle fails")
-    for f in host_failures:
-        print(f"        -> {f}")
-    results.append(ok)
+        # A skip whose record carries only a name, no identifier: the same reader
+        # the plan's skips use must catch it, not an identifier-shaped filter.
+        nameskip_host = synthetic_host()
+        nameskip = nameskip_host["testNodes"][0]["children"][0]["children"][-1]
+        nameskip["result"] = "Skipped"
+        del nameskip["nodeIdentifier"]
+        nameskip["name"] = "GRDBRecordMacroTests/testTwentyTwo()"
+        host_failures = check.check_package_coverage(nameskip_host, check.count_tests(nameskip_host))
+        ok = any("host-runner package tests skipped" in f for f in host_failures)
+        print(f"{'PASS' if ok else 'FAIL'}  a name-only skip in the host bundle fails")
+        for f in host_failures:
+            print(f"        -> {f}")
+        results.append(ok)
 
-    # The bundle omitted entirely: the guard must name its absence by calling
-    # the same helper the CI step calls, not by searching its own source.
-    absent = check.package_bundle_failures(None)
-    ok = any("no package result bundle" in f for f in absent) and "macOS" in absent[0]
-    print(f"{'PASS' if ok else 'FAIL'}  missing package bundle is rejected by the guard itself")
-    for f in absent:
-        print(f"        -> {f}")
-    results.append(ok)
-    ok = not check.package_bundle_failures("/tmp/whatever.xcresult")
-    print(f"{'PASS' if ok else 'FAIL'}  a given package bundle passes the presence check")
-    results.append(ok)
+        # The bundle omitted entirely: the guard must name its absence by calling
+        # the same helper the CI step calls, not by searching its own source.
+        absent = check.package_bundle_failures(None)
+        ok = any("no package result bundle" in f for f in absent) and "macOS" in absent[0]
+        print(f"{'PASS' if ok else 'FAIL'}  missing package bundle is rejected by the guard itself")
+        for f in absent:
+            print(f"        -> {f}")
+        results.append(ok)
+        ok = not check.package_bundle_failures("/tmp/whatever.xcresult")
+        print(f"{'PASS' if ok else 'FAIL'}  a given package bundle passes the presence check")
+        results.append(ok)
 
-    failed_host = synthetic_host()
-    failed_host["testNodes"][0]["children"][0]["children"][0]["result"] = "Failed"
-    host_failures = check.check_package_coverage(failed_host, check.count_tests(failed_host))
-    ok = any("host-runner package tests failed" in f for f in host_failures)
-    print(f"{'PASS' if ok else 'FAIL'}  a failing macro test fails the guard")
-    for f in host_failures:
-        print(f"        -> {f}")
+        failed_host = synthetic_host()
+        failed_host["testNodes"][0]["children"][0]["children"][0]["result"] = "Failed"
+        host_failures = check.check_package_coverage(failed_host, check.count_tests(failed_host))
+        ok = any("host-runner package tests failed" in f for f in host_failures)
+        print(f"{'PASS' if ok else 'FAIL'}  a failing macro test fails the guard")
+        for f in host_failures:
+            print(f"        -> {f}")
+        results.append(ok)
+    finally:
+        check.PACKAGE_REQUIRED_TARGETS = saved_package_required
+
+    # With no host bundle required, no bundle is asked for and none is expected.
+    ok = (not check.PACKAGE_REQUIRED_TARGETS and not check.package_bundle_failures(None))
+    print(f"{'PASS' if ok else 'FAIL'}  an empty host requirement asks for no package bundle")
     results.append(ok)
 
     # Listing the tests that legitimately skip must not let a broken build skip

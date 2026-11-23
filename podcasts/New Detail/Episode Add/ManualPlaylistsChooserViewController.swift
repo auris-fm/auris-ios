@@ -14,11 +14,16 @@ class ManualPlaylistsChooserViewController: PCViewController {
     /// The list currently shown in the table. Equal to `allManualPlaylists` unless a search is filtering it.
     private var manualPlaylists: [EpisodeFilter] = []
     private var initialSelectedPlaylists: Set<String> = []
+    private var selectedEpisodesCountByPlaylist: [String: Int] = [:]
     private var newSelectedPlaylists: Set<String> = []
     private var searchController: PCSearchBarController?
     private let episodes: [Episode]
     private let analyticsSource: String
-    private let dataManager = DataManager.sharedManager
+    private let dataManager = DataManager.shared
+
+    /// Called once the user is done with the chooser, so a flow that opened it — such as
+    /// multi-select — can wrap itself up. Not called when the chooser is closed instead.
+    var onCompletion: (() -> Void)?
 
     private var tableView: ThemeableTable! {
         didSet {
@@ -48,7 +53,7 @@ class ManualPlaylistsChooserViewController: PCViewController {
     private var footerView: ThemeableView! {
         didSet {
             footerView.translatesAutoresizingMaskIntoConstraints = false
-            footerView.backgroundColor = AppTheme.viewBackgroundColor()
+            footerView.backgroundColor = AppTheme.viewBackgroundColor
         }
     }
 
@@ -81,7 +86,7 @@ class ManualPlaylistsChooserViewController: PCViewController {
     }
 
     private func setupNavBar() {
-        let backgroundColor = AppTheme.viewBackgroundColor()
+        let backgroundColor = AppTheme.viewBackgroundColor
         changeNavTint(titleColor: AppTheme.colorForStyle(.primaryText01), iconsColor: AppTheme.colorForStyle(.primaryIcon03), backgroundColor: backgroundColor)
 
         title = L10n.playlistManualEpisodeAddToPlaylist
@@ -108,7 +113,7 @@ class ManualPlaylistsChooserViewController: PCViewController {
     private func setupContent() {
         isModalInPresentation = true
 
-        view.backgroundColor = AppTheme.viewBackgroundColor()
+        view.backgroundColor = AppTheme.viewBackgroundColor
 
         tableView = ThemeableTable()
         view.insertSubview(tableView, at: 0)
@@ -121,16 +126,20 @@ class ManualPlaylistsChooserViewController: PCViewController {
 
         setupSearchController()
 
+        let doneButtonBottomConstraint = doneButton.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        doneButtonBottomConstraint.priority = .defaultLow
         NSLayoutConstraint.activate([
             footerView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 0),
             footerView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: 0),
-            footerView.heightAnchor.constraint(equalToConstant: 110),
+            footerView.topAnchor.constraint(equalTo: doneButton.topAnchor, constant: -16),
             footerView.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: 0),
 
-            doneButton.leadingAnchor.constraint(equalTo: footerView.leadingAnchor, constant: 16),
-            doneButton.trailingAnchor.constraint(equalTo: footerView.trailingAnchor, constant: -16),
-            doneButton.bottomAnchor.constraint(equalTo: footerView.bottomAnchor, constant: -34),
-            doneButton.topAnchor.constraint(equalTo: footerView.topAnchor, constant: 16),
+            doneButton.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
+            doneButton.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
+            doneButton.heightAnchor.constraint(equalToConstant: 60),
+            doneButton.bottomAnchor.constraint(lessThanOrEqualTo: view.safeAreaLayoutGuide.bottomAnchor),
+            doneButton.bottomAnchor.constraint(lessThanOrEqualTo: view.bottomAnchor, constant: -16),
+            doneButtonBottomConstraint,
 
             tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 0),
             tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: 0),
@@ -141,22 +150,12 @@ class ManualPlaylistsChooserViewController: PCViewController {
         allManualPlaylists = dataManager.allManualPlaylists(includeDeleted: false)
         manualPlaylists = allManualPlaylists
 
-        if episodes.count == 1, let episode = episodes.first {
-            let uuids = dataManager.manualPlaylistUUIDs(for: episode.uuid)
-            initialSelectedPlaylists = Set(uuids)
-        } else {
-            // For bulk episodes, find playlists that contain ALL selected episodes
-            var playlistsContainingAllEpisodes: Set<String> = []
-            for playlist in allManualPlaylists {
-                let allEpisodesInPlaylist = episodes.allSatisfy { episode in
-                    dataManager.manualPlaylistUUIDs(for: episode.uuid).contains(playlist.uuid)
-                }
-                if allEpisodesInPlaylist {
-                    playlistsContainingAllEpisodes.insert(playlist.uuid)
-                }
+        for episode in episodes {
+            for uuid in dataManager.manualPlaylistUUIDs(for: episode.uuid) {
+                selectedEpisodesCountByPlaylist[uuid, default: 0] += 1
             }
-            initialSelectedPlaylists = playlistsContainingAllEpisodes
         }
+        initialSelectedPlaylists = Set(selectedEpisodesCountByPlaylist.filter { $0.value == episodes.count }.keys)
         newSelectedPlaylists = initialSelectedPlaylists
     }
 
@@ -205,11 +204,14 @@ class ManualPlaylistsChooserViewController: PCViewController {
         changedPlaylists.forEach { playlist in
             playlist.syncStatus = SyncStatus.notSynced.rawValue
             dataManager.save(playlist: playlist)
+            PlaylistManager.checkForAutoDownloads(in: playlist)
         }
 
         let showAddedToast = !added.isEmpty && !changedPlaylists.isEmpty
 
-        dismiss(animated: true) {
+        dismiss(animated: true) { [onCompletion = self.onCompletion] in
+            onCompletion?()
+
             guard showAddedToast else {
                 return
             }
@@ -225,7 +227,7 @@ class ManualPlaylistsChooserViewController: PCViewController {
                         if let rootVC = SceneHelper.rootViewController(includeTopMost: false),
                            rootVC.presentedViewController != nil {
                             rootVC.dismiss(animated: true) {
-                                NavigationManager.sharedManager.navigateTo(
+                                NavigationManager.shared.navigateTo(
                                     NavigationManager.filterPageKey,
                                     data: [
                                         NavigationManager.filterUuidKey: playlist.uuid
@@ -233,7 +235,7 @@ class ManualPlaylistsChooserViewController: PCViewController {
                                 )
                             }
                         } else {
-                            NavigationManager.sharedManager.navigateTo(
+                            NavigationManager.shared.navigateTo(
                                 NavigationManager.filterPageKey,
                                 data: [
                                     NavigationManager.filterUuidKey: playlist.uuid
@@ -270,7 +272,7 @@ extension ManualPlaylistsChooserViewController: UITableViewDelegate, UITableView
         default:
             let playlist = manualPlaylists[indexPath.row]
             let episodeIsInPlaylist = initialSelectedPlaylists.contains(playlist.uuid)
-            let onToggleChange: (Bool) -> Void = { [weak self] selected in
+            let onToggleChange: (Bool) -> Void = { [weak self, weak tableView] selected in
                 guard let self else { return }
 
                 if selected {
@@ -283,7 +285,7 @@ extension ManualPlaylistsChooserViewController: UITableViewDelegate, UITableView
                 } else {
                     self.newSelectedPlaylists.remove(playlist.uuid)
                 }
-                tableView.reloadRows(at: [indexPath], with: .none)
+                tableView?.reloadRows(at: [indexPath], with: .none)
             }
             let isSelected = Binding<Bool>(
                 get: { [weak self] in
@@ -301,7 +303,7 @@ extension ManualPlaylistsChooserViewController: UITableViewDelegate, UITableView
                 isSelected: isSelected,
                 canBeDisabled: !episodeIsInPlaylist,
                 analyticsSource: analyticsSource,
-                additionalEpisodesCount: episodes.count
+                additionalEpisodesCount: episodes.count - selectedEpisodesCountByPlaylist[playlist.uuid, default: 0]
             )
         }
         return cell

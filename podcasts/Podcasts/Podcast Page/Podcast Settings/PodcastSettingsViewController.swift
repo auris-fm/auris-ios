@@ -6,6 +6,7 @@ import UIKit
 class PodcastSettingsViewController: PCViewController {
     var podcast: Podcast
     var episodes = [ArraySection<String, ListItem>]()
+    var onUnsubscribe: (() -> Void)?
 
     let debounce = Debounce(delay: Constants.defaultDebounceTime)
 
@@ -37,6 +38,10 @@ class PodcastSettingsViewController: PCViewController {
         settingsTable.rowHeight = UITableView.automaticDimension
         settingsTable.estimatedRowHeight = UITableView.automaticDimension
 
+        if navigationController?.viewControllers.first === self {
+            customRightBtn = UIBarButtonItem(barButtonSystemItem: .done, target: self, action: #selector(doneTapped))
+            insetAdjuster = InsetAdjuster(ignoreMiniPlayer: true)
+        }
         insetAdjuster.setupInsetAdjustmentsForMiniPlayer(scrollView: settingsTable)
 
         NotificationCenter.default.addObserver(self, selector: #selector(podcastUpdated(_:)), name: Constants.Notifications.podcastUpdated, object: nil)
@@ -70,7 +75,7 @@ class PodcastSettingsViewController: PCViewController {
         guard let uuidLoaded = notification.object as? String else { return }
 
         if podcast.uuid == uuidLoaded {
-            if let updatedPodcast = DataManager.sharedManager.findPodcast(uuid: podcast.uuid) {
+            if let updatedPodcast = DataManager.shared.findPodcast(uuid: podcast.uuid) {
                 podcast = updatedPodcast
                 updateColors()
             }
@@ -83,7 +88,7 @@ class PodcastSettingsViewController: PCViewController {
     }
 
     func updateExistingSortcutData() {
-        SiriShortcutsManager.shared.voiceShortcutForPodcast(podcast: podcast, completion: { voiceShortcut in
+        SiriShortcutsManager.shared.voiceShortcut(for: podcast, completion: { voiceShortcut in
             self.existingShortcut = voiceShortcut
             DispatchQueue.main.async {
                 self.settingsTable.reloadData()
@@ -120,12 +125,20 @@ class PodcastSettingsViewController: PCViewController {
 
     private func performUnsubscribe() {
         PodcastManager.shared.unsubscribe(podcast: podcast)
-        navigationController?.popToRootViewController(animated: true)
+        if let onUnsubscribe {
+            onUnsubscribe()
+        } else {
+            navigationController?.popToRootViewController(animated: true)
+        }
         Analytics.track(.podcastUnsubscribed, properties: ["source": analyticsSource, "uuid": podcast.uuid])
     }
 
+    @objc private func doneTapped() {
+        dismiss(animated: true)
+    }
+
     @objc func podcastUpdated(_ notification: Notification) {
-        guard let podcastUuid = notification.object as? String, podcastUuid == podcast.uuid, let updatedPodcast = DataManager.sharedManager.findPodcast(uuid: podcastUuid) else { return }
+        guard let podcastUuid = notification.object as? String, podcastUuid == podcast.uuid, let updatedPodcast = DataManager.shared.findPodcast(uuid: podcastUuid) else { return }
 
         podcast = updatedPodcast
     }

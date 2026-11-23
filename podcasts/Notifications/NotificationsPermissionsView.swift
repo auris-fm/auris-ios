@@ -95,7 +95,8 @@ struct NotificationsPermissionsView: View {
                 .buttonStyle(
                     SelectCircleButtonStyle(selected: .constant(option.isSelected(viewModel)))
                 )
-                .environmentObject(Theme.sharedTheme)
+                .environmentObject(Theme.shared)
+                .accessibilityHidden(true)
                 VStack(alignment: .leading) {
                     Text(option.title)
                         .font(style: .subheadline, weight: .medium)
@@ -108,15 +109,22 @@ struct NotificationsPermissionsView: View {
             }
         }
         .buttonStyle(.plain)
+        .accessibilityAddTraits(option.isSelected(viewModel) ? .isSelected : [])
     }
 
     var body: some View {
-        ZStack(alignment: .bottom) {
+        GeometryReader { proxy in
             ScrollView {
                 VStack(spacing: 0) {
                     Spacer()
                         .frame(maxHeight: 136)
-                    Image("notifications_permissions_banner")
+                    ViewThatFits(in: .vertical) {
+                        Image("notifications_permissions_banner")
+                        Image("notifications_permissions_banner")
+                            .resizable()
+                            .scaledToFit()
+                    }
+                    .frame(maxHeight: proxy.size.height * 0.42)
                     Spacer().frame(height: 24)
                     Text(L10n.notificationsPermissionsTitle)
                         .textStyle(PrimaryText())
@@ -138,10 +146,11 @@ struct NotificationsPermissionsView: View {
                     .padding(.vertical, 34)
                     .padding(.horizontal, 4)
                     Spacer()
-                    Rectangle().fill(.clear).frame(height: 44)
                 }
                 .padding(.horizontal, 16)
             }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
             ZStack {
                 Button(action: {
                     Analytics.track(.notificationsPermissionsAllowTapped)

@@ -40,19 +40,16 @@ REQUIRED_TARGETS = [
     "PocketCastsUtilsTests",
     "PocketCastsDataModelTests",
     "PocketCastsServerTests",
+    "PocketCastsAnalyticsTests",
     "ModulesTests",
 ]
 
 # Host-only package tests run outside the simulator plan, one runner each, and
-# are guarded with the same floor discipline. GRDBMacrosTests exercise the
-# compiler plugin, so they run on macOS via xcodebuild against the package's
-# scheme, which produces a real result bundle this toolchain's `swift test`
-# cannot (it has no --xcresult-output).
-PACKAGE_REQUIRED_TARGETS = {
-    "GRDBMacrosTests": {
-        "minimum": 21,
-    },
-}
+# are guarded with the same floor discipline. Empty: upstream removed the
+# GRDBRecord macro, so the ModulesMacros package — and its GRDBMacrosTests, the
+# only host bundle this repo had — is gone. The machinery stays so that a future
+# host-runner bundle is a one-entry change rather than a rewrite.
+PACKAGE_REQUIRED_TARGETS = {}
 
 # A floor per target, not just "more than zero". A test runner that dies after one
 # test still reports that test as passing; only a count near the target's real size
@@ -63,6 +60,7 @@ MINIMUM_TESTS = {
     "PocketCastsUtilsTests": 50,
     "PocketCastsDataModelTests": 450,
     "PocketCastsServerTests": 150,
+    "PocketCastsAnalyticsTests": 2,
     "ModulesTests": 1,
 }
 
@@ -157,10 +155,9 @@ FLAKY_TESTS = {
         "nothing anchors after the inserted ad on some runs; passes on others",
 }
 
-# No target is blocked any more: the host-only macro plugin lives in the
-# ModulesMacros package now, so the DataModel and Server test bundles link for
-# the simulator and are required targets above. If a target stops linking
-# again, this list is where its absence is made visible rather than forgotten.
+# No target is blocked: every bundle in the plan links for the simulator and is
+# a required target above. If a target stops linking again, this list is where
+# its absence is made visible rather than forgotten.
 BLOCKED_TARGETS = []
 
 # Skips to carry when a target returns to the plan, so it comes back with its
@@ -585,9 +582,11 @@ def check_package_coverage(report: dict, counts: dict) -> list:
     """The host-only package tests, one runner each, same floor discipline.
 
     The bundle identity is exact: the host run is produced by xcodebuild against
-    a macOS destination, and its unit-test bundle is named GRDBMacrosTests in
-    the report — the same key the floor looks up and the same key that is
-    printed, so a renamed bundle reads as missing rather than partially found.
+    a macOS destination, and its unit-test bundle is named in the report — the
+    same key the floor looks up and the same key that is printed, so a renamed
+    bundle reads as missing rather than partially found. No host bundle is
+    required today (PACKAGE_REQUIRED_TARGETS is empty), so this reports nothing
+    until one is added back.
     """
     failures = []
     for target, spec in sorted(PACKAGE_REQUIRED_TARGETS.items()):
