@@ -216,6 +216,7 @@ final class CloudRouteClient {
         // the consumer's claim and close still reach the registration after producer completion.
         socket.closeHook = { lifetime.close() }
         socket.claimHook = { lifetime.claimOwnership() }
+        socket.abandonBeforeAuthenticationHook = { lifetime.closeBeforeAuthentication() }
         // Bounded cleanup armed at creation: if no consumer ever claims the turn, the
         // registration is retired on a bound. claimOwnership() cancels this timer; a
         // claimed consumer is NEVER closed by it, however long its work takes.
@@ -249,6 +250,10 @@ final class CloudRouteClient {
         private var closed = false
         private var consumerClaimed = false
         private var graceTask: Task<Void, Never>?
+        /// Set under `closeLock` at the instant the authentication send is ABOUT to be invoked.
+        /// From that point the server may admit this turn, so it can no longer be abandoned as
+        /// unheard — the same conservative reading the transport's own submission rule uses.
+        private var authSendInvoked = false
 
         /// True once the lifetime has closed. Read by the binding site so a socket that closed
         /// before its transport registered retires immediately at bind time instead of leaking.
@@ -256,6 +261,50 @@ final class CloudRouteClient {
             closeLock.lock()
             defer { closeLock.unlock() }
             return closed
+        }
+
+        /// THE ABANDON-BEFORE-AUTHENTICATION DECISION, as ONE transition.
+        ///
+        /// A barge-in that finds its predecessor still unauthenticated must abandon it before it
+        /// submits anything, and then send the interrupting utterance as a fresh turn. Reading
+        /// "has it authenticated?" and then closing are two steps, and the producer can invoke the
+        /// authentication send between them — leaving the server holding a turn the client believes
+        /// it cancelled. So the decision is made here, under the same lock the producer takes to
+        /// mark its send:
+        ///
+        /// - returns `true` when this call closed the lifetime BEFORE the authentication send was
+        ///   invoked. Nothing of this turn will reach the server; the caller may abandon it.
+        /// - returns `false` when the send had already been invoked (or the lifetime was already
+        ///   closed). The turn may have been admitted, so it must be interrupted, not abandoned.
+        ///
+        /// CLOSES ONLY WHEN IT WINS. On the losing arm the lifetime is left OPEN, because the
+        /// interrupt still has to travel on that socket: closing it there would turn a deliverable
+        /// interruption into transport loss and drop the user's utterance.
+        func closeBeforeAuthentication() -> Bool {
+            closeLock.lock()
+            guard !authSendInvoked, !closed else {
+                closeLock.unlock()
+                return false
+            }
+            closed = true
+            graceTask?.cancel()
+            closeLock.unlock()
+            if let client, let requestId, let identity {
+                client.retireSocket(requestId: requestId, identity: identity)
+            }
+            wsTask?.cancel(with: .goingAway, reason: nil)
+            return true
+        }
+
+        /// Marks the authentication send as invoked, or refuses it because the lifetime already
+        /// closed. Called by the producer immediately before the send, under the same lock the
+        /// abandonment decision takes, so exactly one of the two wins.
+        fileprivate func beginAuthenticationSend() -> Bool {
+            closeLock.lock()
+            defer { closeLock.unlock() }
+            if closed { return false }
+            authSendInvoked = true
+            return true
         }
 
         /// Single synchronized bind/close transition: publishes the binding fields and returns
@@ -520,8 +569,16 @@ final class CloudRouteClient {
         let boundTask: WebSocketTasking? = entry?.identity == socket.boundIdentity ? entry?.task : nil
         liveSocketsLock.unlock()
         guard let boundTask else {
+            // THE CAUSES ARE NOT THE SAME FACT and this line used to name only one of them. A
+            // registration is absent when the turn closed (consumer abandonment, bounded cleanup,
+            // a rejected bind) AND when the turn was abandoned before it ever authenticated, which
+            // is not a failure at all — it means the server holds no turn to interrupt. Naming the
+            // retired-registration case for both is how a healthy abandonment was read as transport
+            // loss in a full-plan run. So the logs distinguish them and name no cause here.
+            let abandoned = socket.boundIdentity == nil
             FileLog.shared.addMessage(
-                "[CloudRoute] interrupt undelivered: registration retired for turn \(socket.requestId)"
+                "[CloudRoute] interrupt undelivered: no live registration for turn \(socket.requestId)"
+                + (abandoned ? " (the turn never registered — it was abandoned before authentication)" : " (the registration was retired while the turn was still open)")
             )
             return .undelivered
         }
@@ -772,6 +829,20 @@ final class CloudRouteClient {
             // admitted. The conservative reading is the correct one here: once the send is
             // INVOKED, admission is possible, so only a failure BEFORE entry proves the frame
             // never left.
+            // THE ABANDONMENT BOUNDARY. Marking the send as invoked and checking for a close are
+            // ONE transition under the lifetime's lock, so a barge-in either wins here and this
+            // turn never authenticates, or loses and takes the interrupt path. A refused mark means
+            // the turn was abandoned before submission: end it without sending anything.
+            if let lifetime, !lifetime.beginAuthenticationSend() {
+                retireSocket(requestId: turn.requestId, identity: socketRegistration)
+                wsTask.cancel(with: .goingAway, reason: nil)
+                FileLog.shared.addMessage(
+                    "[CloudRoute] turn abandoned before authentication — nothing submitted (request_id=\(turn.requestId))"
+                )
+                continuation.yield(.error(source: .requestConstruction, code: "connection_lost", message: "turn abandoned before submission"))
+                continuation.finish()
+                return true
+            }
             do {
                 try await wsTask.send(.string(authText))
             } catch {

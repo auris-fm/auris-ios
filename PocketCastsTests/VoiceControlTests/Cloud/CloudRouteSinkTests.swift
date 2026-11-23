@@ -5128,6 +5128,10 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             "premise: the predecessor must NOT have authenticated yet; frames=\(priorTask.sentTextFrames)"
         )
 
+        // B is a SECOND turn and therefore a second socket, so it needs its own fixture: the
+        // per-build handoff consumes one, and a turn built with none gets an empty script (measured
+        // as `NSURLErrorDomain -1011`, which reads like a production failure and is not one).
+        self.nextTurnFixture = Self.doneOnlyFixture
         // B barges in while A is still pre-authentication.
         let successor = Task {
             await sink.routeToCloud(
@@ -5135,11 +5139,33 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                 origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-turn-b"
             )
         }
-        // Wait for B to REACH its interruption decision — observable as the hold it takes on A —
-        // and only then let A's producer proceed. Releasing earlier would let A authenticate before
-        // B ever decided, which is the other arm of the race and not what this case pins.
-        let held = await waitForHeldFollowUp(state, requestId: priorSocket.requestId, timeout: 5)
-        XCTAssertTrue(held, "premise: B must reach its interruption decision while A is still pre-authentication")
+        // WAIT FOR THE ABANDONMENT, not for a held follow-up.
+        //
+        // Two earlier versions used observables that cannot express this arm. The hold B takes
+        // before its send is DROPPED inside the same synchronous decision
+        // (`dropHoldForAbandonedPredecessor`), so there is nothing left to poll. And the socket
+        // handle's `boundIdentity` is never unwound — `retireSocket` removes the client's registry
+        // entry but nothing clears the handle — so it stays non-nil after any retirement.
+        //
+        // The abandonment's own record is the line it logs, which is a production observable and
+        // the same thing a run's log shows. Polled on a bounded deadline so a missing line fails
+        // here with its premise rather than silently passing.
+        var abandoned = false
+        let abandonDeadline = Date().addingTimeInterval(5)
+        while Date() < abandonDeadline {
+            let logged = await FileLog.shared.logFileAsString()
+            if logged.contains("predecessor turn \(priorSocket.requestId) abandoned before authentication") {
+                abandoned = true
+                break
+            }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(abandoned, "premise: B must abandon A before A authenticates")
+        XCTAssertTrue(
+            priorTask.sentTextFrames.isEmpty,
+            "premise: the abandonment must have landed BEFORE A's authentication send; "
+            + "frames=\(priorTask.sentTextFrames)"
+        )
         abandonObserved.markClosed()
         abandonObserved.resolve(())
         let priorResult = await prior.value

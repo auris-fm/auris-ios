@@ -72,6 +72,7 @@ final class AppOperationResultSocket: @unchecked Sendable {
     private var _boundIdentity: UUID?
     private var _closeHook: (() -> Void)?
     private var _claimHook: (() -> Void)?
+    private var _abandonBeforeAuthenticationHook: (() -> Bool)?
 
     init(requestId: String) {
         self.requestId = requestId
@@ -123,6 +124,39 @@ extension AppOperationResultSocket {
         }
         set {
             bindingLock.lock(); _closeHook = newValue; bindingLock.unlock()
+        }
+    }
+
+    /// ABANDON THIS TURN BEFORE IT AUTHENTICATES, as one atomic decision.
+    ///
+    /// Returns true when the turn was closed before its authentication send was invoked — nothing
+    /// of it will reach the server, so a barge-in may abandon it and submit its own utterance as a
+    /// fresh turn. Returns false when the send had already been invoked, or when another path
+    /// already took this decision: the turn may have been admitted and must be interrupted instead.
+    ///
+    /// On a LOST race the turn is left OPEN — the interrupt still has to travel on its socket — and
+    /// the hook stays installed, so a later caller can still observe the same lost outcome. Only a
+    /// WIN takes the hook, since only a win actually closed anything.
+    func abandonBeforeAuthentication() -> Bool {
+        let hook: (() -> Bool)? = {
+            bindingLock.lock(); defer { bindingLock.unlock() }
+            return _abandonBeforeAuthenticationHook
+        }()
+        guard let hook else { return false }
+        let won = hook()
+        if won {
+            bindingLock.lock(); _abandonBeforeAuthenticationHook = nil; bindingLock.unlock()
+        }
+        return won
+    }
+
+    var abandonBeforeAuthenticationHook: (() -> Bool)? {
+        get {
+            bindingLock.lock(); defer { bindingLock.unlock() }
+            return _abandonBeforeAuthenticationHook
+        }
+        set {
+            bindingLock.lock(); _abandonBeforeAuthenticationHook = newValue; bindingLock.unlock()
         }
     }
 
