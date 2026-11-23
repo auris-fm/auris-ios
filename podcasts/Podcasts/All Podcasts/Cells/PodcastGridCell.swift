@@ -11,6 +11,8 @@ class PodcastGridCell: UICollectionViewCell {
     @IBOutlet var badgeView: GridBadgeView!
     @IBOutlet var supporterHeart: PodcastHeartView!
 
+    static let playedAlpha: CGFloat = 0.4
+
     private var podcastUuid: String?
     private var badgeType = BadgeType.off
 
@@ -32,7 +34,7 @@ class PodcastGridCell: UICollectionViewCell {
         shadowView.layer.cornerRadius = 4
     }
 
-    func populateFrom(podcast: Podcast, badgeType: BadgeType, libraryType: LibraryType) {
+    func populateFrom(podcast: Podcast, badgeType: BadgeType, libraryType: LibraryType, isPlayed: Bool = false) {
         self.badgeType = badgeType
         podcastUuid = podcast.uuid
 
@@ -42,6 +44,8 @@ class PodcastGridCell: UICollectionViewCell {
         setColors(podcast: podcast)
 
         podcastName.accessibilityLabel = podcast.title
+        podcastName.accessibilityValue = isPlayed ? L10n.statusPlayed : nil
+        contentView.alpha = isPlayed ? Self.playedAlpha : 1
 
         updateBadge(podcast: podcast, badgeType: badgeType, libraryType: libraryType)
 
@@ -58,7 +62,7 @@ class PodcastGridCell: UICollectionViewCell {
     @objc private func podcastColorsLoaded(_ notification: Notification) {
         guard let uuidLoaded = notification.object as? String else { return }
 
-        if uuidLoaded == podcastUuid, let podcast = DataManager.sharedManager.findPodcast(uuid: uuidLoaded) {
+        if uuidLoaded == podcastUuid, let podcast = DataManager.shared.findPodcast(uuid: uuidLoaded) {
             setColors(podcast: podcast)
         }
     }
@@ -77,12 +81,12 @@ class PodcastGridCell: UICollectionViewCell {
     private func setImage() {
         guard let podcastUuid else { return }
 
-        ImageManager.sharedManager.loadImage(podcastUuid: podcastUuid, imageView: podcastImage, size: .grid, showPlaceHolder: false)
+        ImageManager.shared.loadImage(podcastUuid: podcastUuid, imageView: podcastImage, size: .grid, showPlaceHolder: false)
     }
 
     private func setColors(podcast: Podcast) {
         podcastName.text = podcast.title
-        let bgColor = ColorManager.backgroundColorForPodcast(podcast)
+        let bgColor = ColorManager.backgroundColor(for: podcast)
         backgroundColor = .clear
         containerView.backgroundColor = bgColor
         podcastName.backgroundColor = bgColor

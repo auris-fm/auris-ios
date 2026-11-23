@@ -21,8 +21,12 @@ struct SubscriptionPurchaseButton: View {
             return tier.buttonLabel
         }
 
-        if subscriptionInfo.offer?.type == .freeTrial {
-            return L10n.freeTrialStartButton
+        if let offer = subscriptionInfo.offer {
+            if offer.type == .freeTrial {
+                return L10n.freeTrialStartButton
+            } else if offer.type == .discount {
+                return L10n.discountOfferClaimButton(offer.discountPercent)
+            }
         }
 
         return tier.buttonLabel
@@ -45,11 +49,12 @@ struct SubscriptionPurchaseButton: View {
         }, label: {
             VStack {
                 Text(purchaseTitle)
+                    .font(size: 18, style: .body, weight: .semibold, maxSizeCategory: .extraExtraExtraLarge)
             }
             .transition(.opacity)
             .id("plus_price" + tier.title)
         })
-        .buttonStyle(PlusOpaqueButtonStyle(isLoading: isLoading, plan: tier.plan, themeOverride: Theme.sharedTheme))
+        .buttonStyle(PlusOpaqueButtonStyle(isLoading: isLoading, plan: tier.plan, themeOverride: Theme.shared))
         .alert(isPresented: hasError) {
             Alert(
                 title: Text(L10n.plusPurchaseFailed),

@@ -13,8 +13,6 @@ class RatePodcastViewModel: ObservableObject {
 
     @Published var isSubmitting: Bool = false
 
-    @Published var showConfirmation: Bool = false
-
     @Published var anErrorOccurred: Bool = false
 
     @Published var stars: Double = 0 {
@@ -53,7 +51,7 @@ class RatePodcastViewModel: ObservableObject {
 
     private var onRate: () -> Void
 
-    init(presented: Binding<Bool>, dismissAction: Binding<DismissAction>, podcast: Podcast, dataManager: DataManager = .sharedManager, onRate: @escaping () -> Void) {
+    init(presented: Binding<Bool>, dismissAction: Binding<DismissAction>, podcast: Podcast, dataManager: DataManager = .shared, onRate: @escaping () -> Void) {
         self._presented = presented
         self._dismissAction = dismissAction
         self.podcast = podcast

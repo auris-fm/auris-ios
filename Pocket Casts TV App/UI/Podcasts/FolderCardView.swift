@@ -3,8 +3,8 @@ import PocketCastsDataModel
 
 struct FolderCardView: View {
 
-    var folder: Folder
-    @State var model: FolderCardViewModel
+    private var folder: Folder
+    @State private var model: FolderCardViewModel
 
     init(folder: Folder) {
         self.folder = folder
@@ -14,13 +14,6 @@ struct FolderCardView: View {
     private let cardSize: CGFloat = 250
     private let coverSize: CGFloat = 80
     private let coverSpacing: CGFloat = 6
-
-    private let gradient = LinearGradient(
-        colors: [Color(red: 0x60/255, green: 0x46/255, blue: 0xE9/255),
-                 Color(red: 0xE7/255, green: 0x4B/255, blue: 0x8A/255)],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-    )
 
     var body: some View {
         ZStack(alignment: .bottom) {

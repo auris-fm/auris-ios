@@ -1,3 +1,4 @@
+import CoreMedia
 import XCTest
 
 @testable import podcasts
@@ -83,6 +84,40 @@ class ChapterManagerTests: XCTestCase {
         let nextVisiblePlayableChapter = chapterManager.previousVisibleChapter()
 
         XCTAssertEqual(nextVisiblePlayableChapter, chapterInfo(startTime: 201, duration: 300, shouldPlay: true))
+    }
+
+    /// Time left skips the parts of deselected chapters still ahead
+    func testDeselectedDurationAfterTime() async {
+        let parserMock = PodcastChapterParserMock()
+        parserMock.chapters = [
+            chapterInfo(startTime: 0, duration: 100, shouldPlay: true),
+            chapterInfo(startTime: 100, duration: 100, shouldPlay: false),
+            chapterInfo(startTime: 200, duration: 100, shouldPlay: true),
+            chapterInfo(startTime: 300, duration: 100, shouldPlay: false)
+        ]
+        let chapterManager = ChapterManager(chapterParser: parserMock, showInfoCoordinator: ShowInfoCoordinatorMock())
+        await chapterManager.parseChapters(episode: EpisodeMock(), duration: 400)
+
+        XCTAssertEqual(chapterManager.deselectedDuration(after: 50), 200)
+        XCTAssertEqual(chapterManager.deselectedDuration(after: 150), 150)
+        XCTAssertEqual(chapterManager.deselectedDuration(after: 250), 100)
+        XCTAssertEqual(chapterManager.deselectedDuration(after: 350), 50)
+        XCTAssertEqual(chapterManager.deselectedDuration(after: 400), 0)
+    }
+
+    /// Overlapping deselected chapters count their shared time once
+    func testDeselectedDurationCountsOverlapOnce() async {
+        let parserMock = PodcastChapterParserMock()
+        parserMock.chapters = [
+            chapterInfo(startTime: 0, duration: 15, shouldPlay: false),
+            chapterInfo(startTime: 7, duration: 15, shouldPlay: false),
+            chapterInfo(startTime: 22, duration: 10, shouldPlay: true)
+        ]
+        let chapterManager = ChapterManager(chapterParser: parserMock, showInfoCoordinator: ShowInfoCoordinatorMock())
+        await chapterManager.parseChapters(episode: EpisodeMock(), duration: 32)
+
+        XCTAssertEqual(chapterManager.deselectedDuration(after: 0), 22)
+        XCTAssertEqual(chapterManager.deselectedDuration(after: 10), 12)
     }
 
     func chapterInfo(startTime: TimeInterval, duration: TimeInterval, shouldPlay: Bool) -> ChapterInfo {

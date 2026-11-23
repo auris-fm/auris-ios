@@ -5,10 +5,8 @@ Pods/
 .DS_Store
 GoogleService-Info.plist
 
-# All secrets should be stored under .configure-files
-# Everything without a .enc extension is ignored
-.configure-files/*
-!.configure-files/*.enc
+# Legacy decrypted secrets from before a8c-secrets. Remove in AINFRA-3241.
+.configure-files/
 
 # Ruby tooling
 vendor
@@ -49,6 +47,8 @@ artifacts/*
 # Claude Code ignored personal preferences
 .claude/settings.local.json
 .claude/worktrees
+fastlane/Preview.html
+
 build/
 
 # CPU llama.cpp pin (built by scripts/build-llama-ios.sh; Metal off)

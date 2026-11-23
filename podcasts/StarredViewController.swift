@@ -22,6 +22,10 @@ class StarredViewController: PCViewController {
     var episodes = [ListEpisode]() {
         didSet {
             refreshContentUnavailable()
+            if !isMultiSelectEnabled {
+                // Show the Select button only when there's something to select
+                setupNavBar()
+            }
         }
     }
     private let refreshQueue = OperationQueue()
@@ -30,7 +34,7 @@ class StarredViewController: PCViewController {
     var isMultiSelectEnabled: Bool = false {
         didSet {
             setupNavBar()
-            setEnclosingTabBarHidden(isMultiSelectEnabled, animated: false)
+            setHidesEnclosingTabBar(isMultiSelectEnabled, animated: false)
             starredTable.beginUpdates()
             starredTable.setEditing(isMultiSelectEnabled, animated: true)
             starredTable.endUpdates()
@@ -72,6 +76,7 @@ class StarredViewController: PCViewController {
 
         refreshQueue.maxConcurrentOperationCount = 1
         self.title = L10n.statusStarred
+        (view as? ThemeableView)?.style = .primaryUi02
         setupNavBar()
         insetAdjuster.setupInsetAdjustmentsForMiniPlayer(scrollView: starredTable)
         if SyncManager.isUserLoggedIn() {
@@ -96,10 +101,9 @@ class StarredViewController: PCViewController {
                     return
                 }
 
-                let oldData = self.episodes
                 var newData = [ListEpisode]()
                 for episode in episodes {
-                    newData.append(ListEpisode(episode: episode, tintColor: AppTheme.appTintColor()))
+                    newData.append(ListEpisode(episode: episode, tintColor: AppTheme.appTintColor))
                 }
 
                 DispatchQueue.main.sync { [weak self] in
@@ -107,7 +111,7 @@ class StarredViewController: PCViewController {
                     strongSelf.loadingIndicator.stopAnimating()
                     strongSelf.starredTable.isHidden = (newData.isEmpty)
                     if animated {
-                        let changeSet = StagedChangeset(source: oldData, target: newData)
+                        let changeSet = StagedChangeset(source: strongSelf.episodes, target: newData)
                         strongSelf.starredTable.reload(using: changeSet, with: .none, setData: { data in
                             strongSelf.episodes = data
                         })
@@ -123,13 +127,12 @@ class StarredViewController: PCViewController {
     func refreshEpisodesFromDatabase(animated: Bool) {
         refreshQueue.addOperation { [weak self] in
             guard let self else { return }
-            let oldData = self.episodes
             let newData = self.episodesDataManager.starredEpisodes()
 
             DispatchQueue.main.sync {
                 self.starredTable.isHidden = (newData.isEmpty)
                 if animated {
-                    let changeSet = StagedChangeset(source: oldData, target: newData)
+                    let changeSet = StagedChangeset(source: self.episodes, target: newData)
                     self.starredTable.reload(using: changeSet, with: .none, setData: { data in
                         self.episodes = data
                     })
@@ -157,8 +160,16 @@ class StarredViewController: PCViewController {
     }
 
     func setupNavBar() {
-        super.customRightBtn = isMultiSelectEnabled ? UIBarButtonItem(title: L10n.cancel, style: .plain, target: self, action: #selector(cancelTapped)) : UIBarButtonItem(title: L10n.select, style: .plain, target: self, action: #selector(selectTapped))
-        super.customRightBtn?.accessibilityLabel = isMultiSelectEnabled ? L10n.accessibilityCancelMultiselect : L10n.select
+        if isMultiSelectEnabled {
+            super.customRightBtn = UIBarButtonItem(title: L10n.cancel, style: .plain, target: self, action: #selector(cancelTapped))
+            super.customRightBtn?.accessibilityLabel = L10n.accessibilityCancelMultiselect
+        } else if episodes.isEmpty {
+            // Nothing to select on the empty state, so don't offer multi-select
+            super.customRightBtn = nil
+        } else {
+            super.customRightBtn = UIBarButtonItem(title: L10n.select, style: .plain, target: self, action: #selector(selectTapped))
+            super.customRightBtn?.accessibilityLabel = L10n.select
+        }
 
         navigationItem.leftBarButtonItem = isMultiSelectEnabled ? UIBarButtonItem(title: L10n.selectAll, style: .done, target: self, action: #selector(selectAllTapped)) : nil
         navigationItem.backBarButtonItem = isMultiSelectEnabled ? nil : UIBarButtonItem(title: "", style: .plain, target: nil, action: nil)

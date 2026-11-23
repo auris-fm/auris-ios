@@ -40,15 +40,8 @@ actor PlaylistMetadataLoader {
     // MARK: - Publisher
 
     /// Thread-safe subject for publishing metadata updates.
-    /// Access via `updatesPublisher` for subscribing to changes.
     /// Marked nonisolated(unsafe) because PassthroughSubject is internally thread-safe.
     nonisolated(unsafe) private let updatesSubject = PassthroughSubject<MetadataUpdate, Never>()
-
-    /// Publisher that emits metadata updates when counts or images change.
-    /// Subscribe to receive updates for specific playlists.
-    nonisolated var updatesPublisher: AnyPublisher<MetadataUpdate, Never> {
-        updatesSubject.eraseToAnyPublisher()
-    }
 
     /// Convenience publisher for count updates only.
     /// Emits (playlistID, count) tuples when a playlist's count changes.
@@ -112,28 +105,20 @@ actor PlaylistMetadataLoader {
     private var countTasks: [String: Task<Int, Never>] = [:]
     private var imagesTasks: [String: Task<[PlaylistArtworkView.ImageItem], Never>] = [:]
 
+    private let readQueue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.name = "PlaylistMetadataLoader"
+        queue.maxConcurrentOperationCount = 2
+        return queue
+    }()
+
     private let dataManager: DataManager
     private let imageManager: ImageManager
     private let episodesDataManager: EpisodesDataManager
 
-    static func gridArtworkItems<T>(
-        from episodes: [T],
-        limit: Int,
-        imageManager: ImageManager = .sharedManager,
-        podcastUuid: (T) -> String
-    ) -> [PlaylistArtworkView.ImageItem] {
-        let distinctEpisodes = distinctPodcasts(from: episodes, limit: limit, podcastUuid: podcastUuid)
-
-        return distinctEpisodes.map { episode in
-            let uuid = podcastUuid(episode)
-            let url = imageManager.podcastUrl(imageSize: .grid, uuid: uuid)
-            return PlaylistArtworkView.ImageItem(id: uuid, url: url)
-        }
-    }
-
     init(
-        dataManager: DataManager = .sharedManager,
-        imageManager: ImageManager = .sharedManager,
+        dataManager: DataManager = .shared,
+        imageManager: ImageManager = .shared,
         episodesDataManager: EpisodesDataManager = .init()
     ) {
         self.dataManager = dataManager
@@ -143,10 +128,6 @@ actor PlaylistMetadataLoader {
 
     func cachedCount(for playlistID: String) -> Int? {
         return cache.counts[playlistID]?.count
-    }
-
-    func cachedCountState(for playlistID: String) -> CountCacheState? {
-        return cache.counts[playlistID]
     }
 
     func cachedImages(for playlistID: String) -> [PlaylistArtworkView.ImageItem]? {
@@ -168,7 +149,9 @@ actor PlaylistMetadataLoader {
 
         // Start new fetch task
         let task = Task {
-            let newCount = await getEpisodesCount(for: playlist)
+            guard let newCount = await getEpisodesCount(for: playlist) else {
+                return cache.counts[playlistID]?.count ?? 0
+            }
 
             countTasks[playlistID] = nil
 
@@ -202,10 +185,12 @@ actor PlaylistMetadataLoader {
 
         // Start new fetch task
         let task = Task {
+            guard let episodes = await loadListEpisodes(for: playlist) else {
+                return cache.images[playlistID] ?? []
+            }
             defer {
                 imagesTasks[playlistID] = nil
             }
-            let episodes = await loadListEpisodes(for: playlist)
             let distinctEpisodes = firstDistinctPodcasts(from: episodes)
 
             do {
@@ -322,28 +307,56 @@ actor PlaylistMetadataLoader {
         }
     }
 
-    private func getEpisodesCount(for playlist: EpisodeFilter) async -> Int {
+    private func getEpisodesCount(for playlist: EpisodeFilter) async -> Int? {
         let playlist = playlist
         let dataManager = self.dataManager
 
-        return await Task(priority: FeatureFlag.playlistDataCacheBeforeQuery.enabled ? .medium : .userInitiated) {
+        return await read {
             dataManager.allPlaylistEpisodeCount(
                 for: playlist,
                 episodeUuidToAdd: playlist.episodeUuidToAddToQueries(),
                 includingArchivedEpisodes: playlist.manual
             )
-        }.value
+        }
     }
 
-    private func loadListEpisodes(for playlist: EpisodeFilter) async -> [ListEpisode] {
+    private func loadListEpisodes(for playlist: EpisodeFilter) async -> [ListEpisode]? {
         let playlist = playlist
         let episodesDataManager = self.episodesDataManager
-        return await Task(priority: FeatureFlag.playlistDataCacheBeforeQuery.enabled ? .medium : .userInitiated) {
+        return await read {
             episodesDataManager.playlistFirstDistinctEpisodes(
                 for: playlist,
                 shouldShowArchived: playlist.showArchivedEpisodes
             )
-        }.value
+        }
+    }
+
+    /// Returns `nil` when the task is cancelled before the query starts.
+    private func read<T>(_ query: @escaping () -> T) async -> T? {
+        guard FeatureFlag.efficientPlaylistQueries.enabled else {
+            return await Task(priority: FeatureFlag.playlistDataCacheBeforeQuery.enabled ? .medium : .userInitiated) {
+                query()
+            }.value
+        }
+        let result = ReadResult<T>()
+        let operation = BlockOperation {
+            result.value = query()
+        }
+        operation.qualityOfService = FeatureFlag.playlistDataCacheBeforeQuery.enabled ? .default : .userInitiated
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                operation.completionBlock = {
+                    continuation.resume(returning: result.value)
+                }
+                readQueue.addOperation(operation)
+            }
+        } onCancel: {
+            operation.cancel()
+        }
+    }
+
+    private final class ReadResult<T>: @unchecked Sendable {
+        var value: T?
     }
 
     private func loadImagesURLs(episodes: [ListEpisode], includingEpisodeArtwork: Bool = false) async throws -> [PlaylistArtworkView.ImageItem] {

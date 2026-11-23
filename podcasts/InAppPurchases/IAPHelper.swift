@@ -11,7 +11,6 @@ class IAPHelper: NSObject {
         [.monthly, .yearly, .patronMonthly, .patronYearly, .yearlyReferral]
     }
     private var productsArray = [SKProduct]()
-    private var requestedPurchase: String!
     private var productsRequest: SKProductsRequest?
 
     /// Whether or not the user is eligible for an offer
@@ -180,18 +179,46 @@ class IAPHelper: NSObject {
         return formattedPrice ?? ""
     }
 
-    public func getWeeklyPrice(for identifier: IAPProductID) -> String {
+    public func getWeeklyPrice(for identifier: IAPProductID, applyDiscount: Bool) -> String {
         guard let product = getProduct(for: identifier),
             let weekly = getWeeklyReferencePrice(for: identifier) else {
             return ""
         }
-
+        var priceRatio: Double = 1
+        if applyDiscount, let discountRatio = introductoryDiscountPriceRatio(for: product) {
+            priceRatio = discountRatio
+        }
         let numberFormatter = NumberFormatter()
         numberFormatter.formatterBehavior = .behavior10_4
         numberFormatter.numberStyle = .currency
         numberFormatter.locale = product.priceLocale
-        let formattedPrice = numberFormatter.string(from: NSNumber(value: weekly))
+        let formattedPrice = numberFormatter.string(from: NSNumber(value: weekly * priceRatio))
         return formattedPrice ?? ""
+    }
+
+    public func getDiscountPercent(for identifier: IAPProductID) -> String {
+        guard let product = getProduct(for: identifier),
+              let priceRatio = introductoryDiscountPriceRatio(for: product) else {
+            return ""
+        }
+        return (1.0 - priceRatio).localized(.percent)
+    }
+
+    /// The ratio between a pay up front introductory offer price and the regular price for the same length of time.
+    /// For example, a $19.99 offer for 1 year on a $39.99/year product returns ~0.5.
+    /// - Returns: A value between 0 and 1, or nil if the product has no pay up front introductory offer
+    private func introductoryDiscountPriceRatio(for product: SKProduct) -> Double? {
+        guard let offer = product.introductoryPrice,
+              offer.paymentMode == .payUpFront,
+              let productPeriod = product.subscriptionPeriod,
+              let productYears = productPeriod.durationInYears,
+              let offerYears = offer.subscriptionPeriod.durationInYears.map({ $0 * Double(max(offer.numberOfPeriods, 1)) }),
+              productYears > 0, offerYears > 0, product.price.doubleValue > 0 else {
+            return nil
+        }
+        let regularPriceForOfferDuration = product.price.doubleValue * (offerYears / productYears)
+        let ratio = offer.price.doubleValue / regularPriceForOfferDuration
+        return min(max(ratio, 0), 1)
     }
 
     public func getMonthlyPrice(for identifier: IAPProductID) -> String {
@@ -306,24 +333,6 @@ extension IAPHelper: SKProductsRequestDelegate {
     }
 }
 
-// MARK: - Pricing String Helpers
-
-extension IAPHelper {
-    /// Generates a string for a subscription price in the format of PRICE / FREQUENCY
-    /// - Parameter product: The product to get the pricing string for
-    /// - Returns: The formatted string or nil if the product isn't available or hasn't loaded yet
-    func pricingStringWithFrequency(for product: IAPProductID) -> String? {
-        let pricing = getPrice(for: product)
-        let frequency = getPaymentFrequency(for: product)
-
-        guard !pricing.isEmpty, !frequency.isEmpty else {
-            return nil
-        }
-
-        return "\(pricing) / \(frequency)"
-    }
-}
-
 // MARK: - Intro Offers: Free Trials
 
 extension IAPHelper {
@@ -355,6 +364,15 @@ extension IAPHelper {
         }
 
         return offer.subscriptionPeriod.localizedPeriodString()
+    }
+
+    /// Returns the offer duration with the number spelled out, for example "one year"
+    func localizedOfferDurationSpelledOut(_ identifier: IAPProductID) -> String? {
+        guard let offer = getFreeTrialOffer(identifier) else {
+            return nil
+        }
+
+        return offer.subscriptionPeriod.localizedPeriodStringSpelledOut()
     }
 
     func localizedFreeTrialDurationAdjective(_ identifier: IAPProductID) -> String? {
@@ -409,22 +427,6 @@ extension IAPHelper {
     /// - Returns: The SKProductDiscount or nil if there is no offer or the user is not eligible for one
     private func getFreeTrialOffer(_ identifier: IAPProductID) -> SKProductDiscount? {
         guard let offer = getProduct(for: identifier)?.introductoryPrice,
-            offer.paymentMode == .freeTrial || offer.paymentMode == .payUpFront
-        else {
-            return nil
-        }
-
-        return offer
-    }
-
-    /// Checks if there is a promotional offer for this given product
-    /// - Parameter identifier: The product to check
-    /// - Returns: The SKProductDiscount or nil if there is no offer or the user is not eligible for one
-    func getPromoOffer(_ identifier: IAPProductID) -> SKProductDiscount? {
-        guard
-            let offer = getProduct(for: identifier)?.discounts.first(where: { discount in
-                discount.type != .introductory
-            }),
             offer.paymentMode == .freeTrial || offer.paymentMode == .payUpFront
         else {
             return nil
@@ -547,7 +549,7 @@ extension IAPHelper: SKPaymentTransactionObserver {
 
         for transaction in transactions {
             let product = transaction.payment.productIdentifier
-            let transactionDate = DateFormatHelper.sharedHelper.jsonFormat(transaction.transactionDate)
+            let transactionDate = DateFormatHelper.shared.jsonFormat(transaction.transactionDate)
             FileLog.shared.addMessage("IAPHelper Processing transaction with id \(String(describing: transaction.transactionIdentifier)) \(transactionDate))")
 
             if lowercasedProductIdentifiers.contains(product.lowercased()) {
@@ -609,6 +611,46 @@ extension IAPHelper: SKPaymentTransactionObserver {
 private extension SKProductSubscriptionPeriod {
     /// Converts the period into a localized readable format, ie: 3 days, 1 month, 1 year, etc.
     /// - Returns: Localized formatted version of the subscription period
+    /// The approximate length of the period in years
+    var durationInYears: Double? {
+        let periodsPerYear: Double
+        switch unit {
+        case .day:
+            periodsPerYear = 365
+        case .week:
+            periodsPerYear = 52
+        case .month:
+            periodsPerYear = 12
+        case .year:
+            periodsPerYear = 1
+        @unknown default:
+            return nil
+        }
+        return Double(numberOfUnits) / periodsPerYear
+    }
+
+    /// The period with the number spelled out, for example "one year" or "six months"
+    func localizedPeriodStringSpelledOut() -> String? {
+        var components = DateComponents()
+        switch unit {
+        case .day:
+            components.day = numberOfUnits
+        case .week:
+            components.weekOfMonth = numberOfUnits
+        case .month:
+            components.month = numberOfUnits
+        case .year:
+            components.year = numberOfUnits
+        @unknown default:
+            return nil
+        }
+
+        let formatter = DateComponentsFormatter()
+        formatter.unitsStyle = .spellOut
+        formatter.maximumUnitCount = 1
+        return formatter.string(from: components)
+    }
+
     func localizedPeriodString() -> String? {
         let calendarUnit: NSCalendar.Unit
         switch unit {
@@ -663,7 +705,7 @@ private extension SKProductSubscriptionPeriod {
         components.calendar = Calendar.current
         components.setValue(self.numberOfUnits, for: calendarUnit)
 
-        return Calendar.current.date(byAdding: components, to: Date.now, wrappingComponents: true)
+        return Calendar.current.date(byAdding: components, to: Date.now, wrappingComponents: false)
     }
 }
 

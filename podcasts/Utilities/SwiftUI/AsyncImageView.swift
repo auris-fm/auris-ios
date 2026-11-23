@@ -12,7 +12,7 @@ struct AsyncImageView: View {
     init(
         url: URL,
         cacheKey: String? = nil,
-        cache: ImageCache = ImageManager.sharedManager.subscribedPodcastsCache,
+        cache: ImageCache = ImageManager.shared.subscribedPodcastsCache,
         placeholder: Image? = nil,
         aspectRatio: CGFloat? = 1,
         contentMode: SwiftUI.ContentMode = .fit
@@ -37,6 +37,8 @@ struct AsyncImageView: View {
             }
             .resizable()
             .targetCache(cache)
+            .serialize(by: ImageManager.originalDataSerializer)
+            .backgroundDecode()
             .fade(duration: 0.25)
             .aspectRatio(aspectRatio, contentMode: contentMode)
     }

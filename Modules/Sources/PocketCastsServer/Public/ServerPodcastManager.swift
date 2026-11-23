@@ -3,14 +3,7 @@ import PocketCastsDataModel
 import PocketCastsUtils
 
 public class ServerPodcastManager: NSObject {
-    private static let maxAutoDownloadSeperationTime = 12.hours
-
     public static let shared = ServerPodcastManager()
-
-    lazy var isoFormatter: ISO8601DateFormatter = {
-        let formatter = ISO8601DateFormatter()
-        return formatter
-    }()
 
     lazy var subscribeQueue: OperationQueue = {
         let queue = OperationQueue()
@@ -61,10 +54,10 @@ public class ServerPodcastManager: NSObject {
         }
     }
 
-    public func addFromUuid(podcastUuid: String, subscribe: Bool, autoDownloads: Int = 0, completion: ((Bool) -> Void)?) {
+    public func addFromUuid(podcastUuid: String, subscribe: Bool, autoDownloads: Int = 0, fromSync: Bool = false, completion: ((Bool) -> Void)?) {
         CacheServerHandler.shared.loadPodcastInfo(podcastUuid: podcastUuid) { [weak self] podcastInfo, lastModified in
             if let podcastInfo {
-                self?.addFromJson(podcastUuid: podcastUuid, lastModified: lastModified, podcastInfo: podcastInfo, subscribe: subscribe, autoDownloads: autoDownloads, completion: completion)
+                self?.addFromJson(podcastUuid: podcastUuid, lastModified: lastModified, podcastInfo: podcastInfo, subscribe: subscribe, autoDownloads: autoDownloads, fromSync: fromSync, completion: completion)
             } else {
                 completion?(false)
             }
@@ -84,18 +77,19 @@ public class ServerPodcastManager: NSObject {
         }
     }
 
-    public func addFromJson(podcastUuid: String, lastModified: String?, podcastInfo: [String: Any], subscribe: Bool, autoDownloads: Int, completion: ((Bool) -> Void)?) {
+    public func addFromJson(podcastUuid: String, lastModified: String?, podcastInfo: [String: Any], subscribe: Bool, autoDownloads: Int, fromSync: Bool = false, completion: ((Bool) -> Void)?) {
+        let episodes = Self.episodes(fromPodcastInfo: podcastInfo)
         subscribeQueue.addOperation { [weak self] in
             guard let strongSelf = self else { return }
 
-            let added = strongSelf.addPodcast(podcastInfo: podcastInfo, subscribe: subscribe, autoDownloads: autoDownloads, lastModified: lastModified)
-            if subscribe, added { ServerConfig.shared.syncDelegate?.subscribedToPodcast() } // addFromUuid and addFromiTunesId end up here, so just need this one analytic
+            let added = strongSelf.addPodcast(podcastInfo: podcastInfo, episodes: episodes, subscribe: subscribe, autoDownloads: autoDownloads, lastModified: lastModified)
+            if subscribe, added, !fromSync { ServerConfig.shared.syncDelegate?.subscribedToPodcast() } // addFromUuid and addFromiTunesId end up here, so just need this one analytic
             completion?(added)
         }
     }
 
     public func addPodcastFromUpNextItem(_ upNextItem: UpNextItem, completion: ((Bool) -> Void)?) {
-        if let existingPodcast = DataManager.sharedManager.findPodcast(uuid: upNextItem.podcastUuid, includeUnsubscribed: true) {
+        if let existingPodcast = DataManager.shared.findPodcast(uuid: upNextItem.podcastUuid, includeUnsubscribed: true) {
             // we have the podcast, but not the episode, so it's ok to just save it in
             addToDatabase(upNextItem: upNextItem, to: existingPodcast)
             completion?(true)
@@ -110,7 +104,7 @@ public class ServerPodcastManager: NSObject {
                 return
             }
 
-            guard let existingPodcast = DataManager.sharedManager.findPodcast(uuid: upNextItem.podcastUuid, includeUnsubscribed: true) else {
+            guard let existingPodcast = DataManager.shared.findPodcast(uuid: upNextItem.podcastUuid, includeUnsubscribed: true) else {
                 completion?(false)
                 return
             }
@@ -119,7 +113,7 @@ public class ServerPodcastManager: NSObject {
             if SyncManager.isUserLoggedIn() {
                 guard let episodes = ApiServerHandler.shared.retrieveEpisodeTaskSynchronouusly(podcastUuid: upNextItem.podcastUuid) else { return }
 
-                DataManager.sharedManager.saveBulkEpisodeSyncInfo(episodes: DataConverter.convert(syncInfoEpisodes: episodes))
+                DataManager.shared.saveBulkEpisodeSyncInfo(episodes: DataConverter.convert(syncInfoEpisodes: episodes))
             }
 
             self?.addToDatabase(upNextItem: upNextItem, to: existingPodcast)
@@ -145,9 +139,9 @@ public class ServerPodcastManager: NSObject {
         return nil
     }
 
-    /// Soft-deprecated: performs synchronous networking, blocking the calling thread, and never calls
-    /// the completion on failure. Use the async ``addMissingPodcastAndEpisode(episodeUuid:podcastUuid:shouldUpdateEpisode:)`` instead.
-    @available(*, deprecated, message: "Performs synchronous networking and blocks the calling thread. Use the async addMissingPodcastAndEpisode(episodeUuid:podcastUuid:shouldUpdateEpisode:) instead.")
+    /// - warning: Performs synchronous networking and blocks the calling thread until the request finishes.
+    /// Never call it from the main thread. The completion is never called on failure. Prefer the async
+    /// ``addMissingPodcastAndEpisode(episodeUuid:podcastUuid:shouldUpdateEpisode:)`` in new code.
     public func addMissingPodcastAndEpisode(episodeUuid: String, podcastUuid: String, shouldUpdateEpisode: Bool = false, completion: ((Episode?) -> ())? = nil) {
         let url = ServerConstants.Urls.cache() + "mobile/podcast/findbyepisode/\(podcastUuid)/\(episodeUuid)"
 
@@ -185,7 +179,7 @@ public class ServerPodcastManager: NSObject {
 
     private func addToDatabase(upNextItem: UpNextItem, to podcast: Podcast) {
         // if we have this episode already, then we don't need to do anything here
-        guard DataManager.sharedManager.findEpisode(uuid: upNextItem.episodeUuid) == nil else { return }
+        guard DataManager.shared.findEpisode(uuid: upNextItem.episodeUuid) == nil else { return }
 
         let episode = Episode()
         episode.addedDate = Date()
@@ -199,14 +193,27 @@ public class ServerPodcastManager: NSObject {
         episode.podcast_id = podcast.id
         episode.hlsUrl = upNextItem.hlsUrl
 
-        DataManager.sharedManager.save(episode: episode)
+        DataManager.shared.save(episode: episode)
     }
 
     private func addPodcast(podcastInfo: [String: Any], subscribe: Bool, autoDownloads: Int = 0, lastModified: String?) -> Bool {
+        addPodcast(podcastInfo: podcastInfo, episodes: Self.episodes(fromPodcastInfo: podcastInfo), subscribe: subscribe, autoDownloads: autoDownloads, lastModified: lastModified)
+    }
+
+    /// Parses the podcast's episodes without a `podcast_id`, which `addPodcast` sets once the podcast is saved.
+    private static func episodes(fromPodcastInfo podcastInfo: [String: Any]) -> [Episode]? {
+        guard let podcastJson = podcastInfo["podcast"] as? [String: Any],
+              let podcastUuid = podcastJson["uuid"] as? String,
+              let episodesJson = podcastJson["episodes"] as? [[String: Any]] else { return nil }
+
+        return episodesJson.map { Episode.from(episodeJson: $0, podcastId: 0, podcastUuid: podcastUuid) }
+    }
+
+    private func addPodcast(podcastInfo: [String: Any], episodes: [Episode]?, subscribe: Bool, autoDownloads: Int = 0, lastModified: String?) -> Bool {
         guard let podcastJson = podcastInfo["podcast"] as? [String: Any], let podcastUuid = podcastJson["uuid"] as? String else { return false }
 
         // check if we already have this podcast, and if we do treat it differently
-        if let existingPodcast = DataManager.sharedManager.findPodcast(uuid: podcastUuid, includeUnsubscribed: true) {
+        if let existingPodcast = DataManager.shared.findPodcast(uuid: podcastUuid, includeUnsubscribed: true) {
             if existingPodcast.isSubscribed(), subscribe { return true }
 
             if !existingPodcast.isSubscribed(), subscribe {
@@ -215,7 +222,7 @@ public class ServerPodcastManager: NSObject {
                 existingPodcast.syncStatus = SyncStatus.notSynced.rawValue
                 existingPodcast.autoDownloadSetting = (autoDownloads > 0 ? AutoDownloadSetting.latest : AutoDownloadSetting.off).rawValue
             }
-            DataManager.sharedManager.save(podcast: existingPodcast)
+            DataManager.shared.save(podcast: existingPodcast)
             updateLatestEpisodeInfo(podcast: existingPodcast, setDefaults: true, autoDownloadLimit: autoDownloads)
 
             ServerConfig.shared.syncDelegate?.podcastAdded(podcastUuid: existingPodcast.uuid)
@@ -223,22 +230,20 @@ public class ServerPodcastManager: NSObject {
             return true
         }
 
-        let podcast = Podcast.from(podcastJson: podcastJson, podcastInfo: podcastInfo, uuid: podcastUuid, subscribe: subscribe, autoDownloads: autoDownloads, lastModified: lastModified, isoFormatter: isoFormatter)
+        let podcast = Podcast.from(podcastJson: podcastJson, podcastInfo: podcastInfo, uuid: podcastUuid, subscribe: subscribe, autoDownloads: autoDownloads, lastModified: lastModified)
 
         podcast.sortOrder = highestSortOrderForHomeGrid() + 1
 
         // we don't accept podcasts with no episodes
-        guard let episodesJson = podcastJson["episodes"] as? [[String: Any]] else { return false }
+        guard let episodes else { return false }
 
         // save the podcast so that it gets and ID
-        DataManager.sharedManager.save(podcast: podcast)
+        DataManager.shared.save(podcast: podcast)
 
-        var episodes = [Episode]()
-        for episodeJson in episodesJson {
-            let episode = Episode.from(episodeJson: episodeJson, podcastId: podcast.id, podcastUuid: podcast.uuid, isoFormatter: isoFormatter)
-            episodes.append(episode)
+        for episode in episodes {
+            episode.podcast_id = podcast.id
         }
-        DataManager.sharedManager.bulkSave(episodes: episodes)
+        DataManager.shared.bulkSave(episodes: episodes)
 
         updateLatestEpisodeInfo(podcast: podcast, setDefaults: subscribe, autoDownloadLimit: autoDownloads)
 
@@ -251,13 +256,13 @@ public class ServerPodcastManager: NSObject {
         guard let podcastJson = podcastInfo["podcast"] as? [String: Any],
               let podcastUuid = podcastJson["uuid"] as? String,
               let episodesJson = podcastJson["episodes"] as? [[String: Any]],
-              let podcast = DataManager.sharedManager.findPodcast(uuid: podcastUuid, includeUnsubscribed: true),
+              let podcast = DataManager.shared.findPodcast(uuid: podcastUuid, includeUnsubscribed: true),
               let firstEpisode = episodesJson.first,
               let uuid = firstEpisode["uuid"] as? String else { return nil }
 
-        if let episode = DataManager.sharedManager.findEpisode(uuid: uuid) {
+        if let episode = DataManager.shared.findEpisode(uuid: uuid) {
             if shouldUpdate {
-                let updatedEpisode = Episode.from(episodeJson: firstEpisode, podcastId: podcast.id, podcastUuid: podcast.uuid, isoFormatter: isoFormatter)
+                let updatedEpisode = Episode.from(episodeJson: firstEpisode, podcastId: podcast.id, podcastUuid: podcast.uuid)
 
                 // Refresh server-driven fields while preserving user state (playback, downloads, etc.)
                 episode.title = updatedEpisode.title
@@ -284,14 +289,14 @@ public class ServerPodcastManager: NSObject {
                     episode.podcast_id = podcast.id
                 }
 
-                DataManager.sharedManager.save(episode: episode)
+                DataManager.shared.save(episode: episode)
             }
             return episode
         }
 
-        let episode = Episode.from(episodeJson: firstEpisode, podcastId: podcast.id, podcastUuid: podcast.uuid, isoFormatter: isoFormatter)
+        let episode = Episode.from(episodeJson: firstEpisode, podcastId: podcast.id, podcastUuid: podcast.uuid)
 
-        DataManager.sharedManager.save(episode: episode)
+        DataManager.shared.save(episode: episode)
 
         return episode
     }
@@ -391,8 +396,8 @@ public class ServerPodcastManager: NSObject {
         homeGridSortOrder(highest: false)
     }
 
-    public func highestSortOrderForFolder(_ folder: Folder) -> Int32 {
-        let folderPodcasts = DataManager.sharedManager.allPodcastsInFolder(folder: folder)
+    public func highestSortOrder(for folder: Folder) -> Int32 {
+        let folderPodcasts = DataManager.shared.allPodcastsInFolder(folder: folder)
         var highest: Int32 = 1
 
         for podcast in folderPodcasts {
@@ -403,8 +408,8 @@ public class ServerPodcastManager: NSObject {
     }
 
     private func homeGridSortOrder(highest: Bool) -> Int32 {
-        let gridPodcasts = DataManager.sharedManager.allPodcasts(includeUnsubscribed: false).filter { $0.folderUuid == nil }
-        let allFolders = DataManager.sharedManager.allFolders()
+        let gridPodcasts = DataManager.shared.allPodcasts(includeUnsubscribed: false).filter { $0.folderUuid == nil }
+        let allFolders = DataManager.shared.allFolders()
         var value: Int32 = highest ? 1 : 0
 
         for podcast in gridPodcasts {

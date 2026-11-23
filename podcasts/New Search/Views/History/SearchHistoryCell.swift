@@ -31,7 +31,7 @@ struct SearchHistoryCell: View {
         ZStack {
             Button(action: {
                 if let episode = entry.episode {
-                    NavigationManager.sharedManager.navigateTo(NavigationManager.episodePageKey, data: [NavigationManager.episodeUuidKey: episode.uuid, NavigationManager.podcastKey: episode.podcastUuid])
+                    NavigationManager.shared.navigateTo(NavigationManager.episodePageKey, data: [NavigationManager.episodeUuidKey: episode.uuid, NavigationManager.podcastKey: episode.podcastUuid])
                 } else if let podcast = entry.podcast {
                     podcast.navigateTo()
                 } else if let searchTerm = entry.searchTerm {
@@ -91,6 +91,7 @@ struct SearchHistoryCell: View {
                         .frame(width: 56, height: 56)
                     }
                     .buttonStyle(SecondaryButtonStyle())
+                    .accessibilityLabel(L10n.accessibilityRemoveRecentSearch(entry.podcast?.title ?? entry.episode?.title ?? entry.searchTerm ?? ""))
                 }
                 ThemedDivider()
                     .frame(height: 1)

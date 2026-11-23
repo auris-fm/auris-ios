@@ -31,7 +31,9 @@ class TokenHelper {
     /// - Throws: Any error returned from the URLConnection
     func callSecureUrl(request: URLRequest) async throws -> (HTTPURLResponse?, Data?) {
         try await withCheckedThrowingContinuation { continuation in
-            performCallSecureUrl(request: request, retryOnUnauthorized: true) { response, data, error in
+            // Goes through the completion-handler overload so that `acquireToken()`, which blocks on
+            // a semaphore, waits on a global queue thread rather than on a cooperative thread.
+            callSecureUrl(request: request) { response, data, error in
                 if let error {
                     continuation.resume(throwing: error)
                     return
@@ -72,7 +74,13 @@ class TokenHelper {
                 if SyncManager.isUserLoggedIn(), retryOnUnauthorized {
                     ServerSettings.invalidateAccessToken(mutableRequest.value(forHTTPHeaderField: ServerConstants.HttpHeaders.authorization)?.replacingOccurrences(of: "Bearer ", with: ""))
                     FileLog.shared.addMessage("TokenHelper: Removed syncingV2TokenKey due to 401 unauthorized retrying url: \(request.url?.absoluteString ?? "unknown")")
-                    self?.performCallSecureUrl(request: request, retryOnUnauthorized: false, completion: completion)
+                    // This closure runs on the session's serial delegate queue. The retry has no stored
+                    // token, so it calls `acquireToken()`, which blocks until the token request's own
+                    // completion handler has run on that same queue. Retrying here would deadlock the
+                    // retry and every other request on the session, so hop off the queue first.
+                    DispatchQueue.global().async {
+                        self?.performCallSecureUrl(request: request, retryOnUnauthorized: false, completion: completion)
+                    }
                 } else {
                     completion(httpResponse, nil, error)
                 }
@@ -156,7 +164,7 @@ class TokenHelper {
             #if os(iOS)
             isBackgrounded = UIApplication.shared.applicationState == .background
             #elseif os(watchOS)
-            isBackgrounded = WKExtension.shared().applicationState == .background
+            isBackgrounded = WKApplication.shared().applicationState == .background
             #endif
 
             semaphore.signal()
