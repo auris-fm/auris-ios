@@ -72,6 +72,7 @@ final class AppOperationResultSocket: @unchecked Sendable {
     private var _boundIdentity: UUID?
     private var _closeHook: (() -> Void)?
     private var _claimHook: (() -> Void)?
+    private var _abandonBeforeAuthenticationHook: (() -> Bool)?
 
     init(requestId: String) {
         self.requestId = requestId
@@ -123,6 +124,39 @@ extension AppOperationResultSocket {
         }
         set {
             bindingLock.lock(); _closeHook = newValue; bindingLock.unlock()
+        }
+    }
+
+    /// ABANDON THIS TURN BEFORE IT AUTHENTICATES, as one atomic decision.
+    ///
+    /// Returns true when the turn was closed before its authentication send was invoked — nothing
+    /// of it will reach the server, so a barge-in may abandon it and submit its own utterance as a
+    /// fresh turn. Returns false when the send had already been invoked, or when another path
+    /// already took this decision: the turn may have been admitted and must be interrupted instead.
+    ///
+    /// NOT take-once, unlike the close and claim hooks. Those perform an effect that must happen
+    /// exactly once; this one asks a QUESTION whose answer is stable for the life of the turn, and
+    /// the lifetime answers it idempotently under its own lock. Taking the hook on a win would make
+    /// a second barge-in against the same unheard predecessor read `false` — an already-abandoned
+    /// turn misreported as undeliverable, dropping the user's utterance over a turn that never
+    /// existed. On a LOST race the turn is likewise left OPEN, because the interrupt still has to
+    /// travel on its socket.
+    func abandonBeforeAuthentication() -> Bool {
+        let hook: (() -> Bool)? = {
+            bindingLock.lock(); defer { bindingLock.unlock() }
+            return _abandonBeforeAuthenticationHook
+        }()
+        guard let hook else { return false }
+        return hook()
+    }
+
+    var abandonBeforeAuthenticationHook: (() -> Bool)? {
+        get {
+            bindingLock.lock(); defer { bindingLock.unlock() }
+            return _abandonBeforeAuthenticationHook
+        }
+        set {
+            bindingLock.lock(); _abandonBeforeAuthenticationHook = newValue; bindingLock.unlock()
         }
     }
 
