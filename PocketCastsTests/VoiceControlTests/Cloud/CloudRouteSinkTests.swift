@@ -5324,6 +5324,55 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         _ = await prior.value
     }
 
+    /// "ABANDONED" IS A REASON, NOT A SYNONYM FOR CLOSED.
+    ///
+    /// The idempotent answer above must hold only for a lifetime closed BY the abandonment decision.
+    /// A turn that authenticated and then closed — completed, failed, or cancelled — was heard by the
+    /// server, so it is not abandonable: answering "abandoned" for any closed lifetime would route a
+    /// late barge-in against a finished turn as a fresh turn with no interruption report, dropping the
+    /// settled history that turn created.
+    func testATurnThatAuthenticatedAndThenClosedIsNotAbandonable() async throws {
+        self.nextTurnFixture = Self.doneOnlyFixture
+        let sink = makeSink()
+
+        // A runs to its terminal on its own: it authenticates, completes, and its lifetime closes
+        // through the ordinary finish path — never through the abandonment decision.
+        let prior = Task {
+            await sink.routeToCloud(
+                request: "prior question", tier: .free, context: self.sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-turn-a"
+            )
+        }
+        // Capture the handle WHILE the turn is live: the turn-wide defer clears the binding on exit,
+        // so reading it after the terminal would find nothing. The handle itself outlives the
+        // binding, which is exactly the late-barge-in shape this case pins.
+        var captured: AppOperationResultSocket?
+        let captureDeadline = Date().addingTimeInterval(5)
+        while Date() < captureDeadline {
+            captured = await MainActor.run { sink.activeResultSocketForTesting }
+            if captured != nil { break }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        let priorSocket = try XCTUnwrap(captured, "premise: the sink must publish its result binding")
+        let priorResult = await prior.value
+        XCTAssertEqual(priorResult.outcome, .completed, "premise: the predecessor must have run to a terminal")
+        let priorTask = try XCTUnwrap(capturedTask)
+        XCTAssertTrue(
+            priorTask.sentTextFrames.contains { $0.contains("\"authenticate\"") },
+            "premise: the predecessor must have AUTHENTICATED; frames=\(priorTask.sentTextFrames)"
+        )
+
+        // A late ask against that finished turn must NOT read as an abandonment, on the first ask or
+        // any later one.
+        let first = await MainActor.run { priorSocket.abandonBeforeAuthentication() }
+        XCTAssertFalse(
+            first,
+            "a turn that authenticated was heard by the server: closing it later does not make it abandonable"
+        )
+        let second = await MainActor.run { priorSocket.abandonBeforeAuthentication() }
+        XCTAssertFalse(second, "the answer must stay stable for a turn that was heard")
+    }
+
     private func makeSink(conversationManager: CloudConversationManager? = nil, withHoldCounters: Bool = false, interruptionState: CloudInterruptionState = CloudInterruptionState()) -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
         let built = CloudRouteSink(
