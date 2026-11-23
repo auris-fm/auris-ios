@@ -303,6 +303,38 @@ final class FingerprintPreparationTests: XCTestCase {
 
     /// Puts an episode's files where the manager looks for them, makes it the
     /// episode preparation will pick up, and hands back a fresh manager.
+    /// Switching episodes must not carry the previous episode's mapping into the new one.
+    /// The cloud matcher and the identity describing its payload are both per-episode; keeping
+    /// either would let one episode's reference gate — or populate — another's mapping, which
+    /// looks like a valid cache and isn't.
+    func testSwitchingEpisodesDoesNotCarryThePreviousMapping() async throws {
+        try prepareFixture(duration: Self.episodeDuration) { fixture in
+            try fixture.writeAudio(seconds: Self.episodeDuration)
+            try fixture.writeReference()
+        }
+
+        manager.prepareForCurrentEpisode()
+        await waitUntil("the first episode to map") { self.manager.state.analyticsName == "active" }
+        let firstMapping = manager.debugMappingSnapshot()
+        XCTAssertFalse(firstMapping.isEmpty, "the first episode never mapped, so this proves nothing")
+
+        // A different episode, with its own audio and reference files.
+        let second = FingerprintEpisodeFixture(duration: Self.episodeDuration)
+        try second.writeAudio(seconds: Self.episodeDuration)
+        try second.writeReference()
+        currentEpisode?.restore()
+        currentEpisode = CurrentEpisodeOverride(episode: second.episode)
+
+        manager.prepareForCurrentEpisode()
+
+        // Whatever the second episode ends up doing, it must not still be holding the first
+        // one's anchors: those timestamps describe different audio.
+        XCTAssertEqual(
+            manager.debugMappingSnapshot().count, 0,
+            "the previous episode's mapping survived the switch"
+        )
+    }
+
     private func prepareFixture(
         duration: Double,
         writeFiles: (FingerprintEpisodeFixture) throws -> Void

@@ -309,12 +309,12 @@ final class FingerprintMappingCacheTests: XCTestCase {
         XCTAssertEqual(loaded.entries.count, entries.count)
     }
 
-    /// A cache written before this build carries no Auris format at all. It must be
-    /// discarded rather than treated as current, since nothing records which endpoint
-    /// reference its entries came from.
+    /// A cache written before this build is discarded, and by the schema version rather than
+    /// by the identity gate: those caches carry no identity at all, which under the current
+    /// rule reads as transcript-only and would otherwise be reusable. The schema bump is what
+    /// makes them unusable, so this asserts that mechanism instead of implying the gate does it.
     func testAMappingSavedBeforeThisBuildIsDiscarded() throws {
         let entries = makeFullCoverageEntries()
-        // Written with no format recorded, exactly as the previous build wrote it.
         FingerprintMappingCache.save(
             entries,
             audioFilePath: audioPath,
@@ -323,15 +323,26 @@ final class FingerprintMappingCacheTests: XCTestCase {
             referenceDuration: 100
         )
 
+        // Rewrite the stored schema to the previous build's, leaving everything else as this
+        // build wrote it, so the only difference under test is the version.
+        let path = FingerprintMappingCache.mappingPath(forAudioFilePath: audioPath)
+        var json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: try Data(contentsOf: URL(fileURLWithPath: path))) as? [String: Any]
+        )
+        XCTAssertEqual(json["schemaVersion"] as? Int, 3, "this build should be writing schema 3")
+        json["schemaVersion"] = 2
+        try JSONSerialization.data(withJSONObject: json).write(to: URL(fileURLWithPath: path))
+
         XCTAssertNil(
             FingerprintMappingCache.load(
                 audioFilePath: audioPath,
                 referenceFilePath: referencePath,
                 referenceData: referenceData,
                 aurisReference: FingerprintMappingCache.AurisReferenceIdentity(
-                format: "fingerprint-compact-v3", payload: Data("v3-payload".utf8)
-            )
-            )
+                    format: "fingerprint-compact-v3", payload: Data("v3-payload".utf8)
+                )
+            ),
+            "a cache from the previous schema must not be reused"
         )
     }
 
@@ -384,6 +395,33 @@ final class FingerprintMappingCacheTests: XCTestCase {
                 )
             ),
             "same format, different bytes — only the payload hash can reject this"
+        )
+    }
+
+    /// A mapping built with an Auris reference cannot be reused when the caller now holds
+    /// none — offline, or the endpoint unavailable. Its entries came from a reference that can
+    /// no longer be confirmed, so "nothing to compare against" is not "still current".
+    func testAMappingBuiltWithAnAurisReferenceIsDiscardedWhenNoneIsHeldNow() throws {
+        let entries = makeFullCoverageEntries()
+        FingerprintMappingCache.save(
+            entries,
+            audioFilePath: audioPath,
+            referenceFilePath: referencePath,
+            referenceData: referenceData,
+            referenceDuration: 100,
+            aurisReference: FingerprintMappingCache.AurisReferenceIdentity(
+                format: "fingerprint-compact-v3", payload: Data("v3-payload".utf8)
+            )
+        )
+
+        XCTAssertNil(
+            FingerprintMappingCache.load(
+                audioFilePath: audioPath,
+                referenceFilePath: referencePath,
+                referenceData: referenceData
+            ),
+            "the transcript reference is unchanged and no Auris reference is held, so only the "
+                + "recorded identity can reject this"
         )
     }
 

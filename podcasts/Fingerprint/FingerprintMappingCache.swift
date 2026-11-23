@@ -80,11 +80,16 @@ enum FingerprintMappingCache {
             )
             return nil
         }
-        // Only mappings built WITH an Auris reference carry its identity, so only those are
-        // held to it. A transcript-only mapping has no Auris entries to invalidate and stays
-        // reusable exactly as it did before this field existed.
-        if let auris = aurisReference {
-            guard cached.aurisFormat == auris.format, cached.aurisHash == auris.hash else {
+        // The recorded identity must describe the reference the caller holds NOW, in both
+        // directions. A mapping built with an Auris reference cannot be reused when the caller
+        // holds none — offline, or the endpoint unavailable — because its entries came from a
+        // reference that can no longer be confirmed. Comparing only when a reference is present
+        // would let exactly that case through. A transcript-only mapping records no identity
+        // and is unaffected.
+        if cached.aurisFormat != nil || cached.aurisHash != nil {
+            guard let auris = aurisReference,
+                  cached.aurisFormat == auris.format,
+                  cached.aurisHash == auris.hash else {
                 FileLog.shared.addMessage(
                     "FingerprintMappingCache: Auris reference changed (format "
                         + "'\(cached.aurisFormat ?? "none")', hash '\(cached.aurisHash ?? "none")') "
