@@ -1291,11 +1291,6 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         }
 
         var interleaved: [Float] = []
-        // Per-stream cloud fingerprinter: owned by this stream run, flushed on
-        // every exit path (including cancellation) so buffered PCM and stale
-        // windows can never leak into the next stream (PR #14 review).
-        var cloudFingerprinter: CloudFingerprinter?
-        defer { flushCloudFingerprinter(&cloudFingerprinter, startOffset: startSeconds, context: ctx) }
         while true {
             if ctx.isCancelled() { throw StreamError.cancelled }
             let nextChunkStartSeconds = Double(audioFile.framePosition) / format.sampleRate
@@ -1308,7 +1303,6 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
             if !windows.isEmpty {
                 dispatchProcessMatches(windows: windows, startOffset: startSeconds, context: ctx)
             }
-            feedCloudFingerprinter(&cloudFingerprinter, samples: interleaved, channels: Int(channels), sampleRate: Int(format.sampleRate), startOffset: startSeconds, context: ctx)
         }
 
         if ctx.isCancelled() { throw StreamError.cancelled }
@@ -1410,8 +1404,6 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         // Per-stream cloud fingerprinter, flushed on every exit path (PR #14
         // review): the grow-loop previously fed a manager-level instance shared
         // with the continuous path's queue.
-        var cloudFingerprinter: CloudFingerprinter?
-        defer { flushCloudFingerprinter(&cloudFingerprinter, startOffset: startSeconds, context: ctx) }
 
         FileLog.shared.addMessage(
             "FingerprintTimingManager: streaming grow-loop starting at \(String(format: "%.1f", startSeconds))s "
@@ -1534,7 +1526,6 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
                 windowsEmitted += windows.count
                 dispatchProcessMatches(windows: windows, startOffset: startSeconds, context: ctx)
             }
-            feedCloudFingerprinter(&cloudFingerprinter, samples: interleaved, channels: Int(fmt.channelCount), sampleRate: Int(fmt.sampleRate), startOffset: startSeconds, context: ctx)
         }
 
         if ctx.isCancelled() { throw StreamError.cancelled }
@@ -1678,6 +1669,13 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         context ctx: GenerationContext
     ) {
         Self.matchWindows(windows: windows, startOffset: startOffset, matcher: ctx.matcher, into: &main)
+        // The Auris matcher reads the same windows as the transcript matcher: both
+        // references carry the library's own values, so one stream of windows serves
+        // both. It is additional, not a replacement — an episode with no cloud
+        // reference simply has no provider and nothing happens here.
+        if ctx.cloudMatcherProvider() != nil {
+            processCloudMatches(windows: windows, startOffset: startOffset, context: ctx)
+        }
 
         let coverage = main.playbackToReference.count
         if coverage >= FingerprintConstants.minimumCoverageForActive {
@@ -1891,63 +1889,12 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
 
     // MARK: - Cloud Alignment
 
-    /// Feeds decoded PCM into the per-stream CloudFingerprinter and dispatches
-    /// any newly-emitted windows for cloud matching. No-op when the context has
-    /// no cloud reference (transcript-sync-only episodes).
-    private func feedCloudFingerprinter(
-        _ fingerprinter: inout CloudFingerprinter?,
-        samples: [Float],
-        channels: Int,
-        sampleRate: Int,
-        startOffset: Double,
-        context ctx: GenerationContext
-    ) {
-        guard ctx.cloudMatcherProvider() != nil else { return }
-        if fingerprinter == nil {
-            fingerprinter = CloudFingerprinter()
-        }
-        fingerprinter?.pushSamples(samples, channels: channels, sampleRate: sampleRate)
-        guard let emitted = fingerprinter?.drainWindows(), !emitted.isEmpty else { return }
-        dispatchCloudMatches(windows: emitted, startOffset: startOffset, context: ctx)
-    }
-
-    /// Finishes the per-stream CloudFingerprinter, matching any windows whose
-    /// lookahead only became available at EOF. Callers own the instance and
-    /// run this on every exit path (defer), so a cancelled stream can never
-    /// leak buffered PCM into the next episode's stream (PR #14 review).
-    private func flushCloudFingerprinter(
-        _ fingerprinter: inout CloudFingerprinter?,
-        startOffset: Double,
-        context ctx: GenerationContext
-    ) {
-        guard let fp = fingerprinter else { return }
-        fingerprinter = nil
-        let tail = fp.finish()
-        if !tail.isEmpty {
-            dispatchCloudMatches(windows: tail, startOffset: startOffset, context: ctx)
-        }
-    }
-
-    private func dispatchCloudMatches(
-        windows: [CloudFingerprinter.Window],
-        startOffset: Double,
-        context ctx: GenerationContext
-    ) {
-        queue.async { [weak self] in
-            // Same generation guard as dispatchProcessMatches: after a
-            // seek-restart the superseded stream's queued windows must not
-            // interleave with the new stream's bootstrap (PR #14 wave-2).
-            guard let self, self.context?.generation == ctx.generation else { return }
-            self.processCloudMatches(windows: windows, startOffset: startOffset, context: ctx)
-        }
-    }
-
     /// Matches cloud-fingerprinter windows against the cloud reference and
     /// routes candidates through the same drift filter as the transcript path.
     /// Mirrors `processMatches` but uses the Auris cloud matcher and the
     /// Go-scheme window hashes (identical scheme to the server's reference).
     private func processCloudMatches(
-        windows: [CloudFingerprinter.Window],
+        windows: [WindowedFingerprint],
         startOffset: Double,
         context ctx: GenerationContext
     ) {
@@ -1960,7 +1907,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
             startOffset: startOffset,
             scoring: CheckpointMatcherScoring(matcher: cloudMatcher),
             windowHashes: { $0.hashes },
-            windowTimestampSeconds: { Double($0.timestampSec) },
+            windowTimestampSeconds: Double.init,
             rejectionPrefix: "cloud ",
             // The Auris endpoint's own acceptance rule, not transcript sync's.
             rule: .auris,
