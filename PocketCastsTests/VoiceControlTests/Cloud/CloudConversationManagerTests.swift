@@ -634,8 +634,6 @@ final class CloudConversationManagerTests: XCTestCase {
             manager.isAcknowledgedForTesting(conversationId: "a-conversation-this-client-never-opened"),
             "an unknown handle was recorded as acknowledged"
         )
-        // The window's OWN handle is untouched: an unrecognised acknowledgement neither clears the
-        // draft nor invents a conversation.
         // The window's own handle is untouched — an unrecognised acknowledgement neither clears it
         // nor invents a conversation — and the mode still says what the evidence says at send time.
         let later = manager.dialed(
