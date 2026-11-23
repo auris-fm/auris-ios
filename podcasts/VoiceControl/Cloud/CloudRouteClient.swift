@@ -460,20 +460,6 @@ final class CloudRouteClient {
         }
     }
 
-    /// TEST SEAM: is this turn's registration LIVE in the transport's table right now?
-    ///
-    /// A control that means "the predecessor's transport is up" must observe THIS, not the sink's
-    /// published socket binding. The binding is published on the main actor as soon as
-    /// `routeWithResultSocket` returns, while registration happens later inside the detached
-    /// producer task — so a non-nil binding does not yet mean an interrupt can be delivered.
-    /// Waiting on the binding is what let a control send its interrupt into a window where no
-    /// registration existed at all.
-    func hasLiveRegistrationForTesting(requestId: String) -> Bool {
-        liveSocketsLock.lock()
-        defer { liveSocketsLock.unlock() }
-        return liveSockets[requestId] != nil
-    }
-
     /// TEST SEAM: retire a turn's socket registration EXACTLY as a consumer close would, so a
     /// control can produce the `.undelivered` branch through the production send path instead of
     /// calling state transitions directly. Identity-checked in `retireSocket`, so it cannot retire

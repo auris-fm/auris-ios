@@ -316,9 +316,9 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         // a different scenario from the refusal ordering it is here to prove.
         let registered = await waitUntil(timeout: 5) {
             await MainActor.run {
-                guard sink.activeResultSocketForTesting != nil,
-                      let client = sink.resultClientForTesting else { return false }
-                return client.hasLiveRegistrationForTesting(requestId: "u-turn-a")
+                // `boundIdentity` is stamped BY registration, so requiring it observes the
+                // transport rather than the sink's earlier binding publication.
+                return sink.activeResultSocketForTesting?.boundIdentity != nil
             }
         }
         XCTAssertTrue(registered, "premise: the prior turn's transport must be REGISTERED before the successor starts")
@@ -416,9 +416,9 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         // Registration, not merely the published binding — see the refusal-ordering control above.
         let appeared = await waitUntil(timeout: 5) {
             await MainActor.run {
-                guard sink.activeResultSocketForTesting != nil,
-                      let client = sink.resultClientForTesting else { return false }
-                return client.hasLiveRegistrationForTesting(requestId: "u-turn-a")
+                // `boundIdentity` is stamped BY registration, so requiring it observes the
+                // transport rather than the sink's earlier binding publication.
+                return sink.activeResultSocketForTesting?.boundIdentity != nil
             }
         }
         XCTAssertTrue(appeared, "premise: turn A's transport must be REGISTERED")
@@ -586,9 +586,9 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         // Registration, not merely the published binding — see the refusal-ordering control above.
         let appeared = await waitUntil(timeout: 5) {
             await MainActor.run {
-                guard sink.activeResultSocketForTesting != nil,
-                      let client = sink.resultClientForTesting else { return false }
-                return client.hasLiveRegistrationForTesting(requestId: "u-first")
+                // `boundIdentity` is stamped BY registration, so requiring it observes the
+                // transport rather than the sink's earlier binding publication.
+                return sink.activeResultSocketForTesting?.boundIdentity != nil
             }
         }
         XCTAssertTrue(appeared, "premise: the first turn's transport must be REGISTERED")
@@ -663,9 +663,9 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         // Registration, not merely the published binding — see the refusal-ordering control above.
         let appeared = await waitUntil(timeout: 5) {
             await MainActor.run {
-                guard sink.activeResultSocketForTesting != nil,
-                      let client = sink.resultClientForTesting else { return false }
-                return client.hasLiveRegistrationForTesting(requestId: "u-turn-a")
+                // `boundIdentity` is stamped BY registration, so requiring it observes the
+                // transport rather than the sink's earlier binding publication.
+                return sink.activeResultSocketForTesting?.boundIdentity != nil
             }
         }
         XCTAssertTrue(appeared, "premise: the prior turn must be REGISTERED before it is interrupted")
@@ -734,9 +734,9 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
         // Registration, not merely the published binding — see the refusal-ordering control above.
         let appeared = await waitUntil(timeout: 5) {
             await MainActor.run {
-                guard sink.activeResultSocketForTesting != nil,
-                      let client = sink.resultClientForTesting else { return false }
-                return client.hasLiveRegistrationForTesting(requestId: "u-turn-a")
+                // `boundIdentity` is stamped BY registration, so requiring it observes the
+                // transport rather than the sink's earlier binding publication.
+                return sink.activeResultSocketForTesting?.boundIdentity != nil
             }
         }
         XCTAssertTrue(appeared, "premise: the prior turn must be REGISTERED before we retire it")

@@ -50,11 +50,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// must be too. A test awaits it through `MainActor.run`.
     var activeTurnIsCancelledForTesting: Bool? { activeTurn?.isCancelled }
 
-    /// TEST SEAM: the token that currently owns the turn, so a control can read the terminal fact
-    /// its consumer recorded (`acknowledgementResolutionForTesting`) rather than infer settlement
-    /// from the socket's presence.
-    var activeTurnForTesting: CloudTurnToken? { activeTurn }
-
     /// Whether an interruption report awaits a later EXPLICIT user request. A refusal retains the
     /// report but submits nothing, so the turn ends locally and there is no successor frame to
     /// observe it on (reviewer c38ff4ba item 2).
@@ -520,11 +515,14 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // instant as the timer cannot double-resume.
         private var resolution: InterruptionResolution?
 
-        /// TEST SEAM: the terminal fact this turn's consumer actually recorded, or nil while it is
-        /// still unsettled. An interrupt that cannot be delivered must consult THIS rather than
-        /// assume the predecessor ended: a registration can be absent because the transport was
-        /// lost OR because it had not registered yet, and in neither case has a terminal arrived.
-        nonisolated var acknowledgementResolutionForTesting: InterruptionResolution? {
+        /// The terminal fact this turn's consumer has actually recorded, or nil while the turn is
+        /// still unsettled.
+        ///
+        /// An interrupt that cannot be delivered must consult THIS rather than assume the
+        /// predecessor ended. A registration can be missing because the transport went away, or
+        /// because it had not been created yet; in neither case has a terminal arrived, and only a
+        /// recorded terminal authorizes submitting the interrupting utterance.
+        nonisolated var settlement: InterruptionResolution? {
             lock.lock(); defer { lock.unlock() }
             return resolution
         }
