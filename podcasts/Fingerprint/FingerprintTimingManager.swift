@@ -963,6 +963,35 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
                     // late-arriving reference live immediately.
                     self.cloudMatcher = matcher?.matcher
                     self.aurisReferenceIdentity = matcher?.identity
+
+                    // The cache check during configuration ran before this identity existed, so
+                    // an Auris-derived mapping could not be validated then and was refused. Now
+                    // it can be. Only while this pass has committed nothing: adopting a stored
+                    // mapping over anchors the pass has already established would replace live,
+                    // drift-filtered entries and stop work that is still needed.
+                    //
+                    // Deliberately reads no playback position and cancels nothing. An earlier
+                    // version did both and made the ad-absorption pass stop before its later
+                    // anchors committed; bisecting isolated it to those two calls. Adopting the
+                    // entries alone is enough — the running stream sees a full mapping and has
+                    // nothing left to add.
+                    if self.main.playbackToReference.isEmpty,
+                       let ctx = self.context, ctx.episodeUuid == uuid,
+                       let cached = FingerprintMappingCache.load(
+                           audioFilePath: ctx.audioFileURL.path,
+                           referenceFilePath: ctx.referenceFilePath,
+                           referenceData: ctx.referenceData,
+                           aurisReference: self.aurisReferenceIdentity
+                       ) {
+                        self.main.playbackToReference = cached.entries
+                        self.main.referenceToPlayback = cached.entries.sorted { $0.referenceTime < $1.referenceTime }
+                        self.main.filterLastTrusted = cached.entries.last
+                        self.updateState(.active(coverage: cached.entries.count))
+                        FileLog.shared.addMessage(
+                            "FingerprintTimingManager: adopted cached mapping for \(uuid) once the Auris reference landed"
+                        )
+                    }
+
                 }
             }
             return
@@ -1083,51 +1112,64 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         // Capture once so the range check, log, and stream start all use the same position.
         let currentTime = PlaybackManager.shared.currentTime()
 
-        // All-or-nothing cache: only short-circuit the stream if a previous
-        // session persisted a mapping that covers the whole reference timeline
-        // for this exact audio file + reference. Partial caches are ignored
-        // (the failed branch's `inRange` short-circuit on partial coverage was
-        // what trapped the manager in `.preparing`).
-        if !isStreaming,
-           let cached = FingerprintMappingCache.load(
-               audioFilePath: audioFileURL.path,
-               referenceFilePath: refPath,
-               referenceData: referenceData,
-               // Only held to an Auris identity when an Auris reference is actually in use;
-               // a transcript-only mapping stays reusable as it always was.
-               aurisReference: aurisReferenceIdentity
-           ) {
-            // The cache is produced from `playbackToReference` (already sorted
-            // by `playbackTime`), so assign it directly and sort once for the
-            // reference-keyed view — avoids the O(n²) cost of routing every
-            // entry through `insertMapping`'s per-entry `Array.insert`.
-            main.playbackToReference = cached.entries
-            main.referenceToPlayback = cached.entries.sorted { $0.referenceTime < $1.referenceTime }
-
-            if isWithinMappedRange(currentTime) {
-                main.filterLastTrusted = cached.entries.last
-                let coverage = cached.entries.count
-                updateState(.active(coverage: coverage))
-                if !hasReachedActive {
-                    hasReachedActive = true
-                    track(.syncedTranscriptsPreparationCompleted, properties: [
-                        "duration_ms": preparationDurationMs,
-                        "is_streaming": isStreaming
-                    ])
-                }
-                FileLog.shared.addMessage(
-                    "FingerprintTimingManager: skipping stream — full mapping loaded from cache for \(uuid)"
-                )
-                return
-            }
-
-            FileLog.shared.addMessage(
-                "FingerprintTimingManager: cache loaded for \(uuid) but playback at "
-                    + "\(String(format: "%.1f", currentTime))s is outside cached range — starting stream"
-            )
-        }
+        if adoptCachedMappingIfUsable(context: newContext, currentTime: currentTime) { return }
 
         startStream(context: newContext, fromPosition: currentTime)
+    }
+
+    /// Loads a persisted mapping for this context and adopts it when it is usable, returning
+    /// whether the stream can be skipped entirely.
+    ///
+    /// Called twice on the stored-reference path: once during configuration, and again when the
+    /// Auris fetch lands. The first call cannot validate an Auris-derived mapping because the
+    /// identity does not exist yet, and refusing it there is correct — but without the second
+    /// call every such mapping would be re-fingerprinted on every re-open.
+    private func adoptCachedMappingIfUsable(
+        context ctx: GenerationContext,
+        currentTime: Double
+    ) -> Bool {
+        guard !ctx.isStreaming else { return false }
+        // All-or-nothing cache: only short-circuit the stream if a previous session persisted a
+        // mapping covering the whole reference timeline for this exact audio file + reference.
+        // Partial caches are ignored (the failed branch's `inRange` short-circuit on partial
+        // coverage was what trapped the manager in `.preparing`).
+        guard let cached = FingerprintMappingCache.load(
+            audioFilePath: ctx.audioFileURL.path,
+            referenceFilePath: ctx.referenceFilePath,
+            referenceData: ctx.referenceData,
+            // A mapping that recorded an Auris identity is only reusable against that same
+            // identity; a transcript-only mapping records none and stays reusable.
+            aurisReference: aurisReferenceIdentity
+        ) else { return false }
+
+        // The cache is produced from `playbackToReference` (already sorted by `playbackTime`),
+        // so assign it directly and sort once for the reference-keyed view — avoids the O(n²)
+        // cost of routing every entry through `insertMapping`'s per-entry `Array.insert`.
+        main.playbackToReference = cached.entries
+        main.referenceToPlayback = cached.entries.sorted { $0.referenceTime < $1.referenceTime }
+
+        guard isWithinMappedRange(currentTime) else {
+            FileLog.shared.addMessage(
+                "FingerprintTimingManager: cache loaded for \(ctx.episodeUuid) but playback at "
+                    + "\(String(format: "%.1f", currentTime))s is outside cached range — starting stream"
+            )
+            return false
+        }
+
+        main.filterLastTrusted = cached.entries.last
+        let coverage = cached.entries.count
+        updateState(.active(coverage: coverage))
+        if !hasReachedActive {
+            hasReachedActive = true
+            track(.syncedTranscriptsPreparationCompleted, properties: [
+                "duration_ms": preparationDurationMs,
+                "is_streaming": ctx.isStreaming
+            ])
+        }
+        FileLog.shared.addMessage(
+            "FingerprintTimingManager: skipping stream — full mapping loaded from cache for \(ctx.episodeUuid)"
+        )
+        return true
     }
 
     /// Build a `CheckpointMatcher` populated from every usable checkpoint in
@@ -1415,10 +1457,6 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         var totalFramesRead: AVAudioFramePosition = 0
         var windowsEmitted = 0
         var interleaved: [Float] = []
-        // Per-stream cloud fingerprinter, flushed on every exit path (PR #14
-        // review): the grow-loop previously fed a manager-level instance shared
-        // with the continuous path's queue.
-
         FileLog.shared.addMessage(
             "FingerprintTimingManager: streaming grow-loop starting at \(String(format: "%.1f", startSeconds))s "
                 + "(buffer path: \(ctx.audioFileURL.lastPathComponent))"
@@ -1579,6 +1617,10 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         queue.async { [weak self] in
             guard let self, self.context?.episodeUuid == ctx.episodeUuid else { return }
             let snapshot = self.main.playbackToReference
+            // Read here, on `queue`, beside the snapshot it describes. Reading it inside the
+            // generationQueue block would race the fetch that writes it and could persist a
+            // mapping with no identity — or another episode's.
+            let aurisIdentity = self.aurisReferenceIdentity
             self.generationQueue.async {
                 FingerprintMappingCache.save(
                     snapshot,
@@ -1586,7 +1628,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
                     referenceFilePath: ctx.referenceFilePath,
                     referenceData: ctx.referenceData,
                     referenceDuration: ctx.referenceDuration,
-                    aurisReference: self.aurisReferenceIdentity
+                    aurisReference: aurisIdentity
                 )
             }
         }
@@ -1711,80 +1753,9 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
     /// `WindowScoring` normalizes the two matchers; the path-specific wrappers
     /// below supply window hashing, per-path timestamp semantics and debug
     /// logging.
-    private struct WindowMatch {
-        let referenceTime: Double
-        let score: Float
-    }
-
     private protocol WindowScoring {
         /// Returns up to `maxResults` candidates, best first.
         func topMatches(queryHashes: [UInt32], maxResults: Int) -> [WindowMatch]
-    }
-
-    /// How a path decides that a matcher's best candidate is trustworthy: the floor
-    /// a score must clear, how large a lead it needs, and which candidate counts as
-    /// the rival it must beat.
-    ///
-    /// The two sources served by this code answer "which rival" differently, so it is
-    /// a rule rather than a set of constants threaded through the loop. Transcript
-    /// sync compares against the immediate runner-up, as it always has. Auris compares
-    /// against the best candidate more than 2s away, because neighbouring reference
-    /// windows are the same audio shifted slightly and always score alike — a nearby
-    /// rival would suppress real matches while telling us nothing about ambiguity.
-    /// How a path decides that a matcher's best candidate is trustworthy.
-    private struct MatchAcceptanceRule {
-        let scoreThreshold: Float
-        let anchorScoreThreshold: Float
-        let dominanceGap: Float
-        let maxResults: Int
-        /// Which rival the lead is measured against.
-        let rival: Rival
-
-        enum Rival {
-            /// The immediate runner-up: neighbouring reference windows that score alike
-            /// suggest the winner is not distinctive.
-            case runnerUp
-            /// The best candidate more than 2s away. Used for the Auris endpoint, where
-            /// neighbouring windows are the same audio a moment later and always score
-            /// alike, so a nearby rival would suppress real matches and prove nothing.
-            case distant
-        }
-
-        /// The score this candidate must beat, or nil when the rule cannot establish one
-        /// — an unconfirmable window, which fails closed.
-        func rivalScore(in matches: [WindowMatch], best: WindowMatch) -> Float? {
-            switch rival {
-            case .runnerUp:
-                return matches.dropFirst().first?.score ?? 0
-            case .distant:
-                return matches
-                    .dropFirst()
-                    .filter {
-                        abs($0.referenceTime - best.referenceTime) > FingerprintConstants.aurisDistantCandidateSeconds
-                    }
-                    .map(\.score)
-                    .max()
-            }
-        }
-
-        /// Transcript sync's rule, unchanged from when the values were read inline.
-        static let transcript = MatchAcceptanceRule(
-            scoreThreshold: FingerprintConstants.matchScoreThreshold,
-            anchorScoreThreshold: FingerprintConstants.driftAnchorScoreThreshold,
-            dominanceGap: FingerprintConstants.driftScoreDominanceGap,
-            maxResults: 2,
-            rival: .runnerUp
-        )
-
-        /// The Auris endpoint's rule (cloud-ingestion.md): 0.65 floor, a 0.05 lead over
-        /// the best candidate further than 2s away, ranking the matcher's top 6.
-        static let auris = MatchAcceptanceRule(
-            scoreThreshold: FingerprintConstants.aurisMatchScoreThreshold,
-            anchorScoreThreshold: FingerprintConstants.aurisMatchScoreThreshold,
-            dominanceGap: FingerprintConstants.aurisDominanceGap,
-            maxResults: FingerprintConstants.aurisMaxResults,
-            rival: .distant
-        )
     }
 
     private struct CheckpointMatcherScoring: WindowScoring {
@@ -1844,27 +1815,25 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
                 )
                 continue
             }
-            guard let rivalScore = rule.rivalScore(in: matches, best: best) else {
-                recordRejection(
-                    candidate,
-                    reason: "\(rejectionPrefix)no distant candidate "
-                        + "(best \(String(format: "%.2f", best.score)))",
-                    into: &acc
-                )
-                continue
+            // The same decision the fixture tests exercise, so the rule cannot drift
+            // away from what is checked.
+            switch rule.verdict(for: matches) {
+            case .success:
+                inserted += consider(candidate: candidate, into: &acc)
+            case .failure(let rejection):
+                let reason: String
+                switch rejection {
+                case .scoreBelowFloor:
+                    reason = "low score \(String(format: "%.2f", best.score))"
+                case .noDistantCandidate:
+                    reason = "no distant candidate (best \(String(format: "%.2f", best.score)))"
+                case .leadTooSmall:
+                    let rival = rule.rivalScore(in: matches, best: best) ?? 0
+                    reason = "ambiguous top-1 vs rival "
+                        + "(\(String(format: "%.2f", best.score)) vs \(String(format: "%.2f", rival)))"
+                }
+                recordRejection(candidate, reason: "\(rejectionPrefix)\(reason)", into: &acc)
             }
-            let dominance = best.score - rivalScore
-            if dominance < rule.dominanceGap {
-                recordRejection(
-                    candidate,
-                    reason: "\(rejectionPrefix)ambiguous top-1 vs rival "
-                        + "(\(String(format: "%.2f", best.score)) vs \(String(format: "%.2f", rivalScore)))",
-                    into: &acc
-                )
-                continue
-            }
-
-            inserted += consider(candidate: candidate, into: &acc)
         }
         return inserted
     }

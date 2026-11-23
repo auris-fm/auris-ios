@@ -90,24 +90,21 @@ final class AurisMatchAcceptanceRuleTests: XCTestCase {
 
     // MARK: - The rule, applied to a candidate list
 
-    /// Mirrors `MatchAcceptanceRule.auris`. Written out rather than reached through the
-    /// manager so a case failure points at the rule rather than at the streaming loop.
+    /// Calls the **production** rule. An earlier version of this test restated the rule with
+    /// literal thresholds, which meant the forty recorded verdicts checked that copy and could
+    /// not fail when the shipped rule changed — the fixture and its mirror could be wrong
+    /// together. Nothing here re-implements the decision.
     private func evaluate(_ candidates: [Fixture.Candidate]) -> (Bool, String) {
-        let floor: Float = 0.65
-        let gap: Float = 0.05
-        let distantSeconds: Double = 2
-
-        guard let best = candidates.first else { return (false, "score_below_floor") }
-        guard best.score >= floor else { return (false, "score_below_floor") }
-
-        let distant = candidates.dropFirst().filter {
-            abs($0.timestamp - best.timestamp) > distantSeconds
+        let matches = candidates.map { WindowMatch(referenceTime: $0.timestamp, score: $0.score) }
+        switch MatchAcceptanceRule.auris.verdict(for: matches) {
+        case .success:
+            return (true, "accepted")
+        case .failure(let rejection):
+            switch rejection {
+            case .scoreBelowFloor: return (false, "score_below_floor")
+            case .noDistantCandidate: return (false, "no_distant_candidate")
+            case .leadTooSmall: return (false, "lead_too_small")
+            }
         }
-        // A reference too short to offer a distant candidate cannot confirm this window
-        // is unique, so it fails closed: report the best possible rival, leaving no lead.
-        guard let rival = distant.map(\.score).max() else { return (false, "no_distant_candidate") }
-        let lead = best.score - rival
-        guard lead >= gap else { return (false, "lead_too_small") }
-        return (true, "accepted")
     }
 }
