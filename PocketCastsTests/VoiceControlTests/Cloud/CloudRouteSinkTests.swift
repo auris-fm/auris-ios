@@ -6222,6 +6222,7 @@ final class CloudRouteSinkLocaleRuleTests: SocketCapturingTestCase {
 /// localized daily-limit template, exactly once, naming Auris and its daily allowance — and the
 /// remote frame's `message` is DIAGNOSTIC-ONLY for this code, so it must not replace that
 /// explanation.
+@MainActor
 final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
     private var playback: RecordingPlaybackSink!
     private var suiteName: String!

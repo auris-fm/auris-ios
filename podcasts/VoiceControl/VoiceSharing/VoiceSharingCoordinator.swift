@@ -109,6 +109,11 @@ final class VoiceSharingCoordinator {
         private let unregister: () -> Void
         fileprivate init(unregister: @escaping () -> Void) { self.unregister = unregister }
         func unregisterNow() { unregister() }
+        // Destroying the token unregisters, as the contract above states. The removal is keyed by
+        // this registration's own UUID, so an explicit `unregisterNow()` followed by destruction
+        // removes nothing further, and the weak coordinator reference makes a token that outlives
+        // its coordinator safe to destroy.
+        deinit { unregister() }
     }
 
     /// Last observed consent truth, so the membership observer can tell a LOSS from any other

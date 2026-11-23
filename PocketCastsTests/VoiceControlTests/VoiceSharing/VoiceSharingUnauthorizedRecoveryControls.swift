@@ -106,7 +106,7 @@ final class VoiceSharingUnauthorizedRecoveryControls: XCTestCase {
         queue: VoiceSharingQueue,
         sessionAlive: @escaping () -> Bool = { true },
         consentGone: @escaping () -> Bool
-    ) -> (coordinator: VoiceSharingCoordinator, fire: () -> Void) {
+    ) -> (coordinator: VoiceSharingCoordinator, collector: VoiceSharingCollector, fire: () -> Void) {
         let coordinator = VoiceSharingCoordinator()
         let collector = VoiceSharingCollector(
             isCollectionPermitted: { true },
@@ -121,7 +121,10 @@ final class VoiceSharingUnauthorizedRecoveryControls: XCTestCase {
             queue: queue, coordinator: coordinator,
             sessionAlive: sessionAlive, consentGone: consentGone,
             log: { [weak self] line in self?.logged.append(line) })
-        return (coordinator, { coordinator.consentGateLostForTesting() })
+        // The collector is RETURNED, not left in a local: the gate-loss registration lives exactly
+        // as long as its collector, so a caller that dropped it would unregister the handler before
+        // `fire()` and assert against an empty registry.
+        return (coordinator, collector, { coordinator.consentGateLostForTesting() })
     }
 
     /// Waits for the queue to empty, bounded, so a handler that purges off the calling thread can be
@@ -178,7 +181,8 @@ final class VoiceSharingUnauthorizedRecoveryControls: XCTestCase {
                        "the durable queue survives a 401 recovery untouched")
 
         // And the gate event that the incident window produced still RETAINS, logging why.
-        let (_, fire) = makeGateLoss(queue: queue) { store.consentGoneForPurge }
+        let (_, collector, fire) = makeGateLoss(queue: queue) { store.consentGoneForPurge }
+        defer { withExtendedLifetime(collector) {} }
         logged.removeAll()
         fire()
         let afterGateLoss = await queue.entries()
@@ -270,7 +274,8 @@ final class VoiceSharingUnauthorizedRecoveryControls: XCTestCase {
         _ = store.withdrawLocally(acceptedServerProjectionAfterward: false)
         XCTAssertTrue(store.consentGoneForPurge)
 
-        let (_, fire) = makeGateLoss(queue: queue) { store.consentGoneForPurge }
+        let (_, collector, fire) = makeGateLoss(queue: queue) { store.consentGoneForPurge }
+        defer { withExtendedLifetime(collector) {} }
         fire()
 
         // The purge runs on a task of its own, so the assertion waits for it to land rather than
@@ -292,9 +297,10 @@ final class VoiceSharingUnauthorizedRecoveryControls: XCTestCase {
         let queue = VoiceSharingQueue(root: root)
         _ = try await makeReadyEntry(queue)
 
-        let (_, fire) = makeGateLoss(queue: queue,
-                                     sessionAlive: { false },
-                                     consentGone: { store.consentGoneForPurge })
+        let (_, collector, fire) = makeGateLoss(queue: queue,
+                                               sessionAlive: { false },
+                                               consentGone: { store.consentGoneForPurge })
+        defer { withExtendedLifetime(collector) {} }
         fire()
 
         let remainingEntries = await waitForEmptyQueue(queue)
