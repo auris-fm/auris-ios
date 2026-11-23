@@ -52,6 +52,7 @@ final class TranscribingAsrBackend: AsrBackend {
 ///
 /// This is the control the manager-level case explicitly cannot be — the manager is handed an
 /// explicit selection, so it never exercises where the service derives one.
+@MainActor
 final class ServiceSelectionProvenanceTests: XCTestCase {
     /// ISOLATED cloud configuration: `isConfigured()` is `{ !CloudConfig.shared.baseUrl.isEmpty }`,
     /// and it is checked BEFORE the origin gate and before the client is built, so without a base
