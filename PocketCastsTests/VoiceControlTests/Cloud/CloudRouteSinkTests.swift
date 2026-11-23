@@ -5176,6 +5176,21 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             "an abandoned pre-authentication turn must submit NOTHING; frames=\(priorTask.sentTextFrames)"
         )
         XCTAssertNotEqual(priorResult.outcome, .completed, "an abandoned turn is never a completion")
+        // AND IT IS NOT A FAILURE EITHER. Abandonment is not something that went wrong: nothing of
+        // this turn was ever sent, so there is no failure to report and nothing to tell the user.
+        // Yielding an error terminal here made A's own consumer speak "Connection lost. Please try
+        // again." for a turn the server never heard of — the very symptom this disposition removes,
+        // reintroduced on the predecessor's side of it. The successor cancels A's token at its
+        // admission, but that is AFTER its interruption decision, so the cancelled-owner guard in
+        // the error path only hid the symptom when scheduling happened to favour it.
+        XCTAssertEqual(
+            priorResult.outcome, .earlyClose,
+            "an abandoned turn ends incomplete, not failed; got \(priorResult.outcome)"
+        )
+        XCTAssertEqual(
+            priorResult.response, .silent,
+            "nothing may be spoken for a turn that never submitted anything; got \(priorResult.response)"
+        )
 
         // B GOES OUT AS A FRESH TURN, with no interruption report: nothing of A was heard, so there
         // is no settled history to correct.
@@ -5250,6 +5265,63 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             priorTask.isCancelledSocket && !priorTask.sentInterrupt,
             "the losing arm must not close the predecessor's transport"
         )
+    }
+
+    /// A SECOND barge-in against the same already-abandoned predecessor must read the SAME answer.
+    ///
+    /// The abandonment decision is a question about the turn, not an effect to perform once: once a
+    /// turn is closed before its authentication send, it stays unheard for the rest of its life. The
+    /// sink publishes a predecessor's binding until the successor's own publication replaces it, and
+    /// dropping the abandoned hold clears the one-shot interrupt claim — so a second utterance can
+    /// reach the same socket and ask again.
+    ///
+    /// Taking the hook on the first win made that second call answer `false`, which the sink reads as
+    /// "may have been admitted, interrupt undeliverable": it suppressed the utterance and ended
+    /// locally, silently discarding what the user said over a turn that never existed.
+    func testASecondAbandonmentOfTheSameUnheardTurnReadsTheSameAnswer() async throws {
+        self.nextTurnFixture = Self.doneOnlyFixture
+        let state = CloudInterruptionState()
+        let sink = makeSink(interruptionState: state)
+
+        let seamEntered = Promise<Void>()
+        let abandonObserved = Promise<Void>()
+        parkNextProducerAtBindSeam = { client in
+            client.onBeforeBind = { _ in
+                seamEntered.resolve(())
+                let deadline = Date().addingTimeInterval(5)
+                while Date() < deadline, !abandonObserved.didClose { usleep(1_000) }
+            }
+        }
+        let prior = Task {
+            await sink.routeToCloud(
+                request: "prior question", tier: .free, context: self.sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-turn-a"
+            )
+        }
+        await seamEntered.value()
+        var bound = false
+        let bindDeadline = Date().addingTimeInterval(5)
+        while Date() < bindDeadline {
+            if await MainActor.run(body: { sink.activeResultSocketForTesting != nil }) { bound = true; break }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertTrue(bound, "premise: the sink must have published its result binding")
+        let priorSocket = try XCTUnwrap(await MainActor.run { sink.activeResultSocketForTesting })
+
+        // FIRST abandonment wins: nothing of this turn was submitted.
+        let first = await MainActor.run { priorSocket.abandonBeforeAuthentication() }
+        XCTAssertTrue(first, "premise: the pre-authentication window must be won here")
+        // SECOND ask, same turn, same unheard state — the answer must not change.
+        let second = await MainActor.run { priorSocket.abandonBeforeAuthentication() }
+        XCTAssertTrue(
+            second,
+            "a turn already abandoned before authentication is STILL unheard: a second barge-in must "
+            + "read the same answer, not classify it as undeliverable and drop the user's utterance"
+        )
+
+        abandonObserved.markClosed()
+        abandonObserved.resolve(())
+        _ = await prior.value
     }
 
     private func makeSink(conversationManager: CloudConversationManager? = nil, withHoldCounters: Bool = false, interruptionState: CloudInterruptionState = CloudInterruptionState()) -> CloudRouteSink {

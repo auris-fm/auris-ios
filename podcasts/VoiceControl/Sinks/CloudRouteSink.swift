@@ -530,18 +530,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // instant as the timer cannot double-resume.
         private var resolution: InterruptionResolution?
 
-        /// The terminal fact this turn's consumer has actually recorded, or nil while the turn is
-        /// still unsettled.
-        ///
-        /// An interrupt that cannot be delivered must consult THIS rather than assume the
-        /// predecessor ended. A registration can be missing because the transport went away, or
-        /// because it had not been created yet; in neither case has a terminal arrived, and only a
-        /// recorded terminal authorizes submitting the interrupting utterance.
-        nonisolated var settlement: InterruptionResolution? {
-            lock.lock(); defer { lock.unlock() }
-            return resolution
-        }
-
         /// How this turn resolved for an interruption waiter.
         enum InterruptionResolution: Equatable {
             /// A `done` arrived — even a `completed` one. This is the only outcome that may submit

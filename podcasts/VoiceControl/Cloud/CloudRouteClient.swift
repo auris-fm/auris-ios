@@ -254,6 +254,10 @@ final class CloudRouteClient {
         /// From that point the server may admit this turn, so it can no longer be abandoned as
         /// unheard — the same conservative reading the transport's own submission rule uses.
         private var authSendInvoked = false
+        /// Set under `closeLock` when THIS lifetime was closed by a winning abandonment. A later
+        /// barge-in against the same predecessor must read the same answer the first one got: the
+        /// turn is still unheard, so it is still abandonable, not a transport loss.
+        private var abandonedBeforeAuthentication = false
 
         /// True once the lifetime has closed. Read by the binding site so a socket that closed
         /// before its transport registered retires immediately at bind time instead of leaking.
@@ -272,21 +276,32 @@ final class CloudRouteClient {
         /// it cancelled. So the decision is made here, under the same lock the producer takes to
         /// mark its send:
         ///
-        /// - returns `true` when this call closed the lifetime BEFORE the authentication send was
-        ///   invoked. Nothing of this turn will reach the server; the caller may abandon it.
-        /// - returns `false` when the send had already been invoked (or the lifetime was already
-        ///   closed). The turn may have been admitted, so it must be interrupted, not abandoned.
+        /// - returns `true` when the lifetime is closed and its authentication send was never
+        ///   invoked — whether this call closed it or an earlier one did. Nothing of this turn will
+        ///   reach the server; the caller may abandon it.
+        /// - returns `false` when the send had already been invoked, or the lifetime closed by some
+        ///   other path. The turn may have been admitted, so it must be interrupted, not abandoned.
+        ///
+        /// IDEMPOTENT ON A WIN. A second barge-in arriving before the predecessor's binding clears
+        /// asks about the same unheard turn and must get the same answer; reporting `false` there
+        /// would classify an already-abandoned turn as undeliverable and silently drop the user's
+        /// utterance over a turn that never existed.
         ///
         /// CLOSES ONLY WHEN IT WINS. On the losing arm the lifetime is left OPEN, because the
         /// interrupt still has to travel on that socket: closing it there would turn a deliverable
         /// interruption into transport loss and drop the user's utterance.
         func closeBeforeAuthentication() -> Bool {
             closeLock.lock()
+            if abandonedBeforeAuthentication {
+                closeLock.unlock()
+                return true
+            }
             guard !authSendInvoked, !closed else {
                 closeLock.unlock()
                 return false
             }
             closed = true
+            abandonedBeforeAuthentication = true
             graceTask?.cancel()
             closeLock.unlock()
             if let client, let requestId, let identity {
@@ -839,7 +854,16 @@ final class CloudRouteClient {
                 FileLog.shared.addMessage(
                     "[CloudRoute] turn abandoned before authentication — nothing submitted (request_id=\(turn.requestId))"
                 )
-                continuation.yield(.error(source: .requestConstruction, code: "connection_lost", message: "turn abandoned before submission"))
+                // NO ERROR EVENT. An abandoned turn did not fail: nothing of it was ever sent, so
+                // there is no failure to report and nothing for the user to be told about. Yielding
+                // `connection_lost` here would make this turn's own consumer speak "Connection lost.
+                // Please try again." and record an error outcome for a turn the server never heard
+                // of — the exact false-failure symptom this disposition exists to remove.
+                //
+                // Ending the stream alone classifies the turn as an incomplete one (`.earlyClose`,
+                // silent), which is what abandonment is. The successor cancels this turn's token at
+                // its admission, but that happens AFTER its interruption decision, so relying on the
+                // cancelled-owner guard in the error path would leave the symptom to scheduling luck.
                 continuation.finish()
                 return true
             }

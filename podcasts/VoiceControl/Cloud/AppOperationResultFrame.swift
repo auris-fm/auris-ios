@@ -134,20 +134,20 @@ extension AppOperationResultSocket {
     /// fresh turn. Returns false when the send had already been invoked, or when another path
     /// already took this decision: the turn may have been admitted and must be interrupted instead.
     ///
-    /// On a LOST race the turn is left OPEN — the interrupt still has to travel on its socket — and
-    /// the hook stays installed, so a later caller can still observe the same lost outcome. Only a
-    /// WIN takes the hook, since only a win actually closed anything.
+    /// NOT take-once, unlike the close and claim hooks. Those perform an effect that must happen
+    /// exactly once; this one asks a QUESTION whose answer is stable for the life of the turn, and
+    /// the lifetime answers it idempotently under its own lock. Taking the hook on a win would make
+    /// a second barge-in against the same unheard predecessor read `false` — an already-abandoned
+    /// turn misreported as undeliverable, dropping the user's utterance over a turn that never
+    /// existed. On a LOST race the turn is likewise left OPEN, because the interrupt still has to
+    /// travel on its socket.
     func abandonBeforeAuthentication() -> Bool {
         let hook: (() -> Bool)? = {
             bindingLock.lock(); defer { bindingLock.unlock() }
             return _abandonBeforeAuthenticationHook
         }()
         guard let hook else { return false }
-        let won = hook()
-        if won {
-            bindingLock.lock(); _abandonBeforeAuthenticationHook = nil; bindingLock.unlock()
-        }
-        return won
+        return hook()
     }
 
     var abandonBeforeAuthenticationHook: (() -> Bool)? {
