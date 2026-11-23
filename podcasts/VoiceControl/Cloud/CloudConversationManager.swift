@@ -78,6 +78,8 @@ final class CloudConversationManager {
         /// The logical request that created this conversation. A same-owner retry of that
         /// request reuses the conversation rather than opening a second one.
         let creationRequestId: String
+        /// Whether the server has acknowledged a turn in this conversation.
+        var acknowledged: Bool
     }
 
     /// The conversation a live turn must carry, or nil when the turn's origin is not live.
@@ -126,6 +128,11 @@ final class CloudConversationManager {
         var prepared: CloudPreparedConversation
         // The conversation this turn carries: the one opened FOR ITS OWN ORIGIN, so a delayed
         // admitted turn continues its own window's conversation and never the successor's.
+        //
+        // The window's conversation, whatever its acknowledgement state: preparation names it and
+        // the mode is decided at the SEND (`dialed`), because `connected` may arrive while this turn
+        // waits for a predecessor to quiesce. A create replaces it — the window has moved on — so
+        // only its latest conversation can be continued.
         let existingForOrigin = originIsLive ? current : byOrigin[origin]
         if case .followUp = selection, let existing = existingForOrigin, existing.origin == origin {
             prepared = CloudPreparedConversation(
@@ -134,24 +141,21 @@ final class CloudConversationManager {
                 mode: Self.resume
             )
         } else {
-
-            let requestId = utteranceId
-            let conversationId = UUID().uuidString
+            // Held as the window's conversation but UNACKNOWLEDGED: only `connected` makes it
+            // resumable, and that is decided at the send (`dialed`), not here.
             let opened = OpenConversation(
-                id: conversationId,
+                id: UUID().uuidString,
                 origin: origin,
-                creationRequestId: requestId
+                creationRequestId: utteranceId,
+                acknowledged: false
             )
-            // A turn of the LIVE window publishes to `current`; a delayed admitted turn keeps
-            // its conversation under its own origin, where its follow-ups will find it.
-            if originIsLive {
-                current = opened
-            } else {
-                byOrigin[origin] = opened
-            }
+            // The window's own conversation, unacknowledged. A later create of the same window
+            // replaces it — the window has moved on — and `connected` for a replaced one lands on
+            // nothing, which is right: that conversation was never continued.
+            if originIsLive { current = opened } else { byOrigin[origin] = opened }
             prepared = CloudPreparedConversation(
-                requestId: requestId,
-                conversationId: conversationId,
+                requestId: utteranceId,
+                conversationId: opened.id,
                 mode: Self.create
             )
         }
@@ -207,6 +211,86 @@ final class CloudConversationManager {
             }
         }
         liveOrigin = origin
+    }
+
+    /// The conversation a prepared turn DIALS with, decided at the SEND rather than at preparation.
+    ///
+    /// The rule is one line — a follow-up may only resume a conversation the server has
+    /// acknowledged — but it cannot be answered when the turn is prepared. Preparation happens
+    /// before the sink waits for a predecessor to quiesce, and `connected` for the conversation
+    /// being continued may arrive during that wait: deciding early meant sending `resume` for a
+    /// conversation that was still a draft at the moment it went out.
+    ///
+    /// The prepared REQUEST identity is kept exactly as it is: a transport retry of the same
+    /// logical request must present the same `request_id`.
+    ///
+    /// When the decision does change the conversation, the replacement is PUBLISHED as that
+    /// window's conversation and retained under the utterance identity, exactly as a create made
+    /// at preparation is. Otherwise the id would exist only on the wire: its `connected` would
+    /// acknowledge nothing this client holds, the next follow-up would take the same branch
+    /// again, and the user's thread would restart on every utterance for as long as the first
+    /// create stayed unacknowledged. Publishing is also what makes a retry of THIS request reuse
+    /// the conversation it actually dialled rather than minting a third one.
+    func dialed(
+        prepared: CloudPreparedConversation,
+        selection: CloudConversationSelection,
+        origin: Int?
+    ) -> CloudPreparedConversation {
+        guard selection == .followUp, prepared.mode == Self.resume,
+              !isAcknowledged(conversationId: prepared.conversationId)
+        else { return prepared }
+        // Still unacknowledged at the moment of sending: this turn opens its own conversation.
+        let opened = OpenConversation(
+            id: UUID().uuidString,
+            origin: origin ?? liveOrigin ?? 0,
+            creationRequestId: prepared.requestId,
+            acknowledged: false
+        )
+        if opened.origin == liveOrigin { current = opened } else { byOrigin[opened.origin] = opened }
+        let replacement = CloudPreparedConversation(
+            requestId: prepared.requestId,
+            conversationId: opened.id,
+            mode: Self.create
+        )
+        preparedByUtteranceId[prepared.requestId] = replacement
+        return replacement
+    }
+
+    /// Records that the server acknowledged a turn in this conversation by sending `connected`,
+    /// making the handle resumable. Called from the turn that RECEIVED the frame, so the binding
+    /// is the wire's rather than an inference from a send that was merely attempted.
+    ///
+    /// An id this client is not holding is ignored: a late acknowledgement for a conversation a
+    /// successor window already replaced must not convert the live conversation into something a
+    /// follow-up resumes, and it must not resurrect a handle `forget` released.
+    func acknowledge(conversationId: String) {
+        // Marked IN PLACE, wherever the window holds it, so a retry's creation request id and an
+        // earlier window's handle both survive. An id this client is not holding matches nothing.
+        if let live = current, live.id == conversationId {
+            current = OpenConversation(
+                id: live.id, origin: live.origin, creationRequestId: live.creationRequestId,
+                acknowledged: true
+            )
+        } else if let key = byOrigin.first(where: { $0.value.id == conversationId })?.key {
+            let held = byOrigin[key]!
+            byOrigin[key] = OpenConversation(
+                id: held.id, origin: held.origin, creationRequestId: held.creationRequestId,
+                acknowledged: true
+            )
+        }
+    }
+
+    /// TEST SEAM: the wire identity prepared for an utterance, so a control can name the
+    /// conversation a turn actually carried rather than one it wrote itself.
+    func preparedConversationForTesting(utteranceId: String) -> CloudPreparedConversation? {
+        preparedByUtteranceId[utteranceId]
+    }
+
+    /// Whether the server has acknowledged a turn in this conversation, which is what makes it
+    /// resumable. Read by the send-time mode decision as well as by tests.
+    func isAcknowledged(conversationId: String) -> Bool {
+        if let live = current, live.id == conversationId { return live.acknowledged }
+        return byOrigin.values.first { $0.id == conversationId }?.acknowledged ?? false
     }
 
     /// Leaves ONE conversation: the client stops naming it and the server's history expires by

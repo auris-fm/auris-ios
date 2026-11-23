@@ -132,8 +132,14 @@ final class SinglePredecessorInterruptionControl: XCTestCase {
 
     // MARK: - Fixtures
 
+    /// An ADMITTED turn: `connected` then `done`, as the protocol sends them. The acknowledgement
+    /// is what makes the conversation resumable, so a follow-up in this window continues real
+    /// history — and a report about that history belongs to a conversation the server settled.
     private var doneFixture: String {
         """
+        event: connected
+        data: {"codec":"pcm_s16le@24k"}
+
         event: done
         data: {"usage":{"input_tokens":1,"output_tokens":1}}
 

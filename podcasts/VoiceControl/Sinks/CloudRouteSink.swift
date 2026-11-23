@@ -344,9 +344,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         "conversation_expired", "connection_lost",
     ]
 
-    /// The conversation of the most recently admitted turn. A refusal is recorded from the FAILING
+    /// The conversation a report may be attributed to. A refusal is recorded from the FAILING
     /// turn, which is the same conversation as the turn it interrupted (a barge-in continues the
     /// conversation), so this is the id the retained report must carry.
+    ///
+    /// Stamped when `connected` arrives, not when a turn is sent: an id for a conversation the
+    /// server has not admitted is provisional, and a stamp taken from it made the next turn treat
+    /// a live conversation as changed and discard a report it owed.
     @MainActor private var lastAdmittedConversationId: String?
 
     /// The turn socket currently open, so an ordering control can establish that a PRIOR turn is
@@ -1379,18 +1383,30 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // (review 4fc59e2c).
             returnedEarly = false
         }
+        // THE MODE IS DECIDED HERE, at the send, from what this turn actually continues.
+        //
+        // Preparation happens at the top of this function, before the supersede block above waits
+        // for a predecessor to quiesce: a conversation is only resumable once the server has
+        // acknowledged ONE of its turns, and that frame may arrive while this turn waits. Preparing
+        // the mode therefore decided on evidence that was stale by the time the turn went out. The
+        // identity (request id, conversation id) is still the prepared one — a retry must reuse it
+        // — but whether it is a `resume` is read now.
+        let sentConversation = conversationManager.dialed(
+            prepared: conversation,
+            selection: effectiveSelection,
+            origin: origin
+        )
         let turn = CloudTurnEnvelope.make(
             capabilities: CloudClientCapabilities.advertised(rendersStructuredResults: rendersStructuredResults),
             routeHint: routeHintProvider(),
-            conversation: conversation
+            conversation: sentConversation
         )
         // This turn's wire identity, used by the interruption state to bind an acknowledgement or a
         // refusal to the follow-up it resolves.
         let turnRequestId = turn.requestId
         // The conversation this turn carries, used to stamp an interruption report so the report
         // can be discarded if the user abandons that conversation.
-        let turnConversationId = conversation.conversationId
-        lastAdmittedConversationId = turnConversationId
+        let turnConversationId = sentConversation.conversationId
         // Every terminal exit finalizes this request's unresolved hold. Done/refusal already
         // resolve it; cancellation and truncated streams must discard it rather than strand B.
         defer {
@@ -1455,11 +1471,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // would ask the server to correct turns it never settled. Detected here, at the wire
         // construction for this turn, using the conversation id this turn will actually carry.
         if let carriedConversationId = interruptionState.pendingReportConversationId,
-           carriedConversationId != conversation.conversationId {
+           carriedConversationId != turnConversationId {
             interruptionState.discardPendingReport()
             FileLog.shared.addMessage(
                 "[VoicePipeline] pending interruption report discarded — conversation changed "
-                + "from \(carriedConversationId) to \(conversation.conversationId)"
+                + "from \(carriedConversationId) to \(turnConversationId)"
             )
         }
         let pendingInterruptReport = interruptionState.takePendingReport()
@@ -1592,6 +1608,18 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // The server names the codec for this turn's binary frames;
                     // the player decodes at that rate rather than the hardware's.
                     audioPlayer.setNegotiatedCodec(codec)
+                    // THE CONVERSATION BECAME REAL. `connected` is sent only after admission, so
+                    // this frame — not the send that preceded it — is the client's only evidence
+                    // that the server holds the conversation this turn named. Recorded where the
+                    // frame arrives: a create the server refused is never made the window's
+                    // conversation, and the next utterance opens a fresh one instead of resuming
+                    // a thread that never existed.
+                    // The STAMP follows the same rule. It lives on the interruption state and
+                    // decides whether a pending report is abandoned as belonging to a different
+                    // conversation; stamping it at send time told the next turn its conversation
+                    // had changed and threw the report away.
+                    lastAdmittedConversationId = turnConversationId
+                    conversationManager.acknowledge(conversationId: turnConversationId)
                 case let .audioFrame(frame):
                     // Owner cancellation gates buffered audio admission too: a frame drained
                     // after cancel must not reach the player.
@@ -2338,7 +2366,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // The refusal discards the held follow-up and retains a report naming the INTERRUPTED turn.
         // The server applies the report to already-settled history, so it must name a turn the
         // server knows we interrupted — which is the interrupted turn, not the refused one.
-        let reportConversationId = lastAdmittedConversationId
+        // The stamp names the conversation the report describes — one the server ASKED for, i.e.
+        // one that already received `connected` — so it is left alone here. Writing THIS turn's
+        // conversation over it would point a report at a conversation the server never admitted,
+        // which is exactly the case this change exists to remove.
+        let reportConversationId = interruptionState.pendingReportConversationId
+            ?? lastAdmittedConversationId
         let discarded = interruptionState.recordRefusal(
             forRequestId: interruptedRequestId ?? requestId,
             retainingReport: CloudInterruptionState.PendingReport(
