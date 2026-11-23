@@ -141,8 +141,8 @@ final class CloudConversationManager {
                 mode: Self.resume
             )
         } else {
-            // A create is itself a draft until `connected` arrives, so it is not published as the
-            // window's conversation here.
+            // Held as the window's conversation but UNACKNOWLEDGED: only `connected` makes it
+            // resumable, and that is decided at the send (`dialed`), not here.
             let opened = OpenConversation(
                 id: UUID().uuidString,
                 origin: origin,
@@ -221,23 +221,39 @@ final class CloudConversationManager {
     /// being continued may arrive during that wait: deciding early meant sending `resume` for a
     /// conversation that was still a draft at the moment it went out.
     ///
-    /// The prepared REQUEST identity is kept exactly as it is. A transport retry of the same
-    /// logical request must present the same `request_id`, and a request the contract lets us
-    /// retry must keep its conversation and its mode too — so this only ever changes which mode a
-    /// turn is sent with, never the identity of a request already handed out.
+    /// The prepared REQUEST identity is kept exactly as it is: a transport retry of the same
+    /// logical request must present the same `request_id`.
+    ///
+    /// When the decision does change the conversation, the replacement is PUBLISHED as that
+    /// window's conversation and retained under the utterance identity, exactly as a create made
+    /// at preparation is. Otherwise the id would exist only on the wire: its `connected` would
+    /// acknowledge nothing this client holds, the next follow-up would take the same branch
+    /// again, and the user's thread would restart on every utterance for as long as the first
+    /// create stayed unacknowledged. Publishing is also what makes a retry of THIS request reuse
+    /// the conversation it actually dialled rather than minting a third one.
     func dialed(
         prepared: CloudPreparedConversation,
-        selection: CloudConversationSelection
+        selection: CloudConversationSelection,
+        origin: Int?
     ) -> CloudPreparedConversation {
         guard selection == .followUp, prepared.mode == Self.resume,
               !isAcknowledgedForTesting(conversationId: prepared.conversationId)
         else { return prepared }
-        // Still a draft at the moment of sending: this turn opens its own conversation instead.
-        return CloudPreparedConversation(
+        // Still unacknowledged at the moment of sending: this turn opens its own conversation.
+        let opened = OpenConversation(
+            id: UUID().uuidString,
+            origin: origin ?? liveOrigin ?? 0,
+            creationRequestId: prepared.requestId,
+            acknowledged: false
+        )
+        if opened.origin == liveOrigin { current = opened } else { byOrigin[opened.origin] = opened }
+        let replacement = CloudPreparedConversation(
             requestId: prepared.requestId,
-            conversationId: UUID().uuidString,
+            conversationId: opened.id,
             mode: Self.create
         )
+        preparedByUtteranceId[prepared.requestId] = replacement
+        return replacement
     }
 
     /// Records that the server acknowledged a turn in this conversation by sending `connected`,
@@ -262,6 +278,12 @@ final class CloudConversationManager {
                 acknowledged: true
             )
         }
+    }
+
+    /// TEST SEAM: the wire identity prepared for an utterance, so a control can name the
+    /// conversation a turn actually carried rather than one it wrote itself.
+    func preparedConversationForTesting(utteranceId: String) -> CloudPreparedConversation? {
+        preparedByUtteranceId[utteranceId]
     }
 
     /// TEST SEAM: whether the manager currently holds this conversation as resumable.

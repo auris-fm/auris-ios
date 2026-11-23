@@ -1317,7 +1317,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // — but whether it is a `resume` is read now.
         let sentConversation = conversationManager.dialed(
             prepared: conversation,
-            selection: effectiveSelection
+            selection: effectiveSelection,
+            origin: origin
         )
         let turn = CloudTurnEnvelope.make(
             capabilities: CloudClientCapabilities.advertised(rendersStructuredResults: rendersStructuredResults),
@@ -1394,11 +1395,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // would ask the server to correct turns it never settled. Detected here, at the wire
         // construction for this turn, using the conversation id this turn will actually carry.
         if let carriedConversationId = interruptionState.pendingReportConversationId,
-           carriedConversationId != conversation.conversationId {
+           carriedConversationId != turnConversationId {
             interruptionState.discardPendingReport()
             FileLog.shared.addMessage(
                 "[VoicePipeline] pending interruption report discarded — conversation changed "
-                + "from \(carriedConversationId) to \(conversation.conversationId)"
+                + "from \(carriedConversationId) to \(turnConversationId)"
             )
         }
         let pendingInterruptReport = interruptionState.takePendingReport()

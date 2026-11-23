@@ -2918,6 +2918,85 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
         }
     }
 
+    /// THE REPORT IS CHECKED AGAINST THE CONVERSATION THE TURN ACTUALLY SENDS.
+    ///
+    /// A report corrects one conversation's settled history. When the send-time decision opens a
+    /// fresh conversation, the prepared id and the dialled id differ — comparing against the
+    /// prepared one would attach the correction to a turn that is no longer in that conversation,
+    /// asking the server to amend history it never settled.
+    ///
+    /// The control half matters as much: when the ids DO match, the report must survive. Without
+    /// it, "always discard" would pass the first assertion.
+    @MainActor
+    func testThePendingReportIsCheckedAgainstTheConversationActuallySent() async throws {
+        for acknowledged in [false, true] {
+            let manager = CloudConversationManager()
+            manager.registerLiveOrigin(cloudTestOrigin)
+            self.pendingFixture = acknowledged
+                ? """
+                event: connected
+                data: {"codec":"pcm_s16le@24k"}
+
+                event: done
+                data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+                """
+                : """
+                event: done
+                data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+                """
+            let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager)
+            let opening = await sink.routeToCloud(
+                request: "find episodes", tier: .free, context: sampleContext(),
+                origin: cloudTestOrigin, selection: .wakeWord, utteranceId: "u-rep-open-\(acknowledged)"
+            )
+            XCTAssertEqual(opening.outcome, .completed, "premise: the opening turn ran")
+            let openedId = try XCTUnwrap(
+                manager.preparedConversationForTesting(utteranceId: "u-rep-open-\(acknowledged)")
+            ).conversationId
+
+            // A refusal of an interrupted turn leaves a report naming THAT turn's conversation.
+            let state = sink.interruptionStateForTesting
+            XCTAssertTrue(state.claimInterruptEmission(forRequestId: "u-rep-open-\(acknowledged)"))
+            XCTAssertTrue(state.recordRefusal(
+                forRequestId: "u-rep-open-\(acknowledged)",
+                retainingReport: .init(requestId: "u-rep-open-\(acknowledged)", playbackPositionMs: 1_000, conversationId: openedId)
+            ))
+            XCTAssertEqual(state.pendingReportConversationId, openedId, "premise: a report is pending")
+
+            self.pendingFixture = """
+                event: done
+                data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+                """
+            _ = await sink.routeToCloud(
+                request: "play the second one", tier: .free, context: sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-rep-next-\(acknowledged)"
+            )
+            let auths = capturedTask?.sentTextFrames.compactMap { text -> [String: Any]? in
+                guard let data = text.data(using: .utf8) else { return nil }
+                return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            }.filter { $0["type"] as? String == "authenticate" } ?? []
+            let followUp = try XCTUnwrap(auths.last)
+            let sentId = try XCTUnwrap(followUp["conversation_id"] as? String)
+
+            if acknowledged {
+                XCTAssertEqual(sentId, openedId, "control premise: the follow-up stayed in the conversation")
+                XCTAssertNotNil(
+                    followUp["interrupts"],
+                    "a report for the conversation this turn is still in was discarded"
+                )
+            } else {
+                XCTAssertNotEqual(sentId, openedId, "premise: the send opened a different conversation")
+                XCTAssertNil(
+                    followUp["interrupts"],
+                    "a report was attached to a turn that left its conversation"
+                )
+            }
+        }
+    }
+
     private func checkBufferedPlaybackNextAuth(drainBeforeFollowUp: Bool) async throws {
         // A REAL OUTPUT IS REQUIRED for the binding to exist at all: with no available output the
         // player consumes frames silently, `hasPendingAudio` is false, and `done` correctly binds
@@ -3351,7 +3430,16 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             withExtendedLifetime(sink) {}
         }
 
-        // Turn N: done, with its answer audio still scheduled.
+        // Turn N: admitted (`connected`), then done, with its answer audio still scheduled. The
+        // acknowledgement is what makes N's conversation resumable, so the report it leaves behind
+        // describes history the server actually settled — without it utterance 3 opens a fresh
+        // conversation and correctly drops the report.
+        nextTurnFixture = """
+            event: connected
+            data: {"codec":"pcm_s16le@24k"}
+
+            \(Self.doneOnlyFixture)
+            """
         let turnN = Task {
             await sink.routeToCloud(request: "first", tier: .free, context: sampleContext(),
                                     origin: cloudTestOrigin, selection: .wakeWord, utteranceId: "u-n")
