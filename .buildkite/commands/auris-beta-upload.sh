@@ -135,7 +135,34 @@ assert_signing_env() {
   return "$fail"
 }
 
+# PROVENANCE, not a label. `build.branch == "main"` in the pipeline compares a
+# NAME, and this repository is public: anyone can push a branch called `main`,
+# or open a pull request whose build carries that label. A name is not evidence
+# of where a commit came from, so it must not be the only thing standing between
+# an unreviewed checkout and the App Store Connect signing key.
+#
+# The check is ancestry: the checked-out commit must be reachable from the
+# server's main. It runs BEFORE any key is read, and fails CLOSED — a fetch that
+# cannot complete is a refusal, not a pass, because "could not verify" is not
+# "verified".
+assert_on_main() {
+  local root
+  root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+    echo "not a git checkout: refusing to sign a build whose provenance cannot be established"
+    return 1
+  }
+  if ! git -C "$root" fetch --quiet origin main 2>/dev/null; then
+    echo "cannot fetch origin/main: refusing to sign a build whose provenance cannot be verified"
+    return 1
+  fi
+  if ! git -C "$root" merge-base --is-ancestor HEAD FETCH_HEAD 2>/dev/null; then
+    echo "this checkout is not on main: refusing to read the signing key for an unreviewed commit"
+    return 1
+  fi
+}
+
 preflight() {
+  assert_on_main || return 1
   assert_signing_env || return 1
   [[ -d ThirdParty/llama-cpp-build/ios-device/lfm ]] || { echo "device llama build missing"; return 1; }
   echo "auris-beta-upload: preflight OK"
@@ -147,6 +174,7 @@ if [[ "${1:-}" == "--check" ]]; then
 fi
 
 : "${BUILDKITE_BUILD_NUMBER:?must run under Buildkite}"
+assert_on_main
 assert_signing_env
 assert_toolchain
 assert_real_credentials

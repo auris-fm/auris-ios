@@ -22,11 +22,32 @@ mkdir -p "$TMP/bin"
 printf '#!/bin/sh\nexit 0\n' > "$TMP/bin/fastlane"
 chmod +x "$TMP/bin/fastlane"
 
+# Every preflight fixture must genuinely be ON MAIN, or the provenance refusal
+# fires first and the case stops testing the condition it names. This makes a
+# real repo with a real origin at the given path and leaves HEAD on main.
+make_on_main_repo() { # $1 = repo dir
+  local d="$1"
+  rm -rf "$d" "$d.origin.git"
+  git init --quiet --bare "$d.origin.git"
+  git init --quiet "$d"
+  (
+    cd "$d"
+    git config user.email t@t; git config user.name t
+    git config commit.gpgsign false
+    mkdir -p .buildkite/commands
+    cp "$CMD" .buildkite/commands/
+    git add -A >/dev/null 2>&1
+    git commit --quiet -m base
+    git branch -M main
+    git remote add origin "$d.origin.git"
+    git push --quiet origin main
+  ) >/dev/null 2>&1
+}
+
 run_case() { # $1 = expected message; $2.. = env assignments applied over the base set
   local expected="$1"; shift
-  rm -rf "$TMP/repo"
-  mkdir -p "$TMP/repo/.buildkite/commands" "$TMP/repo/ThirdParty/llama-cpp-build/ios-device/lfm"
-  cp "$CMD" "$TMP/repo/.buildkite/commands/"
+  make_on_main_repo "$TMP/repo"
+  mkdir -p "$TMP/repo/ThirdParty/llama-cpp-build/ios-device/lfm"
   local out
   out=$(env -i PATH="$TMP/bin:/usr/bin:/bin" HOME="$TMP" APP_STORE_CONNECT_API_KEY_KEY_ID=k APP_STORE_CONNECT_API_KEY_ISSUER_ID=i APP_STORE_CONNECT_API_KEY_KEY=secret "$@" bash -c "cd '$TMP/repo/.buildkite/commands' && ./auris-beta-upload.sh --check" 2>&1)
   if [[ "$out" == *"$expected"* ]]; then
@@ -42,9 +63,8 @@ run_case "missing env: APP_STORE_CONNECT_API_KEY_KEY" APP_STORE_CONNECT_API_KEY_
 
 # The llama check, with the env satisfied: point the script's cd at a
 # layout whose ThirdParty is empty.
-rm -rf "$TMP/repo"
-mkdir -p "$TMP/repo/.buildkite/commands" "$TMP/repo/ThirdParty"
-cp "$CMD" "$TMP/repo/.buildkite/commands/"
+make_on_main_repo "$TMP/repo"
+mkdir -p "$TMP/repo/ThirdParty"
 out=$(env -i PATH="$TMP/bin:/usr/bin:/bin" HOME="$TMP" APP_STORE_CONNECT_API_KEY_KEY_ID=k APP_STORE_CONNECT_API_KEY_ISSUER_ID=i APP_STORE_CONNECT_API_KEY_KEY=secret bash -c "cd '$TMP/repo/.buildkite/commands' && ./auris-beta-upload.sh --check" 2>&1)
 if [[ "$out" == *"device llama build missing"* ]]; then
   echo "ok: preflight reports 'device llama build missing'"
@@ -53,14 +73,86 @@ else
 fi
 
 # Happy path passes when everything is in place.
-rm -rf "$TMP/repo"
-mkdir -p "$TMP/repo/.buildkite/commands" "$TMP/repo/ThirdParty/llama-cpp-build/ios-device/lfm"
-cp "$CMD" "$TMP/repo/.buildkite/commands/"
+make_on_main_repo "$TMP/repo"
+mkdir -p "$TMP/repo/ThirdParty/llama-cpp-build/ios-device/lfm"
 if env -i PATH="$TMP/bin:/usr/bin:/bin" HOME="$TMP" APP_STORE_CONNECT_API_KEY_KEY_ID=k APP_STORE_CONNECT_API_KEY_ISSUER_ID=i APP_STORE_CONNECT_API_KEY_KEY=secret bash -c "cd '$TMP/repo/.buildkite/commands' && ./auris-beta-upload.sh --check" >/dev/null 2>&1; then
   echo "ok: preflight passes with everything in place"
 else
   fail "preflight failed with all conditions satisfied"
 fi
+
+# ---------------------------------------------------------------------------
+# Provenance: a branch NAME is a label, not proof of where a commit came from,
+# and this repo is public. The step must refuse a checkout that is not on main
+# BEFORE it reads the App Store Connect key. Each case builds a REAL git repo
+# with a real `origin`, so the assertion is about ancestry rather than a string.
+# ---------------------------------------------------------------------------
+provenance_case() { # $1 = on-main|off-main ; $2 = expect-pass|expect-refuse
+  local mode="$1" expect="$2"
+  rm -rf "$TMP/prov" "$TMP/origin.git"
+  git init --quiet --bare "$TMP/origin.git"
+  git init --quiet "$TMP/prov"
+  (
+    cd "$TMP/prov"
+    git config user.email t@t; git config user.name t
+    git config commit.gpgsign false
+    mkdir -p .buildkite/commands ThirdParty/llama-cpp-build/ios-device/lfm
+    cp "$CMD" .buildkite/commands/
+    git add -A >/dev/null 2>&1
+    git commit --quiet -m base
+    git branch -M main
+    git remote add origin "$TMP/origin.git"
+    git push --quiet origin main
+    if [[ "$mode" == off-main ]]; then
+      # A commit that exists in the checkout but was never on main. This is the
+      # shape a pull-request build has, whatever its branch happens to be called.
+      git checkout --quiet -b main   # SAME LABEL, different history
+      echo unreviewed > extra.txt
+      git add -A >/dev/null 2>&1
+      git commit --quiet -m "not on main"
+    fi
+  ) >/dev/null 2>&1
+  local out rc
+  out=$(env -i PATH="$TMP/bin:/usr/bin:/bin" HOME="$TMP" \
+        APP_STORE_CONNECT_API_KEY_KEY_ID=k APP_STORE_CONNECT_API_KEY_ISSUER_ID=i \
+        APP_STORE_CONNECT_API_KEY_KEY=secret BUILDKITE_BRANCH=main \
+        bash -c "cd '$TMP/prov/.buildkite/commands' && ./auris-beta-upload.sh --check" 2>&1) && rc=0 || rc=$?
+  if [[ "$expect" == expect-refuse ]]; then
+    if [[ "$rc" -ne 0 && "$out" == *"not on main"* ]]; then
+      echo "ok: a checkout that is not on main is refused before the key is read"
+    else
+      fail "an off-main checkout was NOT refused (rc=$rc, got: $out)"
+    fi
+  else
+    if [[ "$rc" -eq 0 ]]; then
+      echo "ok: a checkout genuinely on main passes the provenance check"
+    else
+      fail "an on-main checkout was refused (rc=$rc, got: $out)"
+    fi
+  fi
+}
+
+# A remote that cannot be reached must REFUSE, not pass: "could not verify" is
+# not "verified". Same repo shape, origin pointed at a path that does not exist.
+provenance_unreachable() {
+  make_on_main_repo "$TMP/prov"
+  ( cd "$TMP/prov" && git remote set-url origin "$TMP/does-not-exist.git" ) >/dev/null 2>&1
+  local out rc
+  out=$(env -i PATH="$TMP/bin:/usr/bin:/bin" HOME="$TMP" \
+        APP_STORE_CONNECT_API_KEY_KEY_ID=k APP_STORE_CONNECT_API_KEY_ISSUER_ID=i \
+        APP_STORE_CONNECT_API_KEY_KEY=secret BUILDKITE_BRANCH=main \
+        bash -c "cd '$TMP/prov/.buildkite/commands' && ./auris-beta-upload.sh --check" 2>&1) && rc=0 || rc=$?
+  if [[ "$rc" -ne 0 && "$out" == *"cannot fetch origin/main"* ]]; then
+    echo "ok: an unreachable origin refuses rather than assuming provenance"
+  else
+    fail "an unverifiable checkout was NOT refused (rc=$rc, got: $out)"
+  fi
+}
+
+provenance_case off-main expect-refuse
+provenance_case on-main  expect-pass
+provenance_unreachable
+echo "3/3 provenance cases passed (counted separately from the gate/env tally below)"
 
 # ---------------------------------------------------------------------------
 # The upload gate. Archiving and signing happen on every main run; uploading
@@ -73,9 +165,10 @@ report() { echo "ok: $*"; cases=$((cases + 1)); }
 
 # A repo whose `bundle` records its arguments instead of running fastlane.
 make_upload_repo() {
-  rm -rf "$TMP/up"
-  mkdir -p "$TMP/up/.buildkite/commands" "$TMP/up/ThirdParty/llama-cpp-build/ios-device/lfm" "$TMP/up/bin" "$TMP/up/podcasts/Credentials"
-  cp "$CMD" "$TMP/up/.buildkite/commands/"
+  # ON MAIN, like a real upload job: otherwise the provenance refusal fires
+  # first and every gate case below would pass for the wrong reason.
+  make_on_main_repo "$TMP/up"
+  mkdir -p "$TMP/up/ThirdParty/llama-cpp-build/ios-device/lfm" "$TMP/up/bin" "$TMP/up/podcasts/Credentials"
   cp "$ROOT/.ruby-version" "$ROOT/.xcode-version" "$TMP/up/"
   sed 's/%{[^}]*}/real-value/g' "$ROOT/podcasts/Credentials/ApiCredentials.tpl" > "$TMP/up/podcasts/Credentials/LocalApiCredentials.swift"
   printf '#!/bin/sh\necho "$@" >> "%s/lanes.txt"\nexit 0\n' "$TMP/up" > "$TMP/up/bin/bundle"
@@ -155,9 +248,9 @@ report "only BETA_UPLOAD=1 uploads; other values do not"
 # A repo with a stub toolchain that records what ran, plus the real support
 # files the script reads (.ruby-version, .xcode-version, Makefile, template).
 make_env_repo() {
-  rm -rf "$TMP/env"
-  mkdir -p "$TMP/env/.buildkite/commands" "$TMP/env/bin" "$TMP/env/podcasts/Credentials"
-  cp "$CMD" "$TMP/env/.buildkite/commands/"
+  # ON MAIN, so these cases test the environment rather than provenance.
+  make_on_main_repo "$TMP/env"
+  mkdir -p "$TMP/env/bin" "$TMP/env/podcasts/Credentials"
   cp "$ROOT/.ruby-version" "$ROOT/.xcode-version" "$TMP/env/"
   cp "$ROOT/podcasts/Credentials/ApiCredentials.tpl" "$TMP/env/podcasts/Credentials/"
   sed 's/%{[^}]*}/real-value/g' "$ROOT/podcasts/Credentials/ApiCredentials.tpl" > "$TMP/env/podcasts/Credentials/LocalApiCredentials.swift"
