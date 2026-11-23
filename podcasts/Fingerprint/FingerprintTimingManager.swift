@@ -907,7 +907,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         guard !baseUrl.isEmpty else { return nil }
         let matcher = await CloudFingerprintReferenceFetcher.shared.fetchReference(baseUrl: baseUrl, episodeUuid: uuid, podcastUuid: podcastUuid)
         if let matcher {
-            FileLog.shared.addMessage("FingerprintTimingManager: cloud reference loaded (\(matcher.count) checkpoints) for \(uuid)")
+            FileLog.shared.addMessage("FingerprintTimingManager: cloud reference loaded (\(matcher.count()) checkpoints) for \(uuid)")
         } else {
             FileLog.shared.addMessage("FingerprintTimingManager: cloud reference unavailable for \(uuid)")
         }
@@ -1716,14 +1716,41 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
     /// against the best candidate more than 2s away, because neighbouring reference
     /// windows are the same audio shifted slightly and always score alike — a nearby
     /// rival would suppress real matches while telling us nothing about ambiguity.
-    struct MatchAcceptanceRule {
+    /// How a path decides that a matcher's best candidate is trustworthy.
+    private struct MatchAcceptanceRule {
         let scoreThreshold: Float
         let anchorScoreThreshold: Float
         let dominanceGap: Float
         let maxResults: Int
+        /// Which rival the lead is measured against.
+        let rival: Rival
+
+        enum Rival {
+            /// The immediate runner-up: neighbouring reference windows that score alike
+            /// suggest the winner is not distinctive.
+            case runnerUp
+            /// The best candidate more than 2s away. Used for the Auris endpoint, where
+            /// neighbouring windows are the same audio a moment later and always score
+            /// alike, so a nearby rival would suppress real matches and prove nothing.
+            case distant
+        }
+
         /// The score this candidate must beat, or nil when the rule cannot establish one
-        /// (which fails closed: an unconfirmable window is not accepted).
-        let rivalScore: ([WindowMatch], WindowMatch) -> Float?
+        /// — an unconfirmable window, which fails closed.
+        func rivalScore(in matches: [WindowMatch], best: WindowMatch) -> Float? {
+            switch rival {
+            case .runnerUp:
+                return matches.dropFirst().first?.score ?? 0
+            case .distant:
+                return matches
+                    .dropFirst()
+                    .filter {
+                        abs($0.referenceTime - best.referenceTime) > FingerprintConstants.aurisDistantCandidateSeconds
+                    }
+                    .map(\.score)
+                    .max()
+            }
+        }
 
         /// Transcript sync's rule, unchanged from when the values were read inline.
         static let transcript = MatchAcceptanceRule(
@@ -1731,7 +1758,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
             anchorScoreThreshold: FingerprintConstants.driftAnchorScoreThreshold,
             dominanceGap: FingerprintConstants.driftScoreDominanceGap,
             maxResults: 2,
-            rivalScore: { matches, _ in matches.dropFirst().first?.score ?? 0 }
+            rival: .runnerUp
         )
 
         /// The Auris endpoint's rule (cloud-ingestion.md): 0.65 floor, a 0.05 lead over
@@ -1741,17 +1768,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
             anchorScoreThreshold: FingerprintConstants.aurisMatchScoreThreshold,
             dominanceGap: FingerprintConstants.aurisDominanceGap,
             maxResults: FingerprintConstants.aurisMaxResults,
-            rivalScore: { matches, best in
-                // No distant candidate means the reference is too short to show that this
-                // window is unique, so it cannot be confirmed — nil fails closed below.
-                matches
-                    .dropFirst()
-                    .filter {
-                        abs($0.referenceTime - best.referenceTime) > FingerprintConstants.aurisDistantCandidateSeconds
-                    }
-                    .map(\.score)
-                    .max()
-            }
+            rival: .distant
         )
     }
 
@@ -1812,7 +1829,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
                 )
                 continue
             }
-            guard let rivalScore = rule.rivalScore(of: matches, best: best) else {
+            guard let rivalScore = rule.rivalScore(in: matches, best: best) else {
                 recordRejection(
                     candidate,
                     reason: "\(rejectionPrefix)no distant candidate "
@@ -1907,7 +1924,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
             startOffset: startOffset,
             scoring: CheckpointMatcherScoring(matcher: cloudMatcher),
             windowHashes: { $0.hashes },
-            windowTimestampSeconds: Double.init,
+            windowTimestampSeconds: { Double($0.timestampMs) / 1000.0 },
             rejectionPrefix: "cloud ",
             // The Auris endpoint's own acceptance rule, not transcript sync's.
             rule: .auris,

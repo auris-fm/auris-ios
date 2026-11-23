@@ -41,7 +41,7 @@ final class CloudFingerprintReferenceFetcherTests: XCTestCase {
         let matcher = try XCTUnwrap(
             CloudFingerprintReferenceFetcher.shared.buildMatcher(from: compactData(format: "fingerprint-compact-v3"))
         )
-        XCTAssertEqual(matcher.count, 3)
+        XCTAssertEqual(matcher.count(), 3)
 
         let matches = matcher.findTopMatches(
             queryHashes: CloudFingerprintParityData.signal16kMonoWindows[1],

@@ -20,10 +20,16 @@ final class ReferenceFingerprintTests: XCTestCase {
         XCTAssertEqual(reference.checkpoints.count, 3)
     }
 
-    func testRejectsAnUnknownFormat() throws {
+    /// An unknown format still parses — `decode` reports what the bytes say and leaves
+    /// usability to the call site — but neither source will accept it, so alignment
+    /// fails closed. Both halves are asserted: dropping the second would let an
+    /// unrecognised reference through.
+    func testAnUnknownFormatParsesButIsUsableAtNeitherSite() throws {
         let payload = try Self.payload(overrides: ["format": "fingerprint-compact-v1"])
 
-        XCTAssertNil(ReferenceFingerprint.decode(from: payload))
+        XCTAssertEqual(ReferenceFingerprint.decode(from: payload)?.format, "fingerprint-compact-v1")
+        XCTAssertNil(ReferenceFingerprint.decode(from: payload, expectedFormat: "fingerprint-compact-v3"))
+        XCTAssertNil(ReferenceFingerprint.decode(from: payload, expectedFormat: "fingerprint-compact-v2"))
     }
 
     func testRejectsPayloadThatIsNotJSON() {
