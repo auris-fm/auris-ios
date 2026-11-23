@@ -137,7 +137,12 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
     private var cloudMatcher: CheckpointMatcher?
     /// What identifies the Auris payload this episode's mapping is built against. Nil when no
     /// Auris reference was in use, which leaves a transcript-only mapping reusable.
-    private var aurisReferenceIdentity: FingerprintMappingCache.AurisReferenceIdentity?
+/// Set when configuration held the stream back because a stored mapping was waiting for its
+    /// Auris reference. Only the fetch completion may clear it, by adopting that mapping or by
+    /// starting the pass that was deferred. Without this the completion cannot tell "a pass is
+    /// already running" from "nothing has started", and would start a second stream.
+    private var isAwaitingAurisReferenceForStream = false
+        private var aurisReferenceIdentity: FingerprintMappingCache.AurisReferenceIdentity?
     /// Per-stream Go-scheme fingerprinter fed the same decoded PCM as the Rust
     /// streamer; its windows are matched against [cloudMatcher].
     private var cancellationFlag = CancellationFlag()
@@ -861,6 +866,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         fetchTask = nil
         cancellationFlag.cancel()
         cancellationFlag = CancellationFlag()
+        isAwaitingAurisReferenceForStream = false
         context = nil
         main = MappingAccumulator()
         lastProgressPosition = -1
@@ -941,6 +947,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         // here (on `queue`) so the late-arriving fetch below can't race it and
         // so a stale matcher can never leak into the new episode's context.
         cloudMatcher = nil
+        isAwaitingAurisReferenceForStream = false
         // The identity goes with it: keeping the previous episode's would gate this one's
         // mapping against a payload it was never matched against.
         aurisReferenceIdentity = nil
@@ -964,34 +971,26 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
                     self.cloudMatcher = matcher?.matcher
                     self.aurisReferenceIdentity = matcher?.identity
 
-                    // The cache check during configuration ran before this identity existed, so
-                    // an Auris-derived mapping could not be validated then and was refused. Now
-                    // it can be. Only while this pass has committed nothing: adopting a stored
-                    // mapping over anchors the pass has already established would replace live,
-                    // drift-filtered entries and stop work that is still needed.
-                    //
-                    // Deliberately reads no playback position and cancels nothing. An earlier
-                    // version did both and made the ad-absorption pass stop before its later
-                    // anchors committed; bisecting isolated it to those two calls. Adopting the
-                    // entries alone is enough — the running stream sees a full mapping and has
-                    // nothing left to add.
-                    if self.main.playbackToReference.isEmpty,
-                       let ctx = self.context, ctx.episodeUuid == uuid,
-                       let cached = FingerprintMappingCache.load(
-                           audioFilePath: ctx.audioFileURL.path,
-                           referenceFilePath: ctx.referenceFilePath,
-                           referenceData: ctx.referenceData,
-                           aurisReference: self.aurisReferenceIdentity
-                       ) {
-                        self.main.playbackToReference = cached.entries
-                        self.main.referenceToPlayback = cached.entries.sorted { $0.referenceTime < $1.referenceTime }
-                        self.main.filterLastTrusted = cached.entries.last
-                        self.updateState(.active(coverage: cached.entries.count))
-                        FileLog.shared.addMessage(
-                            "FingerprintTimingManager: adopted cached mapping for \(uuid) once the Auris reference landed"
-                        )
+                    // Configuration may have deferred the stream because a stored mapping was
+                    // waiting for this reference. Now that the identity is known, ask again:
+                    // adopt the mapping if the reference confirms it, otherwise start the pass
+                    // that was held back. Either way the episode is not left unprepared.
+                    // Only when a pass was actually held back. Otherwise one is already running
+                    // and must be left alone — starting another would double-match every window.
+                    guard self.isAwaitingAurisReferenceForStream,
+                          let ctx = self.context, ctx.episodeUuid == uuid else { return }
+                    self.isAwaitingAurisReferenceForStream = false
+                    let position = PlaybackManager.shared.currentTime()
+                    // The fetch is finished, so this is the last chance to decide. If it returned
+                    // no reference the mapping can never be confirmed, and `.awaitingReference`
+                    // must NOT be honoured again — waiting on a fetch that has already completed
+                    // leaves the episode in `.preparing` forever. Fingerprint instead.
+                    switch self.adoptCachedMappingIfUsable(context: ctx, currentTime: position) {
+                    case .adopted:
+                        break
+                    case .startStream, .awaitingReference:
+                        self.startStream(context: ctx, fromPosition: position)
                     }
-
                 }
             }
             return
@@ -1112,9 +1111,16 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         // Capture once so the range check, log, and stream start all use the same position.
         let currentTime = PlaybackManager.shared.currentTime()
 
-        if adoptCachedMappingIfUsable(context: newContext, currentTime: currentTime) { return }
-
-        startStream(context: newContext, fromPosition: currentTime)
+        switch adoptCachedMappingIfUsable(context: newContext, currentTime: currentTime) {
+        case .adopted:
+            return
+        case .awaitingReference:
+            // The fetch completion either adopts the mapping or starts this stream.
+            isAwaitingAurisReferenceForStream = true
+            return
+        case .startStream:
+            startStream(context: newContext, fromPosition: currentTime)
+        }
     }
 
     /// Loads a persisted mapping for this context and adopts it when it is usable, returning
@@ -1124,11 +1130,22 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
     /// Auris fetch lands. The first call cannot validate an Auris-derived mapping because the
     /// identity does not exist yet, and refusing it there is correct — but without the second
     /// call every such mapping would be re-fingerprinted on every re-open.
+    /// What the cache check decided about starting a fingerprint stream.
+    enum CacheAdoption {
+        /// Adopted a complete mapping; no stream needed.
+        case adopted
+        /// No usable mapping; fingerprint as usual.
+        case startStream
+        /// A mapping exists but awaits the Auris reference. Start nothing yet — the fetch
+        /// completion asks again, and starts the stream if the reference does not confirm it.
+        case awaitingReference
+    }
+
     private func adoptCachedMappingIfUsable(
         context ctx: GenerationContext,
         currentTime: Double
-    ) -> Bool {
-        guard !ctx.isStreaming else { return false }
+    ) -> CacheAdoption {
+        guard !ctx.isStreaming else { return .startStream }
         // All-or-nothing cache: only short-circuit the stream if a previous session persisted a
         // mapping covering the whole reference timeline for this exact audio file + reference.
         // Partial caches are ignored (the failed branch's `inRange` short-circuit on partial
@@ -1140,7 +1157,17 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
             // A mapping that recorded an Auris identity is only reusable against that same
             // identity; a transcript-only mapping records none and stays reusable.
             aurisReference: aurisReferenceIdentity
-        ) else { return false }
+        ) else { return .startStream }
+
+        // A mapping that is intact but awaits the Auris reference must not be treated as "no
+        // cache": starting the stream here re-fingerprints an episode this device may already
+        // have mapped. Wait for the fetch, which asks again with the identity in hand.
+        if cached.pendingAurisIdentity {
+            FileLog.shared.addMessage(
+                "FingerprintTimingManager: deferring stream for \(ctx.episodeUuid) until its Auris reference lands"
+            )
+            return .awaitingReference
+        }
 
         // The cache is produced from `playbackToReference` (already sorted by `playbackTime`),
         // so assign it directly and sort once for the reference-keyed view — avoids the O(n²)
@@ -1153,7 +1180,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
                 "FingerprintTimingManager: cache loaded for \(ctx.episodeUuid) but playback at "
                     + "\(String(format: "%.1f", currentTime))s is outside cached range — starting stream"
             )
-            return false
+            return .startStream
         }
 
         main.filterLastTrusted = cached.entries.last
@@ -1169,7 +1196,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         FileLog.shared.addMessage(
             "FingerprintTimingManager: skipping stream — full mapping loaded from cache for \(ctx.episodeUuid)"
         )
-        return true
+        return .adopted
     }
 
     /// Build a `CheckpointMatcher` populated from every usable checkpoint in

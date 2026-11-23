@@ -96,8 +96,11 @@ https://shownotes.pocketcasts.com/generated_transcripts/{podcastUuid}/{episodeUu
   network entirely (`loadReference` / `saveReferenceData`).
 
 ### 4.2 What's inside — `ReferenceFingerprint`
-The expected format is **`fingerprint-compact-v2`** (any other `format` string is
-rejected). Top-level fields:
+`decode(from:)` parses any `format` string; each call site names the one it
+requires via `decode(from:expectedFormat:)`. Transcripts and stored references are
+**`fingerprint-compact-v2`**; a reference fetched from Auris is
+**`fingerprint-compact-v3`**. Passing the wrong expectation rejects the body.
+Top-level fields:
 
 | Field (JSON) | Meaning |
 |--------------|---------|

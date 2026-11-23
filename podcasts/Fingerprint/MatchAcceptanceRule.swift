@@ -86,6 +86,11 @@ struct MatchAcceptanceRule {
 
     /// The Auris endpoint's rule (cloud-ingestion.md): 0.65 floor, a 0.05 lead over
     /// the best candidate further than 2s away, ranking the matcher's top 6.
+    /// Floor and anchor threshold are both 0.65 on purpose, and the overlay's missing
+    /// "fired but untrusted" band is deliberate. Measured over 3,734 windows the lowest best
+    /// score was 0.599, and unrelated audio scores 0.64–0.75, so a 0.5 visibility floor would
+    /// filter nothing and would only add windows from audio that is not in the episode. What
+    /// stays is the genuine near-miss signal: score >= 0.65 with no lead over a distant rival.
     static let auris = MatchAcceptanceRule(
         scoreThreshold: FingerprintConstants.aurisMatchScoreThreshold,
         anchorScoreThreshold: FingerprintConstants.aurisMatchScoreThreshold,

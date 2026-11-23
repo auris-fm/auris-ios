@@ -18,6 +18,12 @@ enum FingerprintMappingCache {
     struct LoadResult {
         let entries: [FingerprintTimingManager.TimeMappingEntry]
         let referenceDuration: Double
+        /// The stored mapping is otherwise intact but was built against an Auris reference the
+        /// caller does not hold yet. Distinct from "no usable cache": the caller should wait for
+        /// the fetch and ask again rather than start fingerprinting an episode it may already
+        /// have mapped. Only set when no identity was supplied at all — a *mismatched* identity
+        /// is a real rejection and stays nil.
+        var pendingAurisIdentity: Bool = false
     }
 
     /// What identifies the Auris reference a mapping was built against: its format and the
@@ -80,24 +86,6 @@ enum FingerprintMappingCache {
             )
             return nil
         }
-        // The recorded identity must describe the reference the caller holds NOW, in both
-        // directions. A mapping built with an Auris reference cannot be reused when the caller
-        // holds none — offline, or the endpoint unavailable — because its entries came from a
-        // reference that can no longer be confirmed. Comparing only when a reference is present
-        // would let exactly that case through. A transcript-only mapping records no identity
-        // and is unaffected.
-        if cached.aurisFormat != nil || cached.aurisHash != nil {
-            guard let auris = aurisReference,
-                  cached.aurisFormat == auris.format,
-                  cached.aurisHash == auris.hash else {
-                FileLog.shared.addMessage(
-                    "FingerprintMappingCache: Auris reference changed (format "
-                        + "'\(cached.aurisFormat ?? "none")', hash '\(cached.aurisHash ?? "none")') "
-                        + "at \(path) — discarding"
-                )
-                return nil
-            }
-        }
         guard let refAttrs = fileAttributes(at: referenceFilePath),
               refAttrs.size == cached.referenceByteSize,
               abs(refAttrs.mtime - cached.referenceMTime) < 1.0 else {
@@ -133,6 +121,34 @@ enum FingerprintMappingCache {
                 "FingerprintMappingCache: partial coverage at \(path) — ignoring (will run full stream)"
             )
             return nil
+        }
+        // Checked last, so a stale or corrupt file is rejected on its own merits and never
+        // reported as merely waiting for a reference.
+        //
+        // The recorded identity must describe the reference the caller holds NOW, in both
+        // directions. A mapping built with an Auris reference cannot be reused when the caller
+        // holds none — offline, or the endpoint unavailable — because its entries came from a
+        // reference that can no longer be confirmed. Comparing only when a reference is present
+        // would let exactly that case through. A transcript-only mapping records no identity
+        // and is unaffected.
+        if cached.aurisFormat != nil || cached.aurisHash != nil {
+            guard let auris = aurisReference else {
+                // Nothing held yet: the fetch may still be in flight. Everything else about this
+                // mapping checks out, so tell the caller to wait rather than re-fingerprint an
+                // episode it may already have mapped.
+                FileLog.shared.addMessage(
+                    "FingerprintMappingCache: mapping at \(path) awaits its Auris reference"
+                )
+                return LoadResult(entries: [], referenceDuration: 0, pendingAurisIdentity: true)
+            }
+            guard cached.aurisFormat == auris.format, cached.aurisHash == auris.hash else {
+                FileLog.shared.addMessage(
+                    "FingerprintMappingCache: Auris reference changed (format "
+                        + "'\(cached.aurisFormat ?? "none")', hash '\(cached.aurisHash ?? "none")' "
+                        + "at \(path) — discarding"
+                )
+                return nil
+            }
         }
         FileLog.shared.addMessage(
             "FingerprintMappingCache: loaded \(cached.entries.count) cached mappings from \(path)"

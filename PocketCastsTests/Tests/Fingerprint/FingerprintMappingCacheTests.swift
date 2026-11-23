@@ -414,15 +414,45 @@ final class FingerprintMappingCacheTests: XCTestCase {
             )
         )
 
-        XCTAssertNil(
+        // Not reusable, but NOT discarded either: nothing is held *yet*, which is different from
+        // holding a different reference. The caller must wait for the fetch rather than start
+        // fingerprinting an episode it may already have mapped.
+        let pending = try XCTUnwrap(
             FingerprintMappingCache.load(
                 audioFilePath: audioPath,
                 referenceFilePath: referencePath,
                 referenceData: referenceData
             ),
-            "the transcript reference is unchanged and no Auris reference is held, so only the "
-                + "recorded identity can reject this"
+            "the transcript reference is unchanged, so only the recorded identity stands in the way"
         )
+        XCTAssertTrue(pending.pendingAurisIdentity)
+        XCTAssertTrue(pending.entries.isEmpty, "nothing may be adopted before the reference confirms it")
+
+        // Holding a DIFFERENT reference is a real rejection, not a wait.
+        XCTAssertNil(
+            FingerprintMappingCache.load(
+                audioFilePath: audioPath,
+                referenceFilePath: referencePath,
+                referenceData: referenceData,
+                aurisReference: FingerprintMappingCache.AurisReferenceIdentity(
+                    format: "fingerprint-compact-v3", payload: Data("a-different-payload".utf8)
+                )
+            )
+        )
+
+        // And the same reference makes it usable.
+        let confirmed = try XCTUnwrap(
+            FingerprintMappingCache.load(
+                audioFilePath: audioPath,
+                referenceFilePath: referencePath,
+                referenceData: referenceData,
+                aurisReference: FingerprintMappingCache.AurisReferenceIdentity(
+                    format: "fingerprint-compact-v3", payload: Data("v3-payload".utf8)
+                )
+            )
+        )
+        XCTAssertFalse(confirmed.pendingAurisIdentity)
+        XCTAssertEqual(confirmed.entries.count, entries.count)
     }
 
     private func makeFullCoverageEntries() -> [Entry] {

@@ -335,6 +335,55 @@ final class FingerprintPreparationTests: XCTestCase {
         )
     }
 
+    /// A stored mapping that awaits its Auris reference must not strand the episode.
+    ///
+    /// Configuration defers the stream for such a mapping, because re-fingerprinting an episode
+    /// this device may already have mapped is wasteful. But the fetch can come back with nothing —
+    /// offline, or no endpoint configured, which is the case here. Then the mapping can never be
+    /// confirmed and the pass must run anyway.
+    ///
+    /// This is the regression an earlier version had: it honoured "still awaiting" after the fetch
+    /// had already finished, so the manager sat in `.preparing` until the test timed out. Every
+    /// cache unit test passed throughout, because they call `load` directly and never drive this
+    /// path.
+    func testAMappingAwaitingItsAurisReferenceStillPreparesWhenNoneArrives() async throws {
+        try prepareFixture(duration: Self.episodeDuration) { fixture in
+            try fixture.writeAudio(seconds: Self.episodeDuration)
+            try fixture.writeReference()
+        }
+        let fixture = try XCTUnwrap(self.fixture)
+
+        // A complete mapping attributed to an Auris reference this build cannot fetch.
+        let stored = stride(from: 0.0, through: Self.episodeDuration - 1, by: 1.0).map {
+            FingerprintTimingManager.TimeMappingEntry(
+                playbackTime: $0, referenceTime: $0 + 500, score: 0.9
+            )
+        }
+        FingerprintMappingCache.save(
+            stored,
+            audioFilePath: fixture.audioURL.path,
+            referenceFilePath: fixture.referenceURL.path,
+            referenceData: try Data(contentsOf: fixture.referenceURL),
+            referenceDuration: Self.episodeDuration,
+            aurisReference: FingerprintMappingCache.AurisReferenceIdentity(
+                format: ReferenceFingerprint.aurisFormat, payload: Data("reopen-test-payload".utf8)
+            )
+        )
+
+        manager.prepareForCurrentEpisode()
+        await waitForPass(manager)
+
+        XCTAssertEqual(manager.state.analyticsName, "active", "the episode was left unprepared")
+        let entries = manager.debugMappingSnapshot()
+        XCTAssertFalse(entries.isEmpty, "no pass ran, so the deferred stream was never started")
+        // The unconfirmable mapping must not have been adopted: its timestamps describe a
+        // reference that was never verified.
+        XCTAssertTrue(
+            entries.allSatisfy { $0.referenceTime < 500 },
+            "an unconfirmed mapping was adopted"
+        )
+    }
+
     private func prepareFixture(
         duration: Double,
         writeFiles: (FingerprintEpisodeFixture) throws -> Void
