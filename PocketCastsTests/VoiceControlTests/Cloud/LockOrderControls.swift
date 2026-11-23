@@ -177,7 +177,7 @@ final class LockOrderControls: XCTestCase {
         // RELEASE the gate BEFORE the bounded completion wait (the defer is cleanup for failure
         // paths only): the guard must refuse on the nil capture regardless of the
         // restart-made-true lock-time listening state, and the refusal must arrive through the
-        // released gate, not the gate's own 10s timeout.
+        // released gate, which has no clock of its own to open it early.
         // Set BEFORE signalling: the parked enqueue can only observe `true` after this point,
         // so a recorded `true` proves the gate opened through the test's release.
         gateOutcomes.markReleasedByTest()
@@ -186,8 +186,9 @@ final class LockOrderControls: XCTestCase {
         XCTAssertEqual(doneOutcome, .success,
                        "the enqueue must complete within the bound after release; a hang here is a defect")
         XCTAssertTrue(resultBox.stored, "premise: the enqueue returned a verdict")
-        // The gate must have stayed CLOSED until the test's explicit release: a timeout outcome
-        // means the green verdict arrived through the gate's own clock, not the controlled race.
+        // The gate must have stayed CLOSED until the test's explicit release. It carries no
+        // deadline, so an observation of `false` could only mean the wait returned without the
+        // test having marked its release — the ordering this control exists to pin.
         XCTAssertEqual(gateOutcomes.recordedRelease, true,
                        "the parked enqueue must be released by the test's signal — the gate carries no "
                            + "clock of its own, so an unreleased gate waits instead of proceeding")
