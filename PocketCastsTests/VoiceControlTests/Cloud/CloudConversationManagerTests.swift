@@ -435,7 +435,7 @@ final class CloudConversationManagerTests: XCTestCase {
 
         // The negative premise, asserted on the state itself: nothing has been acknowledged.
         XCTAssertFalse(
-            manager.isAcknowledgedForTesting(conversationId: create.conversationId),
+            manager.isAcknowledged(conversationId: create.conversationId),
             "premise: the opening turn has not been acknowledged"
         )
 
@@ -463,7 +463,7 @@ final class CloudConversationManagerTests: XCTestCase {
         let settled = try XCTUnwrap(manager.prepare(selection: .wakeWord, origin: 1, utteranceId: "ack-settled"))
         manager.acknowledge(conversationId: settled.conversationId)
         XCTAssertTrue(
-            manager.isAcknowledgedForTesting(conversationId: settled.conversationId),
+            manager.isAcknowledged(conversationId: settled.conversationId),
             "the acknowledgement did not make the conversation real"
         )
         let nextPrepared = try XCTUnwrap(
@@ -501,7 +501,7 @@ final class CloudConversationManagerTests: XCTestCase {
         // Its acknowledgement lands, because the client is holding it.
         manager.acknowledge(conversationId: dialed.conversationId)
         XCTAssertTrue(
-            manager.isAcknowledgedForTesting(conversationId: dialed.conversationId),
+            manager.isAcknowledged(conversationId: dialed.conversationId),
             "the conversation opened at the send was never recorded, so its connected landed on nothing"
         )
 
@@ -584,11 +584,11 @@ final class CloudConversationManagerTests: XCTestCase {
         manager.acknowledge(conversationId: live.conversationId)
 
         XCTAssertTrue(
-            manager.isAcknowledgedForTesting(conversationId: older.conversationId),
+            manager.isAcknowledged(conversationId: older.conversationId),
             "the earlier window's create was dropped when a second window prepared one"
         )
         XCTAssertTrue(
-            manager.isAcknowledgedForTesting(conversationId: live.conversationId),
+            manager.isAcknowledged(conversationId: live.conversationId),
             "the live window's create was not recorded"
         )
 
@@ -631,7 +631,7 @@ final class CloudConversationManagerTests: XCTestCase {
         manager.acknowledge(conversationId: "a-conversation-this-client-never-opened")
 
         XCTAssertFalse(
-            manager.isAcknowledgedForTesting(conversationId: "a-conversation-this-client-never-opened"),
+            manager.isAcknowledged(conversationId: "a-conversation-this-client-never-opened"),
             "an unknown handle was recorded as acknowledged"
         )
         // The window's own handle is untouched — an unrecognised acknowledgement neither clears it

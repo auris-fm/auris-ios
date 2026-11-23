@@ -237,7 +237,7 @@ final class CloudConversationManager {
         origin: Int?
     ) -> CloudPreparedConversation {
         guard selection == .followUp, prepared.mode == Self.resume,
-              !isAcknowledgedForTesting(conversationId: prepared.conversationId)
+              !isAcknowledged(conversationId: prepared.conversationId)
         else { return prepared }
         // Still unacknowledged at the moment of sending: this turn opens its own conversation.
         let opened = OpenConversation(
@@ -286,8 +286,9 @@ final class CloudConversationManager {
         preparedByUtteranceId[utteranceId]
     }
 
-    /// TEST SEAM: whether the manager currently holds this conversation as resumable.
-    func isAcknowledgedForTesting(conversationId: String) -> Bool {
+    /// Whether the server has acknowledged a turn in this conversation, which is what makes it
+    /// resumable. Read by the send-time mode decision as well as by tests.
+    func isAcknowledged(conversationId: String) -> Bool {
         if let live = current, live.id == conversationId { return live.acknowledged }
         return byOrigin.values.first { $0.id == conversationId }?.acknowledged ?? false
     }
