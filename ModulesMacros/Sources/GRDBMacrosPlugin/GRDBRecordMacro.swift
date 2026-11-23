@@ -171,14 +171,24 @@ public struct GRDBRecordMacro: MemberMacro, ExtensionMacro {
             // Skip properties marked with @GRDBIgnore
             guard !hasGRDBIgnore(varDecl) else { continue }
 
-            // Only include properties with @objc attribute (database-stored properties)
+            // Database-stored properties are the @objc ones, plus any property
+            // explicitly opted in with @GRDBColumn: types an Objective-C
+            // interface cannot represent — an optional Bool, for one — are
+            // still storable, and the column attribute is the deliberate
+            // marker that this property belongs in the database.
             let hasObjc = varDecl.attributes.contains { attr in
                 if case .attribute(let attributeSyntax) = attr {
                     return attributeSyntax.attributeName.trimmedDescription == "objc"
                 }
                 return false
             }
-            guard hasObjc else { continue }
+            let hasColumnAttribute = varDecl.attributes.contains { attr in
+                if case .attribute(let attributeSyntax) = attr {
+                    return attributeSyntax.attributeName.trimmedDescription == "GRDBColumn"
+                }
+                return false
+            }
+            guard hasObjc || hasColumnAttribute else { continue }
 
             if let propInfo = extractPropertyInfo(from: varDecl) {
                 properties.append(propInfo)
