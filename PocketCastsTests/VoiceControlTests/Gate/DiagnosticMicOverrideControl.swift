@@ -522,9 +522,103 @@ final class DiagnosticMicOverrideControl: XCTestCase {
         XCTAssertTrue(released, "the armed gate subscription must not retain its service")
     }
 
+    /// The router-ready task must not keep the service alive across `ensureReady()`.
+    ///
+    /// DELIBERATELY THE INVERSE OF ITS NEIGHBOURS: this case must **NOT** seed LFM assets.
+    /// Every other suite calls `seedLfmAssetsForTestingForPositive` so the fetch short-circuits
+    /// (that is why they are fast, and why `testStartedServiceCanDeallocateAfterStop` passed in
+    /// 0.026 s on a warm cache without the fix). Seeding here would remove the retention window
+    /// and silently delete the proof. The fetch is parked on a latch instead, so the window is
+    /// explicit and the case is deterministic on any host, warm cache or cold.
+    @MainActor
+    func testRouterReadyTaskDoesNotRetainTheServiceAcrossModelFetch() async throws {
+        let manager = ParkingModelManager()
+        // The fetch must never outlive the case: XCTest waits for the task at test end, so an
+        // early assertion failure would otherwise leave it parked and stall the suite.
+        defer { manager.releaseFetch() }
+
+        let monitor = LiveConditionMonitor(gracePeriodSignal: GracePeriodSignal())
+        monitor.context = .none
+        // An OPTIONAL var, not `guard let`: the reference must be droppable at a chosen instant.
+        // A `let` would live to the end of scope and the service could never deallocate, making
+        // the retention assertion below unfalsifiable.
+        var service: VoiceControlService? = VoiceControlAssembly().buildVoiceControlService(
+            audioSession: FakeAudioSessionControlling(),
+            conditionMonitor: monitor,
+            capture: FakeAudioCapture(),
+            inference: FakeLfmInference(),
+            modelManager: manager,
+            asrBackend: { TranscribingAsrBackend(text: "unused") }
+        )
+        guard service != nil else {
+            XCTFail("premise: the service must be built")
+            return
+        }
+        weak var observed = service
+        service?.startIfAllowed()
+
+        // ORDERING IS THE PREMISE, established rather than hoped for. The defect only bites once
+        // the task body has taken `self`: `[weak self]` alone already returns early when the body
+        // is scheduled after the service is gone (measured `self=0` in a combined run, where the
+        // main actor is busy draining earlier controls). A parked fetch proves the body ran AND is
+        // suspended inside ensureReady() — exactly the window the fix must not hold across.
+        let parked = await awaitTrue(timeout: 30) { manager.enteredFetch }
+        XCTAssertTrue(parked, "premise: the router task must be suspended inside ensureLfmModel()")
+
+        // Drop the ONLY strong reference while the fetch is still parked.
+        service?.stop()
+        service = nil
+
+        // RED on main: `guard let self` above the await keeps the service for the whole fetch.
+        let releasedWhileParked = await awaitTrue(timeout: 5) { observed == nil }
+        XCTAssertTrue(
+            releasedWhileParked,
+            "the router-ready task must not retain its service across ensureReady()"
+        )
+
+        // The fetch is STILL PARKED at the assertion above — nothing has released the latch —
+        // so the deallocation cannot have been caused by the fetch completing. That is the whole
+        // discriminator, and it holds by construction: the only releases are the `defer` at the
+        // top of this case and the end of the case itself. Re-checking `observed == nil` after
+        // releasing would be vacuous (a weak reference that read nil cannot become non-nil), so
+        // there is deliberately no second assertion here.
+    }
+
     #if DEBUG
     func testBuildSideOverrideIsEnabledInDebug() {
         XCTAssertTrue(DiagnosticMicOverride.enabledByBuild)
     }
     #endif
+}
+
+/// Parks `ensureLfmModel()` on a latch so the router-ready task's retention window is explicit.
+/// Subclasses `ModelManager` (non-final) rather than stubbing `ModelDownloader`, which is `final`
+/// and would need a URLProtocol stall. No production seam is added: the assembly already accepts
+/// `modelManager:`.
+private final class ParkingModelManager: ModelManager, @unchecked Sendable {
+    private let lock = NSLock()
+    private var entered = false
+    private var released = false
+
+    var enteredFetch: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return entered
+    }
+
+
+    func releaseFetch() {
+        lock.lock(); released = true; lock.unlock()
+    }
+
+    override func ensureLfmModel() async -> Result<Void, Error> {
+        lock.lock(); entered = true; lock.unlock()
+        while true {
+            lock.lock()
+            let done = released
+            lock.unlock()
+            if done { break }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        return .success(())
+    }
 }

@@ -52,6 +52,7 @@ final class TranscribingAsrBackend: AsrBackend {
 ///
 /// This is the control the manager-level case explicitly cannot be — the manager is handed an
 /// explicit selection, so it never exercises where the service derives one.
+@MainActor
 final class ServiceSelectionProvenanceTests: XCTestCase {
     /// ISOLATED cloud configuration: `isConfigured()` is `{ !CloudConfig.shared.baseUrl.isEmpty }`,
     /// and it is checked BEFORE the origin gate and before the client is built, so without a base
@@ -480,7 +481,10 @@ final class ServiceSelectionProvenanceTests: XCTestCase {
             clientFactory: {
                 factoryInvocations += 1
                 let built = CloudRouteClient.stubbed(
-                    fixture: "event: done\ndata: {\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}\n\n"
+                    // `connected` first, as the protocol sends it after admission: it is what makes
+                    // the conversation resumable, so a later follow-up has something real to continue.
+                    fixture: "event: connected\ndata: {\"codec\":\"pcm_s16le@24k\"}\n\n"
+                        + "event: done\ndata: {\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}\n\n"
                 )
                 injectedTask = built.task
                 stubs.append(built.task)

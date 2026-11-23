@@ -2242,12 +2242,20 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         var owned = false
         let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
-            if await MainActor.run(body: { sink.activeResultSocketForTesting != nil }) {
+            // Registration, not merely the sink's published binding: the binding appears on the
+            // main actor before the detached producer registers anything, so a non-nil socket
+            // alone does not mean an interrupt can be delivered.
+            let live = await MainActor.run(body: { () -> Bool in
+                // `boundIdentity` is stamped BY registration, so requiring it observes the
+                // transport rather than the sink's earlier binding publication.
+                return sink.activeResultSocketForTesting?.boundIdentity != nil
+            })
+            if live {
                 owned = true; break
             }
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
-        XCTAssertTrue(owned, "premise: the prior turn must own a socket before it is interrupted")
+        XCTAssertTrue(owned, "premise: the prior turn's transport must be REGISTERED before it is interrupted")
         let priorRequestId = await MainActor.run { sink.activeResultSocketForTesting?.requestId }
         guard let priorRequestId else { XCTFail("premise: a live socket"); return }
 
@@ -2337,12 +2345,20 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         var owned = false
         let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
-            if await MainActor.run(body: { sink.activeResultSocketForTesting != nil }) {
+            // Registration, not merely the sink's published binding: the binding appears on the
+            // main actor before the detached producer registers anything, so a non-nil socket
+            // alone does not mean an interrupt can be delivered.
+            let live = await MainActor.run(body: { () -> Bool in
+                // `boundIdentity` is stamped BY registration, so requiring it observes the
+                // transport rather than the sink's earlier binding publication.
+                return sink.activeResultSocketForTesting?.boundIdentity != nil
+            })
+            if live {
                 owned = true; break
             }
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
-        XCTAssertTrue(owned, "premise: the prior turn must own a socket before it is interrupted")
+        XCTAssertTrue(owned, "premise: the prior turn's transport must be REGISTERED before it is interrupted")
         let priorRequestId = await MainActor.run { sink.activeResultSocketForTesting?.requestId }
         guard let priorRequestId else { XCTFail("premise: a live socket"); return }
 
@@ -2858,6 +2874,145 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
         try await checkBufferedPlaybackNextAuth(drainBeforeFollowUp: true)
     }
 
+    /// THE WIRE DECIDES WHAT IS RESUMABLE. A turn that receives `connected` makes its conversation
+    /// the one later turns resume; the same turn WITHOUT the frame leaves nothing to resume, and
+    /// the next follow-up opens a fresh conversation. Both halves run through the real sink over a
+    /// scripted transport, so the assertion is on the wire mode a follow-up actually sends rather
+    /// than on manager state the test wrote itself.
+    ///
+    /// This is the client half of the conversation-lifecycle rule: `connected` is sent only after
+    /// the server admits a turn, so it — not the sending of a request — is the evidence that a
+    /// conversation exists.
+    func testOnlyAnAcknowledgedConversationIsResumedByTheNextFollowUp() async throws {
+        for acknowledge in [true, false] {
+            let manager = CloudConversationManager()
+            manager.registerLiveOrigin(cloudTestOrigin)
+
+            self.pendingFixture = acknowledge
+                ? """
+                event: connected
+                data: {"codec":"pcm_s16le@24k"}
+
+                event: done
+                data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+                """
+                : """
+                event: done
+                data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+                """
+            let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager)
+            let opening = await sink.routeToCloud(
+                request: "find episodes", tier: .free, context: sampleContext(),
+                origin: cloudTestOrigin, selection: .wakeWord, utteranceId: "u-ack-\(acknowledge)"
+            )
+            XCTAssertEqual(opening.outcome, .completed, "premise: the opening turn ran")
+
+            self.pendingFixture = """
+                event: done
+                data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+                """
+            _ = await sink.routeToCloud(
+                request: "play the second one", tier: .free, context: sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-next-\(acknowledge)"
+            )
+            let auths = capturedTask?.sentTextFrames.compactMap { text -> [String: Any]? in
+                guard let data = text.data(using: .utf8) else { return nil }
+                return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            }.filter { $0["type"] as? String == "authenticate" } ?? []
+            let followUp = try XCTUnwrap(auths.last)
+            XCTAssertEqual(followUp["request_id"] as? String, "u-next-\(acknowledge)")
+            XCTAssertEqual(
+                followUp["conversation_mode"] as? String,
+                acknowledge ? "resume" : "create",
+                acknowledge
+                    ? "an acknowledged conversation was not resumed, so the thread restarts"
+                    : "a follow-up resumed a conversation the server never acknowledged"
+            )
+        }
+    }
+
+    /// THE REPORT IS CHECKED AGAINST THE CONVERSATION THE TURN ACTUALLY SENDS.
+    ///
+    /// A report corrects one conversation's settled history. When the send-time decision opens a
+    /// fresh conversation, the prepared id and the dialled id differ — comparing against the
+    /// prepared one would attach the correction to a turn that is no longer in that conversation,
+    /// asking the server to amend history it never settled.
+    ///
+    /// The control half matters as much: when the ids DO match, the report must survive. Without
+    /// it, "always discard" would pass the first assertion.
+    @MainActor
+    func testThePendingReportIsCheckedAgainstTheConversationActuallySent() async throws {
+        for acknowledged in [false, true] {
+            let manager = CloudConversationManager()
+            manager.registerLiveOrigin(cloudTestOrigin)
+            self.pendingFixture = acknowledged
+                ? """
+                event: connected
+                data: {"codec":"pcm_s16le@24k"}
+
+                event: done
+                data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+                """
+                : """
+                event: done
+                data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+                """
+            let sink = makeSinkWithConsumer(RecordingResultConsumer(), conversationManager: manager)
+            let opening = await sink.routeToCloud(
+                request: "find episodes", tier: .free, context: sampleContext(),
+                origin: cloudTestOrigin, selection: .wakeWord, utteranceId: "u-rep-open-\(acknowledged)"
+            )
+            XCTAssertEqual(opening.outcome, .completed, "premise: the opening turn ran")
+            let openedId = try XCTUnwrap(
+                manager.preparedConversationForTesting(utteranceId: "u-rep-open-\(acknowledged)")
+            ).conversationId
+
+            // A refusal of an interrupted turn leaves a report naming THAT turn's conversation.
+            let state = sink.interruptionStateForTesting
+            XCTAssertTrue(state.claimInterruptEmission(forRequestId: "u-rep-open-\(acknowledged)"))
+            XCTAssertTrue(state.recordRefusal(
+                forRequestId: "u-rep-open-\(acknowledged)",
+                retainingReport: .init(requestId: "u-rep-open-\(acknowledged)", playbackPositionMs: 1_000, conversationId: openedId)
+            ))
+            XCTAssertEqual(state.pendingReportConversationId, openedId, "premise: a report is pending")
+
+            self.pendingFixture = """
+                event: done
+                data: {"usage":{"input_tokens":1,"output_tokens":1}}
+
+                """
+            _ = await sink.routeToCloud(
+                request: "play the second one", tier: .free, context: sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-rep-next-\(acknowledged)"
+            )
+            let auths = capturedTask?.sentTextFrames.compactMap { text -> [String: Any]? in
+                guard let data = text.data(using: .utf8) else { return nil }
+                return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            }.filter { $0["type"] as? String == "authenticate" } ?? []
+            let followUp = try XCTUnwrap(auths.last)
+            let sentId = try XCTUnwrap(followUp["conversation_id"] as? String)
+
+            if acknowledged {
+                XCTAssertEqual(sentId, openedId, "control premise: the follow-up stayed in the conversation")
+                XCTAssertNotNil(
+                    followUp["interrupts"],
+                    "a report for the conversation this turn is still in was discarded"
+                )
+            } else {
+                XCTAssertNotEqual(sentId, openedId, "premise: the send opened a different conversation")
+                XCTAssertNil(
+                    followUp["interrupts"],
+                    "a report was attached to a turn that left its conversation"
+                )
+            }
+        }
+    }
+
     private func checkBufferedPlaybackNextAuth(drainBeforeFollowUp: Bool) async throws {
         // A REAL OUTPUT IS REQUIRED for the binding to exist at all: with no available output the
         // player consumes frames silently, `hasPendingAudio` is false, and `done` correctly binds
@@ -2865,7 +3020,13 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
         // was reporting on the silent-consume case, not the buffered-playback one).
         CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
         defer { CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil }
+        // `connected` is what makes the conversation real — it is sent after admission — so the
+        // scripted turn carries it, as the protocol does. Without it the follow-up below would be
+        // naming a conversation the server never acknowledged, which is the case the change is for.
         self.pendingFixture = """
+            event: connected
+            data: {"codec":"pcm_s16le@24k"}
+
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":1}}
 
@@ -2874,10 +3035,13 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
             RecordingResultConsumer(),
             audioPayloads: (0..<40).map { Data([UInt8($0)]) }
         )
+        // Turn A is a WAKE that opens the conversation. Stated as one because it is: a turn that
+        // does not say it is a follow-up is not continuing anything, and after this change it no
+        // longer quietly resumes a conversation the server never acknowledged.
         let turn = Task {
             await sink.routeToCloud(
                 request: "x", tier: .free, context: sampleContext(),
-                origin: cloudTestOrigin, selection: nil, utteranceId: "u-settled"
+                origin: cloudTestOrigin, selection: .wakeWord, utteranceId: "u-settled"
             )
         }
         _ = await turn.value
@@ -2909,6 +3073,10 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
             XCTAssertNil(binding, "the production drain callback must clear buffered ownership")
         }
 
+        // `connected` is what makes the conversation real. Turn A's fixture does not script one,
+        // so the acknowledgement is delivered the way production delivers it — the frame reaches
+        // the turn and the turn records it — through the sink's own `connected` handling rather
+        // than by writing the manager's state from the test.
         pendingFixture = """
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":1}}
@@ -3258,7 +3426,11 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
         }
         let producerRelease = DispatchSemaphore(value: 0)
-        blockProducerAfterFrames = (8, producerRelease)
+        // NINE received frames now: seven binary PCM messages, then `connected`, then `done`.
+        // The park counts RECEIVED frames, so adding the admission frame moves the boundary:
+        // leaving it at eight parked the producer on `connected` itself, before the terminal
+        // the turn must read, and the case hung rather than failing.
+        blockProducerAfterFrames = (9, producerRelease)
         nextTurnFixture = Self.doneOnlyFixture
         nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x11, count: 4_800 * 2) }
         playback.setPlaying(true)
@@ -3278,7 +3450,11 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             withExtendedLifetime(sink) {}
         }
 
-        // Turn N: done, with its answer audio still scheduled.
+        // Turn N: admitted (`connected`), then done, with its answer audio still scheduled. The
+        // acknowledgement is what makes N's conversation resumable, so the report it leaves behind
+        // describes history the server actually settled — without it utterance 3 opens a fresh
+        // conversation and correctly drops the report.
+        nextTurnFixture = "event: connected\ndata: {\"codec\":\"pcm_s16le@24k\"}\n\n" + Self.doneOnlyFixture
         let turnN = Task {
             await sink.routeToCloud(request: "first", tier: .free, context: sampleContext(),
                                     origin: cloudTestOrigin, selection: .wakeWord, utteranceId: "u-n")
@@ -4868,6 +5044,22 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         return completed
     }
 
+    /// Bounded wait for the successor to have TAKEN its hold on the given predecessor. That is the
+    /// observable instant of its interruption decision: the hold is recorded before the send, so a
+    /// control can release a parked predecessor exactly after the decision and not before.
+    private func waitForHeldFollowUp(
+        _ state: CloudInterruptionState, requestId: String, utteranceId: String = "u-turn-b",
+        timeout: TimeInterval
+    ) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let taken = await MainActor.run { state.interruptedRequestId(forHeldUtterance: utteranceId) == requestId }
+            if taken { return true }
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+        return await MainActor.run { state.interruptedRequestId(forHeldUtterance: utteranceId) == requestId }
+    }
+
     private func holdNextTurn() -> Gate {
         let gate = Gate()
         pendingHeldGate = gate
@@ -4893,6 +5085,12 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     private var hookedSink: CloudRouteSink?
     /// Opt-in action on the NEXT built client's first frame (ownership-snapshot probes).
     private var firstFrameActionForNextBuild: (@Sendable () -> Void)?
+    /// Opt-in hook on the NEXT built client, applied before its producer starts. Used to park the
+    /// producer at the bind seam so a control can force the pre-authentication window.
+    private var parkNextProducerAtBindSeam: ((CloudRouteClient) -> Void)?
+    /// Opt-in park INSIDE the next built turn's authentication send — the lost-race arm, where the
+    /// producer has already recorded its send as invoked.
+    private var holdNextAuthenticationSend: (gate: Gate, entered: Promise<Void>)?
     /// Grace hold lifecycle counters for ownership controls.
     private var holdCounters: (begin: AtomicInteger, end: AtomicInteger)?
 
@@ -4923,6 +5121,424 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         gate.release()
         let finished = try await timeoutProbe(turn, nanoseconds: UInt64(timeout * 1_000_000_000))
         XCTAssertTrue(finished, "the predecessor did not reach its terminal within \(timeout)s")
+    }
+
+    /// AN UNDELIVERED INTERRUPT WITH NO TERMINAL IS TRANSPORT LOSS, NOT A NEW TURN.
+    ///
+    /// The contract (`docs/specs/cloud-assistant.md` → Interruption) allows the interrupting
+    /// utterance to be submitted only after the interrupted turn's terminal acknowledgement, and
+    /// says that when the transport is lost "no automatic replay occurs". So an `interrupt` that
+    /// never reached the server, for a turn whose terminal the sink has NOT consumed, authorizes
+    /// nothing: discard the held utterance, end locally, keep the pending report.
+    ///
+    /// THE STATE IS REACHABLE IN PRODUCTION, not only through this seam. The client registers a
+    /// turn socket and sends its authentication frame from a DETACHED producer task, while the sink
+    /// publishes its result binding on the main actor as soon as the route call returns. A close
+    /// that lands after registration but before the terminal — a consumer abandoning the turn, or
+    /// the transport going away — retires the registration while the sink's binding still names a
+    /// live predecessor. A barge-in landing there gets `.undelivered` with no terminal consumed.
+    /// Measured on a full-plan run: `interrupt undelivered: registration retired for turn u-turn-a`,
+    /// followed by that utterance authenticating as an ordinary turn.
+    ///
+    /// This is the AUTH-SENT arm. Its sibling below covers the pre-registration window, where the
+    /// correct disposition is the opposite one: abandon the predecessor before it authenticates and
+    /// submit the interrupting utterance as a fresh turn.
+    ///
+    /// This control forces exactly that ordering — retire the registration through the production
+    /// retirement path while the predecessor's terminal is still withheld — and asserts the WIRE:
+    /// the interrupting utterance must never authenticate.
+    func testUndeliveredInterruptWithNoTerminalSubmitsNothing() async throws {
+        self.nextTurnFixture = Self.doneOnlyFixture
+        let gate = holdNextTurn()
+        addTeardownBlock { gate.release() }
+        let state = CloudInterruptionState()
+        let sink = makeSink(interruptionState: state)
+
+        // Turn A genuinely in flight: its receive is parked, so no terminal can arrive on its own.
+        let prior = Task {
+            await sink.routeToCloud(
+                request: "prior question", tier: .free, context: self.sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-turn-a"
+            )
+        }
+        // Wait for the TRANSPORT's registration, not merely the sink's published binding: the
+        // binding appears on the main actor before the detached producer registers anything.
+        var registered = false
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            let live = await MainActor.run(body: { () -> Bool in
+                // `boundIdentity` is stamped BY registration, so requiring it observes the
+                // transport rather than the sink's earlier binding publication.
+                return sink.activeResultSocketForTesting?.boundIdentity != nil
+            })
+            if live { registered = true; break }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertTrue(registered, "premise: turn A's transport must be REGISTERED before it is retired")
+        let observedSocket = await MainActor.run { sink.activeResultSocketForTesting }
+        let priorSocket = try XCTUnwrap(observedSocket)
+        // The premise is the TRANSPORT's registration, not the sink's binding: the binding is
+        // published on the main actor before the detached producer registers anything, so a
+        // non-nil socket alone would let this case interrupt into a window where no registration
+        // existed yet — a different scenario from the retirement it means to test. `boundIdentity`
+        // is stamped BY registration, so requiring it already pins the stronger fact.
+        let priorIdentity = try XCTUnwrap(priorSocket.boundIdentity)
+        let priorTask = try XCTUnwrap(capturedTask)
+        // A is UNSETTLED and un-interrupted: its terminal is withheld by the park, so no
+        // acknowledgement of any kind has been recorded. That is what separates "the transport
+        // went away mid-turn" from "the turn had already ended", and the disposition differs.
+        XCTAssertFalse(priorTask.sentInterrupt, "premise: no interrupt has been sent yet")
+        XCTAssertTrue(
+            priorTask.sentTextFrames.contains { $0.contains("u-turn-a") },
+            "premise: A HAS authenticated — this is the auth-sent arm, not the pre-registration one"
+        )
+
+        // RETIRE THE REGISTRATION exactly as a consumer close does. The sink's binding and token
+        // are untouched, so its barge-in gate still sees a live predecessor — the production window.
+        await MainActor.run {
+            sink.resultClientForTesting?.retireSocketRegistrationForTesting(
+                requestId: priorSocket.requestId, identity: priorIdentity
+            )
+        }
+
+        let result = await sink.routeToCloud(
+            request: "play the next one", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-turn-b"
+        )
+
+        // THE WIRE ASSERTION: B never authenticated. Reading the outcome alone cannot tell
+        // "nothing was submitted" from "something was submitted and also failed".
+        let bFrames = capturedTask?.sentTextFrames ?? []
+        XCTAssertFalse(
+            bFrames.contains { $0.contains("u-turn-b") },
+            "an undelivered interrupt with no terminal acknowledgement must submit NOTHING; "
+            + "measured frames=\(bFrames)"
+        )
+        XCTAssertNotEqual(result.outcome, .completed, "transport loss is never a completion")
+        XCTAssertTrue(
+            state.isSuppressed("u-turn-b"),
+            "the utterance must be suppressed so a queued dispatch cannot reach the wire either"
+        )
+        XCTAssertNil(state.heldFollowUpForTesting, "the held follow-up must be dropped, not stranded")
+
+        gate.release()
+        _ = await prior.value
+    }
+
+    /// THE PRE-AUTHENTICATION WINDOW: an interrupt that arrives before the predecessor's transport
+    /// has registered is NOT transport loss. The predecessor has not authenticated, so the server
+    /// has heard nothing of it and there is no turn to settle.
+    ///
+    /// The window is real and ordered by construction: `routeWithResultSocket` spawns the producer
+    /// as a DETACHED task and returns at once, so the sink publishes its result binding on the main
+    /// actor while registration — and therefore the authentication send — happens later on the
+    /// producer's own task. A barge-in landing in between finds a live-looking predecessor whose
+    /// interrupt cannot be delivered.
+    ///
+    /// The disposition is the opposite of the auth-sent case above: abandon the predecessor BEFORE
+    /// it authenticates, so nothing of it is ever submitted, and let the interrupting utterance go
+    /// out as a FRESH turn carrying no interruption report. Discarding it here would leave the
+    /// predecessor to answer a question the user just talked over.
+    ///
+    /// THE RACE IS PINNED, not waited for: the predecessor's producer is parked at the bind seam,
+    /// which sits after registration in today's code but before the authentication send. The
+    /// successor's decision and the predecessor's "register, then send auth" must be serialized, so
+    /// either the predecessor observes the abandonment before it registers and never authenticates,
+    /// or the interrupt finds it registered. Parking here forces the first arm deterministically.
+    func testInterruptBeforeThePredecessorAuthenticatesAbandonsItAndSubmitsFresh() async throws {
+        self.nextTurnFixture = Self.doneOnlyFixture
+        let state = CloudInterruptionState()
+        let sink = makeSink(interruptionState: state)
+
+        // Park A's producer BEFORE it can authenticate, and hold it there until the test releases
+        // it. `onBeforeBind` runs on the producer's own task; the wait is bounded so a lost release
+        // fails promptly instead of hanging the suite.
+        let seamEntered = Promise<Void>()
+        let abandonObserved = Promise<Void>()
+        parkNextProducerAtBindSeam = { client in
+            client.onBeforeBind = { _ in
+                seamEntered.resolve(())
+                let deadline = Date().addingTimeInterval(5)
+                while Date() < deadline, !abandonObserved.didClose { usleep(1_000) }
+            }
+        }
+
+        let prior = Task {
+            await sink.routeToCloud(
+                request: "prior question", tier: .free, context: self.sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-turn-a"
+            )
+        }
+        // The sink has published its binding; the producer is parked before authentication. Wait
+        // for the BINDING too, not just the seam: the producer runs off the main actor, so it can
+        // reach the seam before the sink's own publication lands.
+        await seamEntered.value()
+        var bound = false
+        let bindDeadline = Date().addingTimeInterval(5)
+        while Date() < bindDeadline {
+            if await MainActor.run(body: { sink.activeResultSocketForTesting != nil }) { bound = true; break }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertTrue(bound, "premise: the sink must have published its result binding")
+        let observedSocket = await MainActor.run { sink.activeResultSocketForTesting }
+        let priorSocket = try XCTUnwrap(observedSocket)
+        let priorTask = try XCTUnwrap(capturedTask)
+        XCTAssertTrue(
+            priorTask.sentTextFrames.isEmpty,
+            "premise: the predecessor must NOT have authenticated yet; frames=\(priorTask.sentTextFrames)"
+        )
+
+        // B is a SECOND turn and therefore a second socket, so it needs its own fixture: the
+        // per-build handoff consumes one, and a turn built with none gets an empty script (measured
+        // as `NSURLErrorDomain -1011`, which reads like a production failure and is not one).
+        self.nextTurnFixture = Self.doneOnlyFixture
+        // B barges in while A is still pre-authentication.
+        let successor = Task {
+            await sink.routeToCloud(
+                request: "play the next one", tier: .free, context: self.sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-turn-b"
+            )
+        }
+        // WAIT FOR THE ABANDONMENT, not for a held follow-up.
+        //
+        // Two earlier versions used observables that cannot express this arm. The hold B takes
+        // before its send is DROPPED inside the same synchronous decision
+        // (`dropHoldForAbandonedPredecessor`), so there is nothing left to poll. And the socket
+        // handle's `boundIdentity` is never unwound — `retireSocket` removes the client's registry
+        // entry but nothing clears the handle — so it stays non-nil after any retirement.
+        //
+        // The abandonment's own record is the line it logs, which is a production observable and
+        // the same thing a run's log shows. Polled on a bounded deadline so a missing line fails
+        // here with its premise rather than silently passing.
+        var abandoned = false
+        let abandonDeadline = Date().addingTimeInterval(5)
+        while Date() < abandonDeadline {
+            let logged = await FileLog.shared.logFileAsString()
+            if logged.contains("predecessor turn \(priorSocket.requestId) abandoned before authentication") {
+                abandoned = true
+                break
+            }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(abandoned, "premise: B must abandon A before A authenticates")
+        XCTAssertTrue(
+            priorTask.sentTextFrames.isEmpty,
+            "premise: the abandonment must have landed BEFORE A's authentication send; "
+            + "frames=\(priorTask.sentTextFrames)"
+        )
+        abandonObserved.markClosed()
+        abandonObserved.resolve(())
+        let priorResult = await prior.value
+
+        // A NEVER AUTHENTICATED: nothing of it reached the server.
+        XCTAssertTrue(
+            priorTask.sentTextFrames.isEmpty,
+            "an abandoned pre-authentication turn must submit NOTHING; frames=\(priorTask.sentTextFrames)"
+        )
+        XCTAssertNotEqual(priorResult.outcome, .completed, "an abandoned turn is never a completion")
+        // AND IT IS NOT A FAILURE EITHER. Abandonment is not something that went wrong: nothing of
+        // this turn was ever sent, so there is no failure to report and nothing to tell the user.
+        // Yielding an error terminal here made A's own consumer speak "Connection lost. Please try
+        // again." for a turn the server never heard of — the very symptom this disposition removes,
+        // reintroduced on the predecessor's side of it. The successor cancels A's token at its
+        // admission, but that is AFTER its interruption decision, so the cancelled-owner guard in
+        // the error path only hid the symptom when scheduling happened to favour it.
+        XCTAssertEqual(
+            priorResult.outcome, .earlyClose,
+            "an abandoned turn ends incomplete, not failed; got \(priorResult.outcome)"
+        )
+        XCTAssertEqual(
+            priorResult.response, .silent,
+            "nothing may be spoken for a turn that never submitted anything; got \(priorResult.response)"
+        )
+
+        // B GOES OUT AS A FRESH TURN, with no interruption report: nothing of A was heard, so there
+        // is no settled history to correct.
+        let bResult = await successor.value
+        let bTask = try XCTUnwrap(capturedTask)
+        let bFrames = bTask.sentTextFrames
+        XCTAssertTrue(
+            bFrames.contains { $0.contains("u-turn-b") },
+            "the interrupting utterance must be submitted as a fresh turn; frames=\(bFrames)"
+        )
+        XCTAssertFalse(
+            bFrames.contains { $0.contains("\"interrupts\"") },
+            "a fresh turn after a pre-authentication abandonment carries NO interruption report; frames=\(bFrames)"
+        )
+        XCTAssertEqual(bResult.outcome, .completed, "the fresh turn runs normally")
+        XCTAssertFalse(state.isSuppressed("u-turn-b"), "the utterance was not discarded, so it must not be suppressed")
+    }
+
+    /// THE LOST ARM of the abandon-before-authentication race. The predecessor's authentication send
+    /// has already been INVOKED when the successor decides, so the server may admit that turn.
+    /// Abandoning it locally would leave a turn running that the client believes it cancelled.
+    ///
+    /// Forced at the only place it can be: INSIDE the test transport's send of the authentication
+    /// frame, which is after the producer records its send as invoked. Parking at the bind seam
+    /// cannot express this — there the mark is not yet set, so an abandonment always wins.
+    ///
+    /// Two things must hold. The abandonment reports LOST and leaves the predecessor's socket OPEN,
+    /// because the interrupt still has to travel on it; closing there would turn a deliverable
+    /// interruption into transport loss and drop the user's utterance. And the interrupt is then
+    /// DELIVERED on that live socket, not reported undelivered.
+    func testAbandonmentLosesToAnAlreadyInvokedAuthenticationSend() async throws {
+        self.nextTurnFixture = Self.doneOnlyFixture
+        let state = CloudInterruptionState()
+        let sink = makeSink(interruptionState: state)
+
+        let authGate = Gate()
+        let authEntered = Promise<Void>()
+        addTeardownBlock { authGate.release() }
+        holdNextAuthenticationSend = (authGate, authEntered)
+
+        let prior = Task {
+            await sink.routeToCloud(
+                request: "prior question", tier: .free, context: self.sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-turn-a"
+            )
+        }
+        // A is INSIDE its authentication send: invoked, not yet returned.
+        await authEntered.value()
+        let observedSocket = await MainActor.run { sink.activeResultSocketForTesting }
+        let priorSocket = try XCTUnwrap(observedSocket)
+        let priorTask = try XCTUnwrap(capturedTask)
+
+        let successor = Task {
+            await sink.routeToCloud(
+                request: "play the next one", tier: .free, context: self.sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-turn-b"
+            )
+        }
+        let held = await waitForHeldFollowUp(state, requestId: priorSocket.requestId, timeout: 5)
+        XCTAssertTrue(held, "premise: B must reach its interruption decision while A's send is in flight")
+
+        // Let the send complete. A was NOT abandoned, so its socket must still carry the interrupt.
+        authGate.release()
+        _ = await prior.value
+        _ = await successor.value
+
+        XCTAssertTrue(
+            priorTask.sentInterrupt,
+            "a lost abandonment race must interrupt the predecessor on its still-open socket"
+        )
+        XCTAssertFalse(
+            priorTask.isCancelledSocket && !priorTask.sentInterrupt,
+            "the losing arm must not close the predecessor's transport"
+        )
+    }
+
+    /// A SECOND barge-in against the same already-abandoned predecessor must read the SAME answer.
+    ///
+    /// The abandonment decision is a question about the turn, not an effect to perform once: once a
+    /// turn is closed before its authentication send, it stays unheard for the rest of its life. The
+    /// sink publishes a predecessor's binding until the successor's own publication replaces it, and
+    /// dropping the abandoned hold clears the one-shot interrupt claim — so a second utterance can
+    /// reach the same socket and ask again.
+    ///
+    /// Taking the hook on the first win made that second call answer `false`, which the sink reads as
+    /// "may have been admitted, interrupt undeliverable": it suppressed the utterance and ended
+    /// locally, silently discarding what the user said over a turn that never existed.
+    func testASecondAbandonmentOfTheSameUnheardTurnReadsTheSameAnswer() async throws {
+        self.nextTurnFixture = Self.doneOnlyFixture
+        let state = CloudInterruptionState()
+        let sink = makeSink(interruptionState: state)
+
+        let seamEntered = Promise<Void>()
+        let abandonObserved = Promise<Void>()
+        parkNextProducerAtBindSeam = { client in
+            client.onBeforeBind = { _ in
+                seamEntered.resolve(())
+                let deadline = Date().addingTimeInterval(5)
+                while Date() < deadline, !abandonObserved.didClose { usleep(1_000) }
+            }
+        }
+        let prior = Task {
+            await sink.routeToCloud(
+                request: "prior question", tier: .free, context: self.sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-turn-a"
+            )
+        }
+        await seamEntered.value()
+        var bound = false
+        let bindDeadline = Date().addingTimeInterval(5)
+        while Date() < bindDeadline {
+            if await MainActor.run(body: { sink.activeResultSocketForTesting != nil }) { bound = true; break }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertTrue(bound, "premise: the sink must have published its result binding")
+        let observedSocket = await MainActor.run { sink.activeResultSocketForTesting }
+        let priorSocket = try XCTUnwrap(observedSocket)
+
+        // FIRST abandonment wins: nothing of this turn was submitted.
+        let first = await MainActor.run { priorSocket.abandonBeforeAuthentication() }
+        XCTAssertTrue(first, "premise: the pre-authentication window must be won here")
+        // SECOND ask, same turn, same unheard state — the answer must not change.
+        let second = await MainActor.run { priorSocket.abandonBeforeAuthentication() }
+        XCTAssertTrue(
+            second,
+            "a turn already abandoned before authentication is STILL unheard: a second barge-in must "
+            + "read the same answer, not classify it as undeliverable and drop the user's utterance"
+        )
+
+        abandonObserved.markClosed()
+        abandonObserved.resolve(())
+        _ = await prior.value
+    }
+
+    /// "ABANDONED" IS A REASON, NOT A SYNONYM FOR CLOSED.
+    ///
+    /// The idempotent answer above must hold only for a lifetime closed BY the abandonment decision.
+    /// A turn that authenticated and then closed — completed, failed, or cancelled — was heard by the
+    /// server, so it is not abandonable: answering "abandoned" for any closed lifetime would route a
+    /// late barge-in against a finished turn as a fresh turn with no interruption report, dropping the
+    /// settled history that turn created.
+    func testATurnThatAuthenticatedAndThenClosedIsNotAbandonable() async throws {
+        self.nextTurnFixture = Self.doneOnlyFixture
+        // HOLD the terminal until the handle has been captured. A done-only turn authenticates and
+        // finishes in well under a millisecond (measured: 0.3 ms from auth frame to terminal), so an
+        // unheld run publishes and clears its binding between two polls and the premise finds
+        // nothing — a fixture race, not a behaviour.
+        let gate = holdNextTurn()
+        addTeardownBlock { gate.release() }
+        let sink = makeSink()
+
+        // A runs to its terminal on its own: it authenticates, completes, and its lifetime closes
+        // through the ordinary finish path — never through the abandonment decision.
+        let prior = Task {
+            await sink.routeToCloud(
+                request: "prior question", tier: .free, context: self.sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-turn-a"
+            )
+        }
+        // Capture the handle WHILE the turn is live: the turn-wide defer clears the binding on exit,
+        // so reading it after the terminal would find nothing. The handle itself outlives the
+        // binding, which is exactly the late-barge-in shape this case pins.
+        var captured: AppOperationResultSocket?
+        let captureDeadline = Date().addingTimeInterval(5)
+        while Date() < captureDeadline {
+            captured = await MainActor.run { sink.activeResultSocketForTesting }
+            if captured != nil { break }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        let priorSocket = try XCTUnwrap(captured, "premise: the sink must publish its result binding")
+        gate.release()
+        let priorResult = await prior.value
+        XCTAssertEqual(priorResult.outcome, .completed, "premise: the predecessor must have run to a terminal")
+        let priorTask = try XCTUnwrap(capturedTask)
+        XCTAssertTrue(
+            priorTask.sentTextFrames.contains { $0.contains("\"authenticate\"") },
+            "premise: the predecessor must have AUTHENTICATED; frames=\(priorTask.sentTextFrames)"
+        )
+
+        // A late ask against that finished turn must NOT read as an abandonment, on the first ask or
+        // any later one.
+        let first = await MainActor.run { priorSocket.abandonBeforeAuthentication() }
+        XCTAssertFalse(
+            first,
+            "a turn that authenticated was heard by the server: closing it later does not make it abandonable"
+        )
+        let second = await MainActor.run { priorSocket.abandonBeforeAuthentication() }
+        XCTAssertFalse(second, "the answer must stay stable for a turn that was heard")
     }
 
     private func makeSink(conversationManager: CloudConversationManager? = nil, withHoldCounters: Bool = false, interruptionState: CloudInterruptionState = CloudInterruptionState()) -> CloudRouteSink {
@@ -4965,6 +5581,14 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                         }
                     }
 
+                }
+                if let park = self.parkNextProducerAtBindSeam {
+                    self.parkNextProducerAtBindSeam = nil
+                    park(built.client)
+                }
+                if let hold = self.holdNextAuthenticationSend {
+                    self.holdNextAuthenticationSend = nil
+                    built.task.holdAuthenticationSendUntilReleased(hold.gate, entered: hold.entered)
                 }
                 if let action = self.firstFrameActionForNextBuild {
                     self.firstFrameActionForNextBuild = nil
@@ -6222,6 +6846,7 @@ final class CloudRouteSinkLocaleRuleTests: SocketCapturingTestCase {
 /// localized daily-limit template, exactly once, naming Auris and its daily allowance — and the
 /// remote frame's `message` is DIAGNOSTIC-ONLY for this code, so it must not replace that
 /// explanation.
+@MainActor
 final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
     private var playback: RecordingPlaybackSink!
     private var suiteName: String!
@@ -6549,6 +7174,378 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
             resolver.resolveForUserLocale("cloud_error_limit_exceeded"),
             "You have reached your Auris free daily limit. Please try again tomorrow."
         )
+    }
+}
+
+/// THE RECORDING GAP (cloud-assistant.md: "Record Required codes whose local template is
+/// missing"). A Required code with no template in the user's locale falls back to the earcon —
+/// correct speech behaviour, but the client GAP itself must be OBSERVABLE in the log, or a
+/// missing translation is indistinguishable from a code that was never meant to speak.
+///
+/// The three cases separate the two axes so none of them can pass for the wrong reason:
+///   - Required + missing template  ⇒ earcon AND a gap line
+///   - Required + present template  ⇒ spoken AND NO gap line (the line means "missing", not "error")
+///   - Generic  + missing template  ⇒ earcon AND NO gap line (an internal diagnostic is not a gap)
+final class CloudRequiredErrorGapRecordingTests: SocketCapturingTestCase {
+    private var playback: RecordingPlaybackSink!
+    private var suiteName: String!
+    private var defaults: UserDefaults!
+
+    override func setUp() {
+        super.setUp()
+        playback = RecordingPlaybackSink()
+        suiteName = "cloud_req_gap_\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suiteName)!
+        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+    }
+
+    override func tearDown() {
+        CloudRouteTestURLProtocol.reset()
+        defaults.removePersistentDomain(forName: suiteName)
+        super.tearDown()
+    }
+
+    /// `ca.lproj` is a REAL shipped localization carrying no VoiceTemplates table — the
+    /// production shape of "this user's language has no template", not an empty directory.
+    private func localeWithoutTemplates() -> Bundle {
+        let path = Bundle.main.path(forResource: "ca", ofType: "lproj")
+        return path.flatMap { Bundle(path: $0) } ?? Bundle(for: type(of: self))
+    }
+
+    private func englishBundle() -> Bundle {
+        Bundle(path: Bundle.main.path(forResource: "en", ofType: "lproj") ?? "") ?? Bundle.main
+    }
+
+    private func makeSink(localeBundle: Bundle) -> CloudRouteSink {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        let cloudConfig = CloudConfig(defaults: defaults)
+        return CloudRouteSink(
+            clientFactory: {
+                let built = CloudRouteClient.stubbed(baseURL: cloudConfig.baseUrl, fixture: self.nextFixture())
+                self.capturedTask = built.task
+                return built.client
+            },
+            isConfigured: { !cloudConfig.baseUrl.isEmpty },
+            playbackSink: playback,
+            fingerprintMapper: RecordingFingerprintMapper(),
+            playbackPositionMs: { 0 },
+            cloudPlaybackContextState: CloudPlaybackContextState(),
+            spokenTemplates: SpokenTemplateResolver(localeBundle: localeBundle),
+            conversationManager: testConversationManager()
+        )
+    }
+
+    /// Runs one error turn and returns THIS turn's gap lines. The log is shared by the whole
+    /// run, so the filter is scoped to this control's own utterance id — counting globally
+    /// would measure the suite rather than the turn.
+    private func runTurn(code: String, bundle: Bundle, utterance: String) async -> (CloudRouteResult, [String]) {
+        self.pendingFixture =
+            """
+            event: error
+            data: {"code":"\(code)","message":""}
+
+            """
+        let response = await makeSink(localeBundle: bundle).routeToCloud(
+            request: "x", tier: .free, context: context(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: utterance)
+        let log = await FileLog.shared.logFileAsString()
+        let mine = log.split(separator: "\n")
+            .filter { $0.contains("cloudErrorTemplateMissing") && $0.contains(utterance) }
+            .map(String.init)
+        return (response, mine)
+    }
+
+    private func context() -> PlaybackContext {
+        PlaybackContext(episodeId: "ep", podcastId: "pod", referencePositionMs: 1_000,
+                        clientPositionMs: 1_100, recentReferencePositions: [],
+                        previousReferencePositionMs: nil)
+    }
+
+    func test_aRequiredCodeWithNoLocalTemplateIsRecordedAsAGap() async {
+        let utterance = "req-gap-\(UUID().uuidString)"
+        // PREMISE: this locale really has no template for the code, so the earcon below is
+        // the missing-template branch and not some other failure.
+        XCTAssertTrue(
+            SpokenTemplateResolver(localeBundle: localeWithoutTemplates())
+                .resolveForUserLocale("cloud_error_no_answer").isEmpty,
+            "the chosen locale must genuinely lack the template"
+        )
+        let (response, lines) = await runTurn(code: "no_answer", bundle: localeWithoutTemplates(), utterance: utterance)
+        XCTAssertEqual(response.response, .earcon(.error), "speech behaviour is unchanged: still the earcon")
+        XCTAssertEqual(lines.count, 1, "a Required code with no local template must record exactly one gap line: \(lines)")
+        // Guarded so a missing line reports as a FAILURE rather than crashing the runner on
+        // an out-of-range index — the crash would hide which assertion actually failed.
+        guard let line = lines.first else { return XCTFail("no gap line was recorded for this turn") }
+        XCTAssertTrue(line.contains("no_answer"), "the line must name the code: \(line)")
+    }
+
+    func test_aRequiredCodeWithATemplateRecordsNoGap() async {
+        let utterance = "req-ok-\(UUID().uuidString)"
+        XCTAssertFalse(
+            SpokenTemplateResolver(localeBundle: englishBundle())
+                .resolveForUserLocale("cloud_error_limit_exceeded").isEmpty,
+            "premise: English carries this template"
+        )
+        let (response, lines) = await runTurn(code: "limit_exceeded", bundle: englishBundle(), utterance: utterance)
+        XCTAssertEqual(
+            response.response,
+            .spoken("You have reached your Auris free daily limit. Please try again tomorrow.")
+        )
+        XCTAssertTrue(lines.isEmpty, "a translated Required code is not a gap: \(lines)")
+    }
+
+    func test_aGenericCodeWithNoTemplateRecordsNoGap() async {
+        let utterance = "gen-gap-\(UUID().uuidString)"
+        let (response, lines) = await runTurn(code: "invalid_response", bundle: localeWithoutTemplates(), utterance: utterance)
+        XCTAssertEqual(response.response, .earcon(.error), "an internal diagnostic stays an earcon")
+        XCTAssertTrue(lines.isEmpty, "a Generic code has no required template, so its absence is not a gap: \(lines)")
+    }
+}
+
+/// EVERY Required code carries a template in EVERY locale that ships a VoiceTemplates table
+/// (cloud-assistant.md: "the client must have a code-specific template in the user's language").
+/// The locale list is DISCOVERED from the app bundle rather than hard-coded, so adding a
+/// localization cannot silently skip this control.
+final class CloudRequiredErrorTemplateCoverageTests: XCTestCase {
+    /// The contract's Required rows, plus the two client-side codes that are spoken feedback the
+    /// user is owed: `conversation_expired` (Required and rendered) and `connection_lost`
+    /// (client-authored, no server row; the client maps duplicate_request onto it).
+    /// Every code the contract marks Required, plus the two client-side spoken codes
+    /// (docs/specs/cloud-assistant.md#error-codes). This list mirrors
+    /// `CloudRouteSink.requiredTemplateCodes`, so a code recorded as a gap and a code asserted
+    /// as translated cannot drift apart.
+    private let requiredCodes = [
+        "limit_exceeded", "no_answer", "retrieval_unavailable", "speech_unavailable",
+        "queue_overflow", "budget_exceeded", "turn_conflict", "corrupt_record",
+        "conversation_expired", "connection_lost",
+    ]
+
+    /// Every shipped `.lproj` that carries a VoiceTemplates table. A locale with no table at all
+    /// is out of scope here — it has no voice vocabulary yet, which is a separate decision.
+    private func localesWithVoiceTemplates() -> [(name: String, bundle: Bundle)] {
+        let dir = Bundle.main.bundleURL
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path))?
+            .filter { $0.hasSuffix(".lproj") }
+            .sorted() ?? []
+        return names.compactMap { name in
+            let base = String(name.dropLast(".lproj".count))
+            guard let path = Bundle.main.path(forResource: base, ofType: "lproj"),
+                  let bundle = Bundle(path: path),
+                  bundle.path(forResource: "VoiceTemplates", ofType: "strings") != nil else { return nil }
+            return (base, bundle)
+        }
+    }
+
+    func test_everyRequiredCodeResolvesInEveryVoiceLocale() throws {
+        let locales = localesWithVoiceTemplates()
+        // PREMISE: discovery found the shipped tables. Without this the loop could iterate
+        // nothing and pass while asserting no coverage at all.
+        XCTAssertGreaterThanOrEqual(locales.count, 11, "expected the shipped voice locales, got \(locales.map(\.name))")
+        XCTAssertTrue(locales.contains { $0.name == "en" }, "English must be among them")
+        for locale in locales {
+            let resolver = SpokenTemplateResolver(localeBundle: locale.bundle)
+            for code in requiredCodes {
+                let text = resolver.resolveForUserLocale("cloud_error_\(code)")
+                XCTAssertFalse(
+                    text.isEmpty,
+                    "\(locale.name) has no template for Required code \(code): that user hears only an earcon"
+                )
+            }
+        }
+    }
+
+    /// The approved copy, verbatim. Presence alone is not the contract: a
+    /// locale carrying English text would satisfy a non-empty check while speaking the wrong
+    /// language. Proven by mutation — English placed in the de `no_answer` string left the
+    /// coverage control GREEN. So each line is asserted exactly, and Android asserts the same
+    /// strings, which is what keeps the two apps saying one thing.
+    private let approvedCopy: [String: [String: String]] = [
+        "en": [
+            "no_answer": "Sorry, I couldn't find an answer to that. Please try asking another way.",
+            "retrieval_unavailable": "Sorry, I couldn't look that up just now. Please try again.",
+            "queue_overflow": "Sorry, I couldn't finish answering that. Please try again.",
+            "budget_exceeded": "Sorry, that took too long to answer. Please try again.",
+            "turn_conflict": "I'm still answering your last question. Please try again in a moment.",
+            "corrupt_record": "Sorry, I've lost track of our conversation. Please ask again to start a new one.",
+            "connection_lost": "Connection lost. Please try again.",
+        ],
+        "de": [
+            "no_answer": "Entschuldigung, ich konnte darauf keine Antwort finden. Bitte versuche es anders zu fragen.",
+            "retrieval_unavailable": "Entschuldigung, ich konnte das gerade nicht nachschlagen. Bitte versuche es noch einmal.",
+            "queue_overflow": "Entschuldigung, ich konnte die Antwort nicht zu Ende geben. Bitte versuche es noch einmal.",
+            "budget_exceeded": "Entschuldigung, die Antwort hat zu lange gedauert. Bitte versuche es noch einmal.",
+            "turn_conflict": "Ich beantworte gerade noch deine letzte Frage. Bitte versuche es gleich noch einmal.",
+            "corrupt_record": "Entschuldigung, ich habe den Überblick über unser Gespräch verloren. Bitte frag noch einmal, dann beginnt ein neues.",
+            "connection_lost": "Die Verbindung wurde unterbrochen. Bitte versuche es noch einmal.",
+        ],
+        "es": [
+            "no_answer": "Lo siento, no he encontrado una respuesta a eso. Prueba a preguntarlo de otra manera.",
+            "retrieval_unavailable": "Lo siento, no he podido consultarlo ahora mismo. Inténtalo de nuevo.",
+            "queue_overflow": "Lo siento, no he podido terminar de responder. Inténtalo de nuevo.",
+            "budget_exceeded": "Lo siento, responder ha tardado demasiado. Inténtalo de nuevo.",
+            "turn_conflict": "Todavía estoy respondiendo a tu última pregunta. Inténtalo de nuevo en un momento.",
+            "corrupt_record": "Lo siento, he perdido el hilo de nuestra conversación. Vuelve a preguntar para empezar una nueva.",
+            "connection_lost": "Se ha perdido la conexión. Inténtalo de nuevo.",
+        ],
+        "es-MX": [
+            "no_answer": "Lo siento, no he encontrado una respuesta a eso. Prueba a preguntarlo de otra manera.",
+            "retrieval_unavailable": "Lo siento, no he podido consultarlo ahora mismo. Inténtalo de nuevo.",
+            "queue_overflow": "Lo siento, no he podido terminar de responder. Inténtalo de nuevo.",
+            "budget_exceeded": "Lo siento, responder ha tardado demasiado. Inténtalo de nuevo.",
+            "turn_conflict": "Todavía estoy respondiendo a tu última pregunta. Inténtalo de nuevo en un momento.",
+            "corrupt_record": "Lo siento, he perdido el hilo de nuestra conversación. Vuelve a preguntar para empezar una nueva.",
+            "connection_lost": "Se perdió la conexión. Inténtalo de nuevo.",
+        ],
+        "fr": [
+            "no_answer": "Désolé, je n'ai pas trouvé de réponse à cela. Essayez de le demander autrement.",
+            "retrieval_unavailable": "Désolé, je n'ai pas pu le vérifier pour le moment. Veuillez réessayer.",
+            "queue_overflow": "Désolé, je n'ai pas pu terminer ma réponse. Veuillez réessayer.",
+            "budget_exceeded": "Désolé, la réponse a pris trop de temps. Veuillez réessayer.",
+            "turn_conflict": "Je suis encore en train de répondre à votre dernière question. Veuillez réessayer dans un instant.",
+            "corrupt_record": "Désolé, j'ai perdu le fil de notre conversation. Reposez votre question pour en commencer une nouvelle.",
+            "connection_lost": "La connexion a été perdue. Veuillez réessayer.",
+        ],
+        "fr-CA": [
+            "no_answer": "Désolé, je n'ai pas trouvé de réponse à cela. Essayez de le demander autrement.",
+            "retrieval_unavailable": "Désolé, je n'ai pas pu le vérifier pour le moment. Veuillez réessayer.",
+            "queue_overflow": "Désolé, je n'ai pas pu terminer ma réponse. Veuillez réessayer.",
+            "budget_exceeded": "Désolé, la réponse a pris trop de temps. Veuillez réessayer.",
+            "turn_conflict": "Je suis encore en train de répondre à votre dernière question. Veuillez réessayer dans un instant.",
+            "corrupt_record": "Désolé, j'ai perdu le fil de notre conversation. Reposez votre question pour en commencer une nouvelle.",
+            "connection_lost": "La connexion a été perdue. Veuillez réessayer.",
+        ],
+        "ja": [
+            "no_answer": "申し訳ありません。それに対する答えが見つかりませんでした。別の聞き方でお試しください。",
+            "retrieval_unavailable": "申し訳ありません。今は調べられませんでした。もう一度お試しください。",
+            "queue_overflow": "申し訳ありません。最後までお答えできませんでした。もう一度お試しください。",
+            "budget_exceeded": "申し訳ありません。お答えするのに時間がかかりすぎました。もう一度お試しください。",
+            "turn_conflict": "前の質問にまだお答えしています。少し待ってからもう一度お試しください。",
+            "corrupt_record": "申し訳ありません。会話の流れがわからなくなってしまいました。もう一度話しかけていただくと、新しい会話が始まります。",
+            "connection_lost": "接続が切れました。もう一度お試しください。",
+        ],
+        "ko": [
+            "no_answer": "죄송합니다. 그에 대한 답을 찾지 못했습니다. 다른 방식으로 물어봐 주세요.",
+            "retrieval_unavailable": "죄송합니다. 지금은 확인하지 못했습니다. 다시 시도해 주세요.",
+            "queue_overflow": "죄송합니다. 답변을 끝까지 드리지 못했습니다. 다시 시도해 주세요.",
+            "budget_exceeded": "죄송합니다. 답변하는 데 시간이 너무 오래 걸렸습니다. 다시 시도해 주세요.",
+            "turn_conflict": "이전 질문에 아직 답변하고 있습니다. 잠시 후에 다시 시도해 주세요.",
+            "corrupt_record": "죄송합니다. 대화의 흐름을 놓쳤습니다. 다시 말씀해 주시면 새 대화를 시작합니다.",
+            "connection_lost": "연결이 끊어졌습니다. 다시 시도해 주세요.",
+        ],
+        "yue": [
+            "no_answer": "唔好意思，我搵唔到呢個問題嘅答案。唔該試吓用第二種問法。",
+            "retrieval_unavailable": "唔好意思，我啱啱查唔到呢樣嘢。唔該再試一次。",
+            "queue_overflow": "唔好意思，我答唔晒呢個問題。唔該再試一次。",
+            "budget_exceeded": "唔好意思，答咗太耐都答唔完。唔該再試一次。",
+            "turn_conflict": "我仲答緊你上一個問題。唔該等一陣再試一次。",
+            "corrupt_record": "唔好意思，我唔記得咗我哋傾到邊。唔該再問一次，咁就會開新嘅對話。",
+            "connection_lost": "連線斷咗。唔該再試一次。",
+        ],
+        "zh-Hans": [
+            "no_answer": "抱歉，我没找到这个问题的答案。请换一种问法试试。",
+            "retrieval_unavailable": "抱歉，我刚才没能查到这个内容。请再试一次。",
+            "queue_overflow": "抱歉，我没能把这个回答说完。请再试一次。",
+            "budget_exceeded": "抱歉，回答这个问题用的时间太长了。请再试一次。",
+            "turn_conflict": "我还在回答你上一个问题。请稍等一下再试。",
+            "corrupt_record": "抱歉，我跟不上我们这段对话了。请再问一次，这样就会开始新的对话。",
+            "connection_lost": "连接已断开。请再试一次。",
+        ],
+        "zh-Hant": [
+            "no_answer": "抱歉，我沒找到這個問題的答案。請換一種問法試試。",
+            "retrieval_unavailable": "抱歉，我剛才沒能查到這個內容。請再試一次。",
+            "queue_overflow": "抱歉，我沒能把這個回答說完。請再試一次。",
+            "budget_exceeded": "抱歉，回答這個問題用的時間太長了。請再試一次。",
+            "turn_conflict": "我還在回答你上一個問題。請稍等一下再試。",
+            "corrupt_record": "抱歉，我跟不上我們這段對話了。請再問一次，這樣就會開始新的對話。",
+            "connection_lost": "連線已中斷。請再試一次。",
+        ],
+    ]
+
+    /// The Cantonese adverb is 啱啱 ("just now"), not 啱啲. Pinned as its own word because every
+    /// other assertion compares a line to a copy of itself — which is exactly why this typo
+    /// survived in both apps: the expected table was written from the same wrong source.
+    ///
+    /// SCOPE: this checks one word in one language. It does not validate Cantonese grammar, and
+    /// it is not a substitute for a reader on the yue lines.
+    func test_theCantoneseJustNowAdverbIsSpelledCorrectly() throws {
+        let yue = localesWithVoiceTemplates().first { $0.name == "yue" }
+        let bundle = try XCTUnwrap(yue?.bundle, "yue.lproj must ship a VoiceTemplates table")
+        let resolver = SpokenTemplateResolver(localeBundle: bundle)
+        // The three lines that say "just now" in Cantonese.
+        for code in ["speech_unavailable", "internal_error", "retrieval_unavailable"] {
+            let text = resolver.resolveForUserLocale("cloud_error_\(code)")
+            XCTAssertFalse(text.isEmpty, "yue/\(code) lost its line")
+            XCTAssertTrue(text.contains("啱啱"), "yue/\(code) must use 啱啱: \(text)")
+            XCTAssertFalse(text.contains("啱啲"), "yue/\(code) uses the misspelling 啱啲: \(text)")
+        }
+    }
+
+    /// Every locale speaks the APPROVED line, not merely a non-empty one. A translation that
+    /// exists but says the wrong thing — or says it in English — is the defect this catches.
+    func test_everyVoiceLocaleSpeaksTheApprovedLineVerbatim() throws {
+        let locales = localesWithVoiceTemplates()
+        XCTAssertEqual(Set(locales.map(\.name)), Set(approvedCopy.keys),
+                       "the shipped voice locales and the approved copy table must be the same set")
+        for locale in locales {
+            let resolver = SpokenTemplateResolver(localeBundle: locale.bundle)
+            let expected = try XCTUnwrap(approvedCopy[locale.name], locale.name)
+            for code in requiredCodes where expected[code] != nil {
+                XCTAssertEqual(
+                    resolver.resolveForUserLocale("cloud_error_\(code)"),
+                    expected[code],
+                    "\(locale.name)/\(code) does not speak the approved line"
+                )
+            }
+        }
+    }
+
+    /// The coverage list and the production recording set must name the SAME codes: a code
+    /// asserted as translated but absent from the recorder would never report a regression, and
+    /// one recorded but never asserted could ship untranslated unnoticed.
+    func test_coverageListMatchesTheProductionRecordingSet() {
+        XCTAssertEqual(
+            Set(requiredCodes), CloudRouteSink.requiredTemplateCodes,
+            "the tested vocabulary and the recorded vocabulary must be one set"
+        )
+    }
+
+    /// The two codes that speak ONE line by decision (`speech_unavailable` / `internal_error`)
+    /// must stay identical in every language — they are one sentence, not two that may drift.
+    func test_theSharedFailureLineStaysIdenticalInEveryVoiceLocale() throws {
+        for locale in localesWithVoiceTemplates() {
+            let resolver = SpokenTemplateResolver(localeBundle: locale.bundle)
+            let speech = resolver.resolveForUserLocale("cloud_error_speech_unavailable")
+            let internalError = resolver.resolveForUserLocale("cloud_error_internal_error")
+            XCTAssertFalse(speech.isEmpty, "\(locale.name) lost the shared failure line")
+            XCTAssertEqual(speech, internalError, "\(locale.name): the two keys must speak one identical line")
+        }
+    }
+
+    /// No spoken line may name the machinery — **checked for the Latin-script locales only**.
+    ///
+    /// HONEST SCOPE: a substring search for English words cannot detect a system term written in
+    /// Japanese, Korean or Chinese. Verified by mutation: replacing the ja `queue_overflow` line
+    /// with "サーバーのキューがあふれました" ("the server queue overflowed") left this control
+    /// GREEN, while the same sentence in ASCII turned it red. So the non-Latin lines are reviewed
+    /// by a reader, not by this control, and claiming otherwise would be a blind assertion.
+    func test_noRequiredLineNamesTheMachineryInLatinScriptLocales() throws {
+        let forbidden = ["server", "service", "provider", "websocket", "api", "queue", "budget"]
+        // Latin-script locales only: en/de/es/es-MX/fr/fr-CA. The CJK and yue tables are checked
+        // by review, because an English substring test cannot see their scripts.
+        let latinLocales = localesWithVoiceTemplates().filter {
+            ["en", "de", "es", "es-MX", "fr", "fr-CA"].contains($0.name)
+        }
+        XCTAssertEqual(latinLocales.count, 6, "expected the six Latin-script voice locales")
+        for locale in latinLocales {
+            let resolver = SpokenTemplateResolver(localeBundle: locale.bundle)
+            for code in requiredCodes {
+                let text = resolver.resolveForUserLocale("cloud_error_\(code)").lowercased()
+                for word in forbidden where text.contains(word) {
+                    XCTFail("\(locale.name)/\(code) speaks the system term '\(word)': \(text)")
+                }
+            }
+        }
     }
 }
 

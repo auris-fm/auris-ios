@@ -229,6 +229,7 @@ class VoiceControlService: ObservableObject {
     /// Extracted so the presentation itself is assertable: published state alone leaves the
     /// silence unexplained, so the fault is also given audible feedback through the product's
     /// existing error earcon.
+    @MainActor
     func presentSegmentationFault(_ fault: VoiceAsrEngine.SegmentationFault) {
         segmentationFault = fault
         FileLog.shared.addMessage(
@@ -266,8 +267,8 @@ class VoiceControlService: ObservableObject {
     /// Observer for earcon requests, for controls that assert the user-facing presentation rather
     /// than only the internal state change.
     var earconObserverForTesting: ((EarconId) -> Void)? {
-        get { audioRenderer.earconObserverForTesting }
-        set { audioRenderer.earconObserverForTesting = newValue }
+        get { MainActor.assumeIsolated { audioRenderer.earconObserverForTesting } }
+        set { MainActor.assumeIsolated { audioRenderer.earconObserverForTesting = newValue } }
     }
     private var latestRouterMetrics: RouterClassificationMetrics?
 
@@ -322,6 +323,11 @@ class VoiceControlService: ObservableObject {
     /// failed capture exposes no inputs even while the headset stays connected.
     private var captureStartFailedEpoch: UInt = 0
 
+    // Main-actor because it wires main-actor callbacks: the interruption handler's
+    // callbacks are main-actor-typed, so assigning them from a nonisolated initialiser
+    // would be exactly the race this design removes. The one production caller
+    // (`buildVoiceControlService`) is already main-actor.
+    @MainActor
     init(
         conditionMonitor: LiveConditionMonitor,
         routeMonitor: IOSAudioRouteMonitor,
@@ -373,7 +379,7 @@ class VoiceControlService: ObservableObject {
         self.preparedObserverFactory = preparedObserverFactory
         self.testInputBarrier = testInputBarrier
 
-        interruptionHandler.onInterruptionBegan = { [weak self] in
+        interruptionHandler.onInterruptionBegan = { @MainActor [weak self] in
             guard let self else { return }
             let wasCapturing = self.isListening
             self.stop()  // stops capture, discards current pipeline state
@@ -446,53 +452,17 @@ class VoiceControlService: ObservableObject {
                 hasExternalMicrophoneCandidate: routeMonitor?.hasExternalMicrophoneCandidate ?? true
             )
         }
-        .sink { [weak self] gate in
+        // Plain synchronous delivery. The thread change happens at the SOURCE —
+        // `IOSAudioRouteMonitor` receives `routeChangeNotification` on main — so every
+        // write to `micExposure`, and therefore every emission here, is already on
+        // main and in order. A hop at this consumer would instead let an older queued
+        // emission race a newer inline one, and `.receive(on:)` here would also defer
+        // the acquisition's own synchronous exposure flip (15 acquisition failures).
+        // `acquireExternalInput` publishes on main directly and never passes through a
+        // notification, so the inline handoff is untouched.
+        .sink { @MainActor [weak self] gate in
             guard let self else { return }
-            let previous = self.gateState
-            self.gateState = gate.state
-            self.gatePosture = gate.posture
-
-            if gateDescription(previous) != gateDescription(gate.state) {
-                FileLog.shared.addMessage("[VoicePipeline] Gate: \(gateDescription(previous)) → \(gateDescription(gate.state))")
-            }
-            // LABEL the diagnostic path (owner requirement): a simulator session that only reached
-            // listening because the built-in microphone was admitted must never be mistaken for a
-            // real isolated-microphone capture when reading logs.
-            if DiagnosticMicOverride.isActive, gate.state.isListening,
-               gate.posture.micExposure == .exposed || gate.posture.micExposure == .noMic {
-                FileLog.shared.addMessage(
-                    "[VoicePipeline] \(DiagnosticMicOverride.logLabel): listening on the BUILT-IN "
-                    + "microphone. The route is genuinely Exposed; this exception exists so the "
-                    + "simulator can exercise capture. Device and Release are unaffected."
-                )
-            }
-
-            guard !self.isStopping else { return }
-            let wasCapturing = self.isListening
-            switch gate.state {
-            case .off:
-                self.stopCapture()
-                self.considerAcquisition(for: gate.posture)
-            case .listening(let mode):
-                // The acquisition's own exposure flip publishes synchronously
-                // from inside `acquireExternalInput`. Cancelling here would
-                // abort the very task committing the route, and its later
-                // cancellation check would clear the selection and drop capture.
-                if !self.isAcquiring {
-                    self.cancelAcquisition()
-                }
-                // DIAGNOSTIC (Debug simulator only): the gate admits the built-in microphone
-                // before any acquisition can run, so the session would never be made
-                // input-capable and the built-in mic would have no usable route. Arm the
-                // diagnostic acquisition on the same path the `.off` case uses. `isAcquiring`
-                // marks the task so the resulting exposure flip cannot cancel it.
-                if DiagnosticMicOverride.isActive,
-                   gate.posture.micExposure == .exposed || gate.posture.micExposure == .noMic {
-                    self.considerAcquisition(for: gate.posture)
-                }
-                self.start(in: mode)
-            }
-            self.logLifecycleTransition(posture: gate.posture, wasCapturing: wasCapturing)
+            self.applyGate(gate)
         }
         .store(in: &cancellables)
 
@@ -500,6 +470,57 @@ class VoiceControlService: ObservableObject {
         // re-processes through (spec 0443b70) — armed at FIRST ARM, exactly as before the
         // extraction: same lifecycle, only the function boundary moved.
         wireAsrCallbacks()
+    }
+
+    /// Applies one gate emission. Main-actor because it mutates service state and
+    /// starts or stops capture; every caller establishes that before entering.
+    @MainActor
+    private func applyGate(_ gate: VoiceControlGate) {
+        let previous = gateState
+        gateState = gate.state
+        gatePosture = gate.posture
+
+        if gateDescription(previous) != gateDescription(gate.state) {
+            FileLog.shared.addMessage("[VoicePipeline] Gate: \(gateDescription(previous)) → \(gateDescription(gate.state))")
+        }
+        // LABEL the diagnostic path (owner requirement): a simulator session that only reached
+        // listening because the built-in microphone was admitted must never be mistaken for a
+        // real isolated-microphone capture when reading logs.
+        if DiagnosticMicOverride.isActive, gate.state.isListening,
+           gate.posture.micExposure == .exposed || gate.posture.micExposure == .noMic {
+            FileLog.shared.addMessage(
+                "[VoicePipeline] \(DiagnosticMicOverride.logLabel): listening on the BUILT-IN "
+                + "microphone. The route is genuinely Exposed; this exception exists so the "
+                + "simulator can exercise capture. Device and Release are unaffected."
+            )
+        }
+
+        guard !isStopping else { return }
+        let wasCapturing = isListening
+        switch gate.state {
+        case .off:
+            stopCapture()
+            considerAcquisition(for: gate.posture)
+        case .listening(let mode):
+            // The acquisition's own exposure flip publishes synchronously
+            // from inside `acquireExternalInput`. Cancelling here would
+            // abort the very task committing the route, and its later
+            // cancellation check would clear the selection and drop capture.
+            if !isAcquiring {
+                cancelAcquisition()
+            }
+            // DIAGNOSTIC (Debug simulator only): the gate admits the built-in microphone
+            // before any acquisition can run, so the session would never be made
+            // input-capable and the built-in mic would have no usable route. Arm the
+            // diagnostic acquisition on the same path the `.off` case uses. `isAcquiring`
+            // marks the task so the resulting exposure flip cannot cancel it.
+            if DiagnosticMicOverride.isActive,
+               gate.posture.micExposure == .exposed || gate.posture.micExposure == .noMic {
+                considerAcquisition(for: gate.posture)
+            }
+            start(in: mode)
+        }
+        logLifecycleTransition(posture: gate.posture, wasCapturing: wasCapturing)
     }
 
     /// Enqueues one utterance onto the serial routing chain — the single capture path for ASR
@@ -809,7 +830,7 @@ class VoiceControlService: ObservableObject {
 
         asrEngine.onWakeWordDetected = { [weak self] in
             self?.gracePeriodSignal.onWakeWordDetected()
-            self?.audioRenderer.playEarcon(.wakeWord)
+            Task { @MainActor in self?.audioRenderer.playEarcon(.wakeWord) }
         }
         // Trailing silence on an addressed utterance is when the connection should open: the user
         // appears to have finished, the endpoint has not fired, so the handshake overlaps the
@@ -865,7 +886,7 @@ class VoiceControlService: ObservableObject {
         // left nil so the intent is visible at the call site.)
         asrEngine.onWakeOnly = {}
         asrEngine.onUnroutable = { [weak self] in
-            self?.audioRenderer.playEarcon(.error)
+            Task { @MainActor in self?.audioRenderer.playEarcon(.error) }
         }
 
         asrEngine.onStageTiming = { [weak self] timing in
@@ -882,16 +903,27 @@ class VoiceControlService: ObservableObject {
         // silence unexplained, so this follows the product's existing feedback pattern: the same
         // error earcon already used when a capture could not be turned into a request.
         asrEngine.onSegmentationFault = { [weak self] fault in
-            self?.presentSegmentationFault(fault)
+            Task { @MainActor in self?.presentSegmentationFault(fault) }
         }
         intentRouter.onMetrics = { [weak self] metrics in
             self?.latestRouterMetrics = metrics
         }
 
         // Single-flight LFM load — one task even if startIfAllowed were re-entered.
-        intentRouterReadyTask = Task { [weak self] in
+        // Main-actor: `updateModelsReady` publishes `$setup`, which the gate chain
+        // reads on main, so this producer must reach main like the others rather
+        // than writing from the cooperative pool after `ensureReady()` resumes.
+        //
+        // Capture the ROUTER, not `self`, across the download. `guard let self` above an `await`
+        // keeps the whole service alive for as long as the model fetch takes — on a cold cache that
+        // outlives `stop()`, so a stopped service could not deallocate until the download finished.
+        // The router is what the await actually needs; everything after it re-binds weakly and does
+        // nothing if the service is gone. The download itself is deliberately NOT cancelled: it is
+        // single-flight and shared, so cancelling it would penalise the next start.
+        let router = intentRouter
+        intentRouterReadyTask = Task { @MainActor [weak self] in
+            let result = await router.ensureReady()
             guard let self else { return }
-            let result = await self.intentRouter.ensureReady()
             switch result {
             case .success:
                 FileLog.shared.addMessage("[VoicePipeline] Intent router ready")
@@ -905,6 +937,7 @@ class VoiceControlService: ObservableObject {
         }
     }
 
+    @MainActor
     private func start(in mode: ListeningMode) {
         guard !isListening else {
             if listeningMode != mode {
@@ -937,6 +970,7 @@ class VoiceControlService: ObservableObject {
         }
     }
 
+    @MainActor
     func stop() {
         guard !isStopping else { return }
         isStopping = true
@@ -945,6 +979,7 @@ class VoiceControlService: ObservableObject {
         stopCapture()
     }
 
+    @MainActor
     private func stopCapture() {
         guard isListening else { return }
         FileLog.shared.addMessage("[VoicePipeline] stop listening")
@@ -1306,7 +1341,7 @@ class VoiceControlService: ObservableObject {
             }
             lastIntentType = intentType
             lastExecutionTime = Date()
-            audioRenderer.render(response)
+            await audioRenderer.render(response)
 
         case .dialogControl(let action):
             FileLog.shared.addMessage("[VoicePipeline] dialog \(action) ← '\(transcript)'")
@@ -1333,7 +1368,7 @@ class VoiceControlService: ObservableObject {
                 gracePeriodSignal.onCommandRecognized()
                 lastIntentType = String(describing: type(of: intent))
                 lastExecutionTime = Date()
-                audioRenderer.render(response)
+                await audioRenderer.render(response)
             } else if let reprocessValue = dialogResult.reprocessValue {
                 // REPROCESS vs SPEAK (spec 0443b70): a `new_command` control cancels the dialog
                 // and re-processes its value as a FRESH transcript — the value is a command the
@@ -1366,7 +1401,7 @@ class VoiceControlService: ObservableObject {
                     stage: "execution",
                     outcome: .init(state: "not_run", reason: "client_refused"),
                     context: captureContext)
-                audioRenderer.render(.spoken(question))
+                await audioRenderer.render(.spoken(question))
             }
             // If dialogResult has no intent and no question (e.g., cancel), nothing was executed —
             // but the record still needs releasing.
@@ -1434,7 +1469,7 @@ class VoiceControlService: ObservableObject {
                     "[VoicePipeline] cloud escalation refused (\(cause)) ← '\(transcript)' (reason=\(reason ?? "?"))"
                 )
                 if gracePeriodSignal.claimRefusalTone() {
-                    audioRenderer.playEarcon(.error)
+                    await audioRenderer.playEarcon(.error)
                 }
                 return .routed
             }
@@ -1473,7 +1508,7 @@ class VoiceControlService: ObservableObject {
                 // The escalation path resolves interruptions too: a barge-in that itself
                 // escalates must still submit its follow-up once acknowledged.
                 await submitRetainedFollowUpIfAny()
-                audioRenderer.render(response)
+                await audioRenderer.render(response)
                 return .routed
             }
 
@@ -1487,7 +1522,7 @@ class VoiceControlService: ObservableObject {
             // test). What is left are the capability failures — reasons where
             // the router could not do its job — and each speaks: the user asked
             // a real question and got nothing.
-            audioRenderer.playEarcon(.error)
+            await audioRenderer.playEarcon(.error)
             // Nothing was executed and no dispatch happened; release the record.
             settleOwnedCapture(captureContext, cancelled: false, reason: "client_refused")
         }

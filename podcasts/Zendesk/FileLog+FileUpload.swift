@@ -18,9 +18,20 @@ extension FileLog: @retroactive EventLoggingDelegate {
 
     static let noWearableLogsAvailable = "No wearable logs were available"
 
+    /// The refusal lives here, taking the key it will actually seal with, so a control can drive
+    /// it with an unusable key without needing real credentials in the test build.
+    static func assertUsableEncryptionKey(_ key: String) throws {
+        guard LogUploadCredentials.isUsableEncryptionKey(key) else {
+            FileLog.shared.addMessage("Log upload skipped: no usable log encryption key configured")
+            throw LogError.logGenerationFailed
+        }
+    }
+
     fileprivate func queueFileUpload(_ filePath: String) throws -> String {
         let logFilePath = URL(fileURLWithPath: filePath)
         let dataProvider = EventLoggingDataProvider(logUploadFile: logFilePath)
+        // Refuse before the encryptor's force-unwrap: an empty or wrong-length key would trap.
+        try Self.assertUsableEncryptionKey(dataProvider.loggingEncryptionKey)
         let logFile = LogFile(url: logFilePath)
         do {
             let eventLogging = EventLogging(dataSource: dataProvider, delegate: self)
@@ -34,6 +45,9 @@ extension FileLog: @retroactive EventLoggingDelegate {
 
     public func encryptedLogUUID() async -> String {
         do {
+            // Refuse before generating: merging the logs is work whose result would be discarded,
+            // and it leaves the merged file behind for a build that can never upload it.
+            try Self.assertUsableEncryptionKey(ApiCredentials.loggingEncryptionKey)
             return try queueFileUpload(try await logFileForUpload())
         } catch {
             return FileLog.genericErrorMessage
@@ -64,6 +78,8 @@ extension FileLog: @retroactive EventLoggingDelegate {
 
     public func encryptedWatchLogUUID() async -> String {
         do {
+            // Same reason: do not ask the watch for its log if it cannot be uploaded.
+            try Self.assertUsableEncryptionKey(ApiCredentials.loggingEncryptionKey)
             guard let filePath = try await watchLogFileForUpload() else {
                 return Self.noWearableLogsAvailable
             }

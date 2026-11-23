@@ -1,5 +1,9 @@
 import Foundation
 
+/// Main-actor isolated so that `cancel` completes before `render` creates the
+/// replacement task. A queued cancel landing after its replacement has started
+/// would stop the very utterance it was meant to precede.
+@MainActor
 class AudioFeedbackRenderer {
     private let earconPlayer: EarconPlayer
     private let ttsEngine: TtsEngineProtocol
