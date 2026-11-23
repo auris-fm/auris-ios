@@ -346,7 +346,7 @@ struct SocialLoginButtons: View {
     let coordinator: LoginCoordinator
 
     var body: some View {
-        ForEach(SocialAuthProvider.allCases, id: \.self) { provider in
+        ForEach(SocialLoginAvailability.availableProviders, id: \.self) { provider in
             switch provider {
             case .apple:
                 Button(L10n.socialSignInContinueWithApple) {

@@ -30,6 +30,21 @@ struct CloudRouteResult: Equatable {
     var fact: SinkActionFact? = nil
 }
 
+/// WHAT A BARGE-IN MAY DO WITH THE TURN IT FOUND, decided BEFORE anything is sent.
+///
+/// The two cases are not degrees of the same thing; they are different facts about the predecessor,
+/// and they authorize opposite actions.
+///
+/// - `abandoned`: the predecessor's authentication send had not been invoked, so nothing of it was
+///   ever submitted and the server holds no turn to settle. There is nothing to interrupt and no
+///   history to correct, so the interrupting utterance goes out as a FRESH turn.
+/// - `interruptSent`: the predecessor may have been admitted. It must be interrupted on its own
+///   socket, and the interrupting utterance may be submitted only once that turn acknowledges.
+private enum PriorTurnDisposition {
+    case abandoned
+    case interruptSent(CloudRouteClient.AppOperationResultSendReport)
+}
+
 /// Lock-guarded one-way flag: set synchronously from a cancellation handler, read from any task.
 final class OwnerCancelFlag: @unchecked Sendable {
     private let lock = NSLock()
@@ -1128,6 +1143,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // no interruption of its own.
         let isRetainedFollowUpSubmission = interruptedRequestIdForUtterance(utteranceId) != nil
         var interruptedRequestIdForThisTurn: String? = nil
+        // Named when an interruption was attempted against a predecessor that may already have been
+        // admitted and could not be told. Distinct from `interruptedRequestIdForThisTurn` because the
+        // two authorize opposite dispositions: one waits for an acknowledgement, the other submits
+        // nothing at all. Reading the request id from this variable rather than from the held
+        // follow-up is deliberate — the hold is already gone by the time the disposition is acted on.
+        var interruptUndeliveredForRequestId: String? = nil
         if !isRetainedFollowUpSubmission,
            let priorRequestId = activeResultSocket?.requestId,
            (activeResultSocketOwner.map { !$0.isCancelled }) ?? false,
@@ -1140,9 +1161,52 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 latency: latency,
                 forRequestId: priorRequestId
             )
-            if await sendInterruptOnPriorSocket(forRequestId: priorRequestId) == .undelivered {
+            switch await interruptPriorTurn(forRequestId: priorRequestId) {
+            case .abandoned:
+                // THE PREDECESSOR NEVER AUTHENTICATED. Nothing of it was submitted, so the server
+                // is not generating an answer to talk over and holds no turn to settle. Its hold
+                // is released and the input it would have retained is dropped on the way out, so
+                // this utterance continues as an ORDINARY NEW TURN: it claims no interruption and
+                // carries no interruption report, because there is no settled history to correct.
                 interruptedRequestIdForThisTurn = nil
+            case .interruptSent(.undelivered):
+                // THE PREDECESSOR MAY HAVE BEEN ADMITTED and the interrupt could not reach it. The
+                // hold is already released (nothing is coming to settle it), which suppresses
+                // this utterance; the arm below ends the turn locally.
+                interruptedRequestIdForThisTurn = nil
+                interruptUndeliveredForRequestId = priorRequestId
+            case .interruptSent(.submitted):
+                break
             }
+        }
+
+        // THE INTERRUPTION DECIDED AGAINST WAITING, SO ONE OF TWO THINGS HAPPENED and each ends the
+        // turn here rather than falling through into this utterance's own dispatch.
+        //
+        //  - `interruptedRequestIdForThisTurn` is nil because the interrupt was undelivered and the
+        //    hold was released. No acknowledgement can arrive — there is no live registration to
+        //    receive a terminal on — so the utterance must END LOCALLY: nothing of it may be
+        //    submitted, because submitting it would assert a settlement that never happened.
+        //  - The arm above could not run because the sink had no `activeTurn` to wait on; the same
+        //    reasoning applies, so it ends locally too.
+        //
+        // The abandonment arm does NOT land here: a turn that never authenticated has no settlement
+        // to wait for and no history to correct, so it is submitted as an ordinary new turn.
+        if let undeliveredPriorRequestId = interruptUndeliveredForRequestId {
+            FileLog.shared.addMessage(
+                "[VoicePipeline] interruption UNDELIVERABLE for turn \(undeliveredPriorRequestId) — "
+                + "the predecessor may have been admitted and cannot be told; utterance \(utteranceId) "
+                + "dropped, nothing submitted, local generic failure"
+            )
+            interruptionState.suppressHeldFollowUp(forRequestId: undeliveredPriorRequestId)
+            // Whatever this turn already acquired is retired here: admission happens before the
+            // interruption block, so the hold and playback ownership are already this turn's.
+            restoreTransientAudioState()
+            let lost = spokenTemplates.resolveForUserLocale("cloud_error_connection_lost")
+            return CloudRouteResult(
+                response: lost.isEmpty ? .earcon(.error) : .spoken(lost),
+                outcome: .failed(code: "connection_lost")
+            )
         }
 
         if interruptedRequestIdForThisTurn != nil, let priorToken = activeTurn {
@@ -2319,15 +2383,26 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     var beforeUnsentHoldReleaseForTesting: ((String) async -> Void)?
     var afterUnsentHoldReleaseForTesting: ((String) -> Void)?
 
-    /// Send the `interrupt` frame on the prior turn's still-open socket, if there is one.
+    /// Decide what may be done with the predecessor, then do it.
     ///
-    /// Extracted so the eager path and the dispatch path share ONE implementation. Returns the
-    /// send report; `.undelivered` means no acknowledgement can ever arrive and the caller must
-    /// drop the hold rather than wait.
+    /// EXTRACTED so the eager path and the dispatch path share ONE implementation; both call this,
+    /// and it is the only place a predecessor's fate is decided.
+    ///
+    /// THE DECISION COMES FIRST, and it is one atomic transition on the predecessor's socket handle
+    /// (see `AppOperationResultSocket.abandonBeforeAuthentication`). Asking whether the predecessor
+    /// had authenticated and then acting on the answer would be two steps, and its producer can
+    /// invoke the authentication send between them — leaving the server holding a turn this client
+    /// believes it abandoned, or abandoning a turn the server is already answering.
+    ///
+    /// A predecessor that never authenticated has submitted NOTHING, so it is abandoned: its
+    /// registration is retired and its socket cancelled, and the caller submits its utterance as a
+    /// fresh turn. A predecessor whose send was already invoked may have been admitted, so it is
+    /// interrupted on its own still-open socket — and the abandonment deliberately does not close
+    /// that socket on the losing arm, because the interrupt has to travel on it.
     @discardableResult
-    private func sendInterruptOnPriorSocket(
+    private func interruptPriorTurn(
         forRequestId priorRequestId: String
-    ) async -> CloudRouteClient.AppOperationResultSendReport? {
+    ) async -> PriorTurnDisposition {
         // EFFECTS CLOSE ON EVERY INTERRUPT ATTEMPT, delivered or not, and here is the ONE place
         // every interrupt goes through. Closing at a caller left every path that caller did not
         // know about uncovered — how this fix first shipped: it closed effects only in
@@ -2335,9 +2410,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // `emitEagerBargeInIfNeeded` -> `emitBargeIn` -> this function) sent its interrupt with
         // effects still open.
         //
-        // Above the guard, because an interrupt that CANNOT be delivered still means the user took
-        // the turn away: no acknowledgement can arrive, nothing may stay held, and nothing of that
-        // turn may still take effect.
+        // Above every branch below, because a predecessor that is ABANDONED took the turn away just
+        // as surely as one that is interrupted: nothing of it may still take effect either way.
         //
         // The moment is the attempt, not the successor's cancellation: a successor interrupts and
         // then WAITS for this turn's terminal, so between the two the interrupted turn is still
@@ -2353,7 +2427,21 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         guard let priorSocket = activeResultSocket, let client = resultSendClient else {
             // No transport to interrupt: no acknowledgement can come, so nothing may stay held.
             interruptionState.releaseUnsentHold(forRequestId: priorRequestId)
-            return .undelivered
+            return .interruptSent(.undelivered)
+        }
+        // THE ABANDONMENT DECISION, before any send. True means this call closed the predecessor
+        // before its authentication send was invoked: nothing of it will ever reach the server.
+        guard !priorSocket.abandonBeforeAuthentication() else {
+            // NOT A TRANSPORT FAILURE, and not a refused interruption either: the utterance was not
+            // discarded, it simply has no interruption to carry. Drop the hold WITHOUT suppressing,
+            // so the retained input does not outlive the decision and can still be submitted as the
+            // fresh turn this disposition calls for.
+            interruptionState.dropHoldForAbandonedPredecessor(forRequestId: priorRequestId)
+            FileLog.shared.addMessage(
+                "[VoicePipeline] predecessor turn \(priorRequestId) abandoned before authentication "
+                + "— nothing of it was submitted; this utterance proceeds as a fresh turn"
+            )
+            return .abandoned
         }
         // AWAITED, because delivery IS the interruption: a fire-and-forget send could be scheduled
         // after this turn retires the registration, which is how an interrupt becomes a silent
@@ -2369,7 +2457,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             interruptionState.releaseUnsentHold(forRequestId: priorRequestId)
             afterUnsentHoldReleaseForTesting?(priorRequestId)
         }
-        return report
+        return .interruptSent(report)
     }
 
     /// THE eager barge-IN STEP. Called by the service at INPUT admission, ahead of its serial
@@ -2467,7 +2555,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // STOP local output immediately — before the send, and long before any wait. The contract
         // says the client stops output and clears buffered answer audio immediately on barge-in.
         _ = audioPlayer.cancel()
-        if await sendInterruptOnPriorSocket(forRequestId: priorRequestId) == .undelivered {
+        switch await interruptPriorTurn(forRequestId: priorRequestId) {
+        case .abandoned:
+            // Nothing of the predecessor was submitted, so there is nothing to interrupt and no
+            // history to correct. Returning nil says so: this utterance is not a follow-up held
+            // for an interruption, and the caller routes it as an ordinary new turn.
+            return nil
+        case .interruptSent(.undelivered):
             // The interruption already claimed this input. A matching done may have handed it
             // to the bridge while the send was suspended; otherwise failed-send cleanup discards
             // it. Neither disposition returns execution ownership to the queued input link.
@@ -2476,12 +2570,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 + "queued link \(utteranceId) retired; interruption settlement owns its disposition"
             )
             return priorRequestId
+        case .interruptSent(.submitted):
+            FileLog.shared.addMessage(
+                "[VoicePipeline] barge-in emitted eagerly for turn \(priorRequestId) from "
+                + "utterance \(utteranceId)"
+            )
+            return priorRequestId
         }
-        FileLog.shared.addMessage(
-            "[VoicePipeline] barge-in emitted eagerly for turn \(priorRequestId) from "
-            + "utterance \(utteranceId)"
-        )
-        return priorRequestId
     }
 
     /// Take the follow-up released by an interruption acknowledgement. Read-and-clear, so the

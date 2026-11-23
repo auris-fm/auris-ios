@@ -44,6 +44,62 @@ final class CloudBindInterleavingControls: XCTestCase {
         )
     }
 
+    /// AN ABANDONED PREDECESSOR'S PRODUCER ENDS WITH NO ERROR EVENT.
+    ///
+    /// This is the mechanism the end-to-end barge-in case cannot reach: there, the successor's
+    /// `activeTurn?.cancel()` runs on every path that survives its interruption switch, and the
+    /// consumer's cancelled-owner guard ends the loop before an error could be spoken or recorded.
+    /// Re-applying the error event therefore leaves that case green — measured, twice.
+    ///
+    /// The property itself lives here, one level down and with no sink or successor involved: when
+    /// the abandonment wins, the predecessor's OWN stream carries no error. An abandoned turn did
+    /// not fail — nothing of it was ever sent — so there is no failure to report and nothing to
+    /// tell the user.
+    func testAnAbandonedProducersStreamCarriesNoErrorEvent() async throws {
+        let task = StubWebSocketTask(textFrames: StubWebSocketTask.frames(fromFixture: fixture()))
+        let client = makeClient(task: task)
+        let turn = CloudTurnEnvelope.make(
+            capabilities: [], routeHint: nil, conversation: testPreparedConversation())
+
+        // Park the producer BEFORE it binds, so the abandonment decision is taken first —
+        // deterministically, not by racing it.
+        let seamEntered = Promise<Void>()
+        let abandonIssued = Promise<Void>()
+        client.onBeforeBind = { _ in
+            seamEntered.resolve(())
+            let deadline = Date().addingTimeInterval(5)
+            while Date() < deadline, !abandonIssued.didClose { usleep(1_000) }
+        }
+
+        let routed = client.routeWithResultSocket(
+            request: "x", context: CloudRouteContext(from: sampleContext()), turn: turn
+        )
+        await seamEntered.value()
+        // The abandonment wins: nothing of this turn will reach the server.
+        let won = await MainActor.run { routed.resultSocket.abandonBeforeAuthentication() }
+        XCTAssertTrue(won, "premise: the pre-authentication window must be won here")
+        abandonIssued.markClosed()
+        abandonIssued.resolve(())
+
+        var events: [CloudRouteEvent] = []
+        for await event in routed.stream { events.append(event) }
+
+        let errors = events.compactMap { event -> String? in
+            if case let .error(_, code, _) = event { return code }
+            return nil
+        }
+        XCTAssertTrue(
+            errors.isEmpty,
+            "an abandoned turn did not fail: its stream must carry NO error event, or its own "
+            + "consumer speaks a connection failure for a turn the server never heard of; got \(errors)"
+        )
+        // And it still submitted nothing.
+        XCTAssertEqual(
+            task.sentTextFrames.count, 0,
+            "an abandoned turn must submit NOTHING; frames=\(task.sentTextFrames)"
+        )
+    }
+
     /// A client whose factory hands out a distinct socket per route, in order, recording them.
     /// Needed to establish isolation between two PHYSICAL sockets (reviewer a2723c92).
     private func makeClient(tasks: [StubWebSocketTask]) -> CloudRouteClient {

@@ -710,8 +710,33 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
         return reportsAlive && cancelled == nil
     }
 
+    /// Park INSIDE the authentication send, after the producer has recorded that the send was
+    /// invoked. This is the only place a control can force the LOST arm of the abandon-before-auth
+    /// race: at the bind seam the mark has not been set yet, so an abandonment there always wins.
+    private var authSendGate: Gate?
+    private var authSendEntered: Promise<Void>?
+
+    func holdAuthenticationSendUntilReleased(_ gate: Gate, entered: Promise<Void>) {
+        scriptLock.lock(); authSendGate = gate; authSendEntered = entered; scriptLock.unlock()
+    }
+
     func send(_ message: URLSessionWebSocketTask.Message) async throws {
         if throwsBeforeRecording { throw URLError(.notConnectedToInternet) }
+        // The park sits AFTER the producer's "send invoked" mark and BEFORE the frame is recorded,
+        // so a decision taken while parked here must observe the send as already under way.
+        if case let .string(text) = message, text.contains("\"type\":\"authenticate\"") {
+            let parked: (Gate, Promise<Void>)? = {
+                scriptLock.lock(); defer { scriptLock.unlock() }
+                guard let gate = authSendGate, let entered = authSendEntered else { return nil }
+                authSendGate = nil
+                authSendEntered = nil
+                return (gate, entered)
+            }()
+            if let (gate, entered) = parked {
+                entered.resolve(())
+                _ = try? await gate.wait(untilCancelled: { self.isCancelledSocket })
+            }
+        }
         // Recorded under `scriptLock`: `sent` is written from the client's task and read by the
         // test task, so an unsynchronised append/read is a data race that can report a frame that
         // was already written as absent.
