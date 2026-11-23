@@ -3410,7 +3410,11 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
         }
         let producerRelease = DispatchSemaphore(value: 0)
-        blockProducerAfterFrames = (8, producerRelease)
+        // NINE received frames now: seven binary PCM messages, then `connected`, then `done`.
+        // The park counts RECEIVED frames, so adding the admission frame moves the boundary:
+        // leaving it at eight parked the producer on `connected` itself, before the terminal
+        // the turn must read, and the case hung rather than failing.
+        blockProducerAfterFrames = (9, producerRelease)
         nextTurnFixture = Self.doneOnlyFixture
         nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x11, count: 4_800 * 2) }
         playback.setPlaying(true)
@@ -3434,12 +3438,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // acknowledgement is what makes N's conversation resumable, so the report it leaves behind
         // describes history the server actually settled — without it utterance 3 opens a fresh
         // conversation and correctly drops the report.
-        nextTurnFixture = """
-            event: connected
-            data: {"codec":"pcm_s16le@24k"}
-
-            \(Self.doneOnlyFixture)
-            """
+        nextTurnFixture = "event: connected\ndata: {\"codec\":\"pcm_s16le@24k\"}\n\n" + Self.doneOnlyFixture
         let turnN = Task {
             await sink.routeToCloud(request: "first", tier: .free, context: sampleContext(),
                                     origin: cloudTestOrigin, selection: .wakeWord, utteranceId: "u-n")
