@@ -308,9 +308,20 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
                 utteranceId: "u-turn-a"
             )
         }
-        // Wait until the prior turn owns the socket.
-        let socketAppeared = await waitUntil(timeout: 5) { await MainActor.run { sink.activeResultSocketForTesting != nil } }
-        XCTAssertTrue(socketAppeared, "premise: the prior turn's socket must open before the successor starts")
+        // THE PREMISE IS THE TRANSPORT'S REGISTRATION, not the sink's published binding. The
+        // binding is set on the main actor as soon as `routeWithResultSocket` returns, while the
+        // registration is created later inside the detached producer task — so a non-nil socket
+        // does NOT yet mean an interrupt can be delivered. Waiting on the binding alone let this
+        // control send its interrupt into a window where no registration existed at all, which is
+        // a different scenario from the refusal ordering it is here to prove.
+        let registered = await waitUntil(timeout: 5) {
+            await MainActor.run {
+                guard sink.activeResultSocketForTesting != nil,
+                      let client = sink.resultClientForTesting else { return false }
+                return client.hasLiveRegistrationForTesting(requestId: "u-turn-a")
+            }
+        }
+        XCTAssertTrue(registered, "premise: the prior turn's transport must be REGISTERED before the successor starts")
         let priorRequestId = await MainActor.run { sink.activeResultSocketForTesting?.requestId }
         XCTAssertNotNil(priorRequestId, "premise: the prior turn must own a live socket")
         // Snapshot the PRIOR socket now: the successor's client factory rebinds `capturedTask`, so
@@ -402,10 +413,15 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
                 origin: Self.origin, selection: .followUp, utteranceId: "u-turn-a"
             )
         }
+        // Registration, not merely the published binding — see the refusal-ordering control above.
         let appeared = await waitUntil(timeout: 5) {
-            await MainActor.run { sink.activeResultSocketForTesting != nil }
+            await MainActor.run {
+                guard sink.activeResultSocketForTesting != nil,
+                      let client = sink.resultClientForTesting else { return false }
+                return client.hasLiveRegistrationForTesting(requestId: "u-turn-a")
+            }
         }
-        XCTAssertTrue(appeared, "premise: turn A must own a live socket")
+        XCTAssertTrue(appeared, "premise: turn A's transport must be REGISTERED")
         let priorTask = capturedTask
         let priorRequestId = await MainActor.run { sink.activeResultSocketForTesting?.requestId }
         XCTAssertNotNil(priorRequestId, "premise: turn A's request id is known")
@@ -567,10 +583,15 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
                 origin: Self.origin, selection: .followUp, utteranceId: "u-first"
             )
         }
+        // Registration, not merely the published binding — see the refusal-ordering control above.
         let appeared = await waitUntil(timeout: 5) {
-            await MainActor.run { sink.activeResultSocketForTesting != nil }
+            await MainActor.run {
+                guard sink.activeResultSocketForTesting != nil,
+                      let client = sink.resultClientForTesting else { return false }
+                return client.hasLiveRegistrationForTesting(requestId: "u-first")
+            }
         }
-        XCTAssertTrue(appeared, "premise: the first turn must own a live socket")
+        XCTAssertTrue(appeared, "premise: the first turn's transport must be REGISTERED")
         let firstTask = capturedTask
 
         let started = Date()
@@ -639,10 +660,15 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
                 utteranceId: "u-turn-a"
             )
         }
+        // Registration, not merely the published binding — see the refusal-ordering control above.
         let appeared = await waitUntil(timeout: 5) {
-            await MainActor.run { sink.activeResultSocketForTesting != nil }
+            await MainActor.run {
+                guard sink.activeResultSocketForTesting != nil,
+                      let client = sink.resultClientForTesting else { return false }
+                return client.hasLiveRegistrationForTesting(requestId: "u-turn-a")
+            }
         }
-        XCTAssertTrue(appeared, "premise: the prior turn must own a socket before it is interrupted")
+        XCTAssertTrue(appeared, "premise: the prior turn must be REGISTERED before it is interrupted")
         let priorRequestId = await MainActor.run { sink.activeResultSocketForTesting?.requestId }
         guard let priorRequestId else {
             XCTFail("premise: the prior turn must own a live socket")
@@ -705,10 +731,15 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
                 utteranceId: "u-turn-a"
             )
         }
+        // Registration, not merely the published binding — see the refusal-ordering control above.
         let appeared = await waitUntil(timeout: 5) {
-            await MainActor.run { sink.activeResultSocketForTesting != nil }
+            await MainActor.run {
+                guard sink.activeResultSocketForTesting != nil,
+                      let client = sink.resultClientForTesting else { return false }
+                return client.hasLiveRegistrationForTesting(requestId: "u-turn-a")
+            }
         }
-        XCTAssertTrue(appeared, "premise: the prior turn must own a socket before we retire it")
+        XCTAssertTrue(appeared, "premise: the prior turn must be REGISTERED before we retire it")
         let priorRequestId = await MainActor.run { sink.activeResultSocketForTesting?.requestId }
         guard let priorRequestId else {
             XCTFail("premise: the prior turn must own a live socket")

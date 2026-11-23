@@ -2242,12 +2242,20 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         var owned = false
         let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
-            if await MainActor.run(body: { sink.activeResultSocketForTesting != nil }) {
+            // Registration, not merely the sink's published binding: the binding appears on the
+            // main actor before the detached producer registers anything, so a non-nil socket
+            // alone does not mean an interrupt can be delivered.
+            let live = await MainActor.run(body: { () -> Bool in
+                guard sink.activeResultSocketForTesting != nil,
+                      let client = sink.resultClientForTesting else { return false }
+                return client.hasLiveRegistrationForTesting(requestId: "u-turn-a")
+            })
+            if live {
                 owned = true; break
             }
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
-        XCTAssertTrue(owned, "premise: the prior turn must own a socket before it is interrupted")
+        XCTAssertTrue(owned, "premise: the prior turn's transport must be REGISTERED before it is interrupted")
         let priorRequestId = await MainActor.run { sink.activeResultSocketForTesting?.requestId }
         guard let priorRequestId else { XCTFail("premise: a live socket"); return }
 
@@ -2337,12 +2345,20 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         var owned = false
         let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
-            if await MainActor.run(body: { sink.activeResultSocketForTesting != nil }) {
+            // Registration, not merely the sink's published binding: the binding appears on the
+            // main actor before the detached producer registers anything, so a non-nil socket
+            // alone does not mean an interrupt can be delivered.
+            let live = await MainActor.run(body: { () -> Bool in
+                guard sink.activeResultSocketForTesting != nil,
+                      let client = sink.resultClientForTesting else { return false }
+                return client.hasLiveRegistrationForTesting(requestId: "u-turn-a")
+            })
+            if live {
                 owned = true; break
             }
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
-        XCTAssertTrue(owned, "premise: the prior turn must own a socket before it is interrupted")
+        XCTAssertTrue(owned, "premise: the prior turn's transport must be REGISTERED before it is interrupted")
         let priorRequestId = await MainActor.run { sink.activeResultSocketForTesting?.requestId }
         guard let priorRequestId else { XCTFail("premise: a live socket"); return }
 
@@ -4923,6 +4939,113 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         gate.release()
         let finished = try await timeoutProbe(turn, nanoseconds: UInt64(timeout * 1_000_000_000))
         XCTAssertTrue(finished, "the predecessor did not reach its terminal within \(timeout)s")
+    }
+
+    /// AN UNDELIVERED INTERRUPT WITH NO TERMINAL IS TRANSPORT LOSS, NOT A NEW TURN.
+    ///
+    /// The contract (`docs/specs/cloud-assistant.md` → Interruption) allows the interrupting
+    /// utterance to be submitted only after the interrupted turn's terminal acknowledgement, and
+    /// says that when the transport is lost "no automatic replay occurs". So an `interrupt` that
+    /// never reached the server, for a turn whose terminal the sink has NOT consumed, authorizes
+    /// nothing: discard the held utterance, end locally, keep the pending report.
+    ///
+    /// THE STATE IS REACHABLE IN PRODUCTION, not only through this seam. The client registers a
+    /// turn socket, sends its authentication frame, and then serves frames; on producer completion
+    /// the stream's `.finished` termination deliberately takes no action, leaving the registration
+    /// to the unclaimed-consumer grace (`closeAfterGrace` → `closeIfUnclaimed`). The sink publishes
+    /// its result binding BEFORE it claims consumer ownership, so between those two points the sink
+    /// looks live while the registration can already be retired. A barge-in landing in that window
+    /// gets `.undelivered`. Measured on a full-plan run: `interrupt undelivered: registration
+    /// retired for turn u-turn-a`, followed by that utterance authenticating as an ordinary turn.
+    ///
+    /// This control forces exactly that ordering — retire the registration through the production
+    /// retirement path while the predecessor's terminal is still withheld — and asserts the WIRE:
+    /// the interrupting utterance must never authenticate.
+    func testUndeliveredInterruptWithNoTerminalSubmitsNothing() async throws {
+        self.nextTurnFixture = Self.doneOnlyFixture
+        let gate = holdNextTurn()
+        addTeardownBlock { gate.release() }
+        let state = CloudInterruptionState()
+        let sink = makeSink(interruptionState: state)
+
+        // Turn A genuinely in flight: its receive is parked, so no terminal can arrive on its own.
+        let prior = Task {
+            await sink.routeToCloud(
+                request: "prior question", tier: .free, context: self.sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-turn-a"
+            )
+        }
+        // Wait for the TRANSPORT's registration, not merely the sink's published binding: the
+        // binding appears on the main actor before the detached producer registers anything.
+        var registered = false
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            let live = await MainActor.run(body: { () -> Bool in
+                guard sink.activeResultSocketForTesting != nil, let client = sink.resultClientForTesting else { return false }
+                return client.hasLiveRegistrationForTesting(requestId: "u-turn-a")
+            })
+            if live { registered = true; break }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertTrue(registered, "premise: turn A's transport must be REGISTERED before it is retired")
+        let observedSocket = await MainActor.run { sink.activeResultSocketForTesting }
+        let priorSocket = try XCTUnwrap(observedSocket)
+        // The premise is the TRANSPORT's registration, not the sink's binding: the binding is
+        // published on the main actor before the detached producer registers anything, so a
+        // non-nil socket alone would let this case interrupt into a window where no registration
+        // existed yet — a different scenario from the retirement it means to test. `boundIdentity`
+        // is stamped BY registration, so requiring it already pins the stronger fact.
+        let priorClient = await MainActor.run { sink.resultClientForTesting }
+        let client = try XCTUnwrap(priorClient)
+        XCTAssertTrue(client.hasLiveRegistrationForTesting(requestId: "u-turn-a"),
+                      "premise: turn A's transport must be REGISTERED before it is retired")
+        let priorIdentity = try XCTUnwrap(priorSocket.boundIdentity)
+        let priorTask = try XCTUnwrap(capturedTask)
+        XCTAssertFalse(
+            priorTask.sentInterrupt,
+            "premise: no interrupt has been sent yet"
+        )
+
+        // A is UNSETTLED: its terminal is withheld by the park, so no acknowledgement of any kind
+        // has been recorded. This is what separates "the transport went away mid-turn" from "the
+        // turn had already ended", and the disposition must differ accordingly.
+        let observedToken = await MainActor.run { sink.activeTurnForTesting }
+        let aToken: CloudRouteSink.CloudTurnToken = try XCTUnwrap(observedToken)
+        XCTAssertNil(
+            aToken.acknowledgementResolutionForTesting,
+            "premise: turn A must still be UNSETTLED when its registration is lost"
+        )
+
+        // RETIRE THE REGISTRATION exactly as a consumer close does. The sink's binding and token
+        // are untouched, so its barge-in gate still sees a live predecessor — the production window.
+        await MainActor.run {
+            sink.resultClientForTesting?.retireSocketRegistrationForTesting(
+                requestId: priorSocket.requestId, identity: priorIdentity
+            )
+        }
+
+        let result = await sink.routeToCloud(
+            request: "play the next one", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-turn-b"
+        )
+
+        // THE WIRE ASSERTION: B never authenticated. Reading the outcome alone cannot tell
+        // "nothing was submitted" from "something was submitted and also failed".
+        let bFrames = capturedTask?.sentTextFrames ?? []
+        XCTAssertFalse(
+            bFrames.contains { $0.contains("u-turn-b") },
+            "an undelivered interrupt with no terminal acknowledgement must submit NOTHING; "
+            + "measured frames=\(bFrames)"
+        )
+        XCTAssertNotEqual(result.outcome, .completed, "transport loss is never a completion")
+        XCTAssertTrue(
+            state.isSuppressed("u-turn-b"),
+            "the utterance must be suppressed so a queued dispatch cannot reach the wire either"
+        )
+        XCTAssertNil(state.heldFollowUpForTesting, "the held follow-up must be dropped, not stranded")
+
+        gate.release()
+        _ = await prior.value
     }
 
     private func makeSink(conversationManager: CloudConversationManager? = nil, withHoldCounters: Bool = false, interruptionState: CloudInterruptionState = CloudInterruptionState()) -> CloudRouteSink {
