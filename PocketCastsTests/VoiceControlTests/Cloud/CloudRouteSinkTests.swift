@@ -2242,12 +2242,20 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         var owned = false
         let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
-            if await MainActor.run(body: { sink.activeResultSocketForTesting != nil }) {
+            // Registration, not merely the sink's published binding: the binding appears on the
+            // main actor before the detached producer registers anything, so a non-nil socket
+            // alone does not mean an interrupt can be delivered.
+            let live = await MainActor.run(body: { () -> Bool in
+                // `boundIdentity` is stamped BY registration, so requiring it observes the
+                // transport rather than the sink's earlier binding publication.
+                return sink.activeResultSocketForTesting?.boundIdentity != nil
+            })
+            if live {
                 owned = true; break
             }
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
-        XCTAssertTrue(owned, "premise: the prior turn must own a socket before it is interrupted")
+        XCTAssertTrue(owned, "premise: the prior turn's transport must be REGISTERED before it is interrupted")
         let priorRequestId = await MainActor.run { sink.activeResultSocketForTesting?.requestId }
         guard let priorRequestId else { XCTFail("premise: a live socket"); return }
 
@@ -2337,12 +2345,20 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         var owned = false
         let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
-            if await MainActor.run(body: { sink.activeResultSocketForTesting != nil }) {
+            // Registration, not merely the sink's published binding: the binding appears on the
+            // main actor before the detached producer registers anything, so a non-nil socket
+            // alone does not mean an interrupt can be delivered.
+            let live = await MainActor.run(body: { () -> Bool in
+                // `boundIdentity` is stamped BY registration, so requiring it observes the
+                // transport rather than the sink's earlier binding publication.
+                return sink.activeResultSocketForTesting?.boundIdentity != nil
+            })
+            if live {
                 owned = true; break
             }
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
-        XCTAssertTrue(owned, "premise: the prior turn must own a socket before it is interrupted")
+        XCTAssertTrue(owned, "premise: the prior turn's transport must be REGISTERED before it is interrupted")
         let priorRequestId = await MainActor.run { sink.activeResultSocketForTesting?.requestId }
         guard let priorRequestId else { XCTFail("premise: a live socket"); return }
 
@@ -5028,6 +5044,22 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         return completed
     }
 
+    /// Bounded wait for the successor to have TAKEN its hold on the given predecessor. That is the
+    /// observable instant of its interruption decision: the hold is recorded before the send, so a
+    /// control can release a parked predecessor exactly after the decision and not before.
+    private func waitForHeldFollowUp(
+        _ state: CloudInterruptionState, requestId: String, utteranceId: String = "u-turn-b",
+        timeout: TimeInterval
+    ) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let taken = await MainActor.run { state.interruptedRequestId(forHeldUtterance: utteranceId) == requestId }
+            if taken { return true }
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+        return await MainActor.run { state.interruptedRequestId(forHeldUtterance: utteranceId) == requestId }
+    }
+
     private func holdNextTurn() -> Gate {
         let gate = Gate()
         pendingHeldGate = gate
@@ -5053,6 +5085,12 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     private var hookedSink: CloudRouteSink?
     /// Opt-in action on the NEXT built client's first frame (ownership-snapshot probes).
     private var firstFrameActionForNextBuild: (@Sendable () -> Void)?
+    /// Opt-in hook on the NEXT built client, applied before its producer starts. Used to park the
+    /// producer at the bind seam so a control can force the pre-authentication window.
+    private var parkNextProducerAtBindSeam: ((CloudRouteClient) -> Void)?
+    /// Opt-in park INSIDE the next built turn's authentication send — the lost-race arm, where the
+    /// producer has already recorded its send as invoked.
+    private var holdNextAuthenticationSend: (gate: Gate, entered: Promise<Void>)?
     /// Grace hold lifecycle counters for ownership controls.
     private var holdCounters: (begin: AtomicInteger, end: AtomicInteger)?
 
@@ -5083,6 +5121,424 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         gate.release()
         let finished = try await timeoutProbe(turn, nanoseconds: UInt64(timeout * 1_000_000_000))
         XCTAssertTrue(finished, "the predecessor did not reach its terminal within \(timeout)s")
+    }
+
+    /// AN UNDELIVERED INTERRUPT WITH NO TERMINAL IS TRANSPORT LOSS, NOT A NEW TURN.
+    ///
+    /// The contract (`docs/specs/cloud-assistant.md` → Interruption) allows the interrupting
+    /// utterance to be submitted only after the interrupted turn's terminal acknowledgement, and
+    /// says that when the transport is lost "no automatic replay occurs". So an `interrupt` that
+    /// never reached the server, for a turn whose terminal the sink has NOT consumed, authorizes
+    /// nothing: discard the held utterance, end locally, keep the pending report.
+    ///
+    /// THE STATE IS REACHABLE IN PRODUCTION, not only through this seam. The client registers a
+    /// turn socket and sends its authentication frame from a DETACHED producer task, while the sink
+    /// publishes its result binding on the main actor as soon as the route call returns. A close
+    /// that lands after registration but before the terminal — a consumer abandoning the turn, or
+    /// the transport going away — retires the registration while the sink's binding still names a
+    /// live predecessor. A barge-in landing there gets `.undelivered` with no terminal consumed.
+    /// Measured on a full-plan run: `interrupt undelivered: registration retired for turn u-turn-a`,
+    /// followed by that utterance authenticating as an ordinary turn.
+    ///
+    /// This is the AUTH-SENT arm. Its sibling below covers the pre-registration window, where the
+    /// correct disposition is the opposite one: abandon the predecessor before it authenticates and
+    /// submit the interrupting utterance as a fresh turn.
+    ///
+    /// This control forces exactly that ordering — retire the registration through the production
+    /// retirement path while the predecessor's terminal is still withheld — and asserts the WIRE:
+    /// the interrupting utterance must never authenticate.
+    func testUndeliveredInterruptWithNoTerminalSubmitsNothing() async throws {
+        self.nextTurnFixture = Self.doneOnlyFixture
+        let gate = holdNextTurn()
+        addTeardownBlock { gate.release() }
+        let state = CloudInterruptionState()
+        let sink = makeSink(interruptionState: state)
+
+        // Turn A genuinely in flight: its receive is parked, so no terminal can arrive on its own.
+        let prior = Task {
+            await sink.routeToCloud(
+                request: "prior question", tier: .free, context: self.sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-turn-a"
+            )
+        }
+        // Wait for the TRANSPORT's registration, not merely the sink's published binding: the
+        // binding appears on the main actor before the detached producer registers anything.
+        var registered = false
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            let live = await MainActor.run(body: { () -> Bool in
+                // `boundIdentity` is stamped BY registration, so requiring it observes the
+                // transport rather than the sink's earlier binding publication.
+                return sink.activeResultSocketForTesting?.boundIdentity != nil
+            })
+            if live { registered = true; break }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertTrue(registered, "premise: turn A's transport must be REGISTERED before it is retired")
+        let observedSocket = await MainActor.run { sink.activeResultSocketForTesting }
+        let priorSocket = try XCTUnwrap(observedSocket)
+        // The premise is the TRANSPORT's registration, not the sink's binding: the binding is
+        // published on the main actor before the detached producer registers anything, so a
+        // non-nil socket alone would let this case interrupt into a window where no registration
+        // existed yet — a different scenario from the retirement it means to test. `boundIdentity`
+        // is stamped BY registration, so requiring it already pins the stronger fact.
+        let priorIdentity = try XCTUnwrap(priorSocket.boundIdentity)
+        let priorTask = try XCTUnwrap(capturedTask)
+        // A is UNSETTLED and un-interrupted: its terminal is withheld by the park, so no
+        // acknowledgement of any kind has been recorded. That is what separates "the transport
+        // went away mid-turn" from "the turn had already ended", and the disposition differs.
+        XCTAssertFalse(priorTask.sentInterrupt, "premise: no interrupt has been sent yet")
+        XCTAssertTrue(
+            priorTask.sentTextFrames.contains { $0.contains("u-turn-a") },
+            "premise: A HAS authenticated — this is the auth-sent arm, not the pre-registration one"
+        )
+
+        // RETIRE THE REGISTRATION exactly as a consumer close does. The sink's binding and token
+        // are untouched, so its barge-in gate still sees a live predecessor — the production window.
+        await MainActor.run {
+            sink.resultClientForTesting?.retireSocketRegistrationForTesting(
+                requestId: priorSocket.requestId, identity: priorIdentity
+            )
+        }
+
+        let result = await sink.routeToCloud(
+            request: "play the next one", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-turn-b"
+        )
+
+        // THE WIRE ASSERTION: B never authenticated. Reading the outcome alone cannot tell
+        // "nothing was submitted" from "something was submitted and also failed".
+        let bFrames = capturedTask?.sentTextFrames ?? []
+        XCTAssertFalse(
+            bFrames.contains { $0.contains("u-turn-b") },
+            "an undelivered interrupt with no terminal acknowledgement must submit NOTHING; "
+            + "measured frames=\(bFrames)"
+        )
+        XCTAssertNotEqual(result.outcome, .completed, "transport loss is never a completion")
+        XCTAssertTrue(
+            state.isSuppressed("u-turn-b"),
+            "the utterance must be suppressed so a queued dispatch cannot reach the wire either"
+        )
+        XCTAssertNil(state.heldFollowUpForTesting, "the held follow-up must be dropped, not stranded")
+
+        gate.release()
+        _ = await prior.value
+    }
+
+    /// THE PRE-AUTHENTICATION WINDOW: an interrupt that arrives before the predecessor's transport
+    /// has registered is NOT transport loss. The predecessor has not authenticated, so the server
+    /// has heard nothing of it and there is no turn to settle.
+    ///
+    /// The window is real and ordered by construction: `routeWithResultSocket` spawns the producer
+    /// as a DETACHED task and returns at once, so the sink publishes its result binding on the main
+    /// actor while registration — and therefore the authentication send — happens later on the
+    /// producer's own task. A barge-in landing in between finds a live-looking predecessor whose
+    /// interrupt cannot be delivered.
+    ///
+    /// The disposition is the opposite of the auth-sent case above: abandon the predecessor BEFORE
+    /// it authenticates, so nothing of it is ever submitted, and let the interrupting utterance go
+    /// out as a FRESH turn carrying no interruption report. Discarding it here would leave the
+    /// predecessor to answer a question the user just talked over.
+    ///
+    /// THE RACE IS PINNED, not waited for: the predecessor's producer is parked at the bind seam,
+    /// which sits after registration in today's code but before the authentication send. The
+    /// successor's decision and the predecessor's "register, then send auth" must be serialized, so
+    /// either the predecessor observes the abandonment before it registers and never authenticates,
+    /// or the interrupt finds it registered. Parking here forces the first arm deterministically.
+    func testInterruptBeforeThePredecessorAuthenticatesAbandonsItAndSubmitsFresh() async throws {
+        self.nextTurnFixture = Self.doneOnlyFixture
+        let state = CloudInterruptionState()
+        let sink = makeSink(interruptionState: state)
+
+        // Park A's producer BEFORE it can authenticate, and hold it there until the test releases
+        // it. `onBeforeBind` runs on the producer's own task; the wait is bounded so a lost release
+        // fails promptly instead of hanging the suite.
+        let seamEntered = Promise<Void>()
+        let abandonObserved = Promise<Void>()
+        parkNextProducerAtBindSeam = { client in
+            client.onBeforeBind = { _ in
+                seamEntered.resolve(())
+                let deadline = Date().addingTimeInterval(5)
+                while Date() < deadline, !abandonObserved.didClose { usleep(1_000) }
+            }
+        }
+
+        let prior = Task {
+            await sink.routeToCloud(
+                request: "prior question", tier: .free, context: self.sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-turn-a"
+            )
+        }
+        // The sink has published its binding; the producer is parked before authentication. Wait
+        // for the BINDING too, not just the seam: the producer runs off the main actor, so it can
+        // reach the seam before the sink's own publication lands.
+        await seamEntered.value()
+        var bound = false
+        let bindDeadline = Date().addingTimeInterval(5)
+        while Date() < bindDeadline {
+            if await MainActor.run(body: { sink.activeResultSocketForTesting != nil }) { bound = true; break }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertTrue(bound, "premise: the sink must have published its result binding")
+        let observedSocket = await MainActor.run { sink.activeResultSocketForTesting }
+        let priorSocket = try XCTUnwrap(observedSocket)
+        let priorTask = try XCTUnwrap(capturedTask)
+        XCTAssertTrue(
+            priorTask.sentTextFrames.isEmpty,
+            "premise: the predecessor must NOT have authenticated yet; frames=\(priorTask.sentTextFrames)"
+        )
+
+        // B is a SECOND turn and therefore a second socket, so it needs its own fixture: the
+        // per-build handoff consumes one, and a turn built with none gets an empty script (measured
+        // as `NSURLErrorDomain -1011`, which reads like a production failure and is not one).
+        self.nextTurnFixture = Self.doneOnlyFixture
+        // B barges in while A is still pre-authentication.
+        let successor = Task {
+            await sink.routeToCloud(
+                request: "play the next one", tier: .free, context: self.sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-turn-b"
+            )
+        }
+        // WAIT FOR THE ABANDONMENT, not for a held follow-up.
+        //
+        // Two earlier versions used observables that cannot express this arm. The hold B takes
+        // before its send is DROPPED inside the same synchronous decision
+        // (`dropHoldForAbandonedPredecessor`), so there is nothing left to poll. And the socket
+        // handle's `boundIdentity` is never unwound — `retireSocket` removes the client's registry
+        // entry but nothing clears the handle — so it stays non-nil after any retirement.
+        //
+        // The abandonment's own record is the line it logs, which is a production observable and
+        // the same thing a run's log shows. Polled on a bounded deadline so a missing line fails
+        // here with its premise rather than silently passing.
+        var abandoned = false
+        let abandonDeadline = Date().addingTimeInterval(5)
+        while Date() < abandonDeadline {
+            let logged = await FileLog.shared.logFileAsString()
+            if logged.contains("predecessor turn \(priorSocket.requestId) abandoned before authentication") {
+                abandoned = true
+                break
+            }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertTrue(abandoned, "premise: B must abandon A before A authenticates")
+        XCTAssertTrue(
+            priorTask.sentTextFrames.isEmpty,
+            "premise: the abandonment must have landed BEFORE A's authentication send; "
+            + "frames=\(priorTask.sentTextFrames)"
+        )
+        abandonObserved.markClosed()
+        abandonObserved.resolve(())
+        let priorResult = await prior.value
+
+        // A NEVER AUTHENTICATED: nothing of it reached the server.
+        XCTAssertTrue(
+            priorTask.sentTextFrames.isEmpty,
+            "an abandoned pre-authentication turn must submit NOTHING; frames=\(priorTask.sentTextFrames)"
+        )
+        XCTAssertNotEqual(priorResult.outcome, .completed, "an abandoned turn is never a completion")
+        // AND IT IS NOT A FAILURE EITHER. Abandonment is not something that went wrong: nothing of
+        // this turn was ever sent, so there is no failure to report and nothing to tell the user.
+        // Yielding an error terminal here made A's own consumer speak "Connection lost. Please try
+        // again." for a turn the server never heard of — the very symptom this disposition removes,
+        // reintroduced on the predecessor's side of it. The successor cancels A's token at its
+        // admission, but that is AFTER its interruption decision, so the cancelled-owner guard in
+        // the error path only hid the symptom when scheduling happened to favour it.
+        XCTAssertEqual(
+            priorResult.outcome, .earlyClose,
+            "an abandoned turn ends incomplete, not failed; got \(priorResult.outcome)"
+        )
+        XCTAssertEqual(
+            priorResult.response, .silent,
+            "nothing may be spoken for a turn that never submitted anything; got \(priorResult.response)"
+        )
+
+        // B GOES OUT AS A FRESH TURN, with no interruption report: nothing of A was heard, so there
+        // is no settled history to correct.
+        let bResult = await successor.value
+        let bTask = try XCTUnwrap(capturedTask)
+        let bFrames = bTask.sentTextFrames
+        XCTAssertTrue(
+            bFrames.contains { $0.contains("u-turn-b") },
+            "the interrupting utterance must be submitted as a fresh turn; frames=\(bFrames)"
+        )
+        XCTAssertFalse(
+            bFrames.contains { $0.contains("\"interrupts\"") },
+            "a fresh turn after a pre-authentication abandonment carries NO interruption report; frames=\(bFrames)"
+        )
+        XCTAssertEqual(bResult.outcome, .completed, "the fresh turn runs normally")
+        XCTAssertFalse(state.isSuppressed("u-turn-b"), "the utterance was not discarded, so it must not be suppressed")
+    }
+
+    /// THE LOST ARM of the abandon-before-authentication race. The predecessor's authentication send
+    /// has already been INVOKED when the successor decides, so the server may admit that turn.
+    /// Abandoning it locally would leave a turn running that the client believes it cancelled.
+    ///
+    /// Forced at the only place it can be: INSIDE the test transport's send of the authentication
+    /// frame, which is after the producer records its send as invoked. Parking at the bind seam
+    /// cannot express this — there the mark is not yet set, so an abandonment always wins.
+    ///
+    /// Two things must hold. The abandonment reports LOST and leaves the predecessor's socket OPEN,
+    /// because the interrupt still has to travel on it; closing there would turn a deliverable
+    /// interruption into transport loss and drop the user's utterance. And the interrupt is then
+    /// DELIVERED on that live socket, not reported undelivered.
+    func testAbandonmentLosesToAnAlreadyInvokedAuthenticationSend() async throws {
+        self.nextTurnFixture = Self.doneOnlyFixture
+        let state = CloudInterruptionState()
+        let sink = makeSink(interruptionState: state)
+
+        let authGate = Gate()
+        let authEntered = Promise<Void>()
+        addTeardownBlock { authGate.release() }
+        holdNextAuthenticationSend = (authGate, authEntered)
+
+        let prior = Task {
+            await sink.routeToCloud(
+                request: "prior question", tier: .free, context: self.sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-turn-a"
+            )
+        }
+        // A is INSIDE its authentication send: invoked, not yet returned.
+        await authEntered.value()
+        let observedSocket = await MainActor.run { sink.activeResultSocketForTesting }
+        let priorSocket = try XCTUnwrap(observedSocket)
+        let priorTask = try XCTUnwrap(capturedTask)
+
+        let successor = Task {
+            await sink.routeToCloud(
+                request: "play the next one", tier: .free, context: self.sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-turn-b"
+            )
+        }
+        let held = await waitForHeldFollowUp(state, requestId: priorSocket.requestId, timeout: 5)
+        XCTAssertTrue(held, "premise: B must reach its interruption decision while A's send is in flight")
+
+        // Let the send complete. A was NOT abandoned, so its socket must still carry the interrupt.
+        authGate.release()
+        _ = await prior.value
+        _ = await successor.value
+
+        XCTAssertTrue(
+            priorTask.sentInterrupt,
+            "a lost abandonment race must interrupt the predecessor on its still-open socket"
+        )
+        XCTAssertFalse(
+            priorTask.isCancelledSocket && !priorTask.sentInterrupt,
+            "the losing arm must not close the predecessor's transport"
+        )
+    }
+
+    /// A SECOND barge-in against the same already-abandoned predecessor must read the SAME answer.
+    ///
+    /// The abandonment decision is a question about the turn, not an effect to perform once: once a
+    /// turn is closed before its authentication send, it stays unheard for the rest of its life. The
+    /// sink publishes a predecessor's binding until the successor's own publication replaces it, and
+    /// dropping the abandoned hold clears the one-shot interrupt claim — so a second utterance can
+    /// reach the same socket and ask again.
+    ///
+    /// Taking the hook on the first win made that second call answer `false`, which the sink reads as
+    /// "may have been admitted, interrupt undeliverable": it suppressed the utterance and ended
+    /// locally, silently discarding what the user said over a turn that never existed.
+    func testASecondAbandonmentOfTheSameUnheardTurnReadsTheSameAnswer() async throws {
+        self.nextTurnFixture = Self.doneOnlyFixture
+        let state = CloudInterruptionState()
+        let sink = makeSink(interruptionState: state)
+
+        let seamEntered = Promise<Void>()
+        let abandonObserved = Promise<Void>()
+        parkNextProducerAtBindSeam = { client in
+            client.onBeforeBind = { _ in
+                seamEntered.resolve(())
+                let deadline = Date().addingTimeInterval(5)
+                while Date() < deadline, !abandonObserved.didClose { usleep(1_000) }
+            }
+        }
+        let prior = Task {
+            await sink.routeToCloud(
+                request: "prior question", tier: .free, context: self.sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-turn-a"
+            )
+        }
+        await seamEntered.value()
+        var bound = false
+        let bindDeadline = Date().addingTimeInterval(5)
+        while Date() < bindDeadline {
+            if await MainActor.run(body: { sink.activeResultSocketForTesting != nil }) { bound = true; break }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertTrue(bound, "premise: the sink must have published its result binding")
+        let observedSocket = await MainActor.run { sink.activeResultSocketForTesting }
+        let priorSocket = try XCTUnwrap(observedSocket)
+
+        // FIRST abandonment wins: nothing of this turn was submitted.
+        let first = await MainActor.run { priorSocket.abandonBeforeAuthentication() }
+        XCTAssertTrue(first, "premise: the pre-authentication window must be won here")
+        // SECOND ask, same turn, same unheard state — the answer must not change.
+        let second = await MainActor.run { priorSocket.abandonBeforeAuthentication() }
+        XCTAssertTrue(
+            second,
+            "a turn already abandoned before authentication is STILL unheard: a second barge-in must "
+            + "read the same answer, not classify it as undeliverable and drop the user's utterance"
+        )
+
+        abandonObserved.markClosed()
+        abandonObserved.resolve(())
+        _ = await prior.value
+    }
+
+    /// "ABANDONED" IS A REASON, NOT A SYNONYM FOR CLOSED.
+    ///
+    /// The idempotent answer above must hold only for a lifetime closed BY the abandonment decision.
+    /// A turn that authenticated and then closed — completed, failed, or cancelled — was heard by the
+    /// server, so it is not abandonable: answering "abandoned" for any closed lifetime would route a
+    /// late barge-in against a finished turn as a fresh turn with no interruption report, dropping the
+    /// settled history that turn created.
+    func testATurnThatAuthenticatedAndThenClosedIsNotAbandonable() async throws {
+        self.nextTurnFixture = Self.doneOnlyFixture
+        // HOLD the terminal until the handle has been captured. A done-only turn authenticates and
+        // finishes in well under a millisecond (measured: 0.3 ms from auth frame to terminal), so an
+        // unheld run publishes and clears its binding between two polls and the premise finds
+        // nothing — a fixture race, not a behaviour.
+        let gate = holdNextTurn()
+        addTeardownBlock { gate.release() }
+        let sink = makeSink()
+
+        // A runs to its terminal on its own: it authenticates, completes, and its lifetime closes
+        // through the ordinary finish path — never through the abandonment decision.
+        let prior = Task {
+            await sink.routeToCloud(
+                request: "prior question", tier: .free, context: self.sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-turn-a"
+            )
+        }
+        // Capture the handle WHILE the turn is live: the turn-wide defer clears the binding on exit,
+        // so reading it after the terminal would find nothing. The handle itself outlives the
+        // binding, which is exactly the late-barge-in shape this case pins.
+        var captured: AppOperationResultSocket?
+        let captureDeadline = Date().addingTimeInterval(5)
+        while Date() < captureDeadline {
+            captured = await MainActor.run { sink.activeResultSocketForTesting }
+            if captured != nil { break }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        let priorSocket = try XCTUnwrap(captured, "premise: the sink must publish its result binding")
+        gate.release()
+        let priorResult = await prior.value
+        XCTAssertEqual(priorResult.outcome, .completed, "premise: the predecessor must have run to a terminal")
+        let priorTask = try XCTUnwrap(capturedTask)
+        XCTAssertTrue(
+            priorTask.sentTextFrames.contains { $0.contains("\"authenticate\"") },
+            "premise: the predecessor must have AUTHENTICATED; frames=\(priorTask.sentTextFrames)"
+        )
+
+        // A late ask against that finished turn must NOT read as an abandonment, on the first ask or
+        // any later one.
+        let first = await MainActor.run { priorSocket.abandonBeforeAuthentication() }
+        XCTAssertFalse(
+            first,
+            "a turn that authenticated was heard by the server: closing it later does not make it abandonable"
+        )
+        let second = await MainActor.run { priorSocket.abandonBeforeAuthentication() }
+        XCTAssertFalse(second, "the answer must stay stable for a turn that was heard")
     }
 
     private func makeSink(conversationManager: CloudConversationManager? = nil, withHoldCounters: Bool = false, interruptionState: CloudInterruptionState = CloudInterruptionState()) -> CloudRouteSink {
@@ -5125,6 +5581,14 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                         }
                     }
 
+                }
+                if let park = self.parkNextProducerAtBindSeam {
+                    self.parkNextProducerAtBindSeam = nil
+                    park(built.client)
+                }
+                if let hold = self.holdNextAuthenticationSend {
+                    self.holdNextAuthenticationSend = nil
+                    built.task.holdAuthenticationSendUntilReleased(hold.gate, entered: hold.entered)
                 }
                 if let action = self.firstFrameActionForNextBuild {
                     self.firstFrameActionForNextBuild = nil

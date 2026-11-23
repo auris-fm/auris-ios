@@ -186,7 +186,7 @@ echo "--- :swift: Resolving packages"
 # Resolution is a separate step so a network or pin failure is reported as
 # itself. The test invocation below disables automatic resolution: re-resolving
 # on every invocation costs minutes and can change versions mid-run.
-{ xcodebuild -resolvePackageDependencies \
+{ xcodebuild -scmProvider system -resolvePackageDependencies \
   -project podcasts.xcodeproj \
   -scheme pocketcasts \
   -derivedDataPath "$DERIVED" \
@@ -275,7 +275,7 @@ run_build_step() {
 BUILD_STATUS=0
 # A verdict from an earlier attempt must never be mistaken for this one's.
 rm -f "$LOG_DIR/build-watchdog-verdict"
-xcodebuild build-for-testing \
+xcodebuild build-for-testing -scmProvider system \
   -project podcasts.xcodeproj \
   -scheme pocketcasts \
   -testPlan UnitTests \
@@ -539,6 +539,32 @@ echo "--- :test_tube: Running the full test plan"
 RESULT_BUNDLE="$LOG_DIR/auris-${BUILDKITE_BUILD_NUMBER:-local}-${BUILDKITE_JOB_ID:-job}.xcresult"
 rm -rf "$RESULT_BUNDLE"
 
+# The host-only macro package's tests run outside the simulator plan: they
+# exercise a compiler plugin, which is host code. They run on this Mac as a
+# macOS destination so the run produces a real result bundle: this toolchain's
+# `swift test` has no --xcresult-output, and an unverified host run would be
+# exactly the coverage this pipeline exists to catch. A nonzero exit here ends
+# the step before the plan runs: a broken macro build is not a partial result
+# to be judged by a floor, it is no result at all.
+PACKAGE_BUNDLE="$LOG_DIR/modules-macros-${BUILDKITE_BUILD_NUMBER:-local}-${BUILDKITE_JOB_ID:-job}.xcresult"
+rm -rf "$PACKAGE_BUNDLE"
+set +e
+# The scheme lives in the package, not in podcasts.xcodeproj: run from inside
+# the package directory or xcodebuild resolves the app project and finds no
+# ModulesMacros scheme.
+{ (cd ModulesMacros && xcodebuild test -scmProvider system -scheme ModulesMacros -destination 'platform=macOS' \
+    -derivedDataPath "${MACRO_DERIVED_DATA:-$DERIVED/macros-host}" \
+    -clonedSourcePackagesDirPath "$DERIVED/SourcePackages" \
+    -disableAutomaticPackageResolution \
+    -resultBundlePath "$PACKAGE_BUNDLE") \
+    2>&1 | tee "$LOG_DIR/modules-macros-tests.log"; } & wait $!
+MACRO_TEST_STATUS=$?
+set -e
+if [ "$MACRO_TEST_STATUS" -ne 0 ]; then
+  echo "macro package tests failed (xcodebuild exit $MACRO_TEST_STATUS); see $LOG_DIR/modules-macros-tests.log" >&2
+  exit 1
+fi
+
 # `-testPlan UnitTests` names the plan explicitly. Marking a plan `default = YES`
 # in the scheme is not enough on the command line: without this flag xcodebuild
 # runs the scheme's Testables list, which holds only PocketCastsTests, and the
@@ -578,7 +604,7 @@ TEST_PROGRESS_DEADLINE="${BUILDKITE_AURIS_TEST_PROGRESS_DEADLINE:-300}"
 TEST_TOTAL_DEADLINE="${BUILDKITE_AURIS_TEST_TOTAL_DEADLINE:-3600}"
 
 set +e
-xcodebuild test-without-building \
+xcodebuild test-without-building -scmProvider system \
   -project podcasts.xcodeproj \
   -scheme pocketcasts \
   -testPlan UnitTests \
@@ -790,7 +816,7 @@ echo "--- :mag: Checking that the whole plan ran"
 # status is reported separately so a coverage gap is not hidden by a test failure
 # and a test failure is not excused by coverage being complete.
 set +e
-run_bg python3 .buildkite/lib/check-test-coverage.py "$RESULT_BUNDLE" --log "$LOG_DIR/test.log"
+run_bg python3 .buildkite/lib/check-test-coverage.py "$RESULT_BUNDLE" --log "$LOG_DIR/test.log" --package-bundle "$PACKAGE_BUNDLE"
 COVERAGE_STATUS=$?
 set -e
 
@@ -798,6 +824,9 @@ if [ -d "$RESULT_BUNDLE" ]; then
   # Zipped for upload: an .xcresult is a directory, and the artifact glob would
   # otherwise upload thousands of loose files.
   (cd "$LOG_DIR" && zip -qry "$(basename "$RESULT_BUNDLE").zip" "$(basename "$RESULT_BUNDLE")")
+fi
+if [ -d "$PACKAGE_BUNDLE" ]; then
+  (cd "$LOG_DIR" && zip -qry "$(basename "$PACKAGE_BUNDLE").zip" "$(basename "$PACKAGE_BUNDLE")")
 fi
 
 # The live log is streamed over a link that has dropped chunks, so a failure's

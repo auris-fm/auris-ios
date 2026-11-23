@@ -330,6 +330,26 @@ final class CloudInterruptionState: @unchecked Sendable {
         if interruptSentForRequestId == requestId { interruptSentForRequestId = nil }
     }
 
+    /// Drop a hold because the predecessor it was taken for will never be submitted at all.
+    ///
+    /// NOT `releaseUnsentHold`: that one suppresses, and suppression is right for an interrupt the
+    /// server never saw while the predecessor MAY have been admitted — the utterance it belongs to
+    /// then asserts a settlement that never happened. Here the opposite is true. The predecessor
+    /// had not authenticated, so nothing of it was ever submitted, there is no settlement to assert
+    /// and no history to correct; the utterance it belongs to is an ordinary question that must go
+    /// out as a fresh turn. Suppressing it would drop the user's speech over a turn the server never
+    /// heard of.
+    ///
+    /// The turn is NOT marked resolved — nothing happened to it, so a later turn may still
+    /// interrupt it — and the one-interrupt-per-turn claim is released so a later barge-in stands a
+    /// chance. Not a retry path: the hold is dropped, not re-armed.
+    func dropHoldForAbandonedPredecessor(forRequestId requestId: String) {
+        lock.lock(); defer { lock.unlock() }
+        guard let current = held, current.interruptedRequestId == requestId else { return }
+        held = nil
+        if interruptSentForRequestId == requestId { interruptSentForRequestId = nil }
+    }
+
     /// Whether this utterance's interruption was refused, so it must not be submitted.
     func isSuppressed(_ utteranceId: String) -> Bool {
         lock.lock(); defer { lock.unlock() }

@@ -33,6 +33,27 @@
         "identifier" : "PocketCastsUtilsTests",
         "name" : "PocketCastsUtilsTests"
       }
+    },
+    {
+      "target" : {
+        "containerPath" : "container:Modules",
+        "identifier" : "PocketCastsDataModelTests",
+        "name" : "PocketCastsDataModelTests"
+      }
+    },
+    {
+      "target" : {
+        "containerPath" : "container:Modules",
+        "identifier" : "PocketCastsServerTests",
+        "name" : "PocketCastsServerTests"
+      }
+    },
+    {
+      "target" : {
+        "containerPath" : "container:Modules",
+        "identifier" : "ModulesTests",
+        "name" : "ModulesTests"
+      }
     }
   ],
   "version" : 1

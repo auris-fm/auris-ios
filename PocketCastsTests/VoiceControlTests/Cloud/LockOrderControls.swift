@@ -123,10 +123,16 @@ final class LockOrderControls: XCTestCase {
         let gateOutcomes = GateOutcomes()
         service.enqueueAfterCaptureForTesting = { [weak service] in
             parked.signal()
-            // The gate's own wait outcome is RECORDED and asserted after completion: a timeout
-            // here would mean the enqueue proceeded on its own clock, not the test's release —
-            // the false-green window this control must not have.
-            gateOutcomes.recordRelease(release.wait(timeout: .now() + 10))
+            // NO DEADLINE ON THIS WAIT. The gate must open only when the test releases it, so
+            // "the refusal came through the test's release" is established by the ORDER of the
+            // two events rather than inferred from a timeout result. A deadline here raced the
+            // test's own release: the restart below needs main-queue work, and on a busy host it
+            // can outlast any fixed bound, expiring the gate before the test signalled and
+            // failing the control while the guard itself behaved correctly.
+            release.wait()
+            // Recorded AFTER the wait returns, so it can only be true if the test had already
+            // set it — which it does immediately before signalling.
+            gateOutcomes.recordRelease(gateOutcomes.releasedByTest)
         }
         // UNCONDITIONAL CLEANUP: the gate is released, the seam cleared and the service stopped
         // on EVERY exit path, so a failed assertion cannot leave a parked enqueue or a listening
@@ -171,17 +177,21 @@ final class LockOrderControls: XCTestCase {
         // RELEASE the gate BEFORE the bounded completion wait (the defer is cleanup for failure
         // paths only): the guard must refuse on the nil capture regardless of the
         // restart-made-true lock-time listening state, and the refusal must arrive through the
-        // released gate, not the gate's own 10s timeout.
+        // released gate, which has no clock of its own to open it early.
+        // Set BEFORE signalling: the parked enqueue can only observe `true` after this point,
+        // so a recorded `true` proves the gate opened through the test's release.
+        gateOutcomes.markReleasedByTest()
         release.signal()
         let doneOutcome = await Task.detached { enqueueDone.wait(timeout: .now() + 10) }.value
         XCTAssertEqual(doneOutcome, .success,
                        "the enqueue must complete within the bound after release; a hang here is a defect")
         XCTAssertTrue(resultBox.stored, "premise: the enqueue returned a verdict")
-        // The gate must have stayed CLOSED until the test's explicit release: a timeout outcome
-        // means the green verdict arrived through the gate's own clock, not the controlled race.
-        XCTAssertEqual(gateOutcomes.recordedRelease, .success,
-                       "the parked enqueue must be released by the test's signal, not by the "
-                           + "gate's own timeout — a timeout makes the refusal verdict uninterpretable")
+        // The gate must have stayed CLOSED until the test's explicit release. It carries no
+        // deadline, so an observation of `false` could only mean the wait returned without the
+        // test having marked its release — the ordering this control exists to pin.
+        XCTAssertEqual(gateOutcomes.recordedRelease, true,
+                       "the parked enqueue must be released by the test's signal — the gate carries no "
+                           + "clock of its own, so an unreleased gate waits instead of proceeding")
         let refused = resultBox.value ?? true
         XCTAssertFalse(refused,
                        "a late callback whose origin reads ran while stopped must be refused by the "
@@ -197,12 +207,16 @@ final class LockOrderControls: XCTestCase {
         func store(_ v: Bool) { lock.lock(); storedValue = v; lock.unlock() }
     }
 
-    /// Lock-protected record of the test gate's own wait outcome (review 50e0f8db).
+    /// Lock-protected record of WHO opened the test gate. The gate has no deadline, so the only
+    /// thing to observe is whether the test had marked its release before the wait returned.
     private final class GateOutcomes: @unchecked Sendable {
         private let lock = NSLock()
-        private var releaseOutcome: DispatchTimeoutResult?
-        var recordedRelease: DispatchTimeoutResult? { lock.lock(); defer { lock.unlock() }; return releaseOutcome }
-        func recordRelease(_ r: DispatchTimeoutResult) { lock.lock(); releaseOutcome = r; lock.unlock() }
+        private var released = false
+        private var observed: Bool?
+        var releasedByTest: Bool { lock.lock(); defer { lock.unlock() }; return released }
+        var recordedRelease: Bool? { lock.lock(); defer { lock.unlock() }; return observed }
+        func markReleasedByTest() { lock.lock(); released = true; lock.unlock() }
+        func recordRelease(_ r: Bool) { lock.lock(); observed = r; lock.unlock() }
     }
 
     private func waitUntilListening(timeout: TimeInterval, _ condition: () -> Bool) async {
