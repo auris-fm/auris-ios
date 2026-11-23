@@ -7177,6 +7177,378 @@ final class CloudRouteSinkLimitExceededFeedbackTests: SocketCapturingTestCase {
     }
 }
 
+/// THE RECORDING GAP (cloud-assistant.md: "Record Required codes whose local template is
+/// missing"). A Required code with no template in the user's locale falls back to the earcon —
+/// correct speech behaviour, but the client GAP itself must be OBSERVABLE in the log, or a
+/// missing translation is indistinguishable from a code that was never meant to speak.
+///
+/// The three cases separate the two axes so none of them can pass for the wrong reason:
+///   - Required + missing template  ⇒ earcon AND a gap line
+///   - Required + present template  ⇒ spoken AND NO gap line (the line means "missing", not "error")
+///   - Generic  + missing template  ⇒ earcon AND NO gap line (an internal diagnostic is not a gap)
+final class CloudRequiredErrorGapRecordingTests: SocketCapturingTestCase {
+    private var playback: RecordingPlaybackSink!
+    private var suiteName: String!
+    private var defaults: UserDefaults!
+
+    override func setUp() {
+        super.setUp()
+        playback = RecordingPlaybackSink()
+        suiteName = "cloud_req_gap_\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suiteName)!
+        defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+    }
+
+    override func tearDown() {
+        CloudRouteTestURLProtocol.reset()
+        defaults.removePersistentDomain(forName: suiteName)
+        super.tearDown()
+    }
+
+    /// `ca.lproj` is a REAL shipped localization carrying no VoiceTemplates table — the
+    /// production shape of "this user's language has no template", not an empty directory.
+    private func localeWithoutTemplates() -> Bundle {
+        let path = Bundle.main.path(forResource: "ca", ofType: "lproj")
+        return path.flatMap { Bundle(path: $0) } ?? Bundle(for: type(of: self))
+    }
+
+    private func englishBundle() -> Bundle {
+        Bundle(path: Bundle.main.path(forResource: "en", ofType: "lproj") ?? "") ?? Bundle.main
+    }
+
+    private func makeSink(localeBundle: Bundle) -> CloudRouteSink {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudRouteTestURLProtocol.self]
+        let cloudConfig = CloudConfig(defaults: defaults)
+        return CloudRouteSink(
+            clientFactory: {
+                let built = CloudRouteClient.stubbed(baseURL: cloudConfig.baseUrl, fixture: self.nextFixture())
+                self.capturedTask = built.task
+                return built.client
+            },
+            isConfigured: { !cloudConfig.baseUrl.isEmpty },
+            playbackSink: playback,
+            fingerprintMapper: RecordingFingerprintMapper(),
+            playbackPositionMs: { 0 },
+            cloudPlaybackContextState: CloudPlaybackContextState(),
+            spokenTemplates: SpokenTemplateResolver(localeBundle: localeBundle),
+            conversationManager: testConversationManager()
+        )
+    }
+
+    /// Runs one error turn and returns THIS turn's gap lines. The log is shared by the whole
+    /// run, so the filter is scoped to this control's own utterance id — counting globally
+    /// would measure the suite rather than the turn.
+    private func runTurn(code: String, bundle: Bundle, utterance: String) async -> (CloudRouteResult, [String]) {
+        self.pendingFixture =
+            """
+            event: error
+            data: {"code":"\(code)","message":""}
+
+            """
+        let response = await makeSink(localeBundle: bundle).routeToCloud(
+            request: "x", tier: .free, context: context(), origin: cloudTestOrigin,
+            selection: nil, utteranceId: utterance)
+        let log = await FileLog.shared.logFileAsString()
+        let mine = log.split(separator: "\n")
+            .filter { $0.contains("cloudErrorTemplateMissing") && $0.contains(utterance) }
+            .map(String.init)
+        return (response, mine)
+    }
+
+    private func context() -> PlaybackContext {
+        PlaybackContext(episodeId: "ep", podcastId: "pod", referencePositionMs: 1_000,
+                        clientPositionMs: 1_100, recentReferencePositions: [],
+                        previousReferencePositionMs: nil)
+    }
+
+    func test_aRequiredCodeWithNoLocalTemplateIsRecordedAsAGap() async {
+        let utterance = "req-gap-\(UUID().uuidString)"
+        // PREMISE: this locale really has no template for the code, so the earcon below is
+        // the missing-template branch and not some other failure.
+        XCTAssertTrue(
+            SpokenTemplateResolver(localeBundle: localeWithoutTemplates())
+                .resolveForUserLocale("cloud_error_no_answer").isEmpty,
+            "the chosen locale must genuinely lack the template"
+        )
+        let (response, lines) = await runTurn(code: "no_answer", bundle: localeWithoutTemplates(), utterance: utterance)
+        XCTAssertEqual(response.response, .earcon(.error), "speech behaviour is unchanged: still the earcon")
+        XCTAssertEqual(lines.count, 1, "a Required code with no local template must record exactly one gap line: \(lines)")
+        // Guarded so a missing line reports as a FAILURE rather than crashing the runner on
+        // an out-of-range index — the crash would hide which assertion actually failed.
+        guard let line = lines.first else { return XCTFail("no gap line was recorded for this turn") }
+        XCTAssertTrue(line.contains("no_answer"), "the line must name the code: \(line)")
+    }
+
+    func test_aRequiredCodeWithATemplateRecordsNoGap() async {
+        let utterance = "req-ok-\(UUID().uuidString)"
+        XCTAssertFalse(
+            SpokenTemplateResolver(localeBundle: englishBundle())
+                .resolveForUserLocale("cloud_error_limit_exceeded").isEmpty,
+            "premise: English carries this template"
+        )
+        let (response, lines) = await runTurn(code: "limit_exceeded", bundle: englishBundle(), utterance: utterance)
+        XCTAssertEqual(
+            response.response,
+            .spoken("You have reached your Auris free daily limit. Please try again tomorrow.")
+        )
+        XCTAssertTrue(lines.isEmpty, "a translated Required code is not a gap: \(lines)")
+    }
+
+    func test_aGenericCodeWithNoTemplateRecordsNoGap() async {
+        let utterance = "gen-gap-\(UUID().uuidString)"
+        let (response, lines) = await runTurn(code: "invalid_response", bundle: localeWithoutTemplates(), utterance: utterance)
+        XCTAssertEqual(response.response, .earcon(.error), "an internal diagnostic stays an earcon")
+        XCTAssertTrue(lines.isEmpty, "a Generic code has no required template, so its absence is not a gap: \(lines)")
+    }
+}
+
+/// EVERY Required code carries a template in EVERY locale that ships a VoiceTemplates table
+/// (cloud-assistant.md: "the client must have a code-specific template in the user's language").
+/// The locale list is DISCOVERED from the app bundle rather than hard-coded, so adding a
+/// localization cannot silently skip this control.
+final class CloudRequiredErrorTemplateCoverageTests: XCTestCase {
+    /// The contract's Required rows, plus the two client-side codes that are spoken feedback the
+    /// user is owed: `conversation_expired` (Required and rendered) and `connection_lost`
+    /// (client-authored, no server row; the client maps duplicate_request onto it).
+    /// Every code the contract marks Required, plus the two client-side spoken codes
+    /// (docs/specs/cloud-assistant.md#error-codes). This list mirrors
+    /// `CloudRouteSink.requiredTemplateCodes`, so a code recorded as a gap and a code asserted
+    /// as translated cannot drift apart.
+    private let requiredCodes = [
+        "limit_exceeded", "no_answer", "retrieval_unavailable", "speech_unavailable",
+        "queue_overflow", "budget_exceeded", "turn_conflict", "corrupt_record",
+        "conversation_expired", "connection_lost",
+    ]
+
+    /// Every shipped `.lproj` that carries a VoiceTemplates table. A locale with no table at all
+    /// is out of scope here — it has no voice vocabulary yet, which is a separate decision.
+    private func localesWithVoiceTemplates() -> [(name: String, bundle: Bundle)] {
+        let dir = Bundle.main.bundleURL
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path))?
+            .filter { $0.hasSuffix(".lproj") }
+            .sorted() ?? []
+        return names.compactMap { name in
+            let base = String(name.dropLast(".lproj".count))
+            guard let path = Bundle.main.path(forResource: base, ofType: "lproj"),
+                  let bundle = Bundle(path: path),
+                  bundle.path(forResource: "VoiceTemplates", ofType: "strings") != nil else { return nil }
+            return (base, bundle)
+        }
+    }
+
+    func test_everyRequiredCodeResolvesInEveryVoiceLocale() throws {
+        let locales = localesWithVoiceTemplates()
+        // PREMISE: discovery found the shipped tables. Without this the loop could iterate
+        // nothing and pass while asserting no coverage at all.
+        XCTAssertGreaterThanOrEqual(locales.count, 11, "expected the shipped voice locales, got \(locales.map(\.name))")
+        XCTAssertTrue(locales.contains { $0.name == "en" }, "English must be among them")
+        for locale in locales {
+            let resolver = SpokenTemplateResolver(localeBundle: locale.bundle)
+            for code in requiredCodes {
+                let text = resolver.resolveForUserLocale("cloud_error_\(code)")
+                XCTAssertFalse(
+                    text.isEmpty,
+                    "\(locale.name) has no template for Required code \(code): that user hears only an earcon"
+                )
+            }
+        }
+    }
+
+    /// The approved copy, verbatim. Presence alone is not the contract: a
+    /// locale carrying English text would satisfy a non-empty check while speaking the wrong
+    /// language. Proven by mutation — English placed in the de `no_answer` string left the
+    /// coverage control GREEN. So each line is asserted exactly, and Android asserts the same
+    /// strings, which is what keeps the two apps saying one thing.
+    private let approvedCopy: [String: [String: String]] = [
+        "en": [
+            "no_answer": "Sorry, I couldn't find an answer to that. Please try asking another way.",
+            "retrieval_unavailable": "Sorry, I couldn't look that up just now. Please try again.",
+            "queue_overflow": "Sorry, I couldn't finish answering that. Please try again.",
+            "budget_exceeded": "Sorry, that took too long to answer. Please try again.",
+            "turn_conflict": "I'm still answering your last question. Please try again in a moment.",
+            "corrupt_record": "Sorry, I've lost track of our conversation. Please ask again to start a new one.",
+            "connection_lost": "Connection lost. Please try again.",
+        ],
+        "de": [
+            "no_answer": "Entschuldigung, ich konnte darauf keine Antwort finden. Bitte versuche es anders zu fragen.",
+            "retrieval_unavailable": "Entschuldigung, ich konnte das gerade nicht nachschlagen. Bitte versuche es noch einmal.",
+            "queue_overflow": "Entschuldigung, ich konnte die Antwort nicht zu Ende geben. Bitte versuche es noch einmal.",
+            "budget_exceeded": "Entschuldigung, die Antwort hat zu lange gedauert. Bitte versuche es noch einmal.",
+            "turn_conflict": "Ich beantworte gerade noch deine letzte Frage. Bitte versuche es gleich noch einmal.",
+            "corrupt_record": "Entschuldigung, ich habe den Überblick über unser Gespräch verloren. Bitte frag noch einmal, dann beginnt ein neues.",
+            "connection_lost": "Die Verbindung wurde unterbrochen. Bitte versuche es noch einmal.",
+        ],
+        "es": [
+            "no_answer": "Lo siento, no he encontrado una respuesta a eso. Prueba a preguntarlo de otra manera.",
+            "retrieval_unavailable": "Lo siento, no he podido consultarlo ahora mismo. Inténtalo de nuevo.",
+            "queue_overflow": "Lo siento, no he podido terminar de responder. Inténtalo de nuevo.",
+            "budget_exceeded": "Lo siento, responder ha tardado demasiado. Inténtalo de nuevo.",
+            "turn_conflict": "Todavía estoy respondiendo a tu última pregunta. Inténtalo de nuevo en un momento.",
+            "corrupt_record": "Lo siento, he perdido el hilo de nuestra conversación. Vuelve a preguntar para empezar una nueva.",
+            "connection_lost": "Se ha perdido la conexión. Inténtalo de nuevo.",
+        ],
+        "es-MX": [
+            "no_answer": "Lo siento, no he encontrado una respuesta a eso. Prueba a preguntarlo de otra manera.",
+            "retrieval_unavailable": "Lo siento, no he podido consultarlo ahora mismo. Inténtalo de nuevo.",
+            "queue_overflow": "Lo siento, no he podido terminar de responder. Inténtalo de nuevo.",
+            "budget_exceeded": "Lo siento, responder ha tardado demasiado. Inténtalo de nuevo.",
+            "turn_conflict": "Todavía estoy respondiendo a tu última pregunta. Inténtalo de nuevo en un momento.",
+            "corrupt_record": "Lo siento, he perdido el hilo de nuestra conversación. Vuelve a preguntar para empezar una nueva.",
+            "connection_lost": "Se perdió la conexión. Inténtalo de nuevo.",
+        ],
+        "fr": [
+            "no_answer": "Désolé, je n'ai pas trouvé de réponse à cela. Essayez de le demander autrement.",
+            "retrieval_unavailable": "Désolé, je n'ai pas pu le vérifier pour le moment. Veuillez réessayer.",
+            "queue_overflow": "Désolé, je n'ai pas pu terminer ma réponse. Veuillez réessayer.",
+            "budget_exceeded": "Désolé, la réponse a pris trop de temps. Veuillez réessayer.",
+            "turn_conflict": "Je suis encore en train de répondre à votre dernière question. Veuillez réessayer dans un instant.",
+            "corrupt_record": "Désolé, j'ai perdu le fil de notre conversation. Reposez votre question pour en commencer une nouvelle.",
+            "connection_lost": "La connexion a été perdue. Veuillez réessayer.",
+        ],
+        "fr-CA": [
+            "no_answer": "Désolé, je n'ai pas trouvé de réponse à cela. Essayez de le demander autrement.",
+            "retrieval_unavailable": "Désolé, je n'ai pas pu le vérifier pour le moment. Veuillez réessayer.",
+            "queue_overflow": "Désolé, je n'ai pas pu terminer ma réponse. Veuillez réessayer.",
+            "budget_exceeded": "Désolé, la réponse a pris trop de temps. Veuillez réessayer.",
+            "turn_conflict": "Je suis encore en train de répondre à votre dernière question. Veuillez réessayer dans un instant.",
+            "corrupt_record": "Désolé, j'ai perdu le fil de notre conversation. Reposez votre question pour en commencer une nouvelle.",
+            "connection_lost": "La connexion a été perdue. Veuillez réessayer.",
+        ],
+        "ja": [
+            "no_answer": "申し訳ありません。それに対する答えが見つかりませんでした。別の聞き方でお試しください。",
+            "retrieval_unavailable": "申し訳ありません。今は調べられませんでした。もう一度お試しください。",
+            "queue_overflow": "申し訳ありません。最後までお答えできませんでした。もう一度お試しください。",
+            "budget_exceeded": "申し訳ありません。お答えするのに時間がかかりすぎました。もう一度お試しください。",
+            "turn_conflict": "前の質問にまだお答えしています。少し待ってからもう一度お試しください。",
+            "corrupt_record": "申し訳ありません。会話の流れがわからなくなってしまいました。もう一度話しかけていただくと、新しい会話が始まります。",
+            "connection_lost": "接続が切れました。もう一度お試しください。",
+        ],
+        "ko": [
+            "no_answer": "죄송합니다. 그에 대한 답을 찾지 못했습니다. 다른 방식으로 물어봐 주세요.",
+            "retrieval_unavailable": "죄송합니다. 지금은 확인하지 못했습니다. 다시 시도해 주세요.",
+            "queue_overflow": "죄송합니다. 답변을 끝까지 드리지 못했습니다. 다시 시도해 주세요.",
+            "budget_exceeded": "죄송합니다. 답변하는 데 시간이 너무 오래 걸렸습니다. 다시 시도해 주세요.",
+            "turn_conflict": "이전 질문에 아직 답변하고 있습니다. 잠시 후에 다시 시도해 주세요.",
+            "corrupt_record": "죄송합니다. 대화의 흐름을 놓쳤습니다. 다시 말씀해 주시면 새 대화를 시작합니다.",
+            "connection_lost": "연결이 끊어졌습니다. 다시 시도해 주세요.",
+        ],
+        "yue": [
+            "no_answer": "唔好意思，我搵唔到呢個問題嘅答案。唔該試吓用第二種問法。",
+            "retrieval_unavailable": "唔好意思，我啱啱查唔到呢樣嘢。唔該再試一次。",
+            "queue_overflow": "唔好意思，我答唔晒呢個問題。唔該再試一次。",
+            "budget_exceeded": "唔好意思，答咗太耐都答唔完。唔該再試一次。",
+            "turn_conflict": "我仲答緊你上一個問題。唔該等一陣再試一次。",
+            "corrupt_record": "唔好意思，我唔記得咗我哋傾到邊。唔該再問一次，咁就會開新嘅對話。",
+            "connection_lost": "連線斷咗。唔該再試一次。",
+        ],
+        "zh-Hans": [
+            "no_answer": "抱歉，我没找到这个问题的答案。请换一种问法试试。",
+            "retrieval_unavailable": "抱歉，我刚才没能查到这个内容。请再试一次。",
+            "queue_overflow": "抱歉，我没能把这个回答说完。请再试一次。",
+            "budget_exceeded": "抱歉，回答这个问题用的时间太长了。请再试一次。",
+            "turn_conflict": "我还在回答你上一个问题。请稍等一下再试。",
+            "corrupt_record": "抱歉，我跟不上我们这段对话了。请再问一次，这样就会开始新的对话。",
+            "connection_lost": "连接已断开。请再试一次。",
+        ],
+        "zh-Hant": [
+            "no_answer": "抱歉，我沒找到這個問題的答案。請換一種問法試試。",
+            "retrieval_unavailable": "抱歉，我剛才沒能查到這個內容。請再試一次。",
+            "queue_overflow": "抱歉，我沒能把這個回答說完。請再試一次。",
+            "budget_exceeded": "抱歉，回答這個問題用的時間太長了。請再試一次。",
+            "turn_conflict": "我還在回答你上一個問題。請稍等一下再試。",
+            "corrupt_record": "抱歉，我跟不上我們這段對話了。請再問一次，這樣就會開始新的對話。",
+            "connection_lost": "連線已中斷。請再試一次。",
+        ],
+    ]
+
+    /// The Cantonese adverb is 啱啱 ("just now"), not 啱啲. Pinned as its own word because every
+    /// other assertion compares a line to a copy of itself — which is exactly why this typo
+    /// survived in both apps: the expected table was written from the same wrong source.
+    ///
+    /// SCOPE: this checks one word in one language. It does not validate Cantonese grammar, and
+    /// it is not a substitute for a reader on the yue lines.
+    func test_theCantoneseJustNowAdverbIsSpelledCorrectly() throws {
+        let yue = localesWithVoiceTemplates().first { $0.name == "yue" }
+        let bundle = try XCTUnwrap(yue?.bundle, "yue.lproj must ship a VoiceTemplates table")
+        let resolver = SpokenTemplateResolver(localeBundle: bundle)
+        // The three lines that say "just now" in Cantonese.
+        for code in ["speech_unavailable", "internal_error", "retrieval_unavailable"] {
+            let text = resolver.resolveForUserLocale("cloud_error_\(code)")
+            XCTAssertFalse(text.isEmpty, "yue/\(code) lost its line")
+            XCTAssertTrue(text.contains("啱啱"), "yue/\(code) must use 啱啱: \(text)")
+            XCTAssertFalse(text.contains("啱啲"), "yue/\(code) uses the misspelling 啱啲: \(text)")
+        }
+    }
+
+    /// Every locale speaks the APPROVED line, not merely a non-empty one. A translation that
+    /// exists but says the wrong thing — or says it in English — is the defect this catches.
+    func test_everyVoiceLocaleSpeaksTheApprovedLineVerbatim() throws {
+        let locales = localesWithVoiceTemplates()
+        XCTAssertEqual(Set(locales.map(\.name)), Set(approvedCopy.keys),
+                       "the shipped voice locales and the approved copy table must be the same set")
+        for locale in locales {
+            let resolver = SpokenTemplateResolver(localeBundle: locale.bundle)
+            let expected = try XCTUnwrap(approvedCopy[locale.name], locale.name)
+            for code in requiredCodes where expected[code] != nil {
+                XCTAssertEqual(
+                    resolver.resolveForUserLocale("cloud_error_\(code)"),
+                    expected[code],
+                    "\(locale.name)/\(code) does not speak the approved line"
+                )
+            }
+        }
+    }
+
+    /// The coverage list and the production recording set must name the SAME codes: a code
+    /// asserted as translated but absent from the recorder would never report a regression, and
+    /// one recorded but never asserted could ship untranslated unnoticed.
+    func test_coverageListMatchesTheProductionRecordingSet() {
+        XCTAssertEqual(
+            Set(requiredCodes), CloudRouteSink.requiredTemplateCodes,
+            "the tested vocabulary and the recorded vocabulary must be one set"
+        )
+    }
+
+    /// The two codes that speak ONE line by decision (`speech_unavailable` / `internal_error`)
+    /// must stay identical in every language — they are one sentence, not two that may drift.
+    func test_theSharedFailureLineStaysIdenticalInEveryVoiceLocale() throws {
+        for locale in localesWithVoiceTemplates() {
+            let resolver = SpokenTemplateResolver(localeBundle: locale.bundle)
+            let speech = resolver.resolveForUserLocale("cloud_error_speech_unavailable")
+            let internalError = resolver.resolveForUserLocale("cloud_error_internal_error")
+            XCTAssertFalse(speech.isEmpty, "\(locale.name) lost the shared failure line")
+            XCTAssertEqual(speech, internalError, "\(locale.name): the two keys must speak one identical line")
+        }
+    }
+
+    /// No spoken line may name the machinery — **checked for the Latin-script locales only**.
+    ///
+    /// HONEST SCOPE: a substring search for English words cannot detect a system term written in
+    /// Japanese, Korean or Chinese. Verified by mutation: replacing the ja `queue_overflow` line
+    /// with "サーバーのキューがあふれました" ("the server queue overflowed") left this control
+    /// GREEN, while the same sentence in ASCII turned it red. So the non-Latin lines are reviewed
+    /// by a reader, not by this control, and claiming otherwise would be a blind assertion.
+    func test_noRequiredLineNamesTheMachineryInLatinScriptLocales() throws {
+        let forbidden = ["server", "service", "provider", "websocket", "api", "queue", "budget"]
+        // Latin-script locales only: en/de/es/es-MX/fr/fr-CA. The CJK and yue tables are checked
+        // by review, because an English substring test cannot see their scripts.
+        let latinLocales = localesWithVoiceTemplates().filter {
+            ["en", "de", "es", "es-MX", "fr", "fr-CA"].contains($0.name)
+        }
+        XCTAssertEqual(latinLocales.count, 6, "expected the six Latin-script voice locales")
+        for locale in latinLocales {
+            let resolver = SpokenTemplateResolver(localeBundle: locale.bundle)
+            for code in requiredCodes {
+                let text = resolver.resolveForUserLocale("cloud_error_\(code)").lowercased()
+                for word in forbidden where text.contains(word) {
+                    XCTFail("\(locale.name)/\(code) speaks the system term '\(word)': \(text)")
+                }
+            }
+        }
+    }
+}
+
 /// A whitespace-only server message is treated as absent (PR #19 review): it must
 /// not be spoken as silence, and it follows the same localized-template/earcon
 /// route as a missing message.
