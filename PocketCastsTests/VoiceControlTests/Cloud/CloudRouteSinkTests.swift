@@ -6685,10 +6685,11 @@ final class CloudRequiredErrorGapRecordingTests: SocketCapturingTestCase {
 final class CloudRequiredErrorTemplateCoverageTests: XCTestCase {
     /// The contract's Required rows, plus the two client-side codes that are spoken feedback the
     /// user is owed: `conversation_expired` (Required and rendered) and `connection_lost`
-    /// (client-authored, no server row, but PR 83 maps duplicate_request onto it).
-    /// Every code the contract marks Required, plus the two client-side spoken codes. Copy
-    /// approved by spec 5ab7b0aa; this list mirrors `CloudRouteSink.requiredTemplateCodes`, so a
-    /// code recorded as a gap and a code asserted as translated cannot drift apart.
+    /// (client-authored, no server row; the client maps duplicate_request onto it).
+    /// Every code the contract marks Required, plus the two client-side spoken codes
+    /// (docs/specs/cloud-assistant.md#error-codes). This list mirrors
+    /// `CloudRouteSink.requiredTemplateCodes`, so a code recorded as a gap and a code asserted
+    /// as translated cannot drift apart.
     private let requiredCodes = [
         "limit_exceeded", "no_answer", "retrieval_unavailable", "speech_unavailable",
         "queue_overflow", "budget_exceeded", "turn_conflict", "corrupt_record",
@@ -6729,7 +6730,7 @@ final class CloudRequiredErrorTemplateCoverageTests: XCTestCase {
         }
     }
 
-    /// The APPROVED copy, verbatim (spec 5ab7b0aa). Presence alone is not the contract: a
+    /// The approved copy, verbatim. Presence alone is not the contract: a
     /// locale carrying English text would satisfy a non-empty check while speaking the wrong
     /// language. Proven by mutation — English placed in the de `no_answer` string left the
     /// coverage control GREEN. So each line is asserted exactly, and Android asserts the same

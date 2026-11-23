@@ -31,7 +31,8 @@
    listener this is an unfinished answer; the queue itself is never named. */
 "cloud_error_queue_overflow" = "죄송합니다. 답변을 끝까지 드리지 못했습니다. 다시 시도해 주세요.";
 
-/* A shared deadline ran out (spec 5ab7b0aa): the cause is TIME, not question length,
+/* A shared deadline ran out (docs/specs/cloud-assistant.md#error-codes): the cause is TIME,
+   not question length,
    so the line must not send the user after a shorter question. No reset time invented. */
 "cloud_error_budget_exceeded" = "죄송합니다. 답변하는 데 시간이 너무 오래 걸렸습니다. 다시 시도해 주세요.";
 
@@ -40,6 +41,7 @@
 "cloud_error_turn_conflict" = "이전 질문에 아직 답변하고 있습니다. 잠시 후에 다시 시도해 주세요.";
 
 /* Prior context is unreadable. Report the loss and require a fresh conversation; a voice
-   user starts one by ASKING AGAIN, since the client clears the handle (spec 5ab7b0aa).
+   user starts one by ASKING AGAIN, since the client clears the handle
+   (docs/specs/cloud-assistant.md#error-codes).
    Never mentions records or storage. */
 "cloud_error_corrupt_record" = "죄송합니다. 대화의 흐름을 놓쳤습니다. 다시 말씀해 주시면 새 대화를 시작합니다.";

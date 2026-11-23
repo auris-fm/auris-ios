@@ -31,7 +31,8 @@
    listener this is an unfinished answer; the queue itself is never named. */
 "cloud_error_queue_overflow" = "唔好意思，我答唔晒呢個問題。唔該再試一次。";
 
-/* A shared deadline ran out (spec 5ab7b0aa): the cause is TIME, not question length,
+/* A shared deadline ran out (docs/specs/cloud-assistant.md#error-codes): the cause is TIME,
+   not question length,
    so the line must not send the user after a shorter question. No reset time invented. */
 "cloud_error_budget_exceeded" = "唔好意思，答咗太耐都答唔完。唔該再試一次。";
 
@@ -40,6 +41,7 @@
 "cloud_error_turn_conflict" = "我仲答緊你上一個問題。唔該等一陣再試一次。";
 
 /* Prior context is unreadable. Report the loss and require a fresh conversation; a voice
-   user starts one by ASKING AGAIN, since the client clears the handle (spec 5ab7b0aa).
+   user starts one by ASKING AGAIN, since the client clears the handle
+   (docs/specs/cloud-assistant.md#error-codes).
    Never mentions records or storage. */
 "cloud_error_corrupt_record" = "唔好意思，我唔記得咗我哋傾到邊。唔該再問一次，咁就會開新嘅對話。";

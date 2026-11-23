@@ -31,7 +31,8 @@
    listener this is an unfinished answer; the queue itself is never named. */
 "cloud_error_queue_overflow" = "Désolé, je n'ai pas pu terminer ma réponse. Veuillez réessayer.";
 
-/* A shared deadline ran out (spec 5ab7b0aa): the cause is TIME, not question length,
+/* A shared deadline ran out (docs/specs/cloud-assistant.md#error-codes): the cause is TIME,
+   not question length,
    so the line must not send the user after a shorter question. No reset time invented. */
 "cloud_error_budget_exceeded" = "Désolé, la réponse a pris trop de temps. Veuillez réessayer.";
 
@@ -40,6 +41,7 @@
 "cloud_error_turn_conflict" = "Je suis encore en train de répondre à votre dernière question. Veuillez réessayer dans un instant.";
 
 /* Prior context is unreadable. Report the loss and require a fresh conversation; a voice
-   user starts one by ASKING AGAIN, since the client clears the handle (spec 5ab7b0aa).
+   user starts one by ASKING AGAIN, since the client clears the handle
+   (docs/specs/cloud-assistant.md#error-codes).
    Never mentions records or storage. */
 "cloud_error_corrupt_record" = "Désolé, j'ai perdu le fil de notre conversation. Reposez votre question pour en commencer une nouvelle.";
