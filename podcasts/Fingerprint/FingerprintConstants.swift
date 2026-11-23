@@ -86,6 +86,10 @@ enum FingerprintConstants {
     /// serve different references and the acceptance rule was written against the
     /// Auris one, so cloud matching must not drift when the transcript path is tuned.
     ///
+    /// How long preparation waits for an Auris reference before fingerprinting anyway. The
+    /// fetcher's own timeout is far longer, and a deferred episode shows nothing while it waits.
+    static let aurisReferenceWaitSeconds: Double = 10
+
     /// Minimum score for a cloud candidate to be considered at all.
     static let aurisMatchScoreThreshold: Float = 0.65
 

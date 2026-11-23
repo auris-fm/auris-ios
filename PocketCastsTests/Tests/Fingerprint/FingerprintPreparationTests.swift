@@ -384,6 +384,51 @@ final class FingerprintPreparationTests: XCTestCase {
         )
     }
 
+    /// A seek while the Auris reference is still being fetched must not start a pass behind the
+    /// deferral's back.
+    ///
+    /// The deferral assumes nothing is running. A seek calls `restart`, and the fetch completion
+    /// never learns about it: it would adopt a mapping under a live pass, or start a second one.
+    /// Nothing may start until the deferral resolves.
+    ///
+    /// LIMIT, stated rather than papered over: this covers the deferral, not the seek guard.
+    /// `restart` is reached only through the progress timer reading the real playback position,
+    /// which a test cannot move without adding a hook. Removing the guard from `restart` leaves
+    /// this test green — verified by mutation. The guard is therefore reviewed, not tested.
+    func testAPassIsNotStartedWhileAMappingAwaitsItsReference() async throws {
+        try prepareFixture(duration: Self.episodeDuration) { fixture in
+            try fixture.writeAudio(seconds: Self.episodeDuration)
+            try fixture.writeReference()
+        }
+        let fixture = try XCTUnwrap(self.fixture)
+
+        let stored = stride(from: 0.0, through: Self.episodeDuration - 1, by: 1.0).map {
+            FingerprintTimingManager.TimeMappingEntry(
+                playbackTime: $0, referenceTime: $0 + 500, score: 0.9
+            )
+        }
+        FingerprintMappingCache.save(
+            stored,
+            audioFilePath: fixture.audioURL.path,
+            referenceFilePath: fixture.referenceURL.path,
+            referenceData: try Data(contentsOf: fixture.referenceURL),
+            referenceDuration: Self.episodeDuration,
+            aurisReference: FingerprintMappingCache.AurisReferenceIdentity(
+                format: ReferenceFingerprint.aurisFormat, payload: Data("seek-during-fetch".utf8)
+            )
+        )
+
+        manager.prepareForCurrentEpisode()
+        XCTAssertEqual(
+            manager.debugMappingSnapshot().count, 0,
+            "the deferred path started a pass anyway"
+        )
+
+        // The wait is bounded, so the episode is prepared even when no reference arrives.
+        await waitForPass(manager)
+        XCTAssertEqual(manager.state.analyticsName, "active", "the episode was left unprepared")
+    }
+
     private func prepareFixture(
         duration: Double,
         writeFiles: (FingerprintEpisodeFixture) throws -> Void

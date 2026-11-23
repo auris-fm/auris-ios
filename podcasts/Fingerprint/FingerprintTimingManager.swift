@@ -142,6 +142,10 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
     /// starting the pass that was deferred. Without this the completion cannot tell "a pass is
     /// already running" from "nothing has started", and would start a second stream.
     private var isAwaitingAurisReferenceForStream = false
+    /// Guards the deferral. The fetcher may take its full timeout, or never resolve at all, and
+    /// the episode must not sit unprepared until then — so the wait is bounded and the pass runs
+    /// if the reference has not arrived.
+    private var awaitingReferenceDeadlineTask: Task<Void, Never>?
         private var aurisReferenceIdentity: FingerprintMappingCache.AurisReferenceIdentity?
     /// Per-stream Go-scheme fingerprinter fed the same decoded PCM as the Rust
     /// streamer; its windows are matched against [cloudMatcher].
@@ -259,7 +263,12 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
                     "FingerprintTimingManager: playback jumped \(String(format: "%.1f", delta))s — restarting from \(String(format: "%.1f", playbackTime))s"
                 )
                 #endif
-                restart(from: playbackTime, context: ctx)
+                // A pass held back for its Auris reference must stay held: starting one here
+                // would run unguarded, since the completion only knows to adopt or start when
+                // nothing has. The position is picked up when the deferral is resolved.
+                if !isAwaitingAurisReferenceForStream {
+                    restart(from: playbackTime, context: ctx)
+                }
                 lastProgressPosition = playbackTime
                 return
             }
@@ -867,6 +876,8 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         cancellationFlag.cancel()
         cancellationFlag = CancellationFlag()
         isAwaitingAurisReferenceForStream = false
+        awaitingReferenceDeadlineTask?.cancel()
+        awaitingReferenceDeadlineTask = nil
         context = nil
         main = MappingAccumulator()
         lastProgressPosition = -1
@@ -948,6 +959,8 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         // so a stale matcher can never leak into the new episode's context.
         cloudMatcher = nil
         isAwaitingAurisReferenceForStream = false
+        awaitingReferenceDeadlineTask?.cancel()
+        awaitingReferenceDeadlineTask = nil
         // The identity goes with it: keeping the previous episode's would gate this one's
         // mapping against a payload it was never matched against.
         aurisReferenceIdentity = nil
@@ -980,6 +993,8 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
                     guard self.isAwaitingAurisReferenceForStream,
                           let ctx = self.context, ctx.episodeUuid == uuid else { return }
                     self.isAwaitingAurisReferenceForStream = false
+                    self.awaitingReferenceDeadlineTask?.cancel()
+                    self.awaitingReferenceDeadlineTask = nil
                     let position = PlaybackManager.shared.currentTime()
                     // The fetch is finished, so this is the last chance to decide. If it returned
                     // no reference the mapping can never be confirmed, and `.awaitingReference`
@@ -1115,8 +1130,29 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         case .adopted:
             return
         case .awaitingReference:
-            // The fetch completion either adopts the mapping or starts this stream.
+            // The fetch completion either adopts the mapping or starts this stream. Whichever
+            // happens first, the wait is bounded: a slow or unreachable endpoint must not leave
+            // the episode unprepared for its full timeout.
             isAwaitingAurisReferenceForStream = true
+            awaitingReferenceDeadlineTask?.cancel()
+            awaitingReferenceDeadlineTask = Task { [weak self] in
+                try? await Task.sleep(
+                    nanoseconds: UInt64(FingerprintConstants.aurisReferenceWaitSeconds * 1_000_000_000)
+                )
+                guard !Task.isCancelled else { return }
+                self?.queue.async { [weak self] in
+                    guard let self, self.isAwaitingAurisReferenceForStream else { return }
+                    self.isAwaitingAurisReferenceForStream = false
+                    self.awaitingReferenceDeadlineTask = nil
+                    guard let ctx = self.context, ctx.episodeUuid == newContext.episodeUuid else {
+                        return
+                    }
+                    FileLog.shared.addMessage(
+                        "FingerprintTimingManager: no Auris reference for \(ctx.episodeUuid) in time — starting the pass"
+                    )
+                    self.startStream(context: ctx, fromPosition: PlaybackManager.shared.currentTime())
+                }
+            }
             return
         case .startStream:
             startStream(context: newContext, fromPosition: currentTime)
