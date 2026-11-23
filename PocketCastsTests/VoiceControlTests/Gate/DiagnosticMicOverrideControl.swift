@@ -576,11 +576,12 @@ final class DiagnosticMicOverrideControl: XCTestCase {
             "the router-ready task must not retain its service across ensureReady()"
         )
 
-        // Discriminator: releasing the latch must not be what frees the service. If it only
-        // deallocates after release, the assertion above passed for the wrong reason.
-        manager.releaseFetch()
-        let releasedAfter = await awaitTrue(timeout: 5) { observed == nil }
-        XCTAssertTrue(releasedAfter, "the service must stay released once the fetch completes")
+        // The fetch is STILL PARKED at the assertion above — nothing has released the latch —
+        // so the deallocation cannot have been caused by the fetch completing. That is the whole
+        // discriminator, and it holds by construction: the only releases are the `defer` at the
+        // top of this case and the end of the case itself. Re-checking `observed == nil` after
+        // releasing would be vacuous (a weak reference that read nil cannot become non-nil), so
+        // there is deliberately no second assertion here.
     }
 
     #if DEBUG
@@ -603,6 +604,7 @@ private final class ParkingModelManager: ModelManager, @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         return entered
     }
+
 
     func releaseFetch() {
         lock.lock(); released = true; lock.unlock()
