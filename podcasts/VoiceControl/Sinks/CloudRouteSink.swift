@@ -332,6 +332,18 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// the sink. On expiry the hold is dropped and the expiry is logged, never assumed away.
     static let interruptionAcknowledgementTimeout: TimeInterval = 10
 
+    /// Codes the contract marks **Required**: the client must carry a code-specific template in
+    /// the user's own language, so a missing one is an observable client GAP rather than an
+    /// ordinary earcon (cloud-assistant.md, error vocabulary). `conversation_expired` is Required
+    /// and rendered; `connection_lost` is client-authored and has no row in the server table, but
+    /// it is spoken feedback the user is owed, so its absence is recorded on the same footing.
+    /// Generic codes are deliberately absent: their earcon is the specified behaviour, not a gap.
+    static let requiredTemplateCodes: Set<String> = [
+        "limit_exceeded", "no_answer", "retrieval_unavailable", "speech_unavailable",
+        "queue_overflow", "budget_exceeded", "turn_conflict", "corrupt_record",
+        "conversation_expired", "connection_lost",
+    ]
+
     /// The conversation of the most recently admitted turn. A refusal is recorded from the FAILING
     /// turn, which is the same conversation as the turn it interrupted (a barge-in continues the
     /// conversation), so this is the id the retained report must carry.
@@ -1850,12 +1862,20 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // select client feedback". So `message` is deliberately NOT read here. What the
                     // user hears is resolved LOCALLY from the stable code: every code maps to its
                     // own `cloud_error_<code>` template in the user's own locale. A code with no
-                    // template in that locale (a Required code whose translation is missing is an
-                    // observable client GAP, not permission to substitute generic feedback) falls
-                    // back to the error earcon — never to English prose, and never to the remote
-                    // text. `limit_exceeded` (spec 27ced9b) is Required and names Auris and its
-                    // daily allowance; it is one of these templates, not a special case.
+                    // template in that locale (a Required code whose translation is missing is a
+                    // client GAP, not permission to substitute generic feedback) falls back to the
+                    // error earcon — never to English prose, and never to the remote text. The gap
+                    // is RECORDED below: calling it observable without a log line made the claim
+                    // false, since nothing distinguished a missing translation from a code that
+                    // was never meant to speak. `limit_exceeded` (spec 27ced9b) is Required and
+                    // names Auris and its daily allowance; it is one of these templates, not a
+                    // special case.
                     let spoken = spokenTemplates.resolveForUserLocale("cloud_error_\(code)")
+                    if spoken.isEmpty, Self.requiredTemplateCodes.contains(code) {
+                        FileLog.shared.addMessage(
+                            "[VoicePipeline] cloudErrorTemplateMissing code=\(code) utterance=\(utteranceId)"
+                        )
+                    }
                     turnResult = .failed(code: code)
                     turnResponse = spoken.isEmpty ? .earcon(.error) : .spoken(spoken)
                     break turnLoop

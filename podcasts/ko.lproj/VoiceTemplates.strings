@@ -14,3 +14,34 @@
    in every language; they are one line by decision, not two that may drift. */
 "cloud_error_speech_unavailable" = "죄송합니다. 지금은 답변드리지 못했습니다. 다시 시도해 주세요.";
 "cloud_error_internal_error" = "죄송합니다. 지금은 답변드리지 못했습니다. 다시 시도해 주세요.";
+
+/* The connection dropped mid-turn. A plain statement of what happened and a retry,
+   matching the other locales' tone; no mention of sockets or servers. */
+"cloud_error_connection_lost" = "연결이 끊어졌습니다. 다시 시도해 주세요.";
+
+/* No answer was found — a content outcome, not a malfunction: say so and invite a
+   different phrasing rather than apologising for an outage. */
+"cloud_error_no_answer" = "죄송합니다. 그에 대한 답을 찾지 못했습니다. 다른 방식으로 물어봐 주세요.";
+
+/* The evidence could not be fetched. The reason is not the user's, so name what
+   failed in their terms and offer a retry. */
+"cloud_error_retrieval_unavailable" = "죄송합니다. 지금은 확인하지 못했습니다. 다시 시도해 주세요.";
+
+/* Audio arrived faster than it could be played, so the answer may be partial. To the
+   listener this is an unfinished answer; the queue itself is never named. */
+"cloud_error_queue_overflow" = "죄송합니다. 답변을 끝까지 드리지 못했습니다. 다시 시도해 주세요.";
+
+/* A shared deadline ran out (docs/specs/cloud-assistant.md#error-codes): the cause is TIME,
+   not question length,
+   so the line must not send the user after a shorter question. No reset time invented. */
+"cloud_error_budget_exceeded" = "죄송합니다. 답변하는 데 시간이 너무 오래 걸렸습니다. 다시 시도해 주세요.";
+
+/* Another turn is still answering. Nothing failed, so no apology: say why and when to
+   retry. */
+"cloud_error_turn_conflict" = "이전 질문에 아직 답변하고 있습니다. 잠시 후에 다시 시도해 주세요.";
+
+/* Prior context is unreadable. Report the loss and require a fresh conversation; a voice
+   user starts one by ASKING AGAIN, since the client clears the handle
+   (docs/specs/cloud-assistant.md#error-codes).
+   Never mentions records or storage. */
+"cloud_error_corrupt_record" = "죄송합니다. 대화의 흐름을 놓쳤습니다. 다시 말씀해 주시면 새 대화를 시작합니다.";

@@ -14,3 +14,34 @@
    in every language; they are one line by decision, not two that may drift. */
 "cloud_error_speech_unavailable" = "申し訳ありません。今はお答えできませんでした。もう一度お試しください。";
 "cloud_error_internal_error" = "申し訳ありません。今はお答えできませんでした。もう一度お試しください。";
+
+/* The connection dropped mid-turn. A plain statement of what happened and a retry,
+   matching the other locales' tone; no mention of sockets or servers. */
+"cloud_error_connection_lost" = "接続が切れました。もう一度お試しください。";
+
+/* No answer was found — a content outcome, not a malfunction: say so and invite a
+   different phrasing rather than apologising for an outage. */
+"cloud_error_no_answer" = "申し訳ありません。それに対する答えが見つかりませんでした。別の聞き方でお試しください。";
+
+/* The evidence could not be fetched. The reason is not the user's, so name what
+   failed in their terms and offer a retry. */
+"cloud_error_retrieval_unavailable" = "申し訳ありません。今は調べられませんでした。もう一度お試しください。";
+
+/* Audio arrived faster than it could be played, so the answer may be partial. To the
+   listener this is an unfinished answer; the queue itself is never named. */
+"cloud_error_queue_overflow" = "申し訳ありません。最後までお答えできませんでした。もう一度お試しください。";
+
+/* A shared deadline ran out (docs/specs/cloud-assistant.md#error-codes): the cause is TIME,
+   not question length,
+   so the line must not send the user after a shorter question. No reset time invented. */
+"cloud_error_budget_exceeded" = "申し訳ありません。お答えするのに時間がかかりすぎました。もう一度お試しください。";
+
+/* Another turn is still answering. Nothing failed, so no apology: say why and when to
+   retry. */
+"cloud_error_turn_conflict" = "前の質問にまだお答えしています。少し待ってからもう一度お試しください。";
+
+/* Prior context is unreadable. Report the loss and require a fresh conversation; a voice
+   user starts one by ASKING AGAIN, since the client clears the handle
+   (docs/specs/cloud-assistant.md#error-codes).
+   Never mentions records or storage. */
+"cloud_error_corrupt_record" = "申し訳ありません。会話の流れがわからなくなってしまいました。もう一度話しかけていただくと、新しい会話が始まります。";
