@@ -1,0 +1,1397 @@
+{
+ "description": "Top-6 candidate lists returned by the real fingerprint library's CheckpointMatcher.findTopMatches, with the verdict of the acceptance rule for each. Candidates are in the order and with the values the library returned.",
+ "rule": {
+  "score_floor": 0.65,
+  "lead": 0.05,
+  "distant_means_more_than_s": 2.0
+ },
+ "cases": [
+  {
+   "name": "shifted-0ms-q123-ref493",
+   "kind": "shifted",
+   "reference_checkpoints": 493,
+   "shift_ms": 0,
+   "query_timestamp_ms": 123000,
+   "true_reference_s": 123.0,
+   "candidates": [
+    {
+     "timestamp": 123.0,
+     "score": 1.0
+    },
+    {
+     "timestamp": 190.0,
+     "score": 0.68014705
+    },
+    {
+     "timestamp": 191.0,
+     "score": 0.67516446
+    },
+    {
+     "timestamp": 124.0,
+     "score": 0.6737132
+    },
+    {
+     "timestamp": 189.0,
+     "score": 0.67105263
+    },
+    {
+     "timestamp": 122.0,
+     "score": 0.66360295
+    }
+   ],
+   "accept": true,
+   "reason": "accepted",
+   "runner_up_rule_accept": true
+  },
+  {
+   "name": "shifted-0ms-q369-ref493",
+   "kind": "shifted",
+   "reference_checkpoints": 493,
+   "shift_ms": 0,
+   "query_timestamp_ms": 369000,
+   "true_reference_s": 369.0,
+   "candidates": [
+    {
+     "timestamp": 369.0,
+     "score": 1.0
+    },
+    {
+     "timestamp": 368.0,
+     "score": 0.7150735
+    },
+    {
+     "timestamp": 189.0,
+     "score": 0.7069257
+    },
+    {
+     "timestamp": 370.0,
+     "score": 0.69669116
+    },
+    {
+     "timestamp": 190.0,
+     "score": 0.6955357
+    },
+    {
+     "timestamp": 187.0,
+     "score": 0.6857143
+    }
+   ],
+   "accept": true,
+   "reason": "accepted",
+   "runner_up_rule_accept": true
+  },
+  {
+   "name": "shifted-100ms-q122-ref493",
+   "kind": "shifted",
+   "reference_checkpoints": 493,
+   "shift_ms": 100,
+   "query_timestamp_ms": 122000,
+   "true_reference_s": 122.1,
+   "candidates": [
+    {
+     "timestamp": 123.0,
+     "score": 0.8556985
+    },
+    {
+     "timestamp": 189.0,
+     "score": 0.69393384
+    },
+    {
+     "timestamp": 188.0,
+     "score": 0.6911765
+    },
+    {
+     "timestamp": 190.0,
+     "score": 0.67589283
+    },
+    {
+     "timestamp": 191.0,
+     "score": 0.66586536
+    },
+    {
+     "timestamp": 187.0,
+     "score": 0.6640625
+    }
+   ],
+   "accept": true,
+   "reason": "accepted",
+   "runner_up_rule_accept": true
+  },
+  {
+   "name": "shifted-100ms-q369-ref493",
+   "kind": "shifted",
+   "reference_checkpoints": 493,
+   "shift_ms": 100,
+   "query_timestamp_ms": 369000,
+   "true_reference_s": 369.1,
+   "candidates": [
+    {
+     "timestamp": 370.0,
+     "score": 0.83455884
+    },
+    {
+     "timestamp": 189.0,
+     "score": 0.70446426
+    },
+    {
+     "timestamp": 190.0,
+     "score": 0.69464284
+    },
+    {
+     "timestamp": 191.0,
+     "score": 0.6829044
+    },
+    {
+     "timestamp": 188.0,
+     "score": 0.68106616
+    },
+    {
+     "timestamp": 192.0,
+     "score": 0.67628205
+    }
+   ],
+   "accept": true,
+   "reason": "accepted",
+   "runner_up_rule_accept": true
+  },
+  {
+   "name": "shifted-250ms-q122-ref493",
+   "kind": "shifted",
+   "reference_checkpoints": 493,
+   "shift_ms": 250,
+   "query_timestamp_ms": 122000,
+   "true_reference_s": 122.25,
+   "candidates": [
+    {
+     "timestamp": 123.0,
+     "score": 0.9482143
+    },
+    {
+     "timestamp": 122.0,
+     "score": 0.6899671
+    },
+    {
+     "timestamp": 189.0,
+     "score": 0.6744792
+    },
+    {
+     "timestamp": 191.0,
+     "score": 0.6669408
+    },
+    {
+     "timestamp": 190.0,
+     "score": 0.6640625
+    },
+    {
+     "timestamp": 192.0,
+     "score": 0.66071427
+    }
+   ],
+   "accept": true,
+   "reason": "accepted",
+   "runner_up_rule_accept": true
+  },
+  {
+   "name": "shifted-250ms-q369-ref493",
+   "kind": "shifted",
+   "reference_checkpoints": 493,
+   "shift_ms": 250,
+   "query_timestamp_ms": 369000,
+   "true_reference_s": 369.25,
+   "candidates": [
+    {
+     "timestamp": 370.0,
+     "score": 0.95446426
+    },
+    {
+     "timestamp": 369.0,
+     "score": 0.7121711
+    },
+    {
+     "timestamp": 189.0,
+     "score": 0.6930147
+    },
+    {
+     "timestamp": 192.0,
+     "score": 0.68914473
+    },
+    {
+     "timestamp": 188.0,
+     "score": 0.6875
+    },
+    {
+     "timestamp": 191.0,
+     "score": 0.68392855
+    }
+   ],
+   "accept": true,
+   "reason": "accepted",
+   "runner_up_rule_accept": true
+  },
+  {
+   "name": "shifted-400ms-q92-ref493",
+   "kind": "shifted",
+   "reference_checkpoints": 493,
+   "shift_ms": 400,
+   "query_timestamp_ms": 92000,
+   "true_reference_s": 92.4,
+   "candidates": [
+    {
+     "timestamp": 92.0,
+     "score": 0.8226351
+    },
+    {
+     "timestamp": 93.0,
+     "score": 0.7925347
+    },
+    {
+     "timestamp": 191.0,
+     "score": 0.6709559
+    },
+    {
+     "timestamp": 190.0,
+     "score": 0.6602564
+    },
+    {
+     "timestamp": 189.0,
+     "score": 0.6536458
+    },
+    {
+     "timestamp": 188.0,
+     "score": 0.6525735
+    }
+   ],
+   "accept": true,
+   "reason": "accepted",
+   "runner_up_rule_accept": false
+  },
+  {
+   "name": "shifted-400ms-q249-ref493",
+   "kind": "shifted",
+   "reference_checkpoints": 493,
+   "shift_ms": 400,
+   "query_timestamp_ms": 249000,
+   "true_reference_s": 249.4,
+   "candidates": [
+    {
+     "timestamp": 249.0,
+     "score": 0.8099662
+    },
+    {
+     "timestamp": 250.0,
+     "score": 0.7795139
+    },
+    {
+     "timestamp": 187.0,
+     "score": 0.6642857
+    },
+    {
+     "timestamp": 189.0,
+     "score": 0.6599265
+    },
+    {
+     "timestamp": 188.0,
+     "score": 0.65625
+    },
+    {
+     "timestamp": 190.0,
+     "score": 0.6534926
+    }
+   ],
+   "accept": true,
+   "reason": "accepted",
+   "runner_up_rule_accept": false
+  },
+  {
+   "name": "shifted-400ms-q413-ref493",
+   "kind": "shifted",
+   "reference_checkpoints": 493,
+   "shift_ms": 400,
+   "query_timestamp_ms": 413000,
+   "true_reference_s": 413.4,
+   "candidates": [
+    {
+     "timestamp": 413.0,
+     "score": 0.8015203
+    },
+    {
+     "timestamp": 414.0,
+     "score": 0.7795139
+    },
+    {
+     "timestamp": 189.0,
+     "score": 0.67053574
+    },
+    {
+     "timestamp": 187.0,
+     "score": 0.6672794
+    },
+    {
+     "timestamp": 190.0,
+     "score": 0.6651786
+    },
+    {
+     "timestamp": 188.0,
+     "score": 0.66160715
+    }
+   ],
+   "accept": true,
+   "reason": "accepted",
+   "runner_up_rule_accept": false
+  },
+  {
+   "name": "shifted-400ms-q251-ref493",
+   "kind": "shifted",
+   "reference_checkpoints": 493,
+   "shift_ms": 400,
+   "query_timestamp_ms": 251000,
+   "true_reference_s": 251.4,
+   "candidates": [
+    {
+     "timestamp": 251.0,
+     "score": 0.8125
+    },
+    {
+     "timestamp": 252.0,
+     "score": 0.7569444
+    },
+    {
+     "timestamp": 189.0,
+     "score": 0.6759868
+    },
+    {
+     "timestamp": 190.0,
+     "score": 0.6672794
+    },
+    {
+     "timestamp": 187.0,
+     "score": 0.6553571
+    },
+    {
+     "timestamp": 188.0,
+     "score": 0.6545608
+    }
+   ],
+   "accept": true,
+   "reason": "accepted",
+   "runner_up_rule_accept": true
+  },
+  {
+   "name": "shifted-450ms-q189-ref493",
+   "kind": "shifted",
+   "reference_checkpoints": 493,
+   "shift_ms": 450,
+   "query_timestamp_ms": 189000,
+   "true_reference_s": 189.45,
+   "candidates": [
+    {
+     "timestamp": 190.0,
+     "score": 0.9765625
+    },
+    {
+     "timestamp": 189.0,
+     "score": 0.9487847
+    },
+    {
+     "timestamp": 188.0,
+     "score": 0.9025735
+    },
+    {
+     "timestamp": 191.0,
+     "score": 0.8538603
+    },
+    {
+     "timestamp": 187.0,
+     "score": 0.83639705
+    },
+    {
+     "timestamp": 192.0,
+     "score": 0.825
+    }
+   ],
+   "accept": true,
+   "reason": "accepted",
+   "runner_up_rule_accept": false
+  },
+  {
+   "name": "shifted-450ms-q246-ref493",
+   "kind": "shifted",
+   "reference_checkpoints": 493,
+   "shift_ms": 450,
+   "query_timestamp_ms": 246000,
+   "true_reference_s": 246.45,
+   "candidates": [
+    {
+     "timestamp": 247.0,
+     "score": 0.9348958
+    },
+    {
+     "timestamp": 189.0,
+     "score": 0.67410713
+    },
+    {
+     "timestamp": 190.0,
+     "score": 0.66785717
+    },
+    {
+     "timestamp": 188.0,
+     "score": 0.6571691
+    },
+    {
+     "timestamp": 191.0,
+     "score": 0.65625
+    },
+    {
+     "timestamp": 349.0,
+     "score": 0.6516544
+    }
+   ],
+   "accept": true,
+   "reason": "accepted",
+   "runner_up_rule_accept": true
+  },
+  {
+   "name": "shifted-500ms-q87-ref493",
+   "kind": "shifted",
+   "reference_checkpoints": 493,
+   "shift_ms": 500,
+   "query_timestamp_ms": 87000,
+   "true_reference_s": 87.5,
+   "candidates": [
+    {
+     "timestamp": 87.0,
+     "score": 0.7508681
+    },
+    {
+     "timestamp": 88.0,
+     "score": 0.7170139
+    },
+    {
+     "timestamp": 189.0,
+     "score": 0.6951014
+    },
+    {
+     "timestamp": 188.0,
+     "score": 0.6856618
+    },
+    {
+     "timestamp": 190.0,
+     "score": 0.68392855
+    },
+    {
+     "timestamp": 191.0,
+     "score": 0.67351973
+    }
+   ],
+   "accept": true,
+   "reason": "accepted",
+   "runner_up_rule_accept": false
+  },
+  {
+   "name": "shifted-500ms-q225-ref493",
+   "kind": "shifted",
+   "reference_checkpoints": 493,
+   "shift_ms": 500,
+   "query_timestamp_ms": 225000,
+   "true_reference_s": 225.5,
+   "candidates": [
+    {
+     "timestamp": 225.0,
+     "score": 0.7361111
+    },
+    {
+     "timestamp": 226.0,
+     "score": 0.7230903
+    },
+    {
+     "timestamp": 189.0,
+     "score": 0.6737132
+    },
+    {
+     "timestamp": 190.0,
+     "score": 0.65789473
+    },
+    {
+     "timestamp": 191.0,
+     "score": 0.6534926
+    },
+    {
+     "timestamp": 188.0,
+     "score": 0.6528716
+    }
+   ],
+   "accept": true,
+   "reason": "accepted",
+   "runner_up_rule_accept": false
+  },
+  {
+   "name": "shifted-500ms-q396-ref493",
+   "kind": "shifted",
+   "reference_checkpoints": 493,
+   "shift_ms": 500,
+   "query_timestamp_ms": 396000,
+   "true_reference_s": 396.5,
+   "candidates": [
+    {
+     "timestamp": 396.0,
+     "score": 0.7256944
+    },
+    {
+     "timestamp": 397.0,
+     "score": 0.7213542
+    },
+    {
+     "timestamp": 189.0,
+     "score": 0.6644737
+    },
+    {
+     "timestamp": 190.0,
+     "score": 0.6617647
+    },
+    {
+     "timestamp": 264.0,
+     "score": 0.66160715
+    },
+    {
+     "timestamp": 186.0,
+     "score": 0.6528716
+    }
+   ],
+   "accept": true,
+   "reason": "accepted",
+   "runner_up_rule_accept": false
+  },
+  {
+   "name": "shifted-500ms-q253-ref493",
+   "kind": "shifted",
+   "reference_checkpoints": 493,
+   "shift_ms": 500,
+   "query_timestamp_ms": 253000,
+   "true_reference_s": 253.5,
+   "candidates": [
+    {
+     "timestamp": 254.0,
+     "score": 0.7543403
+    },
+    {
+     "timestamp": 253.0,
+     "score": 0.6987847
+    },
+    {
+     "timestamp": 189.0,
+     "score": 0.67142856
+    },
+    {
+     "timestamp": 188.0,
+     "score": 0.6590074
+    },
+    {
+     "timestamp": 190.0,
+     "score": 0.6553819
+    },
+    {
+     "timestamp": 191.0,
+     "score": 0.64889705
+    }
+   ],
+   "accept": true,
+   "reason": "accepted",
+   "runner_up_rule_accept": true
+  },
+  {
+   "name": "shifted-500ms-q126-ref493",
+   "kind": "shifted",
+   "reference_checkpoints": 493,
+   "shift_ms": 500,
+   "query_timestamp_ms": 126000,
+   "true_reference_s": 126.5,
+   "candidates": [
+    {
+     "timestamp": 126.0,
+     "score": 0.7335069
+    },
+    {
+     "timestamp": 127.0,
+     "score": 0.7170139
+    },
+    {
+     "timestamp": 189.0,
+     "score": 0.6935764
+    },
+    {
+     "timestamp": 190.0,
+     "score": 0.6908784
+    },
+    {
+     "timestamp": 187.0,
+     "score": 0.6883929
+    },
+    {
+     "timestamp": 188.0,
+     "score": 0.6847426
+    }
+   ],
+   "accept": false,
+   "reason": "lead_too_small",
+   "runner_up_rule_accept": false,
+   "note": "The best candidate is the right place, but the rule does not accept it."
+  },
+  {
+   "name": "shifted-500ms-q388-ref493",
+   "kind": "shifted",
+   "reference_checkpoints": 493,
+   "shift_ms": 500,
+   "query_timestamp_ms": 388000,
+   "true_reference_s": 388.5,
+   "candidates": [
+    {
+     "timestamp": 388.0,
+     "score": 0.7057292
+    },
+    {
+     "timestamp": 389.0,
+     "score": 0.7048611
+    },
+    {
+     "timestamp": 188.0,
+     "score": 0.6767857
+    },
+    {
+     "timestamp": 189.0,
+     "score": 0.6767857
+    },
+    {
+     "timestamp": 190.0,
+     "score": 0.671875
+    },
+    {
+     "timestamp": 187.0,
+     "score": 0.6651786
+    }
+   ],
+   "accept": false,
+   "reason": "lead_too_small",
+   "runner_up_rule_accept": false,
+   "note": "The best candidate is the right place, but the rule does not accept it."
+  },
+  {
+   "name": "shifted-750ms-q122-ref493",
+   "kind": "shifted",
+   "reference_checkpoints": 493,
+   "shift_ms": 750,
+   "query_timestamp_ms": 122000,
+   "true_reference_s": 122.75,
+   "candidates": [
+    {
+     "timestamp": 122.0,
+     "score": 0.9660714
+    },
+    {
+     "timestamp": 123.0,
+     "score": 0.68174344
+    },
+    {
+     "timestamp": 189.0,
+     "score": 0.67147434
+    },
+    {
+     "timestamp": 190.0,
+     "score": 0.6700368
+    },
+    {
+     "timestamp": 188.0,
+     "score": 0.6608456
+    },
+    {
+     "timestamp": 187.0,
+     "score": 0.65625
+    }
+   ],
+   "accept": true,
+   "reason": "accepted",
+   "runner_up_rule_accept": true
+  },
+  {
+   "name": "shifted-750ms-q369-ref493",
+   "kind": "shifted",
+   "reference_checkpoints": 493,
+   "shift_ms": 750,
+   "query_timestamp_ms": 369000,
+   "true_reference_s": 369.75,
+   "candidates": [
+    {
+     "timestamp": 369.0,
+     "score": 0.94107145
+    },
+    {
+     "timestamp": 370.0,
+     "score": 0.734375
+    },
+    {
+     "timestamp": 189.0,
+     "score": 0.6944444
+    },
+    {
+     "timestamp": 190.0,
+     "score": 0.6911765
+    },
+    {
+     "timestamp": 191.0,
+     "score": 0.6776786
+    },
+    {
+     "timestamp": 192.0,
+     "score": 0.67269737
+    }
+   ],
+   "accept": true,
+   "reason": "accepted",
+   "runner_up_rule_accept": true
+  },
+  {
+   "name": "unrelated-0ms-q40-ref493",
+   "kind": "unrelated",
+   "reference_checkpoints": 493,
+   "shift_ms": 0,
+   "query_timestamp_ms": 40000,
+   "true_reference_s": null,
+   "candidates": [
+    {
+     "timestamp": 189.0,
+     "score": 0.6433824
+    },
+    {
+     "timestamp": 190.0,
+     "score": 0.6345486
+    },
+    {
+     "timestamp": 188.0,
+     "score": 0.63327205
+    },
+    {
+     "timestamp": 191.0,
+     "score": 0.6305147
+    },
+    {
+     "timestamp": 249.0,
+     "score": 0.6232143
+    },
+    {
+     "timestamp": 114.0,
+     "score": 0.6208882
+    }
+   ],
+   "accept": false,
+   "reason": "score_below_floor",
+   "runner_up_rule_accept": false
+  },
+  {
+   "name": "unrelated-0ms-q85-ref493",
+   "kind": "unrelated",
+   "reference_checkpoints": 493,
+   "shift_ms": 0,
+   "query_timestamp_ms": 85000,
+   "true_reference_s": null,
+   "candidates": [
+    {
+     "timestamp": 189.0,
+     "score": 0.6378676
+    },
+    {
+     "timestamp": 187.0,
+     "score": 0.63782054
+    },
+    {
+     "timestamp": 188.0,
+     "score": 0.6359797
+    },
+    {
+     "timestamp": 190.0,
+     "score": 0.6348214
+    },
+    {
+     "timestamp": 186.0,
+     "score": 0.63075656
+    },
+    {
+     "timestamp": 193.0,
+     "score": 0.63075656
+    }
+   ],
+   "accept": false,
+   "reason": "score_below_floor",
+   "runner_up_rule_accept": false
+  },
+  {
+   "name": "unrelated-0ms-q49-ref493",
+   "kind": "unrelated",
+   "reference_checkpoints": 493,
+   "shift_ms": 0,
+   "query_timestamp_ms": 49000,
+   "true_reference_s": null,
+   "candidates": [
+    {
+     "timestamp": 190.0,
+     "score": 0.6829044
+    },
+    {
+     "timestamp": 189.0,
+     "score": 0.6746324
+    },
+    {
+     "timestamp": 188.0,
+     "score": 0.6605903
+    },
+    {
+     "timestamp": 187.0,
+     "score": 0.6461149
+    },
+    {
+     "timestamp": 191.0,
+     "score": 0.6432292
+    },
+    {
+     "timestamp": 192.0,
+     "score": 0.6402027
+    }
+   ],
+   "accept": false,
+   "reason": "lead_too_small",
+   "runner_up_rule_accept": false
+  },
+  {
+   "name": "unrelated-0ms-q151-ref493",
+   "kind": "unrelated",
+   "reference_checkpoints": 493,
+   "shift_ms": 0,
+   "query_timestamp_ms": 151000,
+   "true_reference_s": null,
+   "candidates": [
+    {
+     "timestamp": 189.0,
+     "score": 0.68106616
+    },
+    {
+     "timestamp": 188.0,
+     "score": 0.6764706
+    },
+    {
+     "timestamp": 190.0,
+     "score": 0.6694079
+    },
+    {
+     "timestamp": 191.0,
+     "score": 0.6657986
+    },
+    {
+     "timestamp": 187.0,
+     "score": 0.6631944
+    },
+    {
+     "timestamp": 192.0,
+     "score": 0.6510417
+    }
+   ],
+   "accept": false,
+   "reason": "lead_too_small",
+   "runner_up_rule_accept": false
+  },
+  {
+   "name": "unrelated-0ms-q242-ref493",
+   "kind": "unrelated",
+   "reference_checkpoints": 493,
+   "shift_ms": 0,
+   "query_timestamp_ms": 242000,
+   "true_reference_s": null,
+   "candidates": [
+    {
+     "timestamp": 189.0,
+     "score": 0.683277
+    },
+    {
+     "timestamp": 190.0,
+     "score": 0.6785714
+    },
+    {
+     "timestamp": 191.0,
+     "score": 0.6782095
+    },
+    {
+     "timestamp": 188.0,
+     "score": 0.66544116
+    },
+    {
+     "timestamp": 187.0,
+     "score": 0.6544643
+    },
+    {
+     "timestamp": 192.0,
+     "score": 0.65267855
+    }
+   ],
+   "accept": false,
+   "reason": "lead_too_small",
+   "runner_up_rule_accept": false
+  },
+  {
+   "name": "unrelated-0ms-q74-ref493",
+   "kind": "unrelated",
+   "reference_checkpoints": 493,
+   "shift_ms": 0,
+   "query_timestamp_ms": 74000,
+   "true_reference_s": null,
+   "candidates": [
+    {
+     "timestamp": 189.0,
+     "score": 0.7525338
+    },
+    {
+     "timestamp": 188.0,
+     "score": 0.7491071
+    },
+    {
+     "timestamp": 190.0,
+     "score": 0.73839283
+    },
+    {
+     "timestamp": 191.0,
+     "score": 0.7361111
+    },
+    {
+     "timestamp": 187.0,
+     "score": 0.7150735
+    },
+    {
+     "timestamp": 192.0,
+     "score": 0.6951014
+    }
+   ],
+   "accept": true,
+   "reason": "accepted",
+   "runner_up_rule_accept": false,
+   "note": "Unrelated audio that this single-window rule accepts. Such windows are rare and are left to the drift filter; the rule itself must still say accept."
+  },
+  {
+   "name": "short_reference-0ms-q0-ref3",
+   "kind": "short_reference",
+   "reference_checkpoints": 3,
+   "shift_ms": 0,
+   "query_timestamp_ms": 0,
+   "true_reference_s": 0.0,
+   "candidates": [
+    {
+     "timestamp": 0.0,
+     "score": 1.0
+    },
+    {
+     "timestamp": 1.0,
+     "score": 0.72518384
+    },
+    {
+     "timestamp": 2.0,
+     "score": 0.64226973
+    }
+   ],
+   "accept": false,
+   "reason": "no_distant_candidate",
+   "runner_up_rule_accept": true
+  },
+  {
+   "name": "short_reference-0ms-q1-ref3",
+   "kind": "short_reference",
+   "reference_checkpoints": 3,
+   "shift_ms": 0,
+   "query_timestamp_ms": 1000,
+   "true_reference_s": 1.0,
+   "candidates": [
+    {
+     "timestamp": 1.0,
+     "score": 1.0
+    },
+    {
+     "timestamp": 2.0,
+     "score": 0.7362132
+    },
+    {
+     "timestamp": 0.0,
+     "score": 0.72518384
+    }
+   ],
+   "accept": false,
+   "reason": "no_distant_candidate",
+   "runner_up_rule_accept": true
+  },
+  {
+   "name": "short_reference-0ms-q2-ref3",
+   "kind": "short_reference",
+   "reference_checkpoints": 3,
+   "shift_ms": 0,
+   "query_timestamp_ms": 2000,
+   "true_reference_s": 2.0,
+   "candidates": [
+    {
+     "timestamp": 2.0,
+     "score": 1.0
+    },
+    {
+     "timestamp": 1.0,
+     "score": 0.7362132
+    },
+    {
+     "timestamp": 0.0,
+     "score": 0.64226973
+    }
+   ],
+   "accept": false,
+   "reason": "no_distant_candidate",
+   "runner_up_rule_accept": true
+  },
+  {
+   "name": "short_reference-450ms-q0-ref3",
+   "kind": "short_reference",
+   "reference_checkpoints": 3,
+   "shift_ms": 450,
+   "query_timestamp_ms": 0,
+   "true_reference_s": 0.45,
+   "candidates": [
+    {
+     "timestamp": 1.0,
+     "score": 0.9565972
+    },
+    {
+     "timestamp": 0.0,
+     "score": 0.7077703
+    },
+    {
+     "timestamp": 2.0,
+     "score": 0.66268384
+    }
+   ],
+   "accept": false,
+   "reason": "no_distant_candidate",
+   "runner_up_rule_accept": true
+  },
+  {
+   "name": "short_reference-450ms-q1-ref3",
+   "kind": "short_reference",
+   "reference_checkpoints": 3,
+   "shift_ms": 450,
+   "query_timestamp_ms": 1000,
+   "true_reference_s": 1.45,
+   "candidates": [
+    {
+     "timestamp": 2.0,
+     "score": 0.9496528
+    },
+    {
+     "timestamp": 1.0,
+     "score": 0.6984797
+    },
+    {
+     "timestamp": 0.0,
+     "score": 0.63928574
+    }
+   ],
+   "accept": false,
+   "reason": "no_distant_candidate",
+   "runner_up_rule_accept": true
+  },
+  {
+   "name": "short_reference-0ms-q0-ref5",
+   "kind": "short_reference",
+   "reference_checkpoints": 5,
+   "shift_ms": 0,
+   "query_timestamp_ms": 0,
+   "true_reference_s": 0.0,
+   "candidates": [
+    {
+     "timestamp": 0.0,
+     "score": 1.0
+    },
+    {
+     "timestamp": 1.0,
+     "score": 0.72518384
+    },
+    {
+     "timestamp": 3.0,
+     "score": 0.6482143
+    },
+    {
+     "timestamp": 2.0,
+     "score": 0.64226973
+    },
+    {
+     "timestamp": 4.0,
+     "score": 0.6258929
+    }
+   ],
+   "accept": true,
+   "reason": "accepted",
+   "runner_up_rule_accept": true
+  },
+  {
+   "name": "short_reference-0ms-q1-ref5",
+   "kind": "short_reference",
+   "reference_checkpoints": 5,
+   "shift_ms": 0,
+   "query_timestamp_ms": 1000,
+   "true_reference_s": 1.0,
+   "candidates": [
+    {
+     "timestamp": 1.0,
+     "score": 1.0
+    },
+    {
+     "timestamp": 2.0,
+     "score": 0.7362132
+    },
+    {
+     "timestamp": 0.0,
+     "score": 0.72518384
+    },
+    {
+     "timestamp": 3.0,
+     "score": 0.6663603
+    },
+    {
+     "timestamp": 4.0,
+     "score": 0.62857145
+    }
+   ],
+   "accept": true,
+   "reason": "accepted",
+   "runner_up_rule_accept": true
+  },
+  {
+   "name": "short_reference-0ms-q2-ref5",
+   "kind": "short_reference",
+   "reference_checkpoints": 5,
+   "shift_ms": 0,
+   "query_timestamp_ms": 2000,
+   "true_reference_s": 2.0,
+   "candidates": [
+    {
+     "timestamp": 2.0,
+     "score": 1.0
+    },
+    {
+     "timestamp": 3.0,
+     "score": 0.74080884
+    },
+    {
+     "timestamp": 1.0,
+     "score": 0.7362132
+    },
+    {
+     "timestamp": 0.0,
+     "score": 0.64226973
+    },
+    {
+     "timestamp": 4.0,
+     "score": 0.62335527
+    }
+   ],
+   "accept": false,
+   "reason": "no_distant_candidate",
+   "runner_up_rule_accept": true
+  },
+  {
+   "name": "short_reference-0ms-q3-ref5",
+   "kind": "short_reference",
+   "reference_checkpoints": 5,
+   "shift_ms": 0,
+   "query_timestamp_ms": 3000,
+   "true_reference_s": 3.0,
+   "candidates": [
+    {
+     "timestamp": 3.0,
+     "score": 1.0
+    },
+    {
+     "timestamp": 2.0,
+     "score": 0.74080884
+    },
+    {
+     "timestamp": 4.0,
+     "score": 0.7068015
+    },
+    {
+     "timestamp": 1.0,
+     "score": 0.6663603
+    },
+    {
+     "timestamp": 0.0,
+     "score": 0.6482143
+    }
+   ],
+   "accept": true,
+   "reason": "accepted",
+   "runner_up_rule_accept": true
+  },
+  {
+   "name": "short_reference-0ms-q4-ref5",
+   "kind": "short_reference",
+   "reference_checkpoints": 5,
+   "shift_ms": 0,
+   "query_timestamp_ms": 4000,
+   "true_reference_s": 4.0,
+   "candidates": [
+    {
+     "timestamp": 4.0,
+     "score": 1.0
+    },
+    {
+     "timestamp": 3.0,
+     "score": 0.7068015
+    },
+    {
+     "timestamp": 1.0,
+     "score": 0.62857145
+    },
+    {
+     "timestamp": 0.0,
+     "score": 0.6258929
+    },
+    {
+     "timestamp": 2.0,
+     "score": 0.62335527
+    }
+   ],
+   "accept": true,
+   "reason": "accepted",
+   "runner_up_rule_accept": true
+  },
+  {
+   "name": "short_reference-450ms-q0-ref5",
+   "kind": "short_reference",
+   "reference_checkpoints": 5,
+   "shift_ms": 450,
+   "query_timestamp_ms": 0,
+   "true_reference_s": 0.45,
+   "candidates": [
+    {
+     "timestamp": 1.0,
+     "score": 0.9565972
+    },
+    {
+     "timestamp": 0.0,
+     "score": 0.7077703
+    },
+    {
+     "timestamp": 2.0,
+     "score": 0.66268384
+    },
+    {
+     "timestamp": 3.0,
+     "score": 0.6455357
+    },
+    {
+     "timestamp": 4.0,
+     "score": 0.61266446
+    }
+   ],
+   "accept": true,
+   "reason": "accepted",
+   "runner_up_rule_accept": true
+  },
+  {
+   "name": "short_reference-450ms-q1-ref5",
+   "kind": "short_reference",
+   "reference_checkpoints": 5,
+   "shift_ms": 450,
+   "query_timestamp_ms": 1000,
+   "true_reference_s": 1.45,
+   "candidates": [
+    {
+     "timestamp": 2.0,
+     "score": 0.9496528
+    },
+    {
+     "timestamp": 1.0,
+     "score": 0.6984797
+    },
+    {
+     "timestamp": 3.0,
+     "score": 0.6525735
+    },
+    {
+     "timestamp": 0.0,
+     "score": 0.63928574
+    },
+    {
+     "timestamp": 4.0,
+     "score": 0.63214284
+    }
+   ],
+   "accept": false,
+   "reason": "no_distant_candidate",
+   "runner_up_rule_accept": true
+  },
+  {
+   "name": "short_reference-450ms-q2-ref5",
+   "kind": "short_reference",
+   "reference_checkpoints": 5,
+   "shift_ms": 450,
+   "query_timestamp_ms": 2000,
+   "true_reference_s": 2.45,
+   "candidates": [
+    {
+     "timestamp": 3.0,
+     "score": 0.9392361
+    },
+    {
+     "timestamp": 2.0,
+     "score": 0.6976351
+    },
+    {
+     "timestamp": 1.0,
+     "score": 0.6589286
+    },
+    {
+     "timestamp": 0.0,
+     "score": 0.6496711
+    },
+    {
+     "timestamp": 4.0,
+     "score": 0.6305147
+    }
+   ],
+   "accept": true,
+   "reason": "accepted",
+   "runner_up_rule_accept": true
+  },
+  {
+   "name": "short_reference-450ms-q3-ref5",
+   "kind": "short_reference",
+   "reference_checkpoints": 5,
+   "shift_ms": 450,
+   "query_timestamp_ms": 3000,
+   "true_reference_s": 3.45,
+   "candidates": [
+    {
+     "timestamp": 4.0,
+     "score": 0.9513889
+    },
+    {
+     "timestamp": 3.0,
+     "score": 0.691723
+    },
+    {
+     "timestamp": 2.0,
+     "score": 0.6424632
+    },
+    {
+     "timestamp": 0.0,
+     "score": 0.63980263
+    },
+    {
+     "timestamp": 1.0,
+     "score": 0.6274671
+    }
+   ],
+   "accept": true,
+   "reason": "accepted",
+   "runner_up_rule_accept": true
+  }
+ ]
+}

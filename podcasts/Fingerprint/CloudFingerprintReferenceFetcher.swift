@@ -1,8 +1,9 @@
 import Foundation
+@preconcurrency import Fingerprint
 
 /// Fetches the Auris cloud reference fingerprints for an episode from
 /// `GET /api/v1/episodes/{episode_uuid}/fingerprints` (cloud-ingestion.md) and
-/// parses the `fingerprint-compact-v2` payload into a `CloudReferenceMatcher`.
+/// parses the `fingerprint-compact-v3` payload into a library `CheckpointMatcher`.
 ///
 /// Returns nil on any failure (unconfigured, network, decode, no checkpoints,
 /// client-side timeout) so callers degrade gracefully to the transcript-sync
@@ -31,7 +32,7 @@ final class CloudFingerprintReferenceFetcher {
         self.tokenProvider = tokenProvider
     }
 
-    func fetchReference(baseUrl: String, episodeUuid: String, podcastUuid: String) async -> CloudReferenceMatcher? {
+    func fetchReference(baseUrl: String, episodeUuid: String, podcastUuid: String) async -> CheckpointMatcher? {
         let trimmedBase = baseUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard var components = URLComponents(string: "\(trimmedBase)/api/v1/episodes/\(episodeUuid)/fingerprints") else {
             return nil
@@ -93,18 +94,25 @@ final class CloudFingerprintReferenceFetcher {
         case unauthorized
     }
 
-    /// Parses compact-v2 bytes into a matcher, or nil when unusable.
-    func buildMatcher(from data: Data) -> CloudReferenceMatcher? {
-        guard let reference = ReferenceFingerprint.decode(from: data) else { return nil }
+    /// Parses Auris reference bytes into a matcher, or nil when unusable.
+    ///
+    /// Only the Auris format is accepted here: the hashes in a reference of any other
+    /// format are not the ones this matcher is ranked against, so a non-v3 payload is
+    /// absent and alignment fails closed until a v3 reference arrives.
+    func buildMatcher(from data: Data) -> CheckpointMatcher? {
+        guard let reference = ReferenceFingerprint.decode(from: data, expectedFormat: ReferenceFingerprint.aurisFormat) else {
+            return nil
+        }
         let checkpoints = reference.libraryCheckpoints()
         guard !checkpoints.isEmpty else { return nil }
 
-        let matcher = CloudReferenceMatcher()
+        let matcher = CheckpointMatcher()
+        let duration = Float(reference.checkpointDurationSeconds)
         for checkpoint in checkpoints {
             matcher.add(
-                timestampSeconds: checkpoint.timestampSeconds,
+                timestamp: checkpoint.timestampSeconds,
                 hashes: checkpoint.hashes,
-                durationSeconds: reference.checkpointDurationSeconds
+                duration: duration
             )
         }
         return matcher

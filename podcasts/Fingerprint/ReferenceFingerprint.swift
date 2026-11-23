@@ -2,7 +2,12 @@ import Foundation
 import PocketCastsUtils
 
 struct ReferenceFingerprint: Decodable {
-    static let supportedFormat = "fingerprint-compact-v2"
+    /// The Auris endpoint's format: the inherited library's values, deltas the client accumulates.
+    static let aurisFormat = "fingerprint-compact-v3"
+
+    /// The transcript host's format. That host is not ours to migrate, and its references
+    /// hold the same library's values, so transcript sync keeps accepting them.
+    static let transcriptFormat = "fingerprint-compact-v2"
 
     let format: String
     let totalDuration: Double
@@ -36,20 +41,27 @@ struct ReferenceFingerprint: Decodable {
         let hashes: [UInt32]
     }
 
+    /// Parses compact reference bytes of any format. Which formats are usable is the CALL
+    /// SITE's decision, because the two sources serve different ones: check `format` against
+    /// the constant for the source the bytes came from, or use the `expectedFormat:` overload.
     static func decode(from data: Data) -> ReferenceFingerprint? {
-        let fingerprint: ReferenceFingerprint
         do {
-            fingerprint = try JSONDecoder().decode(ReferenceFingerprint.self, from: data)
+            return try JSONDecoder().decode(ReferenceFingerprint.self, from: data)
         } catch {
             FileLog.shared.addMessage("ReferenceFingerprint: failed to decode JSON: \(error.localizedDescription)")
             return nil
         }
+    }
 
-        guard fingerprint.format == supportedFormat else {
-            FileLog.shared.addMessage("ReferenceFingerprint: unknown format '\(fingerprint.format)', expected '\(supportedFormat)'")
+    /// Decodes bytes that must come from `expectedFormat`; any other format is absent.
+    static func decode(from data: Data, expectedFormat: String) -> ReferenceFingerprint? {
+        guard let fingerprint = decode(from: data) else { return nil }
+        guard fingerprint.format == expectedFormat else {
+            FileLog.shared.addMessage(
+                "ReferenceFingerprint: format '\(fingerprint.format)', expected '\(expectedFormat)'"
+            )
             return nil
         }
-
         return fingerprint
     }
 

@@ -56,7 +56,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         /// transcript-sync reference above. A closure rather than a value so
         /// a late-arriving matcher is visible to the already-running stream
         /// (PR #14 wave-2 review: a value snapshot stayed nil forever).
-        let cloudMatcherProvider: () -> CloudReferenceMatcher?
+        let cloudMatcherProvider: () -> CheckpointMatcher?
         /// Raw bytes of the reference fingerprint JSON, used to validate the
         /// persistent mapping cache via SHA-256.
         let referenceData: Data
@@ -134,7 +134,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
     /// the Auris cloud independently of the transcript-sync reference. Only
     /// touched on `queue` (fetch returns the matcher; assignment happens on
     /// `queue` so the documented invariant holds).
-    private var cloudMatcher: CloudReferenceMatcher?
+    private var cloudMatcher: CheckpointMatcher?
     /// Per-stream Go-scheme fingerprinter fed the same decoded PCM as the Rust
     /// streamer; its windows are matched against [cloudMatcher].
     private var cancellationFlag = CancellationFlag()
@@ -902,7 +902,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
     /// reference. Returns the matcher (nil when unconfigured or unavailable);
     /// the caller assigns it on `queue` — this function never touches state
     /// directly, since it runs on the cooperative pool (PR #14 review).
-    private func fetchCloudReference(uuid: String, podcastUuid: String) async -> CloudReferenceMatcher? {
+    private func fetchCloudReference(uuid: String, podcastUuid: String) async -> CheckpointMatcher? {
         let baseUrl = CloudConfig.shared.baseUrl
         guard !baseUrl.isEmpty else { return nil }
         let matcher = await CloudFingerprintReferenceFetcher.shared.fetchReference(baseUrl: baseUrl, episodeUuid: uuid, podcastUuid: podcastUuid)
@@ -1708,21 +1708,61 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         func topMatches(queryHashes: [UInt32], maxResults: Int) -> [WindowMatch]
     }
 
+    /// How a path decides that a matcher's best candidate is trustworthy: the floor
+    /// a score must clear, how large a lead it needs, and which candidate counts as
+    /// the rival it must beat.
+    ///
+    /// The two sources served by this code answer "which rival" differently, so it is
+    /// a rule rather than a set of constants threaded through the loop. Transcript
+    /// sync compares against the immediate runner-up, as it always has. Auris compares
+    /// against the best candidate more than 2s away, because neighbouring reference
+    /// windows are the same audio shifted slightly and always score alike — a nearby
+    /// rival would suppress real matches while telling us nothing about ambiguity.
+    struct MatchAcceptanceRule {
+        let scoreThreshold: Float
+        let anchorScoreThreshold: Float
+        let dominanceGap: Float
+        let maxResults: Int
+        /// The score this candidate must beat, or nil when the rule cannot establish one
+        /// (which fails closed: an unconfirmable window is not accepted).
+        let rivalScore: ([WindowMatch], WindowMatch) -> Float?
+
+        /// Transcript sync's rule, unchanged from when the values were read inline.
+        static let transcript = MatchAcceptanceRule(
+            scoreThreshold: FingerprintConstants.matchScoreThreshold,
+            anchorScoreThreshold: FingerprintConstants.driftAnchorScoreThreshold,
+            dominanceGap: FingerprintConstants.driftScoreDominanceGap,
+            maxResults: 2,
+            rivalScore: { matches, _ in matches.dropFirst().first?.score ?? 0 }
+        )
+
+        /// The Auris endpoint's rule (cloud-ingestion.md): 0.65 floor, a 0.05 lead over
+        /// the best candidate further than 2s away, ranking the matcher's top 6.
+        static let auris = MatchAcceptanceRule(
+            scoreThreshold: FingerprintConstants.aurisMatchScoreThreshold,
+            anchorScoreThreshold: FingerprintConstants.aurisMatchScoreThreshold,
+            dominanceGap: FingerprintConstants.aurisDominanceGap,
+            maxResults: FingerprintConstants.aurisMaxResults,
+            rivalScore: { matches, best in
+                // No distant candidate means the reference is too short to show that this
+                // window is unique, so it cannot be confirmed — nil fails closed below.
+                matches
+                    .dropFirst()
+                    .filter {
+                        abs($0.referenceTime - best.referenceTime) > FingerprintConstants.aurisDistantCandidateSeconds
+                    }
+                    .map(\.score)
+                    .max()
+            }
+        )
+    }
+
     private struct CheckpointMatcherScoring: WindowScoring {
         let matcher: CheckpointMatcher
 
         func topMatches(queryHashes: [UInt32], maxResults: Int) -> [WindowMatch] {
             matcher.findTopMatches(queryHashes: queryHashes, maxResults: UInt32(maxResults))
                 .map { WindowMatch(referenceTime: Double($0.timestamp), score: $0.score) }
-        }
-    }
-
-    private struct CloudReferenceMatcherScoring: WindowScoring {
-        let matcher: CloudReferenceMatcher
-
-        func topMatches(queryHashes: [UInt32], maxResults: Int) -> [WindowMatch] {
-            matcher.findTopMatches(queryHashes: queryHashes, maxResults: maxResults)
-                .map { WindowMatch(referenceTime: Double($0.timestampSeconds), score: $0.score) }
         }
     }
 
@@ -1743,18 +1783,19 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         windowHashes: (W) -> [UInt32],
         windowTimestampSeconds: (W) -> Double,
         rejectionPrefix: String,
+        rule: MatchAcceptanceRule = .transcript,
         onBestScore: ((Float) -> Void)? = nil,
         into acc: inout MappingAccumulator
     ) -> Int {
         var inserted = 0
         for window in windows {
-            // Pull top-2 so we can check how dominant the winner is — ambiguous
-            // wins (top-1 barely beats top-2) are the hallmark of correlated
-            // false positives from non-matching audio.
-            let matches = scoring.topMatches(queryHashes: windowHashes(window), maxResults: 2)
+            // The rule decides how many candidates to pull and which rival counts:
+            // the transcript path compares against the immediate runner-up, the Auris
+            // path against the best candidate more than 2s away.
+            let matches = scoring.topMatches(queryHashes: windowHashes(window), maxResults: rule.maxResults)
             guard let best = matches.first else { continue }
             if best.score > 0 { onBestScore?(best.score) }
-            guard best.score >= FingerprintConstants.matchScoreThreshold else { continue }
+            guard best.score >= rule.scoreThreshold else { continue }
 
             let candidate = TimeMappingEntry(
                 playbackTime: startOffset + windowTimestampSeconds(window),
@@ -1765,7 +1806,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
             // Pre-filter gates. Low-score and ambiguous matches are recorded as
             // rejections so the debug overlay can visualize "matcher fired but
             // we didn't trust it" distinctly from "matcher never fired here".
-            if best.score < FingerprintConstants.driftAnchorScoreThreshold {
+            if best.score < rule.anchorScoreThreshold {
                 recordRejection(
                     candidate,
                     reason: "\(rejectionPrefix)low score \(String(format: "%.2f", best.score))",
@@ -1773,13 +1814,21 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
                 )
                 continue
             }
-            let runnerUpScore = matches.dropFirst().first?.score ?? 0
-            let dominance = best.score - runnerUpScore
-            if dominance < FingerprintConstants.driftScoreDominanceGap {
+            guard let rivalScore = rule.rivalScore(of: matches, best: best) else {
                 recordRejection(
                     candidate,
-                    reason: "\(rejectionPrefix)ambiguous top-1 vs top-2 "
-                        + "(\(String(format: "%.2f", best.score)) vs \(String(format: "%.2f", runnerUpScore)))",
+                    reason: "\(rejectionPrefix)no distant candidate "
+                        + "(best \(String(format: "%.2f", best.score)))",
+                    into: &acc
+                )
+                continue
+            }
+            let dominance = best.score - rivalScore
+            if dominance < rule.dominanceGap {
+                recordRejection(
+                    candidate,
+                    reason: "\(rejectionPrefix)ambiguous top-1 vs rival "
+                        + "(\(String(format: "%.2f", best.score)) vs \(String(format: "%.2f", rivalScore)))",
                     into: &acc
                 )
                 continue
@@ -1895,7 +1944,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
 
     /// Matches cloud-fingerprinter windows against the cloud reference and
     /// routes candidates through the same drift filter as the transcript path.
-    /// Mirrors `processMatches` but uses `CloudReferenceMatcher` and the
+    /// Mirrors `processMatches` but uses the Auris cloud matcher and the
     /// Go-scheme window hashes (identical scheme to the server's reference).
     private func processCloudMatches(
         windows: [CloudFingerprinter.Window],
@@ -1909,10 +1958,12 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         Self.matchWindowsCore(
             windows: windows,
             startOffset: startOffset,
-            scoring: CloudReferenceMatcherScoring(matcher: cloudMatcher),
+            scoring: CheckpointMatcherScoring(matcher: cloudMatcher),
             windowHashes: { $0.hashes },
             windowTimestampSeconds: { Double($0.timestampSec) },
             rejectionPrefix: "cloud ",
+            // The Auris endpoint's own acceptance rule, not transcript sync's.
+            rule: .auris,
             into: &main
         )
 
