@@ -2400,7 +2400,11 @@ class PlaybackManager: ServerPlaybackDelegate {
 
         guard let userInfo = notification.userInfo else { return }
 
-        let interruptionType = userInfo[AVAudioSessionInterruptionTypeKey] as! NSNumber
+        // Same reasoning as the option key below: this is a plain
+        // NotificationCenter message, so an in-process post can omit the type
+        // too. A notification that does not say which interruption it is
+        // carries nothing to act on.
+        guard let interruptionType = userInfo[AVAudioSessionInterruptionTypeKey] as? NSNumber else { return }
         #if os(tvOS)
         let interruptionReason: UInt? = nil
         #else
@@ -2408,7 +2412,11 @@ class PlaybackManager: ServerPlaybackDelegate {
         #endif
         if interruptionType.uintValue == AVAudioSession.InterruptionType.ended.rawValue {
             interruptInProgress = false
-            let interruptionOption = userInfo[AVAudioSessionInterruptionOptionKey] as! NSNumber
+            // An ended notification is a plain NotificationCenter message: the
+            // system always includes the option key, but anything else in the
+            // process can post one without it. Absent means "no flags", which is
+            // the same value the resume check below already treats as no-resume.
+            let interruptionOption = userInfo[AVAudioSessionInterruptionOptionKey] as? NSNumber ?? 0
             FileLog.shared.addMessage("PlaybackManager handleAudioInterrupt ended, should attempt to restart audio: \(interruptionOption) reason: \(interruptionReason?.description ?? "unknown")")
             if interruptionOption.uintValue == AVAudioSession.InterruptionOptions.shouldResume.rawValue, wasPlayingBeforeInterruption {
                 play(userInitiated: false)
