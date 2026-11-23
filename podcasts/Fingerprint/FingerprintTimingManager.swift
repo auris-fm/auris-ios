@@ -135,6 +135,9 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
     /// touched on `queue` (fetch returns the matcher; assignment happens on
     /// `queue` so the documented invariant holds).
     private var cloudMatcher: CheckpointMatcher?
+    /// What identifies the Auris payload this episode's mapping is built against. Nil when no
+    /// Auris reference was in use, which leaves a transcript-only mapping reusable.
+    private var aurisReferenceIdentity: FingerprintMappingCache.AurisReferenceIdentity?
     /// Per-stream Go-scheme fingerprinter fed the same decoded PCM as the Rust
     /// streamer; its windows are matched against [cloudMatcher].
     private var cancellationFlag = CancellationFlag()
@@ -533,7 +536,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
 
         if flag.isCancelled { return .unresolved(reason: "timeout", isStreaming: false) }
         guard let referenceData,
-              let reference = ReferenceFingerprint.decode(from: referenceData) else {
+              let reference = ReferenceFingerprint.decode(from: referenceData, expectedFormat: ReferenceFingerprint.transcriptFormat) else {
             return .unresolved(reason: "no_reference", isStreaming: false)
         }
 
@@ -755,7 +758,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
 
         guard !flag.isCancelled,
               let referenceData,
-              let reference = ReferenceFingerprint.decode(from: referenceData) else {
+              let reference = ReferenceFingerprint.decode(from: referenceData, expectedFormat: ReferenceFingerprint.transcriptFormat) else {
             FileLog.shared.addMessage(
                 "FingerprintTimingManager: bookmark resolve gave up for \(episodeUuid) — no usable reference"
             )
@@ -902,16 +905,19 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
     /// reference. Returns the matcher (nil when unconfigured or unavailable);
     /// the caller assigns it on `queue` — this function never touches state
     /// directly, since it runs on the cooperative pool (PR #14 review).
-    private func fetchCloudReference(uuid: String, podcastUuid: String) async -> CheckpointMatcher? {
+    private func fetchCloudReference(
+        uuid: String,
+        podcastUuid: String
+    ) async -> CloudFingerprintReferenceFetcher.FetchedReference? {
         let baseUrl = CloudConfig.shared.baseUrl
         guard !baseUrl.isEmpty else { return nil }
-        let matcher = await CloudFingerprintReferenceFetcher.shared.fetchReference(baseUrl: baseUrl, episodeUuid: uuid, podcastUuid: podcastUuid)
-        if let matcher {
+        let fetched = await CloudFingerprintReferenceFetcher.shared.fetchReference(baseUrl: baseUrl, episodeUuid: uuid, podcastUuid: podcastUuid)
+        if let matcher = fetched?.matcher {
             FileLog.shared.addMessage("FingerprintTimingManager: cloud reference loaded (\(matcher.count()) checkpoints) for \(uuid)")
         } else {
             FileLog.shared.addMessage("FingerprintTimingManager: cloud reference unavailable for \(uuid)")
         }
-        return matcher
+        return fetched
     }
 
     private func prepareForEpisode(_ episode: BaseEpisode?) {
@@ -935,6 +941,9 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         // here (on `queue`) so the late-arriving fetch below can't race it and
         // so a stale matcher can never leak into the new episode's context.
         cloudMatcher = nil
+        // The identity goes with it: keeping the previous episode's would gate this one's
+        // mapping against a payload it was never matched against.
+        aurisReferenceIdentity = nil
 
         if let loaded = loadReference(for: episode) {
             // Transcript-sync configuration runs immediately — the cloud fetch
@@ -952,7 +961,8 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
                     // The running stream reads the matcher through the
                     // context's provider, so this assignment alone makes the
                     // late-arriving reference live immediately.
-                    self.cloudMatcher = matcher
+                    self.cloudMatcher = matcher?.matcher
+                    self.aurisReferenceIdentity = matcher?.identity
                 }
             }
             return
@@ -985,9 +995,10 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
             self?.queue.async { [weak self] in
                 guard let self, !flag.isCancelled else { return }
 
-                self.cloudMatcher = matcher
+                self.cloudMatcher = matcher?.matcher
+                self.aurisReferenceIdentity = matcher?.identity
 
-                guard let data, let reference = ReferenceFingerprint.decode(from: data) else {
+                guard let data, let reference = ReferenceFingerprint.decode(from: data, expectedFormat: ReferenceFingerprint.transcriptFormat) else {
                     self.updateState(.unavailable)
                     self.track(.syncedTranscriptsUnavailable, properties: ["reason": "no_reference"])
                     FileLog.shared.addMessage("FingerprintTimingManager: no reference available for \(uuid)")
@@ -1082,9 +1093,9 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
                audioFilePath: audioFileURL.path,
                referenceFilePath: refPath,
                referenceData: referenceData,
-               // A mapping is only reusable if it was matched against the Auris
-               // reference format this build accepts.
-               aurisFormat: ReferenceFingerprint.aurisFormat
+               // Only held to an Auris identity when an Auris reference is actually in use;
+               // a transcript-only mapping stays reusable as it always was.
+               aurisReference: aurisReferenceIdentity
            ) {
             // The cache is produced from `playbackToReference` (already sorted
             // by `playbackTime`), so assign it directly and sort once for the
@@ -1575,7 +1586,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
                     referenceFilePath: ctx.referenceFilePath,
                     referenceData: ctx.referenceData,
                     referenceDuration: ctx.referenceDuration,
-                    aurisFormat: ReferenceFingerprint.aurisFormat
+                    aurisReference: self.aurisReferenceIdentity
                 )
             }
         }
@@ -2160,7 +2171,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
     private func loadReference(for episode: BaseEpisode) -> (data: Data, reference: ReferenceFingerprint)? {
         let path = referencePath(for: episode)
         guard let data = FileManager.default.contents(atPath: path),
-              let reference = ReferenceFingerprint.decode(from: data) else { return nil }
+              let reference = ReferenceFingerprint.decode(from: data, expectedFormat: ReferenceFingerprint.transcriptFormat) else { return nil }
         return (data, reference)
     }
 

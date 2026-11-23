@@ -8,18 +8,18 @@ import Fingerprint
 /// Proof that the library bundled in this app produces the values the server's generator is
 /// checked against, on the same audio.
 ///
-/// The five clips and their expected values live in `core`'s
-/// `chroma-generator/server/internal/fingerprint/testdata/fixtures/`. They are ~14 MB of raw
-/// audio, so they are not committed here: point `AURIS_FINGERPRINT_FIXTURES` at that directory
-/// to run this, and it skips with a message otherwise. The server commits them because its CI
-/// must run the equivalent assertion; on iOS the library runs on the device, so this is
-/// evidence for a change rather than a gate CI can fail on.
+/// The clips and their expected values are committed beside this file: the simulator runs the
+/// real library, so this is a gate rather than evidence. Three clips are checked in (48 kHz
+/// stereo, 48 kHz mono, 11.025 kHz mono) — the fractional resampling ratio and the no-resampling
+/// case — rather than all five, to keep 7.7 MB out of the repository instead of 14.
 ///
-/// A skip is not a pass. If the directory is set but a clip is missing or malformed, the case
-/// fails rather than skipping, so a broken path cannot be mistaken for absent fixtures.
+/// A missing fixture fails rather than skipping: a skip would let a broken path or a dropped
+/// resource read as a pass.
 final class FingerprintClipReproductionTests: XCTestCase {
 
-    private static let fixturesEnvVar = "AURIS_FINGERPRINT_FIXTURES"
+    /// The clips committed with this test. 44.1 kHz and 22.05 kHz are omitted: their ratios are
+    /// whole numbers, so 48 kHz exercises the harder resampling path.
+    private static let clipNames = ["clip-48000hz-2ch", "clip-48000hz-1ch", "clip-11025hz-1ch"]
 
     private struct Clip: Decodable {
         struct Window: Decodable {
@@ -49,18 +49,14 @@ final class FingerprintClipReproductionTests: XCTestCase {
         }
     }
 
-    private func fixtureDirectory() throws -> URL? {
-        guard let path = ProcessInfo.processInfo.environment[Self.fixturesEnvVar], !path.isEmpty else {
-            return nil
-        }
-        let url = URL(fileURLWithPath: path, isDirectory: true)
-        // The variable was set deliberately, so a wrong path is a failure, not a skip.
-        var isDirectory: ObjCBool = false
-        XCTAssertTrue(
-            FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue,
-            "\(Self.fixturesEnvVar) is set to \(path), which is not a directory"
+    /// The committed clip fixtures, which must be in the test bundle. A missing resource fails
+    /// here rather than skipping, so a dropped resource cannot read as a pass.
+    private func fixtureURL(_ name: String, _ extension: String) throws -> URL {
+        try XCTUnwrap(
+            Bundle(for: Self.self).url(forResource: name, withExtension: `extension`, subdirectory: "Fixtures")
+                ?? Bundle(for: Self.self).url(forResource: name, withExtension: `extension`),
+            "fixture \(name).\(`extension`) is not in the test bundle"
         )
-        return url
     }
 
     /// Every value of every window of every clip, position by position.
@@ -69,24 +65,11 @@ final class FingerprintClipReproductionTests: XCTestCase {
     /// keeps duplicates, and a fingerprint that reordered them would still be "the same set"
     /// while matching nothing.
     func testTheLibraryReproducesEveryFixtureValue() throws {
-        guard let directory = try fixtureDirectory() else {
-            throw XCTSkip(
-                "set \(Self.fixturesEnvVar) to core's server/internal/fingerprint/testdata/fixtures "
-                    + "to run; 14 MB of audio is not committed to this repo"
-            )
-        }
-
-        let clipURLs = try FileManager.default
-            .contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
-            .filter { $0.lastPathComponent.hasPrefix("clip-") && $0.pathExtension == "json" }
-            .sorted { $0.lastPathComponent < $1.lastPathComponent }
-
-        XCTAssertEqual(clipURLs.count, 5, "expected the five clip fixtures in \(directory.path)")
-
         var compared = 0
-        for jsonURL in clipURLs {
+        for name in Self.clipNames {
+            let jsonURL = try fixtureURL(name, "json")
             let clip = try JSONDecoder().decode(Clip.self, from: Data(contentsOf: jsonURL))
-            let audioURL = directory.appendingPathComponent(clip.audio)
+            let audioURL = try fixtureURL(name, "f32")
 
             let audio = try Data(contentsOf: audioURL)
             XCTAssertEqual(
@@ -122,22 +105,17 @@ final class FingerprintClipReproductionTests: XCTestCase {
             }
         }
 
-        // The count the server's generator is held to. Pinned so a run that silently compared
-        // far less than the whole fixture cannot read as a pass.
-        XCTAssertEqual(compared, 975)
+        // Three clips x five windows x 39 values. Pinned so a run that silently compared less
+        // than the whole fixture — or dropped a clip — cannot read as a pass.
+        XCTAssertEqual(compared, 585)
     }
 
     /// The rate and channel count in each clip's name must match what the file actually holds,
     /// or the values below were produced from different audio than the name suggests.
     func testTheFixtureRatesAndChannelsMatchTheirFiles() throws {
-        guard let directory = try fixtureDirectory() else {
-            throw XCTSkip("set \(Self.fixturesEnvVar) to run")
-        }
-
-        for jsonURL in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
-            where jsonURL.lastPathComponent.hasPrefix("clip-") && jsonURL.pathExtension == "json" {
-            let clip = try JSONDecoder().decode(Clip.self, from: Data(contentsOf: jsonURL))
-            let audio = try Data(contentsOf: directory.appendingPathComponent(clip.audio))
+        for name in Self.clipNames {
+            let clip = try JSONDecoder().decode(Clip.self, from: Data(contentsOf: try fixtureURL(name, "json")))
+            let audio = try Data(contentsOf: try fixtureURL(name, "f32"))
 
             // Raw interleaved little-endian float32, no header.
             let frameBytes = 4 * clip.channels

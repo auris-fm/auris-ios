@@ -263,7 +263,9 @@ final class FingerprintMappingCacheTests: XCTestCase {
             referenceFilePath: referencePath,
             referenceData: referenceData,
             referenceDuration: 100,
-            aurisFormat: "fingerprint-compact-v2"
+            aurisReference: FingerprintMappingCache.AurisReferenceIdentity(
+                format: "fingerprint-compact-v2", payload: Data("v2-payload".utf8)
+            )
         )
 
         XCTAssertNil(
@@ -271,7 +273,9 @@ final class FingerprintMappingCacheTests: XCTestCase {
                 audioFilePath: audioPath,
                 referenceFilePath: referencePath,
                 referenceData: referenceData,
-                aurisFormat: "fingerprint-compact-v3"
+                aurisReference: FingerprintMappingCache.AurisReferenceIdentity(
+                format: "fingerprint-compact-v3", payload: Data("v3-payload".utf8)
+            )
             ),
             "the transcript reference is unchanged, so only the recorded Auris format can reject this"
         )
@@ -287,7 +291,9 @@ final class FingerprintMappingCacheTests: XCTestCase {
             referenceFilePath: referencePath,
             referenceData: referenceData,
             referenceDuration: 100,
-            aurisFormat: "fingerprint-compact-v3"
+            aurisReference: FingerprintMappingCache.AurisReferenceIdentity(
+                format: "fingerprint-compact-v3", payload: Data("v3-payload".utf8)
+            )
         )
 
         let loaded = try XCTUnwrap(
@@ -295,7 +301,9 @@ final class FingerprintMappingCacheTests: XCTestCase {
                 audioFilePath: audioPath,
                 referenceFilePath: referencePath,
                 referenceData: referenceData,
-                aurisFormat: "fingerprint-compact-v3"
+                aurisReference: FingerprintMappingCache.AurisReferenceIdentity(
+                format: "fingerprint-compact-v3", payload: Data("v3-payload".utf8)
+            )
             )
         )
         XCTAssertEqual(loaded.entries.count, entries.count)
@@ -320,8 +328,62 @@ final class FingerprintMappingCacheTests: XCTestCase {
                 audioFilePath: audioPath,
                 referenceFilePath: referencePath,
                 referenceData: referenceData,
-                aurisFormat: "fingerprint-compact-v3"
+                aurisReference: FingerprintMappingCache.AurisReferenceIdentity(
+                format: "fingerprint-compact-v3", payload: Data("v3-payload".utf8)
             )
+            )
+        )
+    }
+
+    /// A mapping built with no Auris reference at all stays reusable. Only mappings that
+    /// carry Auris entries can be invalidated by an Auris change, so gating every mapping on
+    /// it would throw away transcript-only work for no reason.
+    func testATranscriptOnlyMappingStaysReusable() throws {
+        let entries = makeFullCoverageEntries()
+        FingerprintMappingCache.save(
+            entries,
+            audioFilePath: audioPath,
+            referenceFilePath: referencePath,
+            referenceData: referenceData,
+            referenceDuration: 100
+        )
+
+        let loaded = try XCTUnwrap(
+            FingerprintMappingCache.load(
+                audioFilePath: audioPath,
+                referenceFilePath: referencePath,
+                referenceData: referenceData
+            ),
+            "no Auris reference was in use, so nothing about the endpoint can invalidate this"
+        )
+        XCTAssertEqual(loaded.entries.count, entries.count)
+    }
+
+    /// Two payloads can both be v3 and still carry different hashes. The format alone cannot
+    /// tell them apart, which is why the payload's own hash is recorded too.
+    func testADifferentV3PayloadDiscardsTheMapping() throws {
+        let entries = makeFullCoverageEntries()
+        FingerprintMappingCache.save(
+            entries,
+            audioFilePath: audioPath,
+            referenceFilePath: referencePath,
+            referenceData: referenceData,
+            referenceDuration: 100,
+            aurisReference: FingerprintMappingCache.AurisReferenceIdentity(
+                format: "fingerprint-compact-v3", payload: Data("first-payload".utf8)
+            )
+        )
+
+        XCTAssertNil(
+            FingerprintMappingCache.load(
+                audioFilePath: audioPath,
+                referenceFilePath: referencePath,
+                referenceData: referenceData,
+                aurisReference: FingerprintMappingCache.AurisReferenceIdentity(
+                    format: "fingerprint-compact-v3", payload: Data("second-payload".utf8)
+                )
+            ),
+            "same format, different bytes — only the payload hash can reject this"
         )
     }
 

@@ -32,7 +32,14 @@ final class CloudFingerprintReferenceFetcher {
         self.tokenProvider = tokenProvider
     }
 
-    func fetchReference(baseUrl: String, episodeUuid: String, podcastUuid: String) async -> CheckpointMatcher? {
+    /// The matcher and what identifies the payload it was built from. The bytes themselves are
+    /// not kept — only their hash, which is what a cached mapping has to be checked against.
+    struct FetchedReference {
+        let matcher: CheckpointMatcher
+        let identity: FingerprintMappingCache.AurisReferenceIdentity
+    }
+
+    func fetchReference(baseUrl: String, episodeUuid: String, podcastUuid: String) async -> FetchedReference? {
         let trimmedBase = baseUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard var components = URLComponents(string: "\(trimmedBase)/api/v1/episodes/\(episodeUuid)/fingerprints") else {
             return nil
@@ -72,7 +79,14 @@ final class CloudFingerprintReferenceFetcher {
                 }
                 switch outcome {
                 case .body(let data):
-                    return buildMatcher(from: data)
+                    guard let matcher = buildMatcher(from: data) else { return nil }
+                    return FetchedReference(
+                        matcher: matcher,
+                        identity: FingerprintMappingCache.AurisReferenceIdentity(
+                            format: ReferenceFingerprint.aurisFormat,
+                            payload: data
+                        )
+                    )
                 case .unauthorized:
                     // Report the rejected bearer only when a retry follows:
                     // each report rotates the SHARED Auris refresh chain, and

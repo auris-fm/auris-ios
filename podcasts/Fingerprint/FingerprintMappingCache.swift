@@ -20,6 +20,19 @@ enum FingerprintMappingCache {
         let referenceDuration: Double
     }
 
+    /// What identifies the Auris reference a mapping was built against: its format and the
+    /// bytes themselves. Both are needed — the format says which scheme, the hash says which
+    /// payload within that scheme.
+    struct AurisReferenceIdentity {
+        let format: String
+        let hash: String
+
+        init(format: String, payload: Data) {
+            self.format = format
+            self.hash = sha256(payload)
+        }
+    }
+
     private struct CachedMapping: Codable {
         let schemaVersion: Int
         /// The Auris reference format these entries were matched against. Recorded
@@ -27,6 +40,10 @@ enum FingerprintMappingCache {
         /// a mapping can be perfectly current for that file and still have been built
         /// against an endpoint reference whose hashes are no longer the ones we match.
         let aurisFormat: String?
+        /// sha256 of the Auris payload itself, recorded only when an Auris reference was in
+        /// use. The format alone cannot tell two v3 payloads apart, and the endpoint can
+        /// re-emit the same episode with different hashes while still calling it v3.
+        let aurisHash: String?
         let referenceHash: String
         let referenceByteSize: UInt64
         let referenceMTime: Double
@@ -47,7 +64,7 @@ enum FingerprintMappingCache {
         audioFilePath: String,
         referenceFilePath: String,
         referenceData: Data,
-        aurisFormat: String? = nil
+        aurisReference: AurisReferenceIdentity? = nil
     ) -> LoadResult? {
         let path = mappingPath(forAudioFilePath: audioFilePath)
         guard let data = FileManager.default.contents(atPath: path) else { return nil }
@@ -63,15 +80,18 @@ enum FingerprintMappingCache {
             )
             return nil
         }
-        // A mapping built against a different Auris reference format is not usable even
-        // when the transcript reference is unchanged, so it is discarded rather than
-        // matched. Absent means it predates this field, which is also not v3.
-        guard cached.aurisFormat == aurisFormat else {
-            FileLog.shared.addMessage(
-                "FingerprintMappingCache: Auris format '\(cached.aurisFormat ?? "none")' "
-                    + "is not '\(aurisFormat ?? "none")' at \(path) — discarding"
-            )
-            return nil
+        // Only mappings built WITH an Auris reference carry its identity, so only those are
+        // held to it. A transcript-only mapping has no Auris entries to invalidate and stays
+        // reusable exactly as it did before this field existed.
+        if let auris = aurisReference {
+            guard cached.aurisFormat == auris.format, cached.aurisHash == auris.hash else {
+                FileLog.shared.addMessage(
+                    "FingerprintMappingCache: Auris reference changed (format "
+                        + "'\(cached.aurisFormat ?? "none")', hash '\(cached.aurisHash ?? "none")') "
+                        + "at \(path) — discarding"
+                )
+                return nil
+            }
         }
         guard let refAttrs = fileAttributes(at: referenceFilePath),
               refAttrs.size == cached.referenceByteSize,
@@ -130,7 +150,7 @@ enum FingerprintMappingCache {
         referenceFilePath: String,
         referenceData: Data,
         referenceDuration: Double,
-        aurisFormat: String? = nil
+        aurisReference: AurisReferenceIdentity? = nil
     ) {
         guard let last = entries.last,
               referenceDuration > 0,
@@ -158,7 +178,8 @@ enum FingerprintMappingCache {
         let path = mappingPath(forAudioFilePath: audioFilePath)
         let cached = CachedMapping(
             schemaVersion: FingerprintConstants.mappingCacheSchemaVersion,
-            aurisFormat: aurisFormat,
+            aurisFormat: aurisReference?.format,
+            aurisHash: aurisReference?.hash,
             referenceHash: sha256(referenceData),
             referenceByteSize: refAttrs.size,
             referenceMTime: refAttrs.mtime,
