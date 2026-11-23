@@ -4928,6 +4928,9 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// Opt-in hook on the NEXT built client, applied before its producer starts. Used to park the
     /// producer at the bind seam so a control can force the pre-authentication window.
     private var parkNextProducerAtBindSeam: ((CloudRouteClient) -> Void)?
+    /// Opt-in park INSIDE the next built turn's authentication send — the lost-race arm, where the
+    /// producer has already recorded its send as invoked.
+    private var holdNextAuthenticationSend: (gate: Gate, entered: Promise<Void>)?
     /// Grace hold lifecycle counters for ownership controls.
     private var holdCounters: (begin: AtomicInteger, end: AtomicInteger)?
 
@@ -5165,6 +5168,64 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertFalse(state.isSuppressed("u-turn-b"), "the utterance was not discarded, so it must not be suppressed")
     }
 
+    /// THE LOST ARM of the abandon-before-authentication race. The predecessor's authentication send
+    /// has already been INVOKED when the successor decides, so the server may admit that turn.
+    /// Abandoning it locally would leave a turn running that the client believes it cancelled.
+    ///
+    /// Forced at the only place it can be: INSIDE the test transport's send of the authentication
+    /// frame, which is after the producer records its send as invoked. Parking at the bind seam
+    /// cannot express this — there the mark is not yet set, so an abandonment always wins.
+    ///
+    /// Two things must hold. The abandonment reports LOST and leaves the predecessor's socket OPEN,
+    /// because the interrupt still has to travel on it; closing there would turn a deliverable
+    /// interruption into transport loss and drop the user's utterance. And the interrupt is then
+    /// DELIVERED on that live socket, not reported undelivered.
+    func testAbandonmentLosesToAnAlreadyInvokedAuthenticationSend() async throws {
+        self.nextTurnFixture = Self.doneOnlyFixture
+        let state = CloudInterruptionState()
+        let sink = makeSink(interruptionState: state)
+
+        let authGate = Gate()
+        let authEntered = Promise<Void>()
+        addTeardownBlock { authGate.release() }
+        holdNextAuthenticationSend = (authGate, authEntered)
+
+        let prior = Task {
+            await sink.routeToCloud(
+                request: "prior question", tier: .free, context: self.sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-turn-a"
+            )
+        }
+        // A is INSIDE its authentication send: invoked, not yet returned.
+        await authEntered.value()
+        let observedSocket = await MainActor.run { sink.activeResultSocketForTesting }
+        let priorSocket = try XCTUnwrap(observedSocket)
+        let priorTask = try XCTUnwrap(capturedTask)
+
+        let successor = Task {
+            await sink.routeToCloud(
+                request: "play the next one", tier: .free, context: self.sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-turn-b"
+            )
+        }
+        let held = await waitForHeldFollowUp(state, requestId: priorSocket.requestId, timeout: 5)
+        XCTAssertTrue(held, "premise: B must reach its interruption decision while A's send is in flight")
+
+        // Let the send complete. A was NOT abandoned, so its socket must still carry the interrupt.
+        authGate.release()
+        _ = await prior.value
+        _ = await successor.value
+
+        XCTAssertTrue(
+            priorTask.sentInterrupt,
+            "a lost abandonment race must interrupt the predecessor on its still-open socket"
+        )
+        XCTAssertFalse(
+            priorTask.isCancelledSocket && !priorTask.sentInterrupt,
+            "the losing arm must not close the predecessor's transport"
+        )
+    }
+
     private func makeSink(conversationManager: CloudConversationManager? = nil, withHoldCounters: Bool = false, interruptionState: CloudInterruptionState = CloudInterruptionState()) -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
         let built = CloudRouteSink(
@@ -5209,6 +5270,10 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                 if let park = self.parkNextProducerAtBindSeam {
                     self.parkNextProducerAtBindSeam = nil
                     park(built.client)
+                }
+                if let hold = self.holdNextAuthenticationSend {
+                    self.holdNextAuthenticationSend = nil
+                    built.task.holdAuthenticationSendUntilReleased(hold.gate, entered: hold.entered)
                 }
                 if let action = self.firstFrameActionForNextBuild {
                     self.firstFrameActionForNextBuild = nil
