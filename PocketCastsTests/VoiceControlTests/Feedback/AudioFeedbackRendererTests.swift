@@ -1,6 +1,7 @@
 import XCTest
 @testable import podcasts
 
+@MainActor
 final class AudioFeedbackRendererTests: XCTestCase {
 
     func test_earconResponse_playsEarcon() {

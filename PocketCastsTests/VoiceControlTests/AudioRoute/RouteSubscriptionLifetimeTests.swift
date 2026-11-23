@@ -14,13 +14,14 @@ import AVFoundation
 /// deliver a real route-change notification. They assert the effect on the engine's own
 /// classification rather than on a helper called directly, because calling the helper would
 /// pass whether or not any subscription exists.
+@MainActor
 final class RouteSubscriptionLifetimeTests: XCTestCase {
 
     /// The positive control: with the assembly alive, a route change reaches the grace signal.
     ///
     /// Without this, a failing lifetime case below could not be attributed to the release —
     /// it would be equally consistent with route changes never being observed at all.
-    func test_routeChange_deactivatesGrace_whileTheAssemblyIsAlive() throws {
+    func test_routeChange_deactivatesGrace_whileTheAssemblyIsAlive() async throws {
         let signal = GracePeriodSignal()
         let monitor = IOSAudioRouteMonitor(gracePeriodSignal: signal)
 
@@ -28,6 +29,9 @@ final class RouteSubscriptionLifetimeTests: XCTestCase {
         XCTAssertTrue(signal.isActive, "the grace window did not arm, so the case proves nothing")
 
         postRouteChange()
+        // Route notifications are received on main at the source, so delivery is
+        // ordered but asynchronous relative to this post.
+        await waitUntil(timeout: 5) { !signal.isActive }
 
         XCTAssertFalse(
             signal.isActive,
@@ -42,7 +46,7 @@ final class RouteSubscriptionLifetimeTests: XCTestCase {
     /// assembly holds, it dies here and the grace window stays armed across a route change —
     /// a privacy-relevant failure that fails closed-silently in the opposite direction from
     /// what the design intends.
-    func test_routeChange_deactivatesGrace_afterTheAssemblyIsReleased() throws {
+    func test_routeChange_deactivatesGrace_afterTheAssemblyIsReleased() async throws {
         let service: VoiceControlService?
         do {
             // Scoped so the assembly is released at the end of the block, as in the app.
@@ -62,6 +66,7 @@ final class RouteSubscriptionLifetimeTests: XCTestCase {
         XCTAssertTrue(signal.isActive, "the grace window did not arm, so the case proves nothing")
 
         postRouteChange()
+        await waitUntil(timeout: 5) { !signal.isActive }
 
         XCTAssertFalse(
             signal.isActive,
@@ -127,5 +132,13 @@ final class RouteSubscriptionLifetimeTests: XCTestCase {
             the builder rather than by the service the app keeps.
             """
         )
+    }
+
+    @MainActor
+    private func waitUntil(timeout: TimeInterval, _ condition: () -> Bool) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition(), Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
     }
 }
