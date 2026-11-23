@@ -211,7 +211,10 @@ final class FingerprintPreparationTests: XCTestCase {
             audioFilePath: fixture.audioURL.path,
             referenceFilePath: fixture.referenceURL.path,
             referenceData: try Data(contentsOf: fixture.referenceURL),
-            referenceDuration: duration
+            referenceDuration: duration,
+            // Written as this build writes it, so the cache is one the manager would
+            // actually reuse rather than one its own format gate discards.
+            aurisFormat: ReferenceFingerprint.aurisFormat
         )
         XCTAssertTrue(
             FileManager.default.fileExists(atPath: fixture.mappingCachePath),

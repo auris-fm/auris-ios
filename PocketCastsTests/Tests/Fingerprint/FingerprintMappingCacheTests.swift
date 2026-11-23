@@ -250,6 +250,81 @@ final class FingerprintMappingCacheTests: XCTestCase {
 
     // MARK: - Helpers
 
+    // MARK: - Auris reference format
+
+    /// A mapping matched against a v2 Auris reference is discarded once this build
+    /// accepts only v3 — even though the transcript reference file is byte-identical,
+    /// so the hash guard cannot catch it. The two guards cover different references.
+    func testAMappingBuiltAgainstAV2AurisReferenceIsDiscarded() throws {
+        let entries = makeFullCoverageEntries()
+        FingerprintMappingCache.save(
+            entries,
+            audioFilePath: audioPath,
+            referenceFilePath: referencePath,
+            referenceData: referenceData,
+            referenceDuration: 100,
+            aurisFormat: "fingerprint-compact-v2"
+        )
+
+        XCTAssertNil(
+            FingerprintMappingCache.load(
+                audioFilePath: audioPath,
+                referenceFilePath: referencePath,
+                referenceData: referenceData,
+                aurisFormat: "fingerprint-compact-v3"
+            ),
+            "the transcript reference is unchanged, so only the recorded Auris format can reject this"
+        )
+    }
+
+    /// The same mapping is reusable when the format matches, which is what makes the
+    /// case above a rejection rather than a cache that never loads at all.
+    func testAMappingBuiltAgainstV3IsReusable() throws {
+        let entries = makeFullCoverageEntries()
+        FingerprintMappingCache.save(
+            entries,
+            audioFilePath: audioPath,
+            referenceFilePath: referencePath,
+            referenceData: referenceData,
+            referenceDuration: 100,
+            aurisFormat: "fingerprint-compact-v3"
+        )
+
+        let loaded = try XCTUnwrap(
+            FingerprintMappingCache.load(
+                audioFilePath: audioPath,
+                referenceFilePath: referencePath,
+                referenceData: referenceData,
+                aurisFormat: "fingerprint-compact-v3"
+            )
+        )
+        XCTAssertEqual(loaded.entries.count, entries.count)
+    }
+
+    /// A cache written before this build carries no Auris format at all. It must be
+    /// discarded rather than treated as current, since nothing records which endpoint
+    /// reference its entries came from.
+    func testAMappingSavedBeforeThisBuildIsDiscarded() throws {
+        let entries = makeFullCoverageEntries()
+        // Written with no format recorded, exactly as the previous build wrote it.
+        FingerprintMappingCache.save(
+            entries,
+            audioFilePath: audioPath,
+            referenceFilePath: referencePath,
+            referenceData: referenceData,
+            referenceDuration: 100
+        )
+
+        XCTAssertNil(
+            FingerprintMappingCache.load(
+                audioFilePath: audioPath,
+                referenceFilePath: referencePath,
+                referenceData: referenceData,
+                aurisFormat: "fingerprint-compact-v3"
+            )
+        )
+    }
+
     private func makeFullCoverageEntries() -> [Entry] {
         // Reference duration = 100s; last entry at 99s clears fullCoverageThreshold = 0.95.
         return stride(from: 0.0, through: 99.0, by: 1.0).map {

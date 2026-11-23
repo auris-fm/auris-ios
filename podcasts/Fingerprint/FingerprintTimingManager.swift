@@ -1081,7 +1081,10 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
            let cached = FingerprintMappingCache.load(
                audioFilePath: audioFileURL.path,
                referenceFilePath: refPath,
-               referenceData: referenceData
+               referenceData: referenceData,
+               // A mapping is only reusable if it was matched against the Auris
+               // reference format this build accepts.
+               aurisFormat: ReferenceFingerprint.aurisFormat
            ) {
             // The cache is produced from `playbackToReference` (already sorted
             // by `playbackTime`), so assign it directly and sort once for the
@@ -1571,7 +1574,8 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
                     audioFilePath: ctx.audioFileURL.path,
                     referenceFilePath: ctx.referenceFilePath,
                     referenceData: ctx.referenceData,
-                    referenceDuration: ctx.referenceDuration
+                    referenceDuration: ctx.referenceDuration,
+                    aurisFormat: ReferenceFingerprint.aurisFormat
                 )
             }
         }

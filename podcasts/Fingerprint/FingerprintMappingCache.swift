@@ -22,6 +22,11 @@ enum FingerprintMappingCache {
 
     private struct CachedMapping: Codable {
         let schemaVersion: Int
+        /// The Auris reference format these entries were matched against. Recorded
+        /// separately from `referenceHash`, which covers the *transcript* reference:
+        /// a mapping can be perfectly current for that file and still have been built
+        /// against an endpoint reference whose hashes are no longer the ones we match.
+        let aurisFormat: String?
         let referenceHash: String
         let referenceByteSize: UInt64
         let referenceMTime: Double
@@ -41,7 +46,8 @@ enum FingerprintMappingCache {
     static func load(
         audioFilePath: String,
         referenceFilePath: String,
-        referenceData: Data
+        referenceData: Data,
+        aurisFormat: String? = nil
     ) -> LoadResult? {
         let path = mappingPath(forAudioFilePath: audioFilePath)
         guard let data = FileManager.default.contents(atPath: path) else { return nil }
@@ -54,6 +60,16 @@ enum FingerprintMappingCache {
         guard cached.schemaVersion == FingerprintConstants.mappingCacheSchemaVersion else {
             FileLog.shared.addMessage(
                 "FingerprintMappingCache: schema version mismatch at \(path) — discarding"
+            )
+            return nil
+        }
+        // A mapping built against a different Auris reference format is not usable even
+        // when the transcript reference is unchanged, so it is discarded rather than
+        // matched. Absent means it predates this field, which is also not v3.
+        guard cached.aurisFormat == aurisFormat else {
+            FileLog.shared.addMessage(
+                "FingerprintMappingCache: Auris format '\(cached.aurisFormat ?? "none")' "
+                    + "is not '\(aurisFormat ?? "none")' at \(path) — discarding"
             )
             return nil
         }
@@ -113,7 +129,8 @@ enum FingerprintMappingCache {
         audioFilePath: String,
         referenceFilePath: String,
         referenceData: Data,
-        referenceDuration: Double
+        referenceDuration: Double,
+        aurisFormat: String? = nil
     ) {
         guard let last = entries.last,
               referenceDuration > 0,
@@ -141,6 +158,7 @@ enum FingerprintMappingCache {
         let path = mappingPath(forAudioFilePath: audioFilePath)
         let cached = CachedMapping(
             schemaVersion: FingerprintConstants.mappingCacheSchemaVersion,
+            aurisFormat: aurisFormat,
             referenceHash: sha256(referenceData),
             referenceByteSize: refAttrs.size,
             referenceMTime: refAttrs.mtime,

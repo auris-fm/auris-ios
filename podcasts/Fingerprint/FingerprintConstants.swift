@@ -123,7 +123,7 @@ enum FingerprintConstants {
 
     /// Persistent cache schema version. Bump when the on-disk shape changes so
     /// older files are silently discarded on the next load.
-    static let mappingCacheSchemaVersion: Int = 2
+    static let mappingCacheSchemaVersion: Int = 3
 
     /// Highlighting is opt-in: a transcript word is only highlighted while playback
     /// sits between two committed anchors no further apart than this. Real content
