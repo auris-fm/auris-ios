@@ -146,10 +146,8 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
     /// the episode must not sit unprepared until then — so the wait is bounded and the pass runs
     /// if the reference has not arrived.
     ///
-    /// Reviewed, not tested: with no gateway configured the fetch returns nil immediately and the
-    /// completion starts the pass before any deadline could fire, so removing this bound leaves
-    /// the suite green (verified by mutation). Reaching it needs either a hanging endpoint or an
-    /// injectable interval, and test-only seams are not added here.
+    /// Covered by `testTheWaitForAnAurisReferenceIsBounded`, which injects a fetcher that never
+    /// returns; removing the bound leaves that case stuck in `.preparing`.
     private var awaitingReferenceDeadlineTask: Task<Void, Never>?
     /// Distinguishes one deferral from the next. A deadline that fires for a superseded deferral
     /// must not act, even though it cannot tell from the flag alone whether it is still the
@@ -188,9 +186,16 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
     /// How long a deferred pass waits for its Auris reference before fingerprinting anyway.
     /// Injected so a test can shorten it; the default is what production uses.
     private let aurisReferenceWaitSeconds: Double
+    /// Where the Auris reference comes from. Injected so a test can hold the fetch open and reach
+    /// the bounded wait; production uses the shared fetcher.
+    private let cloudReferenceFetcher: any CloudReferenceFetching
 
-    init(aurisReferenceWaitSeconds: Double = FingerprintConstants.aurisReferenceWaitSeconds) {
+    init(
+        aurisReferenceWaitSeconds: Double = FingerprintConstants.aurisReferenceWaitSeconds,
+        cloudReferenceFetcher: any CloudReferenceFetching = CloudFingerprintReferenceFetcher.shared
+    ) {
         self.aurisReferenceWaitSeconds = aurisReferenceWaitSeconds
+        self.cloudReferenceFetcher = cloudReferenceFetcher
         super.init()
         NotificationCenter.default.addObserver(
             self,
@@ -942,7 +947,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
     ) async -> CloudFingerprintReferenceFetcher.FetchedReference? {
         let baseUrl = CloudConfig.shared.baseUrl
         guard !baseUrl.isEmpty else { return nil }
-        let fetched = await CloudFingerprintReferenceFetcher.shared.fetchReference(baseUrl: baseUrl, episodeUuid: uuid, podcastUuid: podcastUuid)
+        let fetched = await cloudReferenceFetcher.fetchReference(baseUrl: baseUrl, episodeUuid: uuid, podcastUuid: podcastUuid)
         if let matcher = fetched?.matcher {
             FileLog.shared.addMessage("FingerprintTimingManager: cloud reference loaded (\(matcher.count()) checkpoints) for \(uuid)")
         } else {

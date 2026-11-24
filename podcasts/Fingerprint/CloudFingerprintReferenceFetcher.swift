@@ -8,7 +8,15 @@ import Foundation
 /// Returns nil on any failure (unconfigured, network, decode, no checkpoints,
 /// client-side timeout) so callers degrade gracefully to the transcript-sync
 /// path / `client_position_ms`.
-final class CloudFingerprintReferenceFetcher {
+/// What the timing manager needs from a reference fetcher. Injected so a test can supply one
+/// that never returns, which is the only way to reach the bounded wait.
+protocol CloudReferenceFetching {
+    func fetchReference(
+        baseUrl: String, episodeUuid: String, podcastUuid: String
+    ) async -> CloudFingerprintReferenceFetcher.FetchedReference?
+}
+
+final class CloudFingerprintReferenceFetcher: CloudReferenceFetching {
     static let shared = CloudFingerprintReferenceFetcher()
 
     /// Server blocks up to 2 minutes; client budget sits slightly above that.

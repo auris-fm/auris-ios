@@ -318,7 +318,9 @@ far-ahead cues.)
 `FingerprintMappingCache` saves a completed mapping next to the audio file as
 **`<audio-path>.map.fp.json`**, so reopening a transcript for an
 already-fingerprinted **downloaded** episode skips the decode+match pipeline
-entirely (`configureForReference` loads it and goes straight to `.active`).
+entirely (`configureForReference` loads it and goes straight to `.active`) — unless
+the mapping was built against an Auris reference, which is held until that
+reference confirms it (below).
 
 It is deliberately **all-or-nothing**. A cache is loaded only when *all* hold:
 
@@ -328,7 +330,15 @@ It is deliberately **all-or-nothing**. A cache is loaded only when *all* hold:
 - audio file identity unchanged (size + mtime) **and** a 64 KB content-sample hash
   matches,
 - the mapping covers `≥ fullCoverageThreshold` (95 %) of the reference timeline
-  (`lastEntry.referenceTime / referenceDuration`).
+  (`lastEntry.referenceTime / referenceDuration`),
+- **the recorded Auris identity matches the reference held now.** A mapping saved
+  while an Auris reference was in use records that reference's `format` **and** the
+  SHA-256 of its payload; both must match, so a same-format regeneration invalidates
+  it. A transcript-only mapping records neither and is unaffected. Holding a
+  *different* identity discards the cache; holding *none yet* is not a rejection —
+  the fetch may still be in flight, so the pass is deferred until it lands, bounded
+  by `aurisReferenceWaitSeconds`. When no fetch is outstanding the pass starts at
+  once, since nothing can confirm the mapping.
 
 Anything less and the cache is ignored and a full stream runs. (Partial-cache
 short-circuits were what previously trapped the manager in `.preparing`.) Saving
