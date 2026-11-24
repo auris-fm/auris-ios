@@ -996,6 +996,11 @@ final class CloudRouteClient {
                         // the same connection loss any other dead socket produces — never as a
                         // refusal, which would read as "you may not do that".
                         if redialledInheritedConnection, case .error(_, "duplicate_request", _) = event {
+                            // Admission is reported BEFORE the loss, and separately: the server holds
+                            // this conversation even though the answer went to a dead socket, so the
+                            // next follow-up may resume it. Yielding only the loss left the handle a
+                            // draft and restarted the user's thread on every such turn.
+                            continuation.yield(.admittedOnRetry)
                             continuation.yield(.error(source: .transport, code: "connection_lost", message: ""))
                             terminalFlag.set()
                             break receiveLoop

@@ -130,6 +130,16 @@ enum CloudRouteEvent: Equatable {
     /// Carried structurally because the two are indistinguishable from usage alone — a client that
     /// cannot tell them apart plays out an answer nobody is listening to.
     case done(usage: CloudTurnUsage, outcome: CloudTurnDoneOutcome = .completed)
+    /// THE SERVER ALREADY ADMITTED THIS REQUEST, observed as `duplicate_request` answering a retry
+    /// this client itself made (`cloud-assistant.md` → conversation mode: a handle is resumable on
+    /// `connected` "or as `duplicate_request` on a retry of that same request").
+    ///
+    /// Separate from the turn's error because the two answer different questions: the ANSWER went to
+    /// a dead socket, so the turn still reports its connection loss, while the ADMISSION is a fact
+    /// about the server and survives that loss. Only the transport knows whether this client re-sent
+    /// the frame, so the fact is carried structurally rather than inferred from a code the sink also
+    /// sees for duplicates that are not its own retry.
+    case admittedOnRetry
     /// Terminal error.
     /// WHERE the error originated, carried STRUCTURALLY so a consumer never has to infer it from the
     /// message text. Text sniffing misclassifies: a server could legitimately send a message that looks
