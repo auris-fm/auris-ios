@@ -1,13 +1,22 @@
 import Foundation
+@preconcurrency import Fingerprint
+
+/// What the timing manager needs from a reference fetcher. Injected so a test can supply one
+/// that never returns, which is the only way to reach the bounded wait.
+protocol CloudReferenceFetching {
+    func fetchReference(
+        baseUrl: String, episodeUuid: String, podcastUuid: String
+    ) async -> CloudFingerprintReferenceFetcher.FetchedReference?
+}
 
 /// Fetches the Auris cloud reference fingerprints for an episode from
 /// `GET /api/v1/episodes/{episode_uuid}/fingerprints` (cloud-ingestion.md) and
-/// parses the `fingerprint-compact-v2` payload into a `CloudReferenceMatcher`.
+/// parses the `fingerprint-compact-v3` payload into a library `CheckpointMatcher`.
 ///
 /// Returns nil on any failure (unconfigured, network, decode, no checkpoints,
 /// client-side timeout) so callers degrade gracefully to the transcript-sync
 /// path / `client_position_ms`.
-final class CloudFingerprintReferenceFetcher {
+final class CloudFingerprintReferenceFetcher: CloudReferenceFetching {
     static let shared = CloudFingerprintReferenceFetcher()
 
     /// Server blocks up to 2 minutes; client budget sits slightly above that.
@@ -31,7 +40,14 @@ final class CloudFingerprintReferenceFetcher {
         self.tokenProvider = tokenProvider
     }
 
-    func fetchReference(baseUrl: String, episodeUuid: String, podcastUuid: String) async -> CloudReferenceMatcher? {
+    /// The matcher and what identifies the payload it was built from. The bytes themselves are
+    /// not kept — only their hash, which is what a cached mapping has to be checked against.
+    struct FetchedReference {
+        let matcher: CheckpointMatcher
+        let identity: FingerprintMappingCache.AurisReferenceIdentity
+    }
+
+    func fetchReference(baseUrl: String, episodeUuid: String, podcastUuid: String) async -> FetchedReference? {
         let trimmedBase = baseUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard var components = URLComponents(string: "\(trimmedBase)/api/v1/episodes/\(episodeUuid)/fingerprints") else {
             return nil
@@ -71,7 +87,14 @@ final class CloudFingerprintReferenceFetcher {
                 }
                 switch outcome {
                 case .body(let data):
-                    return buildMatcher(from: data)
+                    guard let matcher = buildMatcher(from: data) else { return nil }
+                    return FetchedReference(
+                        matcher: matcher,
+                        identity: FingerprintMappingCache.AurisReferenceIdentity(
+                            format: ReferenceFingerprint.aurisFormat,
+                            payload: data
+                        )
+                    )
                 case .unauthorized:
                     // Report the rejected bearer only when a retry follows:
                     // each report rotates the SHARED Auris refresh chain, and
@@ -93,18 +116,25 @@ final class CloudFingerprintReferenceFetcher {
         case unauthorized
     }
 
-    /// Parses compact-v2 bytes into a matcher, or nil when unusable.
-    func buildMatcher(from data: Data) -> CloudReferenceMatcher? {
-        guard let reference = ReferenceFingerprint.decode(from: data) else { return nil }
+    /// Parses Auris reference bytes into a matcher, or nil when unusable.
+    ///
+    /// Only the Auris format is accepted here: the hashes in a reference of any other
+    /// format are not the ones this matcher is ranked against, so a non-v3 payload is
+    /// absent and alignment fails closed until a v3 reference arrives.
+    func buildMatcher(from data: Data) -> CheckpointMatcher? {
+        guard let reference = ReferenceFingerprint.decode(from: data, expectedFormat: ReferenceFingerprint.aurisFormat) else {
+            return nil
+        }
         let checkpoints = reference.libraryCheckpoints()
         guard !checkpoints.isEmpty else { return nil }
 
-        let matcher = CloudReferenceMatcher()
+        let matcher = CheckpointMatcher()
+        let duration = Float(reference.checkpointDurationSeconds)
         for checkpoint in checkpoints {
             matcher.add(
-                timestampSeconds: checkpoint.timestampSeconds,
+                timestamp: checkpoint.timestampSeconds,
                 hashes: checkpoint.hashes,
-                durationSeconds: reference.checkpointDurationSeconds
+                duration: duration
             )
         }
         return matcher

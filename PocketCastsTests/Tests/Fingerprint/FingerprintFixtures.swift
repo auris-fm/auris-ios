@@ -136,7 +136,8 @@ enum FingerprintFixtures {
     /// matcher can't build anything from.
     static func referenceWithoutCheckpoints(totalDuration: Double) throws -> Data {
         let json: [String: Any] = [
-            "format": ReferenceFingerprint.supportedFormat,
+            // The transcript host is not ours to migrate, and it serves v2.
+            "format": ReferenceFingerprint.transcriptFormat,
             "total_duration": totalDuration,
             "checkpoint_interval": checkpointIntervalSeconds,
             "checkpoint_duration": checkpointDurationSeconds,
@@ -207,7 +208,8 @@ enum FingerprintFixtures {
         }
 
         let json: [String: Any] = [
-            "format": ReferenceFingerprint.supportedFormat,
+            // Built from our own fingerprinting for transcript sync, which keeps v2.
+            "format": ReferenceFingerprint.transcriptFormat,
             "total_duration": Double(file.length) / format.sampleRate,
             "checkpoint_interval": checkpointIntervalSeconds,
             "checkpoint_duration": checkpointDurationSeconds,

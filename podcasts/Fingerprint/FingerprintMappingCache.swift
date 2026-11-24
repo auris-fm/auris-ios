@@ -18,10 +18,38 @@ enum FingerprintMappingCache {
     struct LoadResult {
         let entries: [FingerprintTimingManager.TimeMappingEntry]
         let referenceDuration: Double
+        /// The stored mapping is otherwise intact but was built against an Auris reference the
+        /// caller does not hold yet. Distinct from "no usable cache": the caller should wait for
+        /// the fetch and ask again rather than start fingerprinting an episode it may already
+        /// have mapped. Only set when no identity was supplied at all — a *mismatched* identity
+        /// is a real rejection and stays nil.
+        var pendingAurisIdentity: Bool = false
+    }
+
+    /// What identifies the Auris reference a mapping was built against: its format and the
+    /// bytes themselves. Both are needed — the format says which scheme, the hash says which
+    /// payload within that scheme.
+    struct AurisReferenceIdentity {
+        let format: String
+        let hash: String
+
+        init(format: String, payload: Data) {
+            self.format = format
+            self.hash = sha256(payload)
+        }
     }
 
     private struct CachedMapping: Codable {
         let schemaVersion: Int
+        /// The Auris reference format these entries were matched against. Recorded
+        /// separately from `referenceHash`, which covers the *transcript* reference:
+        /// a mapping can be perfectly current for that file and still have been built
+        /// against an endpoint reference whose hashes are no longer the ones we match.
+        let aurisFormat: String?
+        /// sha256 of the Auris payload itself, recorded only when an Auris reference was in
+        /// use. The format alone cannot tell two v3 payloads apart, and the endpoint can
+        /// re-emit the same episode with different hashes while still calling it v3.
+        let aurisHash: String?
         let referenceHash: String
         let referenceByteSize: UInt64
         let referenceMTime: Double
@@ -41,7 +69,8 @@ enum FingerprintMappingCache {
     static func load(
         audioFilePath: String,
         referenceFilePath: String,
-        referenceData: Data
+        referenceData: Data,
+        aurisReference: AurisReferenceIdentity? = nil
     ) -> LoadResult? {
         let path = mappingPath(forAudioFilePath: audioFilePath)
         guard let data = FileManager.default.contents(atPath: path) else { return nil }
@@ -93,6 +122,34 @@ enum FingerprintMappingCache {
             )
             return nil
         }
+        // Checked last, so a stale or corrupt file is rejected on its own merits and never
+        // reported as merely waiting for a reference.
+        //
+        // The recorded identity must describe the reference the caller holds NOW, in both
+        // directions. A mapping built with an Auris reference cannot be reused when the caller
+        // holds none — offline, or the endpoint unavailable — because its entries came from a
+        // reference that can no longer be confirmed. Comparing only when a reference is present
+        // would let exactly that case through. A transcript-only mapping records no identity
+        // and is unaffected.
+        if cached.aurisFormat != nil || cached.aurisHash != nil {
+            guard let auris = aurisReference else {
+                // Nothing held yet: the fetch may still be in flight. Everything else about this
+                // mapping checks out, so tell the caller to wait rather than re-fingerprint an
+                // episode it may already have mapped.
+                FileLog.shared.addMessage(
+                    "FingerprintMappingCache: mapping at \(path) awaits its Auris reference"
+                )
+                return LoadResult(entries: [], referenceDuration: 0, pendingAurisIdentity: true)
+            }
+            guard cached.aurisFormat == auris.format, cached.aurisHash == auris.hash else {
+                FileLog.shared.addMessage(
+                    "FingerprintMappingCache: Auris reference changed (format "
+                        + "'\(cached.aurisFormat ?? "none")', hash '\(cached.aurisHash ?? "none")' "
+                        + "at \(path) — discarding"
+                )
+                return nil
+            }
+        }
         FileLog.shared.addMessage(
             "FingerprintMappingCache: loaded \(cached.entries.count) cached mappings from \(path)"
         )
@@ -113,7 +170,8 @@ enum FingerprintMappingCache {
         audioFilePath: String,
         referenceFilePath: String,
         referenceData: Data,
-        referenceDuration: Double
+        referenceDuration: Double,
+        aurisReference: AurisReferenceIdentity? = nil
     ) {
         guard let last = entries.last,
               referenceDuration > 0,
@@ -141,6 +199,8 @@ enum FingerprintMappingCache {
         let path = mappingPath(forAudioFilePath: audioFilePath)
         let cached = CachedMapping(
             schemaVersion: FingerprintConstants.mappingCacheSchemaVersion,
+            aurisFormat: aurisReference?.format,
+            aurisHash: aurisReference?.hash,
             referenceHash: sha256(referenceData),
             referenceByteSize: refAttrs.size,
             referenceMTime: refAttrs.mtime,

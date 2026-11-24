@@ -56,7 +56,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         /// transcript-sync reference above. A closure rather than a value so
         /// a late-arriving matcher is visible to the already-running stream
         /// (PR #14 wave-2 review: a value snapshot stayed nil forever).
-        let cloudMatcherProvider: () -> CloudReferenceMatcher?
+        let cloudMatcherProvider: () -> CheckpointMatcher?
         /// Raw bytes of the reference fingerprint JSON, used to validate the
         /// persistent mapping cache via SHA-256.
         let referenceData: Data
@@ -134,7 +134,26 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
     /// the Auris cloud independently of the transcript-sync reference. Only
     /// touched on `queue` (fetch returns the matcher; assignment happens on
     /// `queue` so the documented invariant holds).
-    private var cloudMatcher: CloudReferenceMatcher?
+    private var cloudMatcher: CheckpointMatcher?
+    /// What identifies the Auris payload this episode's mapping is built against. Nil when no
+    /// Auris reference was in use, which leaves a transcript-only mapping reusable.
+/// Set when configuration held the stream back because a stored mapping was waiting for its
+    /// Auris reference. Only the fetch completion may clear it, by adopting that mapping or by
+    /// starting the pass that was deferred. Without this the completion cannot tell "a pass is
+    /// already running" from "nothing has started", and would start a second stream.
+    private var isAwaitingAurisReferenceForStream = false
+    /// Guards the deferral. The fetcher may take its full timeout, or never resolve at all, and
+    /// the episode must not sit unprepared until then — so the wait is bounded and the pass runs
+    /// if the reference has not arrived.
+    ///
+    /// Covered by `testTheWaitForAnAurisReferenceIsBounded`, which injects a fetcher that never
+    /// returns; removing the bound leaves that case stuck in `.preparing`.
+    private var awaitingReferenceDeadlineTask: Task<Void, Never>?
+    /// Distinguishes one deferral from the next. A deadline that fires for a superseded deferral
+    /// must not act, even though it cannot tell from the flag alone whether it is still the
+    /// current one.
+    private var awaitingReferenceToken = 0
+        private var aurisReferenceIdentity: FingerprintMappingCache.AurisReferenceIdentity?
     /// Per-stream Go-scheme fingerprinter fed the same decoded PCM as the Rust
     /// streamer; its windows are matched against [cloudMatcher].
     private var cancellationFlag = CancellationFlag()
@@ -164,7 +183,19 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
 
     // MARK: - Init
 
-    override init() {
+    /// How long a deferred pass waits for its Auris reference before fingerprinting anyway.
+    /// Injected so a test can shorten it; the default is what production uses.
+    private let aurisReferenceWaitSeconds: Double
+    /// Where the Auris reference comes from. Injected so a test can hold the fetch open and reach
+    /// the bounded wait; production uses the shared fetcher.
+    private let cloudReferenceFetcher: any CloudReferenceFetching
+
+    init(
+        aurisReferenceWaitSeconds: Double = FingerprintConstants.aurisReferenceWaitSeconds,
+        cloudReferenceFetcher: any CloudReferenceFetching = CloudFingerprintReferenceFetcher.shared
+    ) {
+        self.aurisReferenceWaitSeconds = aurisReferenceWaitSeconds
+        self.cloudReferenceFetcher = cloudReferenceFetcher
         super.init()
         NotificationCenter.default.addObserver(
             self,
@@ -251,7 +282,12 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
                     "FingerprintTimingManager: playback jumped \(String(format: "%.1f", delta))s — restarting from \(String(format: "%.1f", playbackTime))s"
                 )
                 #endif
-                restart(from: playbackTime, context: ctx)
+                // A pass held back for its Auris reference must stay held: starting one here
+                // would run unguarded, since the completion only knows to adopt or start when
+                // nothing has. The position is picked up when the deferral is resolved.
+                if !isAwaitingAurisReferenceForStream {
+                    restart(from: playbackTime, context: ctx)
+                }
                 lastProgressPosition = playbackTime
                 return
             }
@@ -533,7 +569,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
 
         if flag.isCancelled { return .unresolved(reason: "timeout", isStreaming: false) }
         guard let referenceData,
-              let reference = ReferenceFingerprint.decode(from: referenceData) else {
+              let reference = ReferenceFingerprint.decode(from: referenceData, expectedFormat: ReferenceFingerprint.transcriptFormat) else {
             return .unresolved(reason: "no_reference", isStreaming: false)
         }
 
@@ -755,7 +791,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
 
         guard !flag.isCancelled,
               let referenceData,
-              let reference = ReferenceFingerprint.decode(from: referenceData) else {
+              let reference = ReferenceFingerprint.decode(from: referenceData, expectedFormat: ReferenceFingerprint.transcriptFormat) else {
             FileLog.shared.addMessage(
                 "FingerprintTimingManager: bookmark resolve gave up for \(episodeUuid) — no usable reference"
             )
@@ -858,6 +894,9 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         fetchTask = nil
         cancellationFlag.cancel()
         cancellationFlag = CancellationFlag()
+        isAwaitingAurisReferenceForStream = false
+        awaitingReferenceDeadlineTask?.cancel()
+        awaitingReferenceDeadlineTask = nil
         context = nil
         main = MappingAccumulator()
         lastProgressPosition = -1
@@ -902,16 +941,19 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
     /// reference. Returns the matcher (nil when unconfigured or unavailable);
     /// the caller assigns it on `queue` — this function never touches state
     /// directly, since it runs on the cooperative pool (PR #14 review).
-    private func fetchCloudReference(uuid: String, podcastUuid: String) async -> CloudReferenceMatcher? {
+    private func fetchCloudReference(
+        uuid: String,
+        podcastUuid: String
+    ) async -> CloudFingerprintReferenceFetcher.FetchedReference? {
         let baseUrl = CloudConfig.shared.baseUrl
         guard !baseUrl.isEmpty else { return nil }
-        let matcher = await CloudFingerprintReferenceFetcher.shared.fetchReference(baseUrl: baseUrl, episodeUuid: uuid, podcastUuid: podcastUuid)
-        if let matcher {
-            FileLog.shared.addMessage("FingerprintTimingManager: cloud reference loaded (\(matcher.count) checkpoints) for \(uuid)")
+        let fetched = await cloudReferenceFetcher.fetchReference(baseUrl: baseUrl, episodeUuid: uuid, podcastUuid: podcastUuid)
+        if let matcher = fetched?.matcher {
+            FileLog.shared.addMessage("FingerprintTimingManager: cloud reference loaded (\(matcher.count()) checkpoints) for \(uuid)")
         } else {
             FileLog.shared.addMessage("FingerprintTimingManager: cloud reference unavailable for \(uuid)")
         }
-        return matcher
+        return fetched
     }
 
     private func prepareForEpisode(_ episode: BaseEpisode?) {
@@ -935,6 +977,12 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         // here (on `queue`) so the late-arriving fetch below can't race it and
         // so a stale matcher can never leak into the new episode's context.
         cloudMatcher = nil
+        isAwaitingAurisReferenceForStream = false
+        awaitingReferenceDeadlineTask?.cancel()
+        awaitingReferenceDeadlineTask = nil
+        // The identity goes with it: keeping the previous episode's would gate this one's
+        // mapping against a payload it was never matched against.
+        aurisReferenceIdentity = nil
 
         if let loaded = loadReference(for: episode) {
             // Transcript-sync configuration runs immediately — the cloud fetch
@@ -942,7 +990,9 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
             // gateway used to delay the context build by up to the full cloud
             // client timeout). The matcher lands async and becomes live via
             // the context's matcher provider.
-            configureForReference(loaded.reference, referenceData: loaded.data, episode: episode)
+            configureForReference(
+                loaded.reference, referenceData: loaded.data, episode: episode, aurisFetchPending: true
+            )
             let flag = cancellationFlag
             fetchTask = Task { [weak self] in
                 guard let self, !flag.isCancelled else { return }
@@ -952,7 +1002,31 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
                     // The running stream reads the matcher through the
                     // context's provider, so this assignment alone makes the
                     // late-arriving reference live immediately.
-                    self.cloudMatcher = matcher
+                    self.cloudMatcher = matcher?.matcher
+                    self.aurisReferenceIdentity = matcher?.identity
+
+                    // Configuration may have deferred the stream because a stored mapping was
+                    // waiting for this reference. Now that the identity is known, ask again:
+                    // adopt the mapping if the reference confirms it, otherwise start the pass
+                    // that was held back. Either way the episode is not left unprepared.
+                    // Only when a pass was actually held back. Otherwise one is already running
+                    // and must be left alone — starting another would double-match every window.
+                    guard self.isAwaitingAurisReferenceForStream,
+                          let ctx = self.context, ctx.episodeUuid == uuid else { return }
+                    self.isAwaitingAurisReferenceForStream = false
+                    self.awaitingReferenceDeadlineTask?.cancel()
+                    self.awaitingReferenceDeadlineTask = nil
+                    let position = PlaybackManager.shared.currentTime()
+                    // The fetch is finished, so this is the last chance to decide. If it returned
+                    // no reference the mapping can never be confirmed, and `.awaitingReference`
+                    // must NOT be honoured again — waiting on a fetch that has already completed
+                    // leaves the episode in `.preparing` forever. Fingerprint instead.
+                    switch self.adoptCachedMappingIfUsable(context: ctx, currentTime: position) {
+                    case .adopted:
+                        break
+                    case .startStream, .awaitingReference:
+                        self.startStream(context: ctx, fromPosition: position)
+                    }
                 }
             }
             return
@@ -985,9 +1059,10 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
             self?.queue.async { [weak self] in
                 guard let self, !flag.isCancelled else { return }
 
-                self.cloudMatcher = matcher
+                self.cloudMatcher = matcher?.matcher
+                self.aurisReferenceIdentity = matcher?.identity
 
-                guard let data, let reference = ReferenceFingerprint.decode(from: data) else {
+                guard let data, let reference = ReferenceFingerprint.decode(from: data, expectedFormat: ReferenceFingerprint.transcriptFormat) else {
                     self.updateState(.unavailable)
                     self.track(.syncedTranscriptsUnavailable, properties: ["reason": "no_reference"])
                     FileLog.shared.addMessage("FingerprintTimingManager: no reference available for \(uuid)")
@@ -995,15 +1070,23 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
                 }
 
                 self.saveReferenceData(data, for: episode)
-                self.configureForReference(reference, referenceData: data, episode: episode)
+                // The cloud fetch has already completed on this path, so nothing will confirm a
+                // mapping that is waiting for its reference.
+                self.configureForReference(
+                    reference, referenceData: data, episode: episode, aurisFetchPending: false
+                )
             }
         }
     }
 
+    /// - Parameter aurisFetchPending: whether an Auris fetch will still complete for this
+    ///   preparation. When it will not, a mapping awaiting its reference can never be confirmed,
+    ///   so the pass starts at once instead of waiting out the deadline for nothing.
     private func configureForReference(
         _ reference: ReferenceFingerprint,
         referenceData: Data,
-        episode: BaseEpisode
+        episode: BaseEpisode,
+        aurisFetchPending: Bool
     ) {
         let uuid = episode.uuid
 
@@ -1072,48 +1155,127 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         // Capture once so the range check, log, and stream start all use the same position.
         let currentTime = PlaybackManager.shared.currentTime()
 
-        // All-or-nothing cache: only short-circuit the stream if a previous
-        // session persisted a mapping that covers the whole reference timeline
-        // for this exact audio file + reference. Partial caches are ignored
-        // (the failed branch's `inRange` short-circuit on partial coverage was
-        // what trapped the manager in `.preparing`).
-        if !isStreaming,
-           let cached = FingerprintMappingCache.load(
-               audioFilePath: audioFileURL.path,
-               referenceFilePath: refPath,
-               referenceData: referenceData
-           ) {
-            // The cache is produced from `playbackToReference` (already sorted
-            // by `playbackTime`), so assign it directly and sort once for the
-            // reference-keyed view — avoids the O(n²) cost of routing every
-            // entry through `insertMapping`'s per-entry `Array.insert`.
-            main.playbackToReference = cached.entries
-            main.referenceToPlayback = cached.entries.sorted { $0.referenceTime < $1.referenceTime }
-
-            if isWithinMappedRange(currentTime) {
-                main.filterLastTrusted = cached.entries.last
-                let coverage = cached.entries.count
-                updateState(.active(coverage: coverage))
-                if !hasReachedActive {
-                    hasReachedActive = true
-                    track(.syncedTranscriptsPreparationCompleted, properties: [
-                        "duration_ms": preparationDurationMs,
-                        "is_streaming": isStreaming
-                    ])
-                }
-                FileLog.shared.addMessage(
-                    "FingerprintTimingManager: skipping stream — full mapping loaded from cache for \(uuid)"
+        let adoption = adoptCachedMappingIfUsable(context: newContext, currentTime: currentTime)
+        switch adoption {
+        case .adopted:
+            return
+        case .awaitingReference where !aurisFetchPending:
+            // Nothing is coming to confirm it. Waiting would only delay the pass by the full
+            // interval and then do exactly this.
+            startStream(context: newContext, fromPosition: currentTime)
+            return
+        case .awaitingReference:
+            // The fetch completion either adopts the mapping or starts this stream. Whichever
+            // happens first, the wait is bounded: a slow or unreachable endpoint must not leave
+            // the episode unprepared for its full timeout.
+            isAwaitingAurisReferenceForStream = true
+            awaitingReferenceDeadlineTask?.cancel()
+            awaitingReferenceToken &+= 1
+            let token = awaitingReferenceToken
+            let waitSeconds = aurisReferenceWaitSeconds
+            awaitingReferenceDeadlineTask = Task { [weak self] in
+                try? await Task.sleep(
+                    nanoseconds: UInt64(waitSeconds * 1_000_000_000)
                 )
-                return
+                guard !Task.isCancelled else { return }
+                self?.queue.async { [weak self] in
+                    guard let self, self.isAwaitingAurisReferenceForStream,
+                          self.awaitingReferenceToken == token else { return }
+                    // Check the episode before touching any state. A deadline that fired for the
+                    // previous episode must never disarm the current one's deferral, which would
+                    // leave this episode in `.preparing` with nothing to resolve it.
+                    guard let ctx = self.context, ctx.generation == newContext.generation else {
+                        return
+                    }
+                    self.isAwaitingAurisReferenceForStream = false
+                    self.awaitingReferenceDeadlineTask = nil
+                    FileLog.shared.addMessage(
+                        "FingerprintTimingManager: no Auris reference for \(ctx.episodeUuid) in time — starting the pass"
+                    )
+                    self.startStream(context: ctx, fromPosition: PlaybackManager.shared.currentTime())
+                }
             }
+            return
+        case .startStream:
+            startStream(context: newContext, fromPosition: currentTime)
+        }
+    }
 
+    /// What the cache check decided about starting a fingerprint stream.
+    enum CacheAdoption {
+        /// Adopted a complete mapping; no stream needed.
+        case adopted
+        /// No usable mapping; fingerprint as usual.
+        case startStream
+        /// A mapping exists but awaits the Auris reference. Start nothing yet — the fetch
+        /// completion asks again, and starts the stream if the reference does not confirm it.
+        case awaitingReference
+    }
+
+    /// Loads a persisted mapping for this context and adopts it when it is usable, reporting
+    /// what should happen to the stream.
+    ///
+    /// On the stored-reference path this runs during configuration, before the Auris fetch has
+    /// established the identity, so a mapping built against that reference comes back as
+    /// `.awaitingReference` rather than being refused outright. The pass is held until the fetch
+    /// resolves it — or, when no fetch is outstanding, started at once. Without that, every such
+    /// mapping would be re-fingerprinted on every re-open.
+    private func adoptCachedMappingIfUsable(
+        context ctx: GenerationContext,
+        currentTime: Double
+    ) -> CacheAdoption {
+        guard !ctx.isStreaming else { return .startStream }
+        // All-or-nothing cache: only short-circuit the stream if a previous session persisted a
+        // mapping covering the whole reference timeline for this exact audio file + reference.
+        // Partial caches are ignored (the failed branch's `inRange` short-circuit on partial
+        // coverage was what trapped the manager in `.preparing`).
+        guard let cached = FingerprintMappingCache.load(
+            audioFilePath: ctx.audioFileURL.path,
+            referenceFilePath: ctx.referenceFilePath,
+            referenceData: ctx.referenceData,
+            // A mapping that recorded an Auris identity is only reusable against that same
+            // identity; a transcript-only mapping records none and stays reusable.
+            aurisReference: aurisReferenceIdentity
+        ) else { return .startStream }
+
+        // A mapping that is intact but awaits the Auris reference must not be treated as "no
+        // cache": starting the stream here re-fingerprints an episode this device may already
+        // have mapped. Wait for the fetch, which asks again with the identity in hand.
+        if cached.pendingAurisIdentity {
             FileLog.shared.addMessage(
-                "FingerprintTimingManager: cache loaded for \(uuid) but playback at "
-                    + "\(String(format: "%.1f", currentTime))s is outside cached range — starting stream"
+                "FingerprintTimingManager: deferring stream for \(ctx.episodeUuid) until its Auris reference lands"
             )
+            return .awaitingReference
         }
 
-        startStream(context: newContext, fromPosition: currentTime)
+        // The cache is produced from `playbackToReference` (already sorted by `playbackTime`),
+        // so assign it directly and sort once for the reference-keyed view — avoids the O(n²)
+        // cost of routing every entry through `insertMapping`'s per-entry `Array.insert`.
+        main.playbackToReference = cached.entries
+        main.referenceToPlayback = cached.entries.sorted { $0.referenceTime < $1.referenceTime }
+
+        guard isWithinMappedRange(currentTime) else {
+            FileLog.shared.addMessage(
+                "FingerprintTimingManager: cache loaded for \(ctx.episodeUuid) but playback at "
+                    + "\(String(format: "%.1f", currentTime))s is outside cached range — starting stream"
+            )
+            return .startStream
+        }
+
+        main.filterLastTrusted = cached.entries.last
+        let coverage = cached.entries.count
+        updateState(.active(coverage: coverage))
+        if !hasReachedActive {
+            hasReachedActive = true
+            track(.syncedTranscriptsPreparationCompleted, properties: [
+                "duration_ms": preparationDurationMs,
+                "is_streaming": ctx.isStreaming
+            ])
+        }
+        FileLog.shared.addMessage(
+            "FingerprintTimingManager: skipping stream — full mapping loaded from cache for \(ctx.episodeUuid)"
+        )
+        return .adopted
     }
 
     /// Build a `CheckpointMatcher` populated from every usable checkpoint in
@@ -1291,11 +1453,6 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         }
 
         var interleaved: [Float] = []
-        // Per-stream cloud fingerprinter: owned by this stream run, flushed on
-        // every exit path (including cancellation) so buffered PCM and stale
-        // windows can never leak into the next stream (PR #14 review).
-        var cloudFingerprinter: CloudFingerprinter?
-        defer { flushCloudFingerprinter(&cloudFingerprinter, startOffset: startSeconds, context: ctx) }
         while true {
             if ctx.isCancelled() { throw StreamError.cancelled }
             let nextChunkStartSeconds = Double(audioFile.framePosition) / format.sampleRate
@@ -1308,7 +1465,6 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
             if !windows.isEmpty {
                 dispatchProcessMatches(windows: windows, startOffset: startSeconds, context: ctx)
             }
-            feedCloudFingerprinter(&cloudFingerprinter, samples: interleaved, channels: Int(channels), sampleRate: Int(format.sampleRate), startOffset: startSeconds, context: ctx)
         }
 
         if ctx.isCancelled() { throw StreamError.cancelled }
@@ -1407,12 +1563,6 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         var totalFramesRead: AVAudioFramePosition = 0
         var windowsEmitted = 0
         var interleaved: [Float] = []
-        // Per-stream cloud fingerprinter, flushed on every exit path (PR #14
-        // review): the grow-loop previously fed a manager-level instance shared
-        // with the continuous path's queue.
-        var cloudFingerprinter: CloudFingerprinter?
-        defer { flushCloudFingerprinter(&cloudFingerprinter, startOffset: startSeconds, context: ctx) }
-
         FileLog.shared.addMessage(
             "FingerprintTimingManager: streaming grow-loop starting at \(String(format: "%.1f", startSeconds))s "
                 + "(buffer path: \(ctx.audioFileURL.lastPathComponent))"
@@ -1534,7 +1684,6 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
                 windowsEmitted += windows.count
                 dispatchProcessMatches(windows: windows, startOffset: startSeconds, context: ctx)
             }
-            feedCloudFingerprinter(&cloudFingerprinter, samples: interleaved, channels: Int(fmt.channelCount), sampleRate: Int(fmt.sampleRate), startOffset: startSeconds, context: ctx)
         }
 
         if ctx.isCancelled() { throw StreamError.cancelled }
@@ -1574,13 +1723,18 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         queue.async { [weak self] in
             guard let self, self.context?.episodeUuid == ctx.episodeUuid else { return }
             let snapshot = self.main.playbackToReference
+            // Read here, on `queue`, beside the snapshot it describes. Reading it inside the
+            // generationQueue block would race the fetch that writes it and could persist a
+            // mapping with no identity — or another episode's.
+            let aurisIdentity = self.aurisReferenceIdentity
             self.generationQueue.async {
                 FingerprintMappingCache.save(
                     snapshot,
                     audioFilePath: ctx.audioFileURL.path,
                     referenceFilePath: ctx.referenceFilePath,
                     referenceData: ctx.referenceData,
-                    referenceDuration: ctx.referenceDuration
+                    referenceDuration: ctx.referenceDuration,
+                    aurisReference: aurisIdentity
                 )
             }
         }
@@ -1678,6 +1832,13 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         context ctx: GenerationContext
     ) {
         Self.matchWindows(windows: windows, startOffset: startOffset, matcher: ctx.matcher, into: &main)
+        // The Auris matcher reads the same windows as the transcript matcher: both
+        // references carry the library's own values, so one stream of windows serves
+        // both. It is additional, not a replacement — an episode with no cloud
+        // reference simply has no provider and nothing happens here.
+        if ctx.cloudMatcherProvider() != nil {
+            processCloudMatches(windows: windows, startOffset: startOffset, context: ctx)
+        }
 
         let coverage = main.playbackToReference.count
         if coverage >= FingerprintConstants.minimumCoverageForActive {
@@ -1698,11 +1859,6 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
     /// `WindowScoring` normalizes the two matchers; the path-specific wrappers
     /// below supply window hashing, per-path timestamp semantics and debug
     /// logging.
-    private struct WindowMatch {
-        let referenceTime: Double
-        let score: Float
-    }
-
     private protocol WindowScoring {
         /// Returns up to `maxResults` candidates, best first.
         func topMatches(queryHashes: [UInt32], maxResults: Int) -> [WindowMatch]
@@ -1714,15 +1870,6 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         func topMatches(queryHashes: [UInt32], maxResults: Int) -> [WindowMatch] {
             matcher.findTopMatches(queryHashes: queryHashes, maxResults: UInt32(maxResults))
                 .map { WindowMatch(referenceTime: Double($0.timestamp), score: $0.score) }
-        }
-    }
-
-    private struct CloudReferenceMatcherScoring: WindowScoring {
-        let matcher: CloudReferenceMatcher
-
-        func topMatches(queryHashes: [UInt32], maxResults: Int) -> [WindowMatch] {
-            matcher.findTopMatches(queryHashes: queryHashes, maxResults: maxResults)
-                .map { WindowMatch(referenceTime: Double($0.timestampSeconds), score: $0.score) }
         }
     }
 
@@ -1743,18 +1890,19 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         windowHashes: (W) -> [UInt32],
         windowTimestampSeconds: (W) -> Double,
         rejectionPrefix: String,
+        rule: MatchAcceptanceRule = .transcript,
         onBestScore: ((Float) -> Void)? = nil,
         into acc: inout MappingAccumulator
     ) -> Int {
         var inserted = 0
         for window in windows {
-            // Pull top-2 so we can check how dominant the winner is — ambiguous
-            // wins (top-1 barely beats top-2) are the hallmark of correlated
-            // false positives from non-matching audio.
-            let matches = scoring.topMatches(queryHashes: windowHashes(window), maxResults: 2)
+            // The rule decides how many candidates to pull and which rival counts:
+            // the transcript path compares against the immediate runner-up, the Auris
+            // path against the best candidate more than 2s away.
+            let matches = scoring.topMatches(queryHashes: windowHashes(window), maxResults: rule.maxResults)
             guard let best = matches.first else { continue }
             if best.score > 0 { onBestScore?(best.score) }
-            guard best.score >= FingerprintConstants.matchScoreThreshold else { continue }
+            guard best.score >= rule.scoreThreshold else { continue }
 
             let candidate = TimeMappingEntry(
                 playbackTime: startOffset + windowTimestampSeconds(window),
@@ -1765,7 +1913,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
             // Pre-filter gates. Low-score and ambiguous matches are recorded as
             // rejections so the debug overlay can visualize "matcher fired but
             // we didn't trust it" distinctly from "matcher never fired here".
-            if best.score < FingerprintConstants.driftAnchorScoreThreshold {
+            if best.score < rule.anchorScoreThreshold {
                 recordRejection(
                     candidate,
                     reason: "\(rejectionPrefix)low score \(String(format: "%.2f", best.score))",
@@ -1773,19 +1921,25 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
                 )
                 continue
             }
-            let runnerUpScore = matches.dropFirst().first?.score ?? 0
-            let dominance = best.score - runnerUpScore
-            if dominance < FingerprintConstants.driftScoreDominanceGap {
-                recordRejection(
-                    candidate,
-                    reason: "\(rejectionPrefix)ambiguous top-1 vs top-2 "
-                        + "(\(String(format: "%.2f", best.score)) vs \(String(format: "%.2f", runnerUpScore)))",
-                    into: &acc
-                )
-                continue
+            // The same decision the fixture tests exercise, so the rule cannot drift
+            // away from what is checked.
+            switch rule.verdict(for: matches) {
+            case .success:
+                inserted += consider(candidate: candidate, into: &acc)
+            case .failure(let rejection):
+                let reason: String
+                switch rejection {
+                case .scoreBelowFloor:
+                    reason = "low score \(String(format: "%.2f", best.score))"
+                case .noDistantCandidate:
+                    reason = "no distant candidate (best \(String(format: "%.2f", best.score)))"
+                case .leadTooSmall:
+                    let rival = rule.rivalScore(in: matches, best: best) ?? 0
+                    reason = "ambiguous top-1 vs rival "
+                        + "(\(String(format: "%.2f", best.score)) vs \(String(format: "%.2f", rival)))"
+                }
+                recordRejection(candidate, reason: "\(rejectionPrefix)\(reason)", into: &acc)
             }
-
-            inserted += consider(candidate: candidate, into: &acc)
         }
         return inserted
     }
@@ -1842,63 +1996,12 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
 
     // MARK: - Cloud Alignment
 
-    /// Feeds decoded PCM into the per-stream CloudFingerprinter and dispatches
-    /// any newly-emitted windows for cloud matching. No-op when the context has
-    /// no cloud reference (transcript-sync-only episodes).
-    private func feedCloudFingerprinter(
-        _ fingerprinter: inout CloudFingerprinter?,
-        samples: [Float],
-        channels: Int,
-        sampleRate: Int,
-        startOffset: Double,
-        context ctx: GenerationContext
-    ) {
-        guard ctx.cloudMatcherProvider() != nil else { return }
-        if fingerprinter == nil {
-            fingerprinter = CloudFingerprinter()
-        }
-        fingerprinter?.pushSamples(samples, channels: channels, sampleRate: sampleRate)
-        guard let emitted = fingerprinter?.drainWindows(), !emitted.isEmpty else { return }
-        dispatchCloudMatches(windows: emitted, startOffset: startOffset, context: ctx)
-    }
-
-    /// Finishes the per-stream CloudFingerprinter, matching any windows whose
-    /// lookahead only became available at EOF. Callers own the instance and
-    /// run this on every exit path (defer), so a cancelled stream can never
-    /// leak buffered PCM into the next episode's stream (PR #14 review).
-    private func flushCloudFingerprinter(
-        _ fingerprinter: inout CloudFingerprinter?,
-        startOffset: Double,
-        context ctx: GenerationContext
-    ) {
-        guard let fp = fingerprinter else { return }
-        fingerprinter = nil
-        let tail = fp.finish()
-        if !tail.isEmpty {
-            dispatchCloudMatches(windows: tail, startOffset: startOffset, context: ctx)
-        }
-    }
-
-    private func dispatchCloudMatches(
-        windows: [CloudFingerprinter.Window],
-        startOffset: Double,
-        context ctx: GenerationContext
-    ) {
-        queue.async { [weak self] in
-            // Same generation guard as dispatchProcessMatches: after a
-            // seek-restart the superseded stream's queued windows must not
-            // interleave with the new stream's bootstrap (PR #14 wave-2).
-            guard let self, self.context?.generation == ctx.generation else { return }
-            self.processCloudMatches(windows: windows, startOffset: startOffset, context: ctx)
-        }
-    }
-
     /// Matches cloud-fingerprinter windows against the cloud reference and
     /// routes candidates through the same drift filter as the transcript path.
-    /// Mirrors `processMatches` but uses `CloudReferenceMatcher` and the
+    /// Mirrors `processMatches` but uses the Auris cloud matcher and the
     /// Go-scheme window hashes (identical scheme to the server's reference).
     private func processCloudMatches(
-        windows: [CloudFingerprinter.Window],
+        windows: [WindowedFingerprint],
         startOffset: Double,
         context ctx: GenerationContext
     ) {
@@ -1909,10 +2012,12 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         Self.matchWindowsCore(
             windows: windows,
             startOffset: startOffset,
-            scoring: CloudReferenceMatcherScoring(matcher: cloudMatcher),
+            scoring: CheckpointMatcherScoring(matcher: cloudMatcher),
             windowHashes: { $0.hashes },
-            windowTimestampSeconds: { Double($0.timestampSec) },
+            windowTimestampSeconds: { Double($0.timestampMs) / 1000.0 },
             rejectionPrefix: "cloud ",
+            // The Auris endpoint's own acceptance rule, not transcript sync's.
+            rule: .auris,
             into: &main
         )
 
@@ -2141,7 +2246,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
     private func loadReference(for episode: BaseEpisode) -> (data: Data, reference: ReferenceFingerprint)? {
         let path = referencePath(for: episode)
         guard let data = FileManager.default.contents(atPath: path),
-              let reference = ReferenceFingerprint.decode(from: data) else { return nil }
+              let reference = ReferenceFingerprint.decode(from: data, expectedFormat: ReferenceFingerprint.transcriptFormat) else { return nil }
         return (data, reference)
     }
 

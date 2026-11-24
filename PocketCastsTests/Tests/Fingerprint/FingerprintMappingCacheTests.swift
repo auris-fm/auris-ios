@@ -250,6 +250,211 @@ final class FingerprintMappingCacheTests: XCTestCase {
 
     // MARK: - Helpers
 
+    // MARK: - Auris reference format
+
+    /// A mapping matched against a v2 Auris reference is discarded once this build
+    /// accepts only v3 — even though the transcript reference file is byte-identical,
+    /// so the hash guard cannot catch it. The two guards cover different references.
+    func testAMappingBuiltAgainstAV2AurisReferenceIsDiscarded() throws {
+        let entries = makeFullCoverageEntries()
+        FingerprintMappingCache.save(
+            entries,
+            audioFilePath: audioPath,
+            referenceFilePath: referencePath,
+            referenceData: referenceData,
+            referenceDuration: 100,
+            aurisReference: FingerprintMappingCache.AurisReferenceIdentity(
+                format: "fingerprint-compact-v2", payload: Data("v2-payload".utf8)
+            )
+        )
+
+        XCTAssertNil(
+            FingerprintMappingCache.load(
+                audioFilePath: audioPath,
+                referenceFilePath: referencePath,
+                referenceData: referenceData,
+                aurisReference: FingerprintMappingCache.AurisReferenceIdentity(
+                format: "fingerprint-compact-v3", payload: Data("v3-payload".utf8)
+            )
+            ),
+            "the transcript reference is unchanged, so only the recorded Auris format can reject this"
+        )
+    }
+
+    /// The same mapping is reusable when the format matches, which is what makes the
+    /// case above a rejection rather than a cache that never loads at all.
+    func testAMappingBuiltAgainstV3IsReusable() throws {
+        let entries = makeFullCoverageEntries()
+        FingerprintMappingCache.save(
+            entries,
+            audioFilePath: audioPath,
+            referenceFilePath: referencePath,
+            referenceData: referenceData,
+            referenceDuration: 100,
+            aurisReference: FingerprintMappingCache.AurisReferenceIdentity(
+                format: "fingerprint-compact-v3", payload: Data("v3-payload".utf8)
+            )
+        )
+
+        let loaded = try XCTUnwrap(
+            FingerprintMappingCache.load(
+                audioFilePath: audioPath,
+                referenceFilePath: referencePath,
+                referenceData: referenceData,
+                aurisReference: FingerprintMappingCache.AurisReferenceIdentity(
+                format: "fingerprint-compact-v3", payload: Data("v3-payload".utf8)
+            )
+            )
+        )
+        XCTAssertEqual(loaded.entries.count, entries.count)
+    }
+
+    /// A cache written before this build is discarded, and by the schema version rather than
+    /// by the identity gate: those caches carry no identity at all, which under the current
+    /// rule reads as transcript-only and would otherwise be reusable. The schema bump is what
+    /// makes them unusable, so this asserts that mechanism instead of implying the gate does it.
+    func testAMappingSavedBeforeThisBuildIsDiscarded() throws {
+        let entries = makeFullCoverageEntries()
+        FingerprintMappingCache.save(
+            entries,
+            audioFilePath: audioPath,
+            referenceFilePath: referencePath,
+            referenceData: referenceData,
+            referenceDuration: 100
+        )
+
+        // Rewrite the stored schema to the previous build's, leaving everything else as this
+        // build wrote it, so the only difference under test is the version.
+        let path = FingerprintMappingCache.mappingPath(forAudioFilePath: audioPath)
+        var json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: try Data(contentsOf: URL(fileURLWithPath: path))) as? [String: Any]
+        )
+        XCTAssertEqual(json["schemaVersion"] as? Int, 3, "this build should be writing schema 3")
+        json["schemaVersion"] = 2
+        try JSONSerialization.data(withJSONObject: json).write(to: URL(fileURLWithPath: path))
+
+        XCTAssertNil(
+            FingerprintMappingCache.load(
+                audioFilePath: audioPath,
+                referenceFilePath: referencePath,
+                referenceData: referenceData,
+                aurisReference: FingerprintMappingCache.AurisReferenceIdentity(
+                    format: "fingerprint-compact-v3", payload: Data("v3-payload".utf8)
+                )
+            ),
+            "a cache from the previous schema must not be reused"
+        )
+    }
+
+    /// A mapping built with no Auris reference at all stays reusable. Only mappings that
+    /// carry Auris entries can be invalidated by an Auris change, so gating every mapping on
+    /// it would throw away transcript-only work for no reason.
+    func testATranscriptOnlyMappingStaysReusable() throws {
+        let entries = makeFullCoverageEntries()
+        FingerprintMappingCache.save(
+            entries,
+            audioFilePath: audioPath,
+            referenceFilePath: referencePath,
+            referenceData: referenceData,
+            referenceDuration: 100
+        )
+
+        let loaded = try XCTUnwrap(
+            FingerprintMappingCache.load(
+                audioFilePath: audioPath,
+                referenceFilePath: referencePath,
+                referenceData: referenceData
+            ),
+            "no Auris reference was in use, so nothing about the endpoint can invalidate this"
+        )
+        XCTAssertEqual(loaded.entries.count, entries.count)
+    }
+
+    /// Two payloads can both be v3 and still carry different hashes. The format alone cannot
+    /// tell them apart, which is why the payload's own hash is recorded too.
+    func testADifferentV3PayloadDiscardsTheMapping() throws {
+        let entries = makeFullCoverageEntries()
+        FingerprintMappingCache.save(
+            entries,
+            audioFilePath: audioPath,
+            referenceFilePath: referencePath,
+            referenceData: referenceData,
+            referenceDuration: 100,
+            aurisReference: FingerprintMappingCache.AurisReferenceIdentity(
+                format: "fingerprint-compact-v3", payload: Data("first-payload".utf8)
+            )
+        )
+
+        XCTAssertNil(
+            FingerprintMappingCache.load(
+                audioFilePath: audioPath,
+                referenceFilePath: referencePath,
+                referenceData: referenceData,
+                aurisReference: FingerprintMappingCache.AurisReferenceIdentity(
+                    format: "fingerprint-compact-v3", payload: Data("second-payload".utf8)
+                )
+            ),
+            "same format, different bytes — only the payload hash can reject this"
+        )
+    }
+
+    /// A mapping built with an Auris reference cannot be reused when the caller now holds
+    /// none — offline, or the endpoint unavailable. Its entries came from a reference that can
+    /// no longer be confirmed, so "nothing to compare against" is not "still current".
+    func testAMappingBuiltWithAnAurisReferenceIsDiscardedWhenNoneIsHeldNow() throws {
+        let entries = makeFullCoverageEntries()
+        FingerprintMappingCache.save(
+            entries,
+            audioFilePath: audioPath,
+            referenceFilePath: referencePath,
+            referenceData: referenceData,
+            referenceDuration: 100,
+            aurisReference: FingerprintMappingCache.AurisReferenceIdentity(
+                format: "fingerprint-compact-v3", payload: Data("v3-payload".utf8)
+            )
+        )
+
+        // Not reusable, but NOT discarded either: nothing is held *yet*, which is different from
+        // holding a different reference. The caller must wait for the fetch rather than start
+        // fingerprinting an episode it may already have mapped.
+        let pending = try XCTUnwrap(
+            FingerprintMappingCache.load(
+                audioFilePath: audioPath,
+                referenceFilePath: referencePath,
+                referenceData: referenceData
+            ),
+            "the transcript reference is unchanged, so only the recorded identity stands in the way"
+        )
+        XCTAssertTrue(pending.pendingAurisIdentity)
+        XCTAssertTrue(pending.entries.isEmpty, "nothing may be adopted before the reference confirms it")
+
+        // Holding a DIFFERENT reference is a real rejection, not a wait.
+        XCTAssertNil(
+            FingerprintMappingCache.load(
+                audioFilePath: audioPath,
+                referenceFilePath: referencePath,
+                referenceData: referenceData,
+                aurisReference: FingerprintMappingCache.AurisReferenceIdentity(
+                    format: "fingerprint-compact-v3", payload: Data("a-different-payload".utf8)
+                )
+            )
+        )
+
+        // And the same reference makes it usable.
+        let confirmed = try XCTUnwrap(
+            FingerprintMappingCache.load(
+                audioFilePath: audioPath,
+                referenceFilePath: referencePath,
+                referenceData: referenceData,
+                aurisReference: FingerprintMappingCache.AurisReferenceIdentity(
+                    format: "fingerprint-compact-v3", payload: Data("v3-payload".utf8)
+                )
+            )
+        )
+        XCTAssertFalse(confirmed.pendingAurisIdentity)
+        XCTAssertEqual(confirmed.entries.count, entries.count)
+    }
+
     private func makeFullCoverageEntries() -> [Entry] {
         // Reference duration = 100s; last entry at 99s clears fullCoverageThreshold = 0.95.
         return stride(from: 0.0, through: 99.0, by: 1.0).map {

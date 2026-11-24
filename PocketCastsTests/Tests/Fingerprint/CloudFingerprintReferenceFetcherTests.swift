@@ -4,9 +4,12 @@ import XCTest
 
 final class CloudFingerprintReferenceFetcherTests: XCTestCase {
 
-    /// Builds a compact-v2 payload whose checkpoints carry the parity hashes
-    /// (delta 0 for the first window, then 1 per 1s stride).
-    private func compactV2Data() -> Data {
+    /// Builds a payload whose checkpoints carry the parity hashes (delta 0 for the
+    /// first window, then 1 per 1s stride). The format is a parameter so a case can
+    /// present the reference as either source; the strings are written out rather
+    /// than read from the constants, so a case cannot pass by comparing a value
+    /// with itself.
+    private func compactData(format: String) -> Data {
         let windows = CloudFingerprintParityData.signal16kMonoWindows
         var checkpoints: [String] = []
         for (index, hashes) in windows.enumerated() {
@@ -21,7 +24,7 @@ final class CloudFingerprintReferenceFetcherTests: XCTestCase {
         }
         let json = """
         {
-          "format": "fingerprint-compact-v2",
+          "format": "\(format)",
           "total_duration": 10.0,
           "checkpoint_interval": 1,
           "checkpoint_duration": 8,
@@ -32,14 +35,30 @@ final class CloudFingerprintReferenceFetcherTests: XCTestCase {
         return Data(json.utf8)
     }
 
-    func testBuildMatcherParsesCompactV2Checkpoints() throws {
-        let matcher = try XCTUnwrap(CloudFingerprintReferenceFetcher.shared.buildMatcher(from: compactV2Data()))
-        XCTAssertEqual(matcher.count, 3)
+    /// The endpoint's references load straight into the library matcher: the payload
+    /// carries the library's own hash values, so no scoring adapter sits between them.
+    func testBuildMatcherLoadsAnAurisReferenceIntoTheLibraryMatcher() throws {
+        let matcher = try XCTUnwrap(
+            CloudFingerprintReferenceFetcher.shared.buildMatcher(from: compactData(format: "fingerprint-compact-v3"))
+        )
+        XCTAssertEqual(matcher.count(), 3)
 
-        let matches = matcher.findTopMatches(queryHashes: CloudFingerprintParityData.signal16kMonoWindows[1], maxResults: 3)
+        let matches = matcher.findTopMatches(
+            queryHashes: CloudFingerprintParityData.signal16kMonoWindows[1],
+            maxResults: 3
+        )
         XCTAssertEqual(matches.count, 3)
-        XCTAssertTrue(matches.allSatisfy { $0.score == 1.0 }, "parity hashes must match the parsed reference checkpoints")
-        XCTAssertTrue(matches.contains { $0.timestampSeconds == 1 })
+        XCTAssertTrue(matches.allSatisfy { $0.score == 1.0 }, "the hashes must match the loaded checkpoints")
+        XCTAssertTrue(matches.contains { $0.timestamp == 1 })
+    }
+
+    /// A v2 reference is refused, so alignment fails closed rather than matching a
+    /// reference whose hashes are not the ones this endpoint's matcher is ranked
+    /// against. Literal format, deliberately: deriving it would test v3 against v3.
+    func testBuildMatcherRefusesAV2Reference() {
+        XCTAssertNil(
+            CloudFingerprintReferenceFetcher.shared.buildMatcher(from: compactData(format: "fingerprint-compact-v2"))
+        )
     }
 
     func testBuildMatcherReturnsNilForInvalidPayload() {

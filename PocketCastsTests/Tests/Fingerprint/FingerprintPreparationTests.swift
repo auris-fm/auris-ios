@@ -1,3 +1,4 @@
+import PocketCastsServer
 import XCTest
 
 @testable import PocketCastsUtils
@@ -212,6 +213,8 @@ final class FingerprintPreparationTests: XCTestCase {
             referenceFilePath: fixture.referenceURL.path,
             referenceData: try Data(contentsOf: fixture.referenceURL),
             referenceDuration: duration
+            // No Auris reference is in use here, so this is written exactly as the manager
+            // writes a transcript-only mapping: with no Auris identity to be held to.
         )
         XCTAssertTrue(
             FileManager.default.fileExists(atPath: fixture.mappingCachePath),
@@ -301,6 +304,267 @@ final class FingerprintPreparationTests: XCTestCase {
 
     /// Puts an episode's files where the manager looks for them, makes it the
     /// episode preparation will pick up, and hands back a fresh manager.
+    /// Switching episodes must not carry the previous episode's mapping into the new one.
+    /// The cloud matcher and the identity describing its payload are both per-episode; keeping
+    /// either would let one episode's reference gate — or populate — another's mapping, which
+    /// looks like a valid cache and isn't.
+    func testSwitchingEpisodesDoesNotCarryThePreviousMapping() async throws {
+        try prepareFixture(duration: Self.episodeDuration) { fixture in
+            try fixture.writeAudio(seconds: Self.episodeDuration)
+            try fixture.writeReference()
+        }
+
+        manager.prepareForCurrentEpisode()
+        await waitUntil("the first episode to map") { self.manager.state.analyticsName == "active" }
+        let firstMapping = manager.debugMappingSnapshot()
+        XCTAssertFalse(firstMapping.isEmpty, "the first episode never mapped, so this proves nothing")
+
+        // A different episode, with its own audio and reference files.
+        let second = FingerprintEpisodeFixture(duration: Self.episodeDuration)
+        try second.writeAudio(seconds: Self.episodeDuration)
+        try second.writeReference()
+        currentEpisode?.restore()
+        currentEpisode = CurrentEpisodeOverride(episode: second.episode)
+
+        manager.prepareForCurrentEpisode()
+
+        // Whatever the second episode ends up doing, it must not still be holding the first
+        // one's anchors: those timestamps describe different audio.
+        XCTAssertEqual(
+            manager.debugMappingSnapshot().count, 0,
+            "the previous episode's mapping survived the switch"
+        )
+    }
+
+    /// A stored mapping that awaits its Auris reference must not strand the episode.
+    ///
+    /// Configuration defers the stream for such a mapping, because re-fingerprinting an episode
+    /// this device may already have mapped is wasteful. But the fetch can come back with nothing —
+    /// offline, or no endpoint configured, which is the case here. Then the mapping can never be
+    /// confirmed and the pass must run anyway.
+    ///
+    /// This is the regression an earlier version had: it honoured "still awaiting" after the fetch
+    /// had already finished, so the manager sat in `.preparing` until the test timed out. Every
+    /// cache unit test passed throughout, because they call `load` directly and never drive this
+    /// path.
+    func testAMappingAwaitingItsAurisReferenceStillPreparesWhenNoneArrives() async throws {
+        try prepareFixture(duration: Self.episodeDuration) { fixture in
+            try fixture.writeAudio(seconds: Self.episodeDuration)
+            try fixture.writeReference()
+        }
+        let fixture = try XCTUnwrap(self.fixture)
+
+        // A complete mapping attributed to an Auris reference this build cannot fetch.
+        let stored = stride(from: 0.0, through: Self.episodeDuration - 1, by: 1.0).map {
+            FingerprintTimingManager.TimeMappingEntry(
+                playbackTime: $0, referenceTime: $0 + 500, score: 0.9
+            )
+        }
+        FingerprintMappingCache.save(
+            stored,
+            audioFilePath: fixture.audioURL.path,
+            referenceFilePath: fixture.referenceURL.path,
+            referenceData: try Data(contentsOf: fixture.referenceURL),
+            referenceDuration: Self.episodeDuration,
+            aurisReference: FingerprintMappingCache.AurisReferenceIdentity(
+                format: ReferenceFingerprint.aurisFormat, payload: Data("reopen-test-payload".utf8)
+            )
+        )
+
+        manager.prepareForCurrentEpisode()
+        await waitForPass(manager)
+
+        XCTAssertEqual(manager.state.analyticsName, "active", "the episode was left unprepared")
+        let entries = manager.debugMappingSnapshot()
+        XCTAssertFalse(entries.isEmpty, "no pass ran, so the deferred stream was never started")
+        // The unconfirmable mapping must not have been adopted: its timestamps describe a
+        // reference that was never verified.
+        XCTAssertTrue(
+            entries.allSatisfy { $0.referenceTime < 500 },
+            "an unconfirmed mapping was adopted"
+        )
+    }
+
+    /// A seek while the Auris reference is still being fetched must not start a pass behind the
+    /// deferral's back.
+    ///
+    /// The deferral assumes nothing is running. A seek calls `restart`, and the fetch completion
+    /// never learns about it: it would adopt a mapping under a live pass, or start a second one.
+    /// Nothing may start until the deferral resolves.
+    ///
+    /// LIMIT, stated rather than papered over: this covers the deferral, not the seek guard.
+    /// The guard needs the real playback position to move, which no test can do without a hook;
+    /// removing it leaves this green (verified by mutation), so it is reviewed rather than tested.
+    /// The deadline and the download path have their own cases below, each shown red without its fix.
+    /// `restart` is reached only through the progress timer reading the real playback position,
+    /// which a test cannot move without adding a hook. Removing the guard from `restart` leaves
+    /// this test green — verified by mutation. The guard is therefore reviewed, not tested.
+    func testAPassIsNotStartedWhileAMappingAwaitsItsReference() async throws {
+        try prepareFixture(duration: Self.episodeDuration) { fixture in
+            try fixture.writeAudio(seconds: Self.episodeDuration)
+            try fixture.writeReference()
+        }
+        let fixture = try XCTUnwrap(self.fixture)
+
+        let stored = stride(from: 0.0, through: Self.episodeDuration - 1, by: 1.0).map {
+            FingerprintTimingManager.TimeMappingEntry(
+                playbackTime: $0, referenceTime: $0 + 500, score: 0.9
+            )
+        }
+        FingerprintMappingCache.save(
+            stored,
+            audioFilePath: fixture.audioURL.path,
+            referenceFilePath: fixture.referenceURL.path,
+            referenceData: try Data(contentsOf: fixture.referenceURL),
+            referenceDuration: Self.episodeDuration,
+            aurisReference: FingerprintMappingCache.AurisReferenceIdentity(
+                format: ReferenceFingerprint.aurisFormat, payload: Data("seek-during-fetch".utf8)
+            )
+        )
+
+        manager.prepareForCurrentEpisode()
+        XCTAssertEqual(
+            manager.debugMappingSnapshot().count, 0,
+            "the deferred path started a pass anyway"
+        )
+
+        // The wait is bounded, so the episode is prepared even when no reference arrives.
+        await waitForPass(manager)
+        XCTAssertEqual(manager.state.analyticsName, "active", "the episode was left unprepared")
+    }
+
+    /// A fetcher that never returns, so the bounded wait is the only thing that can start the pass.
+    private struct NeverReturningFetcher: CloudReferenceFetching {
+        func fetchReference(
+            baseUrl: String, episodeUuid: String, podcastUuid: String
+        ) async -> CloudFingerprintReferenceFetcher.FetchedReference? {
+            try? await Task.sleep(nanoseconds: 600_000_000_000)
+            return nil
+        }
+    }
+
+    /// The wait for an Auris reference is bounded: an episode must not stay unprepared because the
+    /// reference never arrives.
+    ///
+    /// Deleting the deadline leaves this stuck in `.preparing` — verified by mutation.
+    func testTheWaitForAnAurisReferenceIsBounded() async throws {
+        try prepareFixture(duration: Self.episodeDuration) { fixture in
+            try fixture.writeAudio(seconds: Self.episodeDuration)
+            try fixture.writeReference()
+        }
+        let fixture = try XCTUnwrap(self.fixture)
+        try saveAurisTaggedMapping(for: fixture, payload: "bounded-wait")
+
+        // The gateway must stay configured until the pass finishes: the fetch reads it
+        // asynchronously, so restoring it right after `prepare` would skip the fetch entirely and
+        // this case would pass without ever reaching the deadline.
+        let gatewayKey = GatewayURLProvider.baseURLKey
+        let previousGateway = UserDefaults.standard.object(forKey: gatewayKey)
+        UserDefaults.standard.set("https://gateway.test.example.com", forKey: gatewayKey)
+        defer {
+            if let previousGateway {
+                UserDefaults.standard.set(previousGateway, forKey: gatewayKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: gatewayKey)
+            }
+        }
+
+        manager = FingerprintTimingManager(
+            aurisReferenceWaitSeconds: 0.5,
+            cloudReferenceFetcher: NeverReturningFetcher()
+        )
+        manager.prepareForCurrentEpisode()
+        await waitForPass(manager)
+
+        XCTAssertEqual(manager.state.analyticsName, "active", "the episode was left unprepared")
+        XCTAssertFalse(
+            manager.debugMappingSnapshot().isEmpty,
+            "the pass never started, so the deadline did not fire"
+        )
+        XCTAssertTrue(
+            manager.debugMappingSnapshot().allSatisfy { $0.referenceTime < 500 },
+            "an unconfirmed mapping was adopted"
+        )
+    }
+
+    /// On the download path the cloud fetch has already finished before configuration runs, so a
+    /// mapping awaiting its Auris reference must start at once rather than wait out the interval.
+    ///
+    /// The transcript reference is served by a URLProtocol stub — the retriever uses
+    /// `URLSession.shared` with no token, so no production seam is needed. Removing the
+    /// `!aurisFetchPending` case leaves this stuck in `.preparing` for the full 600 s wait.
+    func testTheDownloadPathDoesNotWaitWhenNoAurisFetchIsOutstanding() async throws {
+        // No stored reference file: this forces the download path.
+        try prepareFixture(duration: Self.episodeDuration) { fixture in
+            try fixture.writeAudio(seconds: Self.episodeDuration)
+            try fixture.writeReference()
+        }
+        let fixture = try XCTUnwrap(self.fixture)
+        let referenceBytes = try Data(contentsOf: fixture.referenceURL)
+        // Save while the reference file still exists — `save` stats it and refuses otherwise —
+        // then remove it so preparation takes the download path. The download rewrites the same
+        // bytes, so the file identity the cache recorded still matches when it is loaded.
+        try saveAurisTaggedMapping(for: fixture, payload: "download-path")
+        try FileManager.default.removeItem(at: fixture.referenceURL)
+
+        ReferenceServingURLProtocol.body = referenceBytes
+        URLProtocol.registerClass(ReferenceServingURLProtocol.self)
+        defer {
+            URLProtocol.unregisterClass(ReferenceServingURLProtocol.self)
+            ReferenceServingURLProtocol.body = nil
+        }
+
+        manager = FingerprintTimingManager(aurisReferenceWaitSeconds: 600)
+        manager.prepareForCurrentEpisode()
+        await waitForPass(manager)
+
+        XCTAssertEqual(
+            manager.state.analyticsName, "active",
+            "the pass waited for a fetch that had already finished"
+        )
+        // The case is only meaningful if the mapping survived to be considered. `load` compares
+        // the reference file's mtime within a second, and this path rewrites that file, so a slow
+        // machine could drop the cache and start the pass by the ordinary route — passing without
+        // touching the code under test. Assert the mapping was actually pending at load time.
+        let cached = FingerprintMappingCache.load(
+            audioFilePath: fixture.audioURL.path,
+            referenceFilePath: fixture.referenceURL.path,
+            referenceData: referenceBytes
+        )
+        XCTAssertEqual(
+            cached?.pendingAurisIdentity, true,
+            "the stored mapping was not pending its reference, so this case proved nothing"
+        )
+        XCTAssertTrue(
+            manager.debugMappingSnapshot().allSatisfy { $0.referenceTime < 500 },
+            "an unconfirmed mapping was adopted"
+        )
+    }
+
+    /// Writes a complete mapping attributed to an Auris reference, with timestamps no real pass over
+    /// this audio would produce, so adopting it is distinguishable from fingerprinting.
+    private func saveAurisTaggedMapping(
+        for fixture: FingerprintEpisodeFixture,
+        payload: String,
+        referenceData: Data? = nil
+    ) throws {
+        let stored = stride(from: 0.0, through: Self.episodeDuration - 1, by: 1.0).map {
+            FingerprintTimingManager.TimeMappingEntry(
+                playbackTime: $0, referenceTime: $0 + 500, score: 0.9
+            )
+        }
+        FingerprintMappingCache.save(
+            stored,
+            audioFilePath: fixture.audioURL.path,
+            referenceFilePath: fixture.referenceURL.path,
+            referenceData: try referenceData ?? Data(contentsOf: fixture.referenceURL),
+            referenceDuration: Self.episodeDuration,
+            aurisReference: FingerprintMappingCache.AurisReferenceIdentity(
+                format: ReferenceFingerprint.aurisFormat, payload: Data(payload.utf8)
+            )
+        )
+    }
+
     private func prepareFixture(
         duration: Double,
         writeFiles: (FingerprintEpisodeFixture) throws -> Void
@@ -311,4 +575,28 @@ final class FingerprintPreparationTests: XCTestCase {
         currentEpisode = CurrentEpisodeOverride(episode: fixture.episode)
         manager = FingerprintTimingManager()
     }
+}
+
+/// Serves fixed bytes for the transcript reference request. Registered globally, so it needs no
+/// production hook; unregistered by the test that installs it.
+private final class ReferenceServingURLProtocol: URLProtocol {
+    static var body: Data?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let body = Self.body else {
+            client?.urlProtocol(self, didFailWithError: URLError(.fileDoesNotExist))
+            return
+        }
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }

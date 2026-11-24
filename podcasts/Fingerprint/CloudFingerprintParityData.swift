@@ -3,7 +3,7 @@ import Foundation
 /// Parity data generated from the server's Go SpectralGenerator
 /// (internal/fingerprint/client_fixtures_test.go). Do not edit by hand —
 /// regenerate with `go test -run TestGenerateClientParityFixtures` in server/.
-/// The signal formula must stay in lockstep with CloudFingerprinterTests.
+/// The signal formula must stay in lockstep with CloudFingerprintReferenceFetcherTests.
 enum CloudFingerprintParityData {
     /// 16 kHz mono input, 10 s: 3 windows at 0/1/2 s, 20 hashes each.
     static let signal16kMonoWindows: [[UInt32]] = [

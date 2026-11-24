@@ -79,6 +79,33 @@ enum FingerprintConstants {
     /// matches whose nearby reference windows also score decently).
     static let driftScoreDominanceGap: Float = 0.05
 
+    // MARK: - Auris reference matching
+
+    /// Thresholds for matching against the **Auris endpoint's** reference. These are
+    /// deliberately separate from the transcript-sync values above: the two sources
+    /// serve different references and the acceptance rule was written against the
+    /// Auris one, so cloud matching must not drift when the transcript path is tuned.
+    ///
+    /// How long preparation waits for an Auris reference before fingerprinting anyway. The
+    /// fetcher's own timeout is far longer, and a deferred episode shows nothing while it waits.
+    static let aurisReferenceWaitSeconds: Double = 10
+
+    /// Minimum score for a cloud candidate to be considered at all.
+    static let aurisMatchScoreThreshold: Float = 0.65
+
+    /// Required lead over the best candidate **more than `aurisDistantCandidateSeconds`
+    /// away**. Measured against a distant rival rather than the immediate runner-up
+    /// because neighbouring reference windows always score alike: they are the same
+    /// audio a moment later, so a nearby rival proves nothing about ambiguity, while a
+    /// strong distant one is exactly the false-positive shape worth rejecting.
+    static let aurisDominanceGap: Float = 0.05
+
+    /// How far apart two candidates must be before one counts as a rival.
+    static let aurisDistantCandidateSeconds: Double = 2
+
+    /// How many candidates to ask the matcher for. The rule ranks the top 6.
+    static let aurisMaxResults: Int = 6
+
     /// Distance ahead of `PlaybackManager.currentTime()` within which the streaming
     /// fingerprint loop runs at full speed. Beyond this lead, the loop still
     /// processes every chunk (so coverage still grows to EOF), but it sleeps
@@ -100,7 +127,7 @@ enum FingerprintConstants {
 
     /// Persistent cache schema version. Bump when the on-disk shape changes so
     /// older files are silently discarded on the next load.
-    static let mappingCacheSchemaVersion: Int = 2
+    static let mappingCacheSchemaVersion: Int = 3
 
     /// Highlighting is opt-in: a transcript word is only highlighted while playback
     /// sits between two committed anchors no further apart than this. Real content

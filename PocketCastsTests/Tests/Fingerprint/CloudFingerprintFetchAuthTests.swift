@@ -27,10 +27,13 @@ final class CloudFingerprintFetchAuthTests: XCTestCase {
         return URLSession(configuration: config)
     }
 
-    /// A minimal valid compact-v2 body so a 200 parses into a matcher.
-    private func compactV2Body() -> Data {
+    /// A minimal valid Auris body so a 200 parses into a matcher. These cases are about the
+    /// bearer token and the retry, so the payload has to be one the Auris site accepts — a v2
+    /// body would be refused for its format and every assertion here would fail for the wrong
+    /// reason. The format is a literal, not the constant under test.
+    private func aurisBody() -> Data {
         let json = """
-        {"format":"fingerprint-compact-v2","total_duration":8.0,"checkpoint_interval":1,"checkpoint_duration":8,"timestamp_quantum":1,"checkpoints":[[0,"AQAAAA=="]]}
+        {"format":"fingerprint-compact-v3","total_duration":8.0,"checkpoint_interval":1,"checkpoint_duration":8,"timestamp_quantum":1,"checkpoints":[[0,"AQAAAA=="]]}
         """
         return Data(json.utf8)
     }
@@ -38,7 +41,7 @@ final class CloudFingerprintFetchAuthTests: XCTestCase {
     func testRequestCarriesTheSelectedProvidersTokenAndThePodcastId() async throws {
         var seen: [URLRequest] = []
         CloudRouteTestURLProtocol.onRequest = { request, _ in seen.append(request) }
-        let body = compactV2Body()
+        let body = aurisBody()
         CloudRouteTestURLProtocol.requestHandler = { _ in
             .complete(status: 200, headers: ["Content-Type": "application/json"], body: body)
         }
@@ -68,7 +71,7 @@ final class CloudFingerprintFetchAuthTests: XCTestCase {
         var seen: [URLRequest] = []
         CloudRouteTestURLProtocol.onRequest = { request, _ in seen.append(request) }
         CloudRouteTestURLProtocol.requestHandler = { _ in
-            .complete(status: 200, headers: [:], body: self.compactV2Body())
+            .complete(status: 200, headers: [:], body: self.aurisBody())
         }
 
         let fetcher = CloudFingerprintReferenceFetcher(
@@ -117,7 +120,7 @@ final class CloudFingerprintFetchAuthTests: XCTestCase {
         CloudRouteTestURLProtocol.onRequest = { request, _ in
             seen.append(request.value(forHTTPHeaderField: "Authorization") ?? "")
         }
-        let body = compactV2Body()
+        let body = aurisBody()
         CloudRouteTestURLProtocol.requestHandler = { request in
             if request.value(forHTTPHeaderField: "Authorization") == "Bearer fresh-token" {
                 return .complete(status: 200, headers: ["Content-Type": "application/json"], body: body)
