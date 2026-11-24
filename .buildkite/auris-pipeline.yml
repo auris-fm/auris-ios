@@ -40,3 +40,4 @@ steps:
     artifact_paths:
       - "artifacts/*.log"
       - "artifacts/*.xcresult.zip"
+      - "artifacts/stuck-sample-*.txt"
