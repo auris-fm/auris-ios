@@ -1407,6 +1407,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // The conversation this turn carries, used to stamp an interruption report so the report
         // can be discarded if the user abandons that conversation.
         let turnConversationId = sentConversation.conversationId
+        // Whether this turn ESTABLISHED the conversation rather than continuing one. A `resume`
+        // names a handle that was already acknowledged, so admission evidence adds nothing there.
+        let turnOpenedConversation = sentConversation.mode == CloudConversationManager.create
         // Every terminal exit finalizes this request's unresolved hold. Done/refusal already
         // resolve it; cancellation and truncated streams must discard it rather than strand B.
         defer {
@@ -1828,6 +1831,21 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     turnResult = .completed
                     turnResponse = .silent
                     break turnLoop
+                case .admittedOnRetry:
+                    // THE SERVER HOLDS THIS CONVERSATION even though this turn's answer went to a
+                    // dead socket (`cloud-assistant.md` → conversation mode). Admission is a fact
+                    // about the server, not about the socket that carried the reply, so the handle
+                    // becomes resumable here exactly as it does on `connected`. Without this the
+                    // next follow-up opened a fresh conversation and the user's thread restarted.
+                    //
+                    // The turn's OWN outcome is untouched: the loss is still reported below, because
+                    // the answer really was lost. Only a create can be admitted this way — a resume
+                    // was already acknowledged, and the transport only emits this for a frame this
+                    // client itself re-sent.
+                    if turnOpenedConversation {
+                        lastAdmittedConversationId = turnConversationId
+                        conversationManager.acknowledge(conversationId: turnConversationId)
+                    }
                 case let .error(_, code, _):
                     // AN ENDED CONVERSATION IS NOT A BROKEN ONE: the server no longer holds this
                     // id, so every later resume of it is refused the same way. Leave it here, at

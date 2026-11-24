@@ -333,6 +333,6 @@ final class CloudConversationManager {
 
     
 
-    private static let create = "create"
+    static let create = "create"
     private static let resume = "resume"
 }
