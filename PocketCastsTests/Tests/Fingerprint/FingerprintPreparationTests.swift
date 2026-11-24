@@ -455,14 +455,25 @@ final class FingerprintPreparationTests: XCTestCase {
         let fixture = try XCTUnwrap(self.fixture)
         try saveAurisTaggedMapping(for: fixture, payload: "bounded-wait")
 
-        // The gateway must be configured or the fetch is skipped before the fetcher is consulted.
-        try withGatewayConfigured {
-            manager = FingerprintTimingManager(
-                aurisReferenceWaitSeconds: 0.5,
-                cloudReferenceFetcher: NeverReturningFetcher()
-            )
-            manager.prepareForCurrentEpisode()
+        // The gateway must stay configured until the pass finishes: the fetch reads it
+        // asynchronously, so restoring it right after `prepare` would skip the fetch entirely and
+        // this case would pass without ever reaching the deadline.
+        let gatewayKey = GatewayURLProvider.baseURLKey
+        let previousGateway = UserDefaults.standard.object(forKey: gatewayKey)
+        UserDefaults.standard.set("https://gateway.test.example.com", forKey: gatewayKey)
+        defer {
+            if let previousGateway {
+                UserDefaults.standard.set(previousGateway, forKey: gatewayKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: gatewayKey)
+            }
         }
+
+        manager = FingerprintTimingManager(
+            aurisReferenceWaitSeconds: 0.5,
+            cloudReferenceFetcher: NeverReturningFetcher()
+        )
+        manager.prepareForCurrentEpisode()
         await waitForPass(manager)
 
         XCTAssertEqual(manager.state.analyticsName, "active", "the episode was left unprepared")
@@ -511,25 +522,23 @@ final class FingerprintPreparationTests: XCTestCase {
             manager.state.analyticsName, "active",
             "the pass waited for a fetch that had already finished"
         )
+        // The case is only meaningful if the mapping survived to be considered. `load` compares
+        // the reference file's mtime within a second, and this path rewrites that file, so a slow
+        // machine could drop the cache and start the pass by the ordinary route — passing without
+        // touching the code under test. Assert the mapping was actually pending at load time.
+        let cached = FingerprintMappingCache.load(
+            audioFilePath: fixture.audioURL.path,
+            referenceFilePath: fixture.referenceURL.path,
+            referenceData: referenceBytes
+        )
+        XCTAssertEqual(
+            cached?.pendingAurisIdentity, true,
+            "the stored mapping was not pending its reference, so this case proved nothing"
+        )
         XCTAssertTrue(
             manager.debugMappingSnapshot().allSatisfy { $0.referenceTime < 500 },
             "an unconfirmed mapping was adopted"
         )
-    }
-
-    /// Runs `body` with a gateway origin configured, restoring the previous value afterwards.
-    private func withGatewayConfigured(_ body: () throws -> Void) rethrows {
-        let key = GatewayURLProvider.baseURLKey
-        let previous = UserDefaults.standard.object(forKey: key)
-        UserDefaults.standard.set("https://gateway.test.example.com", forKey: key)
-        defer {
-            if let previous {
-                UserDefaults.standard.set(previous, forKey: key)
-            } else {
-                UserDefaults.standard.removeObject(forKey: key)
-            }
-        }
-        try body()
     }
 
     /// Writes a complete mapping attributed to an Auris reference, with timestamps no real pass over

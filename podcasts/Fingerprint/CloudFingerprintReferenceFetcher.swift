@@ -1,13 +1,6 @@
 import Foundation
 @preconcurrency import Fingerprint
 
-/// Fetches the Auris cloud reference fingerprints for an episode from
-/// `GET /api/v1/episodes/{episode_uuid}/fingerprints` (cloud-ingestion.md) and
-/// parses the `fingerprint-compact-v3` payload into a library `CheckpointMatcher`.
-///
-/// Returns nil on any failure (unconfigured, network, decode, no checkpoints,
-/// client-side timeout) so callers degrade gracefully to the transcript-sync
-/// path / `client_position_ms`.
 /// What the timing manager needs from a reference fetcher. Injected so a test can supply one
 /// that never returns, which is the only way to reach the bounded wait.
 protocol CloudReferenceFetching {
@@ -16,6 +9,13 @@ protocol CloudReferenceFetching {
     ) async -> CloudFingerprintReferenceFetcher.FetchedReference?
 }
 
+/// Fetches the Auris cloud reference fingerprints for an episode from
+/// `GET /api/v1/episodes/{episode_uuid}/fingerprints` (cloud-ingestion.md) and
+/// parses the `fingerprint-compact-v3` payload into a library `CheckpointMatcher`.
+///
+/// Returns nil on any failure (unconfigured, network, decode, no checkpoints,
+/// client-side timeout) so callers degrade gracefully to the transcript-sync
+/// path / `client_position_ms`.
 final class CloudFingerprintReferenceFetcher: CloudReferenceFetching {
     static let shared = CloudFingerprintReferenceFetcher()
 
