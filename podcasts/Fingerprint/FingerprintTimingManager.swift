@@ -185,7 +185,12 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
 
     // MARK: - Init
 
-    override init() {
+    /// How long a deferred pass waits for its Auris reference before fingerprinting anyway.
+    /// Injected so a test can shorten it; the default is what production uses.
+    private let aurisReferenceWaitSeconds: Double
+
+    init(aurisReferenceWaitSeconds: Double = FingerprintConstants.aurisReferenceWaitSeconds) {
+        self.aurisReferenceWaitSeconds = aurisReferenceWaitSeconds
         super.init()
         NotificationCenter.default.addObserver(
             self,
@@ -980,7 +985,9 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
             // gateway used to delay the context build by up to the full cloud
             // client timeout). The matcher lands async and becomes live via
             // the context's matcher provider.
-            configureForReference(loaded.reference, referenceData: loaded.data, episode: episode)
+            configureForReference(
+                loaded.reference, referenceData: loaded.data, episode: episode, aurisFetchPending: true
+            )
             let flag = cancellationFlag
             fetchTask = Task { [weak self] in
                 guard let self, !flag.isCancelled else { return }
@@ -1058,15 +1065,23 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
                 }
 
                 self.saveReferenceData(data, for: episode)
-                self.configureForReference(reference, referenceData: data, episode: episode)
+                // The cloud fetch has already completed on this path, so nothing will confirm a
+                // mapping that is waiting for its reference.
+                self.configureForReference(
+                    reference, referenceData: data, episode: episode, aurisFetchPending: false
+                )
             }
         }
     }
 
+    /// - Parameter aurisFetchPending: whether an Auris fetch will still complete for this
+    ///   preparation. When it will not, a mapping awaiting its reference can never be confirmed,
+    ///   so the pass starts at once instead of waiting out the deadline for nothing.
     private func configureForReference(
         _ reference: ReferenceFingerprint,
         referenceData: Data,
-        episode: BaseEpisode
+        episode: BaseEpisode,
+        aurisFetchPending: Bool
     ) {
         let uuid = episode.uuid
 
@@ -1135,8 +1150,14 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         // Capture once so the range check, log, and stream start all use the same position.
         let currentTime = PlaybackManager.shared.currentTime()
 
-        switch adoptCachedMappingIfUsable(context: newContext, currentTime: currentTime) {
+        let adoption = adoptCachedMappingIfUsable(context: newContext, currentTime: currentTime)
+        switch adoption {
         case .adopted:
+            return
+        case .awaitingReference where !aurisFetchPending:
+            // Nothing is coming to confirm it. Waiting would only delay the pass by the full
+            // interval and then do exactly this.
+            startStream(context: newContext, fromPosition: currentTime)
             return
         case .awaitingReference:
             // The fetch completion either adopts the mapping or starts this stream. Whichever
@@ -1146,9 +1167,10 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
             awaitingReferenceDeadlineTask?.cancel()
             awaitingReferenceToken &+= 1
             let token = awaitingReferenceToken
+            let waitSeconds = aurisReferenceWaitSeconds
             awaitingReferenceDeadlineTask = Task { [weak self] in
                 try? await Task.sleep(
-                    nanoseconds: UInt64(FingerprintConstants.aurisReferenceWaitSeconds * 1_000_000_000)
+                    nanoseconds: UInt64(waitSeconds * 1_000_000_000)
                 )
                 guard !Task.isCancelled else { return }
                 self?.queue.async { [weak self] in
@@ -1157,7 +1179,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
                     // Check the episode before touching any state. A deadline that fired for the
                     // previous episode must never disarm the current one's deferral, which would
                     // leave this episode in `.preparing` with nothing to resolve it.
-                    guard let ctx = self.context, ctx.episodeUuid == newContext.episodeUuid else {
+                    guard let ctx = self.context, ctx.generation == newContext.generation else {
                         return
                     }
                     self.isAwaitingAurisReferenceForStream = false
@@ -1174,13 +1196,6 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         }
     }
 
-    /// Loads a persisted mapping for this context and adopts it when it is usable, returning
-    /// whether the stream can be skipped entirely.
-    ///
-    /// Called twice on the stored-reference path: once during configuration, and again when the
-    /// Auris fetch lands. The first call cannot validate an Auris-derived mapping because the
-    /// identity does not exist yet, and refusing it there is correct — but without the second
-    /// call every such mapping would be re-fingerprinted on every re-open.
     /// What the cache check decided about starting a fingerprint stream.
     enum CacheAdoption {
         /// Adopted a complete mapping; no stream needed.
@@ -1192,6 +1207,14 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         case awaitingReference
     }
 
+    /// Loads a persisted mapping for this context and adopts it when it is usable, reporting
+    /// what should happen to the stream.
+    ///
+    /// On the stored-reference path this runs during configuration, before the Auris fetch has
+    /// established the identity, so a mapping built against that reference comes back as
+    /// `.awaitingReference` rather than being refused outright. The pass is held until the fetch
+    /// resolves it — or, when no fetch is outstanding, started at once. Without that, every such
+    /// mapping would be re-fingerprinted on every re-open.
     private func adoptCachedMappingIfUsable(
         context ctx: GenerationContext,
         currentTime: Double
