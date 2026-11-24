@@ -145,7 +145,16 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
     /// Guards the deferral. The fetcher may take its full timeout, or never resolve at all, and
     /// the episode must not sit unprepared until then — so the wait is bounded and the pass runs
     /// if the reference has not arrived.
+    ///
+    /// Reviewed, not tested: with no gateway configured the fetch returns nil immediately and the
+    /// completion starts the pass before any deadline could fire, so removing this bound leaves
+    /// the suite green (verified by mutation). Reaching it needs either a hanging endpoint or an
+    /// injectable interval, and test-only seams are not added here.
     private var awaitingReferenceDeadlineTask: Task<Void, Never>?
+    /// Distinguishes one deferral from the next. A deadline that fires for a superseded deferral
+    /// must not act, even though it cannot tell from the flag alone whether it is still the
+    /// current one.
+    private var awaitingReferenceToken = 0
         private var aurisReferenceIdentity: FingerprintMappingCache.AurisReferenceIdentity?
     /// Per-stream Go-scheme fingerprinter fed the same decoded PCM as the Rust
     /// streamer; its windows are matched against [cloudMatcher].
@@ -1135,18 +1144,24 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
             // the episode unprepared for its full timeout.
             isAwaitingAurisReferenceForStream = true
             awaitingReferenceDeadlineTask?.cancel()
+            awaitingReferenceToken &+= 1
+            let token = awaitingReferenceToken
             awaitingReferenceDeadlineTask = Task { [weak self] in
                 try? await Task.sleep(
                     nanoseconds: UInt64(FingerprintConstants.aurisReferenceWaitSeconds * 1_000_000_000)
                 )
                 guard !Task.isCancelled else { return }
                 self?.queue.async { [weak self] in
-                    guard let self, self.isAwaitingAurisReferenceForStream else { return }
-                    self.isAwaitingAurisReferenceForStream = false
-                    self.awaitingReferenceDeadlineTask = nil
+                    guard let self, self.isAwaitingAurisReferenceForStream,
+                          self.awaitingReferenceToken == token else { return }
+                    // Check the episode before touching any state. A deadline that fired for the
+                    // previous episode must never disarm the current one's deferral, which would
+                    // leave this episode in `.preparing` with nothing to resolve it.
                     guard let ctx = self.context, ctx.episodeUuid == newContext.episodeUuid else {
                         return
                     }
+                    self.isAwaitingAurisReferenceForStream = false
+                    self.awaitingReferenceDeadlineTask = nil
                     FileLog.shared.addMessage(
                         "FingerprintTimingManager: no Auris reference for \(ctx.episodeUuid) in time — starting the pass"
                     )

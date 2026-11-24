@@ -391,7 +391,8 @@ final class FingerprintPreparationTests: XCTestCase {
     /// never learns about it: it would adopt a mapping under a live pass, or start a second one.
     /// Nothing may start until the deferral resolves.
     ///
-    /// LIMIT, stated rather than papered over: this covers the deferral, not the seek guard.
+    /// LIMIT, stated rather than papered over: this covers the deferral, not the seek guard or
+    /// the deadline. Both were mutation-checked and both stayed green without their fix.
     /// `restart` is reached only through the progress timer reading the real playback position,
     /// which a test cannot move without adding a hook. Removing the guard from `restart` leaves
     /// this test green — verified by mutation. The guard is therefore reviewed, not tested.
