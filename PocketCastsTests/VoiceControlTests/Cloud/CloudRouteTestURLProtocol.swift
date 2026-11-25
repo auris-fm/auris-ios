@@ -741,6 +741,17 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
         // test task, so an unsynchronised append/read is a data race that can report a frame that
         // was already written as absent.
         scriptLock.lock(); sent.append(message); scriptLock.unlock()
+        if case let .string(text) = message, text.contains("\"type\":\"interrupt\"") {
+            // DELIVERED to this (still open) socket: the frame is on the wire before any delay or
+            // throw below, so this is the event that fixes "interrupt reached A while A was open".
+            markInterruptDelivered()
+        }
+        // LOAD INJECTION (spec acf85b64 / reviewer 05f7dd7d): a slow host is another kind of probe.
+        // A control whose attribution moves when the transport is slower is timing-dependent, so
+        // this delay lets a case be run under deliberate load. Test double only; never production.
+        if let nanos = Self.sendDelayNanoseconds, nanos > 0 {
+            try? await Task.sleep(nanoseconds: nanos)
+        }
         // AN INTERRUPTED TURN TERMINATES ON THE REAL SERVER. A control that keeps a predecessor
         // alive while a successor barges in needs that terminal to arrive, or the successor parks
         // on an acknowledgement the stub can never produce (and an emptied script surfaces as a
@@ -770,6 +781,9 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
     /// Holds delivery until `release()`, so a test can keep one turn in flight
     /// while another supersedes it. Without a way to stall a turn, a stub that
     /// answers instantly cannot express "A is still open when B starts".
+    /// Deliberate per-send delay, set by a control to prove its ordering holds under load.
+    nonisolated(unsafe) static var sendDelayNanoseconds: UInt64?
+
     private var holdGate: Gate?
 
     func holdUntilReleased(_ gate: Gate) {
@@ -935,7 +949,40 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
         snapshotLock.unlock()
     }
 
+    /// ORDER SEAM (spec 8ec43d91 / reviewer 469998b5): when set, this socket's retirement is held
+    /// until an `interrupt` frame has been DELIVERED to its receive. That fixes the order "B's
+    /// interrupt reaches A's OPEN socket, then A closes" by event, so a slow host cannot silently
+    /// turn the case into the retired-registration path. Test transport only.
+    var holdCloseUntilInterruptDelivered = false
+    private var interruptDeliveredToReceive = false
+    private let closeOrderLock = NSLock()
+    private var closeWaiters: [() -> Void] = []
+
+    private func markInterruptDelivered() {
+        closeOrderLock.lock()
+        interruptDeliveredToReceive = true
+        let waiters = closeWaiters
+        closeWaiters = []
+        closeOrderLock.unlock()
+        for w in waiters { w() }
+    }
+
+    /// Blocks the caller (the client's close path) until the interrupt has been delivered.
+    private func awaitInterruptDeliveryBeforeClose() {
+        guard holdCloseUntilInterruptDelivered else { return }
+        let semaphore = DispatchSemaphore(value: 0)
+        closeOrderLock.lock()
+        if interruptDeliveredToReceive {
+            closeOrderLock.unlock()
+            return
+        }
+        closeWaiters.append { semaphore.signal() }
+        closeOrderLock.unlock()
+        _ = semaphore.wait(timeout: .now() + 10)
+    }
+
     func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+        awaitInterruptDeliveryBeforeClose()
         snapshotLock.lock()
         cancelled = (closeCode, reason)
         let waiters = cancellationWaiters
