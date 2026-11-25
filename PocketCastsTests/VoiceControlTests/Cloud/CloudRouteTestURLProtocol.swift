@@ -746,7 +746,7 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
             // throw below, so this is the event that fixes "interrupt reached A while A was open".
             markInterruptDelivered()
         }
-        // LOAD INJECTION (spec acf85b64 / reviewer 05f7dd7d): a slow host is another kind of probe.
+        // LOAD INJECTION: a slow host is another kind of probe.
         // A control whose attribution moves when the transport is slower is timing-dependent, so
         // this delay lets a case be run under deliberate load. Test double only; never production.
         if let nanos = Self.sendDelayNanoseconds, nanos > 0 {
@@ -949,7 +949,7 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
         snapshotLock.unlock()
     }
 
-    /// ORDER SEAM (spec 8ec43d91 / reviewer 469998b5): when set, this socket's retirement is held
+    /// ORDER SEAM: when set, this socket's retirement is held
     /// until an `interrupt` frame has been DELIVERED to its receive. That fixes the order "B's
     /// interrupt reaches A's OPEN socket, then A closes" by event, so a slow host cannot silently
     /// turn the case into the retired-registration path. Test transport only.
