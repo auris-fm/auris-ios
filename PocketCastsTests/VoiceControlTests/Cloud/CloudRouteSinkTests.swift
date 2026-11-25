@@ -3263,6 +3263,11 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         suiteName = "cloud_route_supersede_\(UUID().uuidString)"
         defaults = UserDefaults(suiteName: suiteName)!
         defaults.set("https://cloud.test", forKey: CloudConfig.baseURLKey)
+        // Per-test hold bookkeeping: a ledger or counter left from an earlier test would let this
+        // one's assertions read another turn's holds.
+        holdCounters = nil
+        holdLedger = nil
+        refuseHoldBeginsAfterFirst = false
     }
 
     override func tearDown() {
@@ -5094,6 +5099,49 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// Grace hold lifecycle counters for ownership controls.
     private var holdCounters: (begin: AtomicInteger, end: AtomicInteger)?
 
+    /// Per-TOKEN ledger of the holds this sink took and ended. Shared begin/end counters cannot say
+    /// WHICH turn leaked — two turns share them, and a later turn's cleanup credits the earlier one
+    /// (reviewer + spec on E14). Identity is the token object, so a hold is attributable to the turn
+    /// that took it.
+    private final class HoldLedger: @unchecked Sendable {
+        private let lock = NSLock()
+        private var taken: [ObjectIdentifier] = []
+        private var ended: Set<ObjectIdentifier> = []
+        private var endCounts: [ObjectIdentifier: Int] = [:]
+        func take(_ token: GracePeriodSignal.PlaybackHoldToken) {
+            lock.lock(); taken.append(ObjectIdentifier(token)); lock.unlock()
+        }
+        func end(_ token: GracePeriodSignal.PlaybackHoldToken) {
+            lock.lock()
+            let id = ObjectIdentifier(token)
+            ended.insert(id)
+            endCounts[id, default: 0] += 1
+            lock.unlock()
+        }
+        /// Every token taken ended EXACTLY once — no leak, and no double release either.
+        var unbalanced: String? {
+            lock.lock(); defer { lock.unlock() }
+            for (n, id) in taken.enumerated() {
+                let count = endCounts[id] ?? 0
+                if count != 1 { return "token #\(n) ended \(count) times, expected exactly 1" }
+            }
+            return nil
+        }
+        /// Tokens taken but never ended, in take order.
+        var outstanding: Int {
+            lock.lock(); defer { lock.unlock() }
+            return taken.filter { !ended.contains($0) }.count
+        }
+        var lastTaken: ObjectIdentifier? { lock.lock(); defer { lock.unlock() }; return taken.last }
+        var countTaken: Int { lock.lock(); defer { lock.unlock() }; return taken.count }
+        func wasEnded(_ id: ObjectIdentifier) -> Bool {
+            lock.lock(); defer { lock.unlock() }; return ended.contains(id)
+        }
+    }
+    private var holdLedger: HoldLedger?
+    /// When set, every begin after the first returns nil — the window refused this turn's hold.
+    private var refuseHoldBeginsAfterFirst = false
+
     final class AtomicInteger: @unchecked Sendable {
         private let lock = NSLock(); private var n = 0
         func bump() { lock.lock(); n += 1; lock.unlock() }
@@ -5223,6 +5271,294 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
         gate.release()
         _ = await prior.value
+    }
+
+    // MARK: - The grace hold on an interruption that ends locally
+
+    /// A GRACE HOLD IS ENDED ONLY BY THE TURN THAT TOOK IT.
+    ///
+    /// `restoreTransientAudioState()` ends whatever is in `heldPlaybackToken`, and several callers
+    /// admit themselves when `activeTurn == nil`. So a predecessor that finishes AFTER its successor
+    /// took the hold ends the SUCCESSOR's hold: the window's expiry timer re-arms while the
+    /// successor's answer is still playing, which is the early release the grace contract forbids.
+    ///
+    /// Ordering forced, not raced: A's terminal is withheld until B has taken its hold, then released.
+    func testAPredecessorFinishingLateDoesNotEndItsSuccessorsHold() async throws {
+        self.nextTurnFixture = Self.doneOnlyFixture
+        let gate = holdNextTurn()
+        addTeardownBlock { gate.release() }
+        let state = CloudInterruptionState()
+        holdCounters = (AtomicInteger(), AtomicInteger())
+        let ledger = HoldLedger()
+        holdLedger = ledger
+        addTeardownBlock { self.holdLedger = nil }
+        // Long enough that B's own wait cannot expire and end its hold for an unrelated reason.
+        let sink = makeSink(withHoldCounters: true, acknowledgementTimeout: 30, interruptionState: state)
+
+        let prior = Task {
+            await sink.routeToCloud(
+                request: "prior question", tier: .free, context: self.sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-owner-a"
+            )
+        }
+        var registered = false
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            let live = await MainActor.run { sink.activeResultSocketForTesting?.boundIdentity != nil }
+            if live { registered = true; break }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertTrue(registered, "premise: A's transport must be registered")
+
+        // B dispatches and takes its OWN hold while A is still parked.
+        self.nextTurnFixture = Self.doneOnlyFixture
+        let bGate = Gate()
+        pendingHeldGate = bGate
+        addTeardownBlock { bGate.release() }
+        let b = Task {
+            await sink.routeToCloud(
+                request: "play the next one", tier: .free, context: self.sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-owner-b"
+            )
+        }
+        try await waitUntil("B takes its own hold") { ledger.countTaken >= 2 }
+        let bHold = try XCTUnwrap(ledger.lastTaken, "premise: B must have taken a hold of its own")
+        XCTAssertFalse(ledger.wasEnded(bHold), "premise: B's hold is live before A finishes")
+
+        // NOW let A finish. Its cleanup must not touch B's hold. Read the ledger BEFORE B is
+        // allowed to settle, or B's own legitimate release would satisfy the assertion.
+        gate.release()
+        _ = await prior.value
+        XCTAssertFalse(
+            ledger.wasEnded(bHold),
+            "A ended B's grace hold. The window's expiry re-arms while B's answer is still playing."
+        )
+        bGate.release()
+        _ = await b.value
+        // HANDOVER ACCOUNTING (reviewer): B's begin ends A's token at the atomic transfer, so across
+        // the whole A→B sequence every token taken must be ended EXACTLY once — not merely "B balanced".
+        XCTAssertNil(ledger.unbalanced, "hold accounting across A→B: \(ledger.unbalanced ?? "")")
+    }
+
+    /// A TURN WHOSE OWN BEGIN WAS REFUSED INHERITS THE CURRENT HOLD — AND MUST STILL END IT.
+    ///
+    /// `beginPlaybackHold` returns nil when the window is not live for that turn's generation, so a
+    /// successor can admit while taking no hold of its own. The predecessor's token stays current.
+    /// Nobody may then leave it unended: the predecessor's own release paths are ownership-gated and
+    /// its drain record is overwritten by the successor's, so if the successor does not own the
+    /// inherited hold, the live window keeps no expiry timer at all.
+    ///
+    /// Forced by construction: the second begin is refused, so B genuinely inherits A's token.
+    func testASuccessorWhoseBeginWasRefusedStillEndsTheInheritedHold() async throws {
+        // A takes the only hold there will be and is STILL IN FLIGHT: its terminal is withheld, so
+        // it cannot settle and end its own hold before B inherits it. (Letting A finish first was
+        // a false green — A's own terminal released the token and the case proved nothing;
+        // measured.)
+        self.nextTurnFixture = Self.doneOnlyFixture
+        let state = CloudInterruptionState()
+        holdCounters = (AtomicInteger(), AtomicInteger())
+        let ledger = HoldLedger()
+        holdLedger = ledger
+        // The SECOND begin is refused — the window is not live for that turn's generation — so B
+        // genuinely takes no hold of its own and must inherit A's.
+        refuseHoldBeginsAfterFirst = true
+        addTeardownBlock { self.holdLedger = nil; self.refuseHoldBeginsAfterFirst = false }
+        let sink = makeSink(withHoldCounters: true, acknowledgementTimeout: 30, interruptionState: state)
+        let gate = holdNextTurn()
+        addTeardownBlock { gate.release() }
+        let prior = Task {
+            await sink.routeToCloud(
+                request: "prior question", tier: .free, context: sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-inherit-a"
+            )
+        }
+        try await waitUntil("A takes its hold", timeout: 5) { ledger.countTaken >= 1 }
+        let aHold = try XCTUnwrap(ledger.lastTaken, "premise: A must have taken a hold")
+        XCTAssertFalse(ledger.wasEnded(aHold), "premise: A's hold is still live")
+        // PRE-CLAIM the interruption emission: B's own claim then fails, so B runs as an ORDINARY
+        // successor — no barge-in machinery, no acknowledgement race. This pins the mechanism this
+        // case is about: hold inheritance at an ordinary supersede whose begin was refused.
+        // (Without the pre-claim the barge-in path resolved differently under load: B was
+        // suppressed as refused interruption work before it could inherit anything — measured in
+        // suite order. A turn already past admission and still draining was a false green too: A's
+        // own stop confirmation ended the hold first — measured.)
+        XCTAssertTrue(
+            state.claimInterruptEmission(forRequestId: "u-inherit-a"),
+            "premise: the test pre-claims A's emission so B cannot barge in"
+        )
+
+        // B supersedes A while A's hold is live and unended, and B's own begin is REFUSED, so it
+        // inherits A's token rather than taking its own. B still retires A's output, so its exit
+        // path must end the hold it inherited — ownership follows responsibility, not acquisition.
+        self.nextTurnFixture = Self.doneOnlyFixture
+        let bResult = await sink.routeToCloud(
+            request: "play the next one", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-inherit-b"
+        )
+        gate.release()
+        _ = await prior.value
+        XCTAssertEqual(bResult.outcome, .completed, "premise: B must run to its terminal")
+        XCTAssertEqual(ledger.countTaken, 1, "premise: B's begin was refused, so it took no new hold")
+        // THE ASSERTION: read before A can settle — B's exit must have ended the hold it took over.
+        XCTAssertTrue(
+            ledger.wasEnded(aHold),
+            "the inherited hold was never ended by the turn that took it over: B took none of its "
+            + "own and superseded A, so the live window keeps no expiry timer"
+        )
+        XCTAssertNil(ledger.unbalanced, "hold accounting: \(ledger.unbalanced ?? "")")
+    }
+
+    /// A DELAYED INTERRUPT CAN REACH A REGISTRATION THAT HAS ALREADY RETIRED.
+    ///
+    /// This is the OTHER side of the ordering the two cases above pin, and a real production
+    /// scenario rather than something to exclude: the interrupt is slow, the predecessor's turn ends
+    /// and closes its socket first, so the frame finds nothing live. Production must then let B run
+    /// as an ORDINARY turn — and every hold taken must still be ended exactly once.
+    ///
+    /// Forced by construction: A's terminal is served and A fully returns BEFORE B dispatches, so
+    /// there is no live predecessor to interrupt. No timing assumption either way.
+    func testAnInterruptThatMissesItsPredecessorStillReleasesEveryHold() async throws {
+        self.nextTurnFixture = Self.doneOnlyFixture
+        StubWebSocketTask.sendDelayNanoseconds = 20_000_000
+        addTeardownBlock { StubWebSocketTask.sendDelayNanoseconds = nil }
+        let state = CloudInterruptionState()
+        holdCounters = (AtomicInteger(), AtomicInteger())
+        let ledger = HoldLedger()
+        holdLedger = ledger
+        addTeardownBlock { self.holdLedger = nil }
+        let sink = makeSink(withHoldCounters: true, acknowledgementTimeout: 30, interruptionState: state)
+
+        // A runs to its terminal and RETURNS: its registration is retired by its own close.
+        let aResult = await sink.routeToCloud(
+            request: "prior question", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-missed-a"
+        )
+        XCTAssertEqual(aResult.outcome, .completed, "premise: A must have finished on its own")
+
+        self.nextTurnFixture = Self.doneOnlyFixture
+        let bResult = await sink.routeToCloud(
+            request: "play the next one", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-missed-b"
+        )
+        XCTAssertEqual(
+            bResult.outcome, .completed,
+            "with no live predecessor there is nothing to interrupt: B is an ordinary turn"
+        )
+        XCTAssertNil(ledger.unbalanced, "hold accounting: \(ledger.unbalanced ?? "")")
+    }
+
+    /// AN INTERRUPTION THAT ENDS LOCALLY MUST RELEASE THE GRACE HOLD ITS TURN TOOK.
+    ///
+    /// Every admitted turn takes the window's playback hold BEFORE the interruption block, so a turn
+    /// that ends in the refused or unacknowledged arm is certainly holding one. Those arms return
+    /// without releasing it, while the undelivered arm beside them does — leaving the window with no
+    /// expiry timer, so the grace period never ends on its own.
+    ///
+    /// The ordering matters and is forced here, not raced: the predecessor's terminal is withheld
+    /// until the successor has dispatched and is waiting for its acknowledgement. A refusal arriving
+    /// BEFORE that dispatch suppresses the successor at the service's admission gate instead, and
+    /// the arm under test never runs — measured, and the reason an earlier version of this control
+    /// passed without the fix.
+    func testARefusedInterruptionReleasesTheGraceHoldItsTurnTook() async throws {
+        try await checkLocalInterruptionEndReleasesGraceHold(refused: true)
+    }
+
+    /// The same obligation when no acknowledgement can ever arrive. Production hits this on a slow or
+    /// lost interrupt acknowledgement — a bad network, not a race.
+    func testAnUnacknowledgedInterruptionReleasesTheGraceHoldItsTurnTook() async throws {
+        try await checkLocalInterruptionEndReleasesGraceHold(refused: false)
+    }
+
+    private func checkLocalInterruptionEndReleasesGraceHold(refused: Bool) async throws {
+        // UNDER LOAD: every frame this stub sends is delayed, so the ordering these cases assert
+        // must survive a slow host rather than only a quiet machine.
+        StubWebSocketTask.sendDelayNanoseconds = 20_000_000
+        addTeardownBlock { StubWebSocketTask.sendDelayNanoseconds = nil }
+        // A's OWN fixture carries the refusal: it is A's terminal that answers B's interrupt, and
+        // the gate withholds it until B is waiting. Giving B an error fixture instead made B's own
+        // turn consume the error, leaving the arm under test unreached (measured).
+        self.nextTurnFixture = refused
+            ? """
+            event: error
+            data: {"code":"invalid_request","message":"interrupt does not reference the active turn"}
+
+            """
+            : Self.doneOnlyFixture
+        let gate = holdNextTurn()
+        addTeardownBlock { gate.release() }
+        let state = CloudInterruptionState()
+        holdCounters = (AtomicInteger(), AtomicInteger())
+        let ledger = HoldLedger()
+        holdLedger = ledger
+        addTeardownBlock { self.holdLedger = nil }
+        // For the timeout arm the bound must expire inside the test; for the refused arm it must NOT
+        // expire first, or the wrong arm would run and the case would prove nothing about refusal.
+        let sink = makeSink(
+            withHoldCounters: true,
+            acknowledgementTimeout: refused ? 30 : 0.5,
+            interruptionState: state
+        )
+
+        let prior = Task {
+            await sink.routeToCloud(
+                request: "prior question", tier: .free, context: self.sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-grace-a"
+            )
+        }
+        var registered = false
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            let live = await MainActor.run { sink.activeResultSocketForTesting?.boundIdentity != nil }
+            if live { registered = true; break }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertTrue(registered, "premise: A's transport must be registered")
+        let priorTask = try XCTUnwrap(capturedTask)
+        XCTAssertFalse(priorTask.sentInterrupt, "premise: nothing interrupted yet")
+        // FIX THE ORDER BY EVENT: A's retirement waits until B's interrupt has been delivered to
+        // A's OPEN socket. Without this, a delayed send let A close first and B ran as an ordinary
+        // turn — the case then passed or failed on a different production path (measured).
+        priorTask.holdCloseUntilInterruptDelivered = true
+
+        // B dispatches WHILE A is still parked, so B takes its hold and sends the interrupt before
+        // any terminal can settle it. This is the ordering the arms are reachable in.
+        self.nextTurnFixture = Self.doneOnlyFixture
+        let b = Task {
+            await sink.routeToCloud(
+                request: "play the next one", tier: .free, context: self.sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-grace-b"
+            )
+        }
+        // ORDER, NOT ELAPSED TIME. Two events must both have happened before A is allowed to
+        // settle: B took its hold (the ledger records the begin callback itself), and B's interrupt
+        // left on A's socket. Gating on the wire frame alone left the hold capture racing it, so
+        // extra work in the done path could change which case failed (spec + reviewer).
+        try await waitUntil("B takes its own grace hold", timeout: 10) { ledger.countTaken >= 2 }
+        let bHold = try XCTUnwrap(ledger.lastTaken, "premise: B must have taken a hold of its own")
+        try await waitUntil("B sends its interrupt while holding", timeout: 10) { priorTask.sentInterrupt }
+        XCTAssertTrue(
+            state.heldFollowUpForTesting != nil || state.isSuppressed("u-grace-b"),
+            "premise: B must be parked on its interruption, not already past it"
+        )
+
+        // Only now let A settle: its refusal lands DURING B's acknowledgement wait. For the timeout
+        // arm A stays parked forever, so the bound expires instead.
+        if refused { gate.release() }
+        let bResult = await b.value
+        // Read B's token the instant B returns, BEFORE A settles: A's own drain can end a hold too,
+        // and reading later would credit A's cleanup to B (measured — my earlier false green).
+        let bReleasedOnReturn = ledger.wasEnded(bHold)
+        XCTAssertEqual(bResult.outcome, .refused, "premise: B must end locally, not proceed")
+        if refused { _ = await prior.value } else { gate.release(); _ = await prior.value }
+
+        // THE ASSERTION: every hold taken has been ended. A leaked hold leaves begin > end, and the
+        // window keeps no expiry timer.
+        XCTAssertTrue(
+            bReleasedOnReturn,
+            "B returned while STILL HOLDING its own grace playback hold. The window keeps no expiry "
+            + "timer, so the grace period cannot end on its own — it waits for some later turn to "
+            + "happen to release it."
+        )
     }
 
     /// THE PRE-AUTHENTICATION WINDOW: an interrupt that arrives before the predecessor's transport
@@ -5541,7 +5877,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertFalse(second, "the answer must stay stable for a turn that was heard")
     }
 
-    private func makeSink(conversationManager: CloudConversationManager? = nil, withHoldCounters: Bool = false, interruptionState: CloudInterruptionState = CloudInterruptionState()) -> CloudRouteSink {
+    private func makeSink(conversationManager: CloudConversationManager? = nil, withHoldCounters: Bool = false, acknowledgementTimeout: TimeInterval = CloudRouteSink.interruptionAcknowledgementTimeout, interruptionState: CloudInterruptionState = CloudInterruptionState()) -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
         let built = CloudRouteSink(
             clientFactory: {
@@ -5617,14 +5953,25 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             playbackPositionMs: { self.playback.positionMs },
             cloudPlaybackContextState: CloudPlaybackContextState(),
             analytics: VoiceAnalytics(analytics: analytics),
+            operationResultConsumer: nil,
+            interruptionAcknowledgementTimeout: acknowledgementTimeout,
             conversationManager: conversationManager ?? testConversationManager(),
             interruptionState: interruptionState,
             onGracePlaybackHoldBegin: withHoldCounters ? { origin in
                 self.holdCounters?.begin.bump()
-                return GracePeriodSignal.PlaybackHoldToken(generation: origin ?? -1)
+                // A refused begin is a real production outcome: the window is not live for this
+                // turn's generation (`beginPlaybackHoldOnMain` guards on it). The turn then takes no
+                // hold of its own and INHERITS whatever hold is current.
+                if self.refuseHoldBeginsAfterFirst, (self.holdLedger?.countTaken ?? 0) >= 1 {
+                    return nil
+                }
+                let token = GracePeriodSignal.PlaybackHoldToken(generation: origin ?? -1)
+                self.holdLedger?.take(token)
+                return token
             } : nil,
-            onGracePlaybackHoldEnd: withHoldCounters ? { _ in
+            onGracePlaybackHoldEnd: withHoldCounters ? { token in
                 self.holdCounters?.end.bump()
+                if let token { self.holdLedger?.end(token) }
             } : nil
         )
         return built

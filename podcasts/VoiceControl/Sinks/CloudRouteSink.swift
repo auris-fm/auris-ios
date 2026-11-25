@@ -332,6 +332,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// the sink. On expiry the hold is dropped and the expiry is logged, never assumed away.
     static let interruptionAcknowledgementTimeout: TimeInterval = 10
 
+    /// The bound this sink actually waits, defaulting to the production value. Injected so a control
+    /// can drive the expiry without waiting out ten seconds.
+    private let interruptionAcknowledgementTimeout: TimeInterval
+
     /// Codes the contract marks **Required**: the client must carry a code-specific template in
     /// the user's own language, so a missing one is an observable client GAP rather than an
     /// ordinary earcon (cloud-assistant.md, error vocabulary). `conversation_expired` is Required
@@ -477,6 +481,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// turn that must await it — no shared table to reap, and no reap can discard it early.
     private let tokenLock = NSLock()
     private var capturedRetireEpochStorage: Int?
+    /// The grace playback hold THIS turn acquired at its admitted dispatch. Carried on the token so
+    /// a deferred release, which runs after the turn returned, still ends only its own hold.
+    var acquiredHold: GracePeriodSignal.PlaybackHoldToken?
     var capturedRetireEpoch: Int? {
         get { tokenLock.lock(); defer { tokenLock.unlock() }; return capturedRetireEpochStorage }
         set { tokenLock.lock(); capturedRetireEpochStorage = newValue; tokenLock.unlock() }
@@ -644,6 +651,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         resultsPresenter: DiscoveryResultsPresenting? = nil,
         spokenTemplates: SpokenTemplateResolver = SpokenTemplateResolver(),
         operationResultConsumer: CloudOperationResultConsuming? = nil,
+        interruptionAcknowledgementTimeout: TimeInterval = CloudRouteSink.interruptionAcknowledgementTimeout,
         operationJournal: OperationJournal? = nil,
         // Last so a call site can always supply them after whatever other defaults it uses.
         conversationManager: CloudConversationManager = CloudConversationManager(),
@@ -677,6 +685,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         self.conversationManager = conversationManager
         self.conversationSelectionProvider = conversationSelectionProvider
         self.interruptionState = interruptionState
+        self.interruptionAcknowledgementTimeout = interruptionAcknowledgementTimeout
 
         self.playbackManager = playbackManager
         self.playbackSink = playbackSink
@@ -1112,6 +1121,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // re-arm mid-flight.
         let admittedHoldOrigin = origin
         let admittedHold = onGracePlaybackHoldBegin?(admittedHoldOrigin)
+        // THE HOLD THIS TURN IS RESPONSIBLE FOR. A begin can be refused — the window is not live for
+        // this turn's captured generation — and then no transfer happens and the predecessor's token
+        // stays current. This turn still supersedes that predecessor and retires its output, so it
+        // INHERITS the hold: ownership must follow responsibility, or the live hold ends up with no
+        // owner at all (the predecessor's releases are ownership-gated and its drain record is
+        // overwritten by this turn's).
+        let turnHold = admittedHold ?? heldPlaybackToken
         if let admittedHold {
             let predecessor = heldPlaybackToken
             heldPlaybackToken = admittedHold
@@ -1205,7 +1221,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             interruptionState.suppressHeldFollowUp(forRequestId: undeliveredPriorRequestId)
             // Whatever this turn already acquired is retired here: admission happens before the
             // interruption block, so the hold and playback ownership are already this turn's.
-            restoreTransientAudioState()
+            restoreTransientAudioState(owning: turnHold)
             let lost = spokenTemplates.resolveForUserLocale("cloud_error_connection_lost")
             return CloudRouteResult(
                 response: lost.isEmpty ? .earcon(.error) : .spoken(lost),
@@ -1239,7 +1255,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             let bargeInStopEpoch = audioPlayer.cancel()
 
             let resolution = await priorToken.awaitAcknowledgement(
-                timeout: Self.interruptionAcknowledgementTimeout
+                timeout: interruptionAcknowledgementTimeout
             )
             switch resolution {
             case .acknowledged:
@@ -1265,6 +1281,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 // interruption; it is not settlement and it authorizes nothing, so nothing may
                 // be submitted for it — including this turn's own successor frame.
                 _ = await audioPlayer.awaitActualStop(after: bargeInStopEpoch, timeout: 0.25)
+                // This turn ENDS here, so the hold it took at admission must end with it — on the
+                // CONFIRMED stop, never before: releasing while output still plays would re-arm the
+                // window's allowance mid-flight. Returning without this left the window holding with
+                // no expiry timer, so the grace period could not end on its own.
+                releaseOwnHoldAfterStop(turnHold, stopEpoch: bargeInStopEpoch)
                 return CloudRouteResult(response: .silent, outcome: .refused)
             case .failed:
                 // Timeout or an undelivered send: no acknowledgement can ever arrive, so this
@@ -1274,7 +1295,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 FileLog.shared.addMessage(
                     "[VoicePipeline] interruption NOT acknowledged for turn "
                     + "\(interruptedRequestIdForThisTurn ?? "nil") after "
-                    + "\(Self.interruptionAcknowledgementTimeout)s — held follow-up dropped, "
+                    + "\(interruptionAcknowledgementTimeout)s — held follow-up dropped, "
                     + "nothing submitted, local generic failure"
                 )
                 interruptionState.suppressHeldFollowUp(
@@ -1282,6 +1303,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 )
                 interruptedRequestIdForThisTurn = nil
                 _ = await audioPlayer.awaitActualStop(after: bargeInStopEpoch, timeout: 0.25)
+                // This turn ENDS here, so the hold it took at admission must end with it — on the
+                // CONFIRMED stop, never before: releasing while output still plays would re-arm the
+                // window's allowance mid-flight. Returning without this left the window holding with
+                // no expiry timer, so the grace period could not end on its own.
+                releaseOwnHoldAfterStop(turnHold, stopEpoch: bargeInStopEpoch)
                 return CloudRouteResult(response: .silent, outcome: .refused)
             }
         }
@@ -1294,6 +1320,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // Transfer happens AT ADMISSION, before the quiescence wait: a turn that supersedes US
         // while we wait must observe itself as the owner (review 14f66b72).
         activeTurn = turnToken
+        turnToken.acquiredHold = turnHold
         playbackOwner = turnToken
         // ATOMIC RETIRE + QUIESCENCE AT ADMISSION (reviews 9fc2603e / 14f66b72): the successor
         // retires the PLAYBACK predecessor's output HERE — before this turn can admit any audio
@@ -1732,7 +1759,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                         if await audioPlayer.awaitActualStop(after: stopEpoch) {
                             // Revalidate after the suspension: a successor may own the window now.
                             if activeTurn == nil || activeTurn === turnToken {
-                                restoreTransientAudioState()
+                                restoreTransientAudioState(owning: turnHold)
                             }
                         } else {
                             let stillOwner = activeTurn == nil || activeTurn === turnToken
@@ -1781,7 +1808,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                         // The hold was acquired at this turn's admitted dispatch; it RETAINS
                         // through done into the actual drain and releases at the real stop.
                     } else {
-                        restoreTransientAudioState()
+                        restoreTransientAudioState(owning: turnHold)
                     }
                     // BUFFERED playback after `done` (`cloud-assistant.md` → Interruption:
                     // "Buffered audio may still play after `done` closes the socket. Report that
@@ -1890,7 +1917,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                         // this turn was suspended on the stop wait. Release only if the captured
                         // turn is still this turn's own.
                         guard activeTurn == nil || activeTurn === turnToken else { break turnLoop }
-                        restoreTransientAudioState()
+                        restoreTransientAudioState(owning: turnHold)
                     } else {
                         // Defer to the confirmed stop — but ownership holds in BOTH branches: a
                         // successor B that started (or already finished) while A was suspended owns
@@ -1967,7 +1994,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                         emitLatencyRecord("early_close")
         return CloudRouteResult(response: .silent, outcome: .earlyClose, fact: Self.aggregateActionFact(turnActionFacts))
                     }
-                    restoreTransientAudioState()
+                    restoreTransientAudioState(owning: turnHold)
                 } else {
                     // Timeout: the stop notification owns the release via the deferral — same
                     // ownership rules as the error path (only if still owner, never overwrite a
@@ -2014,7 +2041,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // this turn was suspended on the stop wait; release ONLY the own token. A successor
             // still gets its own truncation release (the earlyClose return below stands).
             if activeTurn == nil || activeTurn === turnToken {
-                restoreTransientAudioState()
+                restoreTransientAudioState(owning: turnHold)
             }
         } else {
             let stillOwner = activeTurn == nil || activeTurn === turnToken
@@ -2079,13 +2106,35 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         FileLog.shared.addMessage("[VoicePipeline] cloudTurnLatency \(line)")
     }
 
-    private func restoreTransientAudioState() {
-        // Whatever playback hold this sink owns ends with the release of the audio state:
-        // error/supersede/no-pending/drain-stop all resume the window's interval exactly once.
-        // Per-token release: a stale terminal never clears another owner's hold.
-        if let held = heldPlaybackToken {
+    /// End the grace hold THIS turn took, at an exit that ends the turn locally.
+    ///
+    /// The release waits for the ACTUAL stop the caller's cancel requested: ending it while output
+    /// is still playing would re-arm the window's allowance mid-flight. If the stop is already
+    /// confirmed, end it now; otherwise the responsibility rides the stop confirmation
+    /// (`audioPlayerDidStop`) — never a timer, never an allowance renewal. Same rule as the
+    /// rolled-back admission path.
+    private func releaseOwnHoldAfterStop(
+        _ acquired: GracePeriodSignal.PlaybackHoldToken?, stopEpoch: Int
+    ) {
+        guard let acquired, heldPlaybackToken === acquired else { return }
+        if audioPlayer.confirmedStopEpoch() >= stopEpoch {
+            restoreTransientAudioState(owning: acquired)
+        } else {
+            pendingHoldRelease = (hold: acquired, epoch: stopEpoch)
+        }
+    }
+
+    /// Release the transient audio state a turn acquired.
+    ///
+    /// `owning` is the hold THE CALLING TURN took. Only that hold is ended: a predecessor that
+    /// finishes after its successor admitted must not end the successor's hold, or the window's
+    /// expiry re-arms while the successor's answer is still playing. Passing nil means the caller
+    /// holds nothing of its own (a drain confirmation acting for a recorded deferral), and then
+    /// nothing is ended here — the deferral path ends its own token explicitly.
+    private func restoreTransientAudioState(owning ownedHold: GracePeriodSignal.PlaybackHoldToken?) {
+        if let owned = ownedHold, heldPlaybackToken === owned {
             heldPlaybackToken = nil
-            onGracePlaybackHoldEnd?(held)
+            onGracePlaybackHoldEnd?(owned)
         }
         // Release only a hold we took, and only if it stopped playback the user
         // was already hearing. A hold that cannot be told apart from the user's
@@ -2892,7 +2941,7 @@ extension CloudRouteSink {
                 // transfer, so the confirmation must resume the inherited pause — exactly once,
                 // guarded by the same flags as every other restore.
                 onGracePlaybackHoldEnd?(pending.hold)
-                restoreTransientAudioState()
+                restoreTransientAudioState(owning: nil)
             }
         }
         // The player has drained its buffer and stopped output. This is when a
@@ -2903,8 +2952,8 @@ extension CloudRouteSink {
         // OWNERSHIP: act only for the turn that DEFERRED. A successor that inherited the hold has
         // already taken it over (it keeps `didAutoPause`), so once ownership moves on, a
         // notification belonging to the earlier turn must not release the newer turn's hold. The
-        // inherited transfer itself is unchanged — a turn that owns the hold still restores it,
-        // whether it took the hold or inherited it.
+        // inherited transfer itself is unchanged — a turn restores the hold it is RESPONSIBLE for,
+        // which is the one it took, or the predecessor's when its own begin was refused.
         guard let deferred = restoreHeldForPlayerDrain else { return }
         // The notification must belong to the drain this turn is waiting on. A foreign drain's
         // notification is rejected on its own identity, and the record is LEFT intact so the turn
@@ -2928,6 +2977,6 @@ extension CloudRouteSink {
         // IS that moment — the turn has finished and its output quiesced — so a later successor
         // must not find a stale binding and report an interruption of audio nobody stopped.
         interruptionState.clearBufferedPlaybackOwner(ifOwnedBy: deferred.owner)
-        restoreTransientAudioState()
+        restoreTransientAudioState(owning: deferred.owner.acquiredHold)
     }
 }
