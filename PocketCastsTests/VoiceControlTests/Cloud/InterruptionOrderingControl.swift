@@ -790,6 +790,7 @@ final class InterruptionOrderingControl: SocketCapturingTestCase {
 private struct EmptyInterruptionMapper: FingerprintMappingProviding {
     func matchedReferenceTime(forPlaybackTime playbackTime: TimeInterval) -> TimeInterval? { nil }
     func playbackTime(forReferenceTime referenceTime: TimeInterval) -> TimeInterval? { nil }
+        func observedOffsetSeconds(beforeReferenceTime referenceTime: TimeInterval) -> Double? { nil }
 }
 
 private final class InterruptPlaybackSink: VoicePlaybackSink, @unchecked Sendable {

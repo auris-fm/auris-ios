@@ -323,6 +323,51 @@ final class FingerprintTimingManagerTests: XCTestCase {
         XCTAssertFalse(FingerprintTimingManager.isWithinMatchedContent(forPlaybackTime: 14.1, in: entries))
     }
 
+    // MARK: - Reference-side bracketing gate (action position conversion)
+
+    // The conversion asks the same question on the OTHER axis: is this REFERENCE time
+    // bracketed by committed anchors, or is the reverse map merely extrapolating past them?
+
+    func testReferenceBracketedOnDenselyMappedContent() {
+        XCTAssertTrue(FingerprintTimingManager.isBracketedReference(30, in: Self.denseContent))
+    }
+
+    func testReferenceBracketedBridgesQuickGapBetweenAnchors() {
+        let entries = [Entry(playbackTime: 20, referenceTime: 20), Entry(playbackTime: 26, referenceTime: 26)]
+        XCTAssertTrue(FingerprintTimingManager.isBracketedReference(23, in: entries))
+    }
+
+    func testReferenceNotBracketedInWideGap() {
+        // A 30 s reference gap between anchors: the target sits between two anchors the
+        // matcher never committed close together, so it is not confirmed content.
+        let entries = [Entry(playbackTime: 20, referenceTime: 20), Entry(playbackTime: 21, referenceTime: 50)]
+        XCTAssertFalse(FingerprintTimingManager.isBracketedReference(35, in: entries))
+    }
+
+    func testReferenceNotBracketedPastLastAnchor() throws {
+        // Past the newest anchor the reverse map still EXTRAPOLATES a position: the gate must
+        // say uncovered anyway, or an ad-shifted seek would take the extrapolation as a match.
+        let entries = [Entry(playbackTime: 18, referenceTime: 18), Entry(playbackTime: 20, referenceTime: 20)]
+        let extrapolated = FingerprintTimingManager.interpolate(
+            time: 40,
+            in: entries,
+            keyPath: \.referenceTime,
+            valuePath: \.playbackTime
+        )
+        XCTAssertEqual(try XCTUnwrap(extrapolated), 40.0, accuracy: 0.001,
+            "premise: the map answers for the unbracketed target")
+        XCTAssertFalse(FingerprintTimingManager.isBracketedReference(40, in: entries))
+    }
+
+    func testReferenceNotBracketedBeforeFirstAnchor() {
+        let entries = [Entry(playbackTime: 18, referenceTime: 18), Entry(playbackTime: 20, referenceTime: 20)]
+        XCTAssertFalse(FingerprintTimingManager.isBracketedReference(5, in: entries))
+    }
+
+    func testReferenceNotBracketedWithEmptyMapping() {
+        XCTAssertFalse(FingerprintTimingManager.isBracketedReference(10, in: []))
+    }
+
     // MARK: - On-demand chapter seek: search-window bounds
 
     func testColdSearchWindowStartsAtReferenceAndUsesColdBudget() {

@@ -35,6 +35,7 @@ final class EarlyConnectionLifecycleControl: XCTestCase {
     private struct NoFingerprintMap: FingerprintMappingProviding {
         func matchedReferenceTime(forPlaybackTime playbackTime: TimeInterval) -> TimeInterval? { nil }
         func playbackTime(forReferenceTime referenceTime: TimeInterval) -> TimeInterval? { nil }
+        func observedOffsetSeconds(beforeReferenceTime referenceTime: TimeInterval) -> Double? { nil }
     }
 
     private func makeSink() -> CloudRouteSink {

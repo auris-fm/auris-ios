@@ -770,4 +770,6 @@ private struct MockFingerprintMapper: FingerprintMappingProviding {
     func playbackTime(forReferenceTime referenceTime: TimeInterval) -> TimeInterval? {
         playbackTimeForReference ?? referenceTime
     }
+
+    func observedOffsetSeconds(beforeReferenceTime referenceTime: TimeInterval) -> Double? { nil }
 }

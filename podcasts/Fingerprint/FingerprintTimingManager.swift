@@ -371,9 +371,36 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         }
     }
 
+    /// The offset playback − reference observed at the nearest mapping entry at or before
+    /// `referenceTime`. Nil when no entry sits at or before the target — nothing before it
+    /// has matched, so there is no observed ad load to carry into the estimate.
+    func observedOffsetSeconds(beforeReferenceTime referenceTime: Double) -> Double? {
+        dispatchPrecondition(condition: .notOnQueue(queue))
+        return queue.sync {
+            let entries = main.referenceToPlayback
+            var nearest: TimeMappingEntry?
+            for entry in entries where entry.referenceTime <= referenceTime {
+                if nearest == nil || entry.referenceTime > nearest!.referenceTime { nearest = entry }
+            }
+            guard let nearest else { return nil }
+            return nearest.playbackTime - nearest.referenceTime
+        }
+    }
+
+    /// Whether `referenceTime` is BRACKETED by two committed anchors no further apart than
+    /// `highlightMaxGapSeconds` — the reference-side analogue of
+    /// `isWithinMatchedContent(forPlaybackTime:)`, and the question the action conversion asks:
+    /// past the last anchor the reverse map still extrapolates a position, but that position is
+    /// an assumption, not a measurement, so the seek must estimate and then correct.
+    func isBracketedReference(_ referenceTime: Double) -> Bool? {
+        dispatchPrecondition(condition: .notOnQueue(queue))
+        return queue.sync {
+            Self.isBracketedReference(referenceTime, in: main.referenceToPlayback)
+        }
+    }
+
     /// Whether `playbackTime` sits on confidently-matched content — bracketed by
     /// committed anchors no more than `highlightMaxGapSeconds` apart.
-    ///
     /// Highlighting keys off this so it only ever runs while we're sure where we
     /// are. Real content commits anchors every second or two, so a sparse "quick
     /// red" gap stays under the bound and still counts as matched. A dynamic ad
@@ -2242,6 +2269,33 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
     }
 
     // MARK: - Helpers
+
+    /// Whether `referenceTime` is bracketed by two anchors no further apart than
+    /// `highlightMaxGapSeconds`. See `isBracketedReference(_:)`.
+    static func isBracketedReference(
+        _ referenceTime: Double,
+        in entries: [TimeMappingEntry]
+    ) -> Bool {
+        // Same search as the playback-side gate, on the other axis: `hi` is the first anchor
+        // strictly after `referenceTime`, `hi - 1` the last at or before it.
+        var lo = 0
+        var hi = entries.count
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if entries[mid].referenceTime <= referenceTime {
+                lo = mid + 1
+            } else {
+                hi = mid
+            }
+        }
+
+        // Need a committed anchor on each side: before the first or past the last we are not
+        // confidently on matched content.
+        guard hi - 1 >= 0, hi < entries.count else { return false }
+
+        let gap = entries[hi].referenceTime - entries[hi - 1].referenceTime
+        return gap <= FingerprintConstants.highlightMaxGapSeconds
+    }
 
     private func loadReference(for episode: BaseEpisode) -> (data: Data, reference: ReferenceFingerprint)? {
         let path = referencePath(for: episode)

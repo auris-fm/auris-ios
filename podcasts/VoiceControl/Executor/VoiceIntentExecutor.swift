@@ -14,7 +14,28 @@ protocol PlaybackStateProviding {
 protocol FingerprintMappingProviding {
     func matchedReferenceTime(forPlaybackTime playbackTime: TimeInterval) -> TimeInterval?
     /// Reverse map: reference (transcript) time → playback time. Nil when unmapped.
+    ///
+    /// The map EXTRAPOLATES past its own anchors, so a non-nil answer is not by itself
+    /// evidence that the target is matched. Use `isBracketedReference` for that question.
     func playbackTime(forReferenceTime referenceTime: TimeInterval) -> TimeInterval?
+    /// The offset playback − reference already OBSERVED at the nearest covered point at or
+    /// before `referenceTime` — the ads and gaps seen so far. Nil when nothing at or before
+    /// the target is covered. An uncovered seek estimates the target with this offset.
+    func observedOffsetSeconds(beforeReferenceTime referenceTime: TimeInterval) -> Double?
+    /// Whether `referenceTime` sits on CONFIRMED matched content: bracketed by two committed
+    /// anchors no further apart than a matched gap. The reference-side analogue of
+    /// `FingerprintTimingManager.isWithinMatchedContent(forPlaybackTime:)`, and the real test of
+    /// coverage: an ad-inserted passage past the last anchor is unbracketed, even though the
+    /// reverse map happily extrapolates a position for it.
+    ///
+    /// Only the action conversion needs this question, so the default keeps the answer for a
+    /// mapping with no anchors of its own unknown rather than assuming full coverage — see
+    /// `CloudRouteSink`: "unknown" must never read as "covered", or a seek stops correcting.
+    func isBracketedReference(_ referenceTime: TimeInterval) -> Bool?
+}
+
+extension FingerprintMappingProviding {
+    func isBracketedReference(_ referenceTime: TimeInterval) -> Bool? { nil }
 }
 
 final class CloudPlaybackContextState {
