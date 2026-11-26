@@ -1566,10 +1566,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // Retrying HERE is the last chance to schedule the turn's answer before the stop drops
         // everything: a drain that finds output available but no engine gives the start bounded
         // attempts instead of silently consuming the frames through the no-engine path.
-        if playerNode == nil, !buffer.isEmpty, Self.audioOutputIsAvailable {
+        if playerNode == nil, !isBufferEmpty, Self.audioOutputIsAvailable {
             let retryDeadline = Date().addingTimeInterval(Self.drainStartRetryBudget)
             var failureLogged = false
-            while playerNode == nil, !buffer.isEmpty, Date() < retryDeadline {
+            while playerNode == nil, !isBufferEmpty, Date() < retryDeadline {
                 if startEngine() { break }
                 if !failureLogged {
                     failureLogged = true
@@ -1578,6 +1578,13 @@ final class CloudAudioPlayer: @unchecked Sendable {
                         + "\(Int(Self.drainStartRetryBudget)) s before the turn's remaining audio is dropped")
                 }
                 Thread.sleep(forTimeInterval: Self.engineStartRetryInterval)
+            }
+            // The budget ran out with the engine still down: the frames remaining now are
+            // dropped by the drain below, and that loss is recorded rather than silent.
+            if playerNode == nil, !isBufferEmpty {
+                FileLog.shared.addMessage(
+                    "[VoicePipeline] cloud audio engine still down after "
+                    + "\(Int(Self.drainStartRetryBudget)) s — dropping \(bufferedFrameCount) buffered frame(s) of the turn's answer")
             }
         }
         // Play any remaining frames.
