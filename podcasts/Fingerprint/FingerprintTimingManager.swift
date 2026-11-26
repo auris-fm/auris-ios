@@ -371,6 +371,22 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         }
     }
 
+    /// The offset playback − reference observed at the nearest mapping entry at or before
+    /// `referenceTime`. Nil when no entry sits at or before the target — nothing before it
+    /// has matched, so there is no observed ad load to carry into the estimate.
+    func observedOffsetSeconds(beforeReferenceTime referenceTime: Double) -> Double? {
+        dispatchPrecondition(condition: .notOnQueue(queue))
+        return queue.sync {
+            let entries = main.referenceToPlayback
+            var nearest: TimeMappingEntry?
+            for entry in entries where entry.referenceTime <= referenceTime {
+                if nearest == nil || entry.referenceTime > nearest!.referenceTime { nearest = entry }
+            }
+            guard let nearest else { return nil }
+            return nearest.playbackTime - nearest.referenceTime
+        }
+    }
+
     /// Whether `referenceTime` is BRACKETED by two committed anchors no further apart than
     /// `highlightMaxGapSeconds` — the reference-side analogue of
     /// `isWithinMatchedContent(forPlaybackTime:)`, and the question the action conversion asks:
@@ -385,7 +401,6 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
 
     /// Whether `playbackTime` sits on confidently-matched content — bracketed by
     /// committed anchors no more than `highlightMaxGapSeconds` apart.
-    ///
     /// Highlighting keys off this so it only ever runs while we're sure where we
     /// are. Real content commits anchors every second or two, so a sparse "quick
     /// red" gap stays under the bound and still counts as matched. A dynamic ad
@@ -2232,25 +2247,37 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         forPlaybackTime playbackTime: Double,
         in entries: [TimeMappingEntry]
     ) -> Bool {
-        // Binary search for the anchors bracketing `playbackTime`. `hi` is the
-        // first anchor strictly after it; `hi - 1` the last at or before it.
+        guard let pair = bracketingAnchors(playbackTime, in: entries, searching: \.playbackTime)
+        else { return false }
+        return pair.upper.playbackTime - pair.lower.playbackTime
+            <= FingerprintConstants.highlightMaxGapSeconds
+    }
+
+    /// THE one binary search for bracketing questions: the two anchors that bracket `time`
+    /// on the searched axis — `lower` at or before it, `upper` strictly after — or nil when
+    /// no pair brackets it (before the first or past the last anchor). Every "is this
+    /// position on confirmed matched content" ask goes through here, and a caller that
+    /// needs BOTH clocks' gaps reads them from the SAME returned pair: the axes bracket
+    /// with different pairs when ads sit between anchors, so the gaps must never come from
+    /// two separate searches.
+    static func bracketingAnchors(
+        _ time: Double,
+        in entries: [TimeMappingEntry],
+        searching keyPath: KeyPath<TimeMappingEntry, Double>
+    ) -> (lower: TimeMappingEntry, upper: TimeMappingEntry)? {
+        // `hi` is the first anchor strictly after `time`; `hi - 1` the last at or before it.
         var lo = 0
         var hi = entries.count
         while lo < hi {
             let mid = (lo + hi) / 2
-            if entries[mid].playbackTime <= playbackTime {
+            if entries[mid][keyPath: keyPath] <= time {
                 lo = mid + 1
             } else {
                 hi = mid
             }
         }
-
-        // Need a committed anchor on each side: before the first or past the last
-        // we aren't confidently on matched content, so don't highlight.
-        guard hi - 1 >= 0, hi < entries.count else { return false }
-
-        let gap = entries[hi].playbackTime - entries[hi - 1].playbackTime
-        return gap <= FingerprintConstants.highlightMaxGapSeconds
+        guard hi - 1 >= 0, hi < entries.count else { return nil }
+        return (entries[hi - 1], entries[hi])
     }
 
     // MARK: - Helpers
@@ -2261,34 +2288,19 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
         _ referenceTime: Double,
         in entries: [TimeMappingEntry]
     ) -> Bool {
-        // Same search as the playback-side gate, on the other axis: `hi` is the first anchor
-        // strictly after `referenceTime`, `hi - 1` the last at or before it.
-        var lo = 0
-        var hi = entries.count
-        while lo < hi {
-            let mid = (lo + hi) / 2
-            if entries[mid].referenceTime <= referenceTime {
-                lo = mid + 1
-            } else {
-                hi = mid
-            }
-        }
-
-        // Need a committed anchor on each side: before the first or past the last we are not
-        // confidently on matched content.
-        guard hi - 1 >= 0, hi < entries.count else { return false }
-
-        // BOTH clocks must be close. A reference-side check alone is wrong exactly where it
-        // matters: inside a 60 s inserted ad the anchors are 4 s apart on the reference clock
-        // but 64 s apart on the playback clock, so reference-only reads "covered" and the seek
-        // lands mid-ad. Coverage means the two anchors agree that the span is real matched
-        // content on both axes.
-        let referenceGap = entries[hi].referenceTime - entries[hi - 1].referenceTime
-        let playbackGap = entries[hi].playbackTime - entries[hi - 1].playbackTime
+        // BOTH clocks must be close — read from the SAME anchor pair. A reference-side check
+        // alone is wrong exactly where it matters: inside a 60 s inserted ad the anchors are
+        // 4 s apart on the reference clock but 64 s apart on the playback clock, so
+        // reference-only reads "covered" and the seek lands mid-ad. Coverage means the pair
+        // that brackets the reference time agrees that the span is real matched content on
+        // both axes.
+        guard let pair = bracketingAnchors(referenceTime, in: entries, searching: \.referenceTime)
+        else { return false }
+        let referenceGap = pair.upper.referenceTime - pair.lower.referenceTime
+        let playbackGap = pair.upper.playbackTime - pair.lower.playbackTime
         return referenceGap <= FingerprintConstants.highlightMaxGapSeconds
             && playbackGap <= FingerprintConstants.highlightMaxGapSeconds
     }
-
     private func loadReference(for episode: BaseEpisode) -> (data: Data, reference: ReferenceFingerprint)? {
         let path = referencePath(for: episode)
         guard let data = FileManager.default.contents(atPath: path),

@@ -37,6 +37,8 @@ final class DuplicateRequestAdmissionControl: XCTestCase {
     private struct NoFingerprintMap: FingerprintMappingProviding {
         func matchedReferenceTime(forPlaybackTime playbackTime: TimeInterval) -> TimeInterval? { nil }
         func playbackTime(forReferenceTime referenceTime: TimeInterval) -> TimeInterval? { nil }
+        func observedOffsetSeconds(beforeReferenceTime referenceTime: TimeInterval) -> Double? { nil }
+        func isBracketedReference(_ referenceTime: TimeInterval) -> Bool? { nil }
     }
 
     private final class UnusedResultConsumer: CloudOperationResultConsuming {

@@ -236,6 +236,8 @@ final class PreTerminalRefusalClientControl: SocketCapturingTestCase {
 private struct EmptyFingerprintMap: FingerprintMappingProviding {
     func matchedReferenceTime(forPlaybackTime playbackTime: TimeInterval) -> TimeInterval? { nil }
     func playbackTime(forReferenceTime referenceTime: TimeInterval) -> TimeInterval? { nil }
+        func observedOffsetSeconds(beforeReferenceTime referenceTime: TimeInterval) -> Double? { nil }
+        func isBracketedReference(_ referenceTime: TimeInterval) -> Bool? { nil }
 }
 
 private final class RefusalPlaybackSink: VoicePlaybackSink, @unchecked Sendable {

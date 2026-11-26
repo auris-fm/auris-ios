@@ -1,5 +1,6 @@
 import Foundation
 import PocketCastsUtils
+import QuartzCore
 
 /// Real cloud route sink: WebSocket client → audio player → action dispatch.
 ///
@@ -382,6 +383,52 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     var ownerCancelledNowForCurrentTurn: Bool { currentOwnerCancelFlag?.isSet ?? false }
     private let playbackSink: VoicePlaybackSink
     private let fingerprintMapper: FingerprintMappingProviding
+    private let seekCorrectionTickInterval: TimeInterval
+    private let seekCorrectionToleranceSeconds: Double
+    private let seekCorrectionScheduler: ((TimeInterval, @escaping () -> Void) -> Any?)?
+    /// Stops a correction tick token. Tests inject a counter; production invalidates Timers.
+    private let seekCorrectionTickCanceller: ((Any?) -> Void)?
+    /// The correction window's clock (injected for tests; wall clock in production).
+    /// Monotonic session clock (never wall time: a wall-clock change mid-session
+    /// must not shorten or stretch a correction window).
+    private let seekCorrectionNow: () -> TimeInterval
+    /// The episode the correction belongs to (injected for tests; the manager's current
+    /// episode uuid in production). A correction must never seek a different episode.
+    private let seekCorrectionEpisodeId: (() -> String?)?
+    /// A correction that has not converged this long after the action's seek gives up.
+    private let seekCorrectionWindowSeconds: TimeInterval = 60
+    /// Wall-clock cap on a correction session's total age, so a session opened while the
+    /// episode stays paused ends even though its playing-time window never fills.
+    private let seekCorrectionSessionMaxSeconds: TimeInterval = 120
+    /// The uncovered-target seek awaiting its convergence corrections, per ACTION.
+    private struct PendingSeekCorrection {
+        let targetReferenceMs: Int64
+        var correctionsRemaining: Int
+        /// Where the head should be if nothing but our own seeks moved it since; also the
+        /// reference point the window's movement test compares against (a paused head never
+        /// passes it).
+        var expectedPlaybackSeconds: Double
+        /// Where this action's LAST seek landed: the estimate at first, each corrective
+        /// destination after. The correction rule measures the mapped target against this,
+        /// not against the drifting head.
+        var lastSeekLanding: Double
+        /// When the action's estimate seek ran, on the monotonic session clock. The session
+        /// cap uses this until the answer hold releases (see `capAnchorSeconds`).
+        let startedAt: TimeInterval
+        /// The cap anchor on the monotonic clock: the seek time, overwritten by the answer
+        /// hold's release when that comes later — the cap counts 120 s from the LATER of the
+        /// two. Stamped by `restoreTransientAudioState` at every site that ends the pause.
+        var capAnchorSeconds: TimeInterval
+        /// PLAYING time accumulated toward the window: intervals between polls during which
+        /// the head advanced count in full; paused intervals do not.
+        var playingSeconds: TimeInterval
+        /// The session clock's reading at the previous poll, for the interval above.
+        var lastTickAt: TimeInterval
+        /// The episode playing when the action sought. Nil only when no identity source exists.
+        let episodeId: String?
+    }
+    private var pendingSeekCorrection: PendingSeekCorrection?
+    private var correctionTickToken: Any?
     private let playbackPositionMs: () -> Int64
     private let cloudPlaybackContextState: CloudPlaybackContextState
     private let analytics: VoiceAnalytics?
@@ -666,6 +713,19 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // the last hold releases. Identity is bound at acquisition (live generation only); release
         // is per-token, so a stale terminal never clears another owner's hold. Optional so
         // direct-constructed sinks in tests opt in.
+        // SEEK CORRECTION (timeline-alignment.md § Action position conversion): an uncovered
+        // reference target seeks its estimate and is corrected after matching converges. The
+        // poll runs on this scheduler; production repeats on a timer, tests drive ticks.
+        seekCorrectionTickInterval: TimeInterval = 1.0,
+        seekCorrectionToleranceSeconds: Double = 5.0,
+        seekCorrectionScheduler: ((TimeInterval, @escaping () -> Void) -> Any?)? = { interval, fire in
+            let timer = Timer(timeInterval: interval, repeats: true) { _ in fire() }
+            RunLoop.main.add(timer, forMode: .common)
+            return timer
+        },
+        seekCorrectionTickCanceller: ((Any?) -> Void)? = nil,
+        seekCorrectionNow: (() -> TimeInterval)? = nil,
+        seekCorrectionEpisodeId: (() -> String?)? = nil,
         onGracePlaybackHoldBegin: ((Int?) -> GracePeriodSignal.PlaybackHoldToken?)? = nil,
         onGracePlaybackHoldEnd: ((GracePeriodSignal.PlaybackHoldToken?) -> Void)? = nil,
         // Carries ADMITTED-WORK authority to the dispatch fence. A turn admitted before the
@@ -690,6 +750,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         self.playbackManager = playbackManager
         self.playbackSink = playbackSink
         self.fingerprintMapper = fingerprintMapper
+        self.seekCorrectionTickInterval = seekCorrectionTickInterval
+        self.seekCorrectionToleranceSeconds = seekCorrectionToleranceSeconds
+        self.seekCorrectionScheduler = seekCorrectionScheduler
+        self.seekCorrectionTickCanceller = seekCorrectionTickCanceller
+        self.seekCorrectionNow = seekCorrectionNow ?? { CACurrentMediaTime() }
+        self.seekCorrectionEpisodeId = seekCorrectionEpisodeId
         self.playbackPositionMs = playbackPositionMs
         self.episodeAvailable = episodeAvailable
         self.cloudPlaybackContextState = cloudPlaybackContextState
@@ -1464,6 +1530,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // in a turn that issued no `play_quote` would seek to a previous turn's
         // captured position (task #12 PR review).
         preQuotePositionMs = nil
+        // A correction belongs to the action that opened it, never across turns: a newer voice
+        // turn supersedes any pending correction (timeline-alignment.md step 4). Without this,
+        // the new turn's own pause/resume around its answer would leave the old session alive.
+        cancelPendingSeekCorrection(reason: "superseded by a newer voice turn")
         // Action outcomes are INVOCATION-LOCAL to this turn: the aggregate fact
         // is built only from the actions this turn actually ran, and two
         // overlapping turns on one sink can never see each other's entries.
@@ -2142,10 +2212,21 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // user asked to stop.
         if didAutoPause && wasPlayingBeforeHold {
             _ = playbackSink.resume()
+            stampSeekCorrectionCapAnchor()
         }
         didAutoPause = false
         wasPlayingBeforeHold = false
         // Seek positions are intentionally not rolled back.
+    }
+
+    /// The answer hold's release re-anchors a pending correction's session cap: the cap
+    /// counts 120 s from the LATER of the seek and the release (timeline-alignment.md step
+    /// 3), because matching cannot converge while the sink pauses playback for the spoken
+    /// answer. Every site that ends that pause goes through `restoreTransientAudioState`,
+    /// which calls this once. A release before any session exists is simply ignored.
+    private func stampSeekCorrectionCapAnchor() {
+        guard pendingSeekCorrection != nil else { return }
+        pendingSeekCorrection?.capAnchorSeconds = seekCorrectionNow()
     }
 
     static func aggregateActionFact(_ facts: [SinkActionFact]) -> SinkActionFact? {
@@ -2323,7 +2404,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 // for the WRONG reason; the honest precondition runs first.
                 if let precondition = currentEpisodePrecondition { return precondition }
                 capturePreActionPosition(referenceMs: reference)
-                return seekToReference(reference)
+                return seekToReference(reference, allowsCorrection: true)
             default:
                 return .nonSuccess(.refused, reason: OperationReason.malformedSeekTarget)
             }
@@ -2338,7 +2419,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             }
             if let precondition = currentEpisodePrecondition { return precondition }
             capturePreActionPosition(referenceMs: referenceMs)
-            return seekToReference(referenceMs)
+            return seekToReference(referenceMs, allowsCorrection: false)
         case "stop_quote":
             // Restoring requires a position this client actually saved (a prior play_quote). No
             // saved position: a precondition of current state failed — refused, never a success.
@@ -2347,6 +2428,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             }
             if let precondition = currentEpisodePrecondition { return precondition }
             let seconds = Int((Double(restoreMs) / 1000.0).rounded())
+            cancelPendingSeekCorrection(reason: "superseded by another moving action")
             _ = playbackSink.seekTo(positionSeconds: seconds)
             return nil
         case "seek_relative":
@@ -2363,6 +2445,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // this as `String?` rather than `Any?` makes the compiler reject the
             // next call site that passes the wrapper where a string is wanted.
             let direction = seekDirectionOf(delta: delta, declared: params["direction"]?.stringValue)
+            cancelPendingSeekCorrection(reason: "superseded by another moving action")
             _ = playbackSink.seekRelative(deltaSeconds: delta, direction: direction)
             return nil
         case "pause":
@@ -2849,6 +2932,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// Signed values are allowed: the duration-aware sink overload resolves a negative
     /// position as an offset back from the episode end, matching how the local path behaves.
     private func seekToSinkSeconds(_ seconds: Int64) {
+        cancelPendingSeekCorrection(reason: "superseded by another moving action")
         let durationSeconds = Int(playbackManager?.duration().rounded() ?? 0)
         _ = playbackSink.seekTo(positionSeconds: Int(seconds), episodeDurationSeconds: durationSeconds)
     }
@@ -2883,23 +2967,196 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         return nil
     }
 
-    private func seekToReference(_ referenceMs: Int64) -> OperationResult? {
+    private func seekToReference(_ referenceMs: Int64, allowsCorrection: Bool) -> OperationResult? {
         let referenceSeconds = Double(referenceMs) / 1000.0
-        // Reference time is not playback time. The two happen to coincide on an unmapped
-        // episode, but taking the fallback when the mapping is *missing* silently seeks to a
-        // position the server never asked for — on a mapped episode that is the wrong place,
-        // and nothing downstream can tell it apart from a correct seek. So an unavailable
-        // mapping is reported as unavailable rather than converted by assumption.
-        guard let playbackSeconds = fingerprintMapper.playbackTime(forReferenceTime: referenceSeconds) else {
+        // COVERAGE is asked of the bracketing anchors, not of the reverse map: the map
+        // extrapolates past its last anchor, so an ad-shifted target already seen would otherwise
+        // read as mapped and be sought at an assumed position — exactly the case the correction
+        // exists for . A mapping that cannot answer the bracketing question is
+        // treated as uncovered, so the seek estimates and corrects rather than silently trusting
+        // an unverifiable position.
+        let playbackSeconds = fingerprintMapper.isBracketedReference(referenceSeconds) == true
+            ? fingerprintMapper.playbackTime(forReferenceTime: referenceSeconds)
+            : nil
+        guard let playbackSeconds else {
+            // UNCOVERED TARGET: only a `seek_to` corrects (timeline-alignment.md § Action
+            // position conversion) — it seeks the ESTIMATE, the target plus the mapping's
+            // observed offset at the nearest covered point before it (the ads already seen),
+            // or the target as-is with no mapping, and corrects after matching converges
+            // there. The action is executed, not refused: the spoken answer does not wait for
+            // the corrections. A `play_quote` shares only the conversion path — an uncovered
+            // quote stays a refusal, with no position moved.
+            if allowsCorrection {
+                startSeekCorrection(targetReferenceMs: referenceMs, referenceSeconds: referenceSeconds)
+                return nil
+            }
             recordReferenceSeekUnavailable(referenceMs: referenceMs)
             return unavailableReferenceSeek
         }
         let seconds = Int(playbackSeconds.rounded())
+        // A MOVING action supersedes any correction a previous action had pending — but only
+        // here, where playback actually moves: a refused `play_quote` moved nothing and must
+        // not scrap an earlier action's session .
+        cancelPendingSeekCorrection(reason: "superseded by another moving action")
         // Negative positionSeconds is an offset back from the episode end.
         // Use the duration-aware overload so the sink resolves and bounds it.
         let durationSeconds = Int(playbackManager?.duration().rounded() ?? 0)
         _ = playbackSink.seekTo(positionSeconds: seconds, episodeDurationSeconds: durationSeconds)
         return nil
+    }
+
+    // MARK: Seek correction (timeline-alignment.md § Action position conversion)
+
+    /// Seeks to the estimate for an uncovered reference target and opens a correction session:
+    /// keep matching at the new spot; once the mapping converges, compare the matched reference
+    /// position with the target and seek by the difference if it is over 3 seconds — at most
+    /// twice. Any later playback change the sink did not command cancels the session.
+    private func startSeekCorrection(targetReferenceMs: Int64, referenceSeconds: Double) {
+        // The estimate seek MOVES playback, so it supersedes any correction a previous action
+        // in this turn had pending.
+        cancelPendingSeekCorrection(reason: "superseded by another moving action")
+        let offset = fingerprintMapper.observedOffsetSeconds(beforeReferenceTime: referenceSeconds) ?? 0
+        let rawEstimateSeconds = Int((referenceSeconds + offset).rounded())
+        let durationSeconds = Int(playbackManager?.duration().rounded() ?? 0)
+        // A negative reference target (an offset back from the end) or a negative estimate can
+        // land before the episode start; the duration-aware seekTo reinterprets a negative
+        // value as an offset back from the END, which would jump the listener near the end.
+        // Clamp to the start instead . A negative TARGET is unreachable, so
+        // there is no correction to open: the plain seek is the whole answer. A merely negative
+        // ESTIMATE (the target itself is positive) keeps its session — matching may still pull
+        // the correction toward it.
+        let estimateSeconds = max(rawEstimateSeconds, 0)
+        _ = playbackSink.seekTo(positionSeconds: estimateSeconds, episodeDurationSeconds: durationSeconds)
+        if referenceSeconds < 0 { return }
+        let sessionStart = seekCorrectionNow()
+        pendingSeekCorrection = PendingSeekCorrection(
+            targetReferenceMs: targetReferenceMs,
+            correctionsRemaining: 2,
+            expectedPlaybackSeconds: Double(estimateSeconds),
+            lastSeekLanding: Double(estimateSeconds),
+            startedAt: sessionStart,
+            capAnchorSeconds: sessionStart,
+            playingSeconds: 0,
+            lastTickAt: sessionStart,
+            episodeId: currentSeekCorrectionEpisodeId()
+        )
+        scheduleNextCorrectionTick()
+        FileLog.shared.addMessage(
+            "[VoicePipeline] reference seek \(Int(referenceSeconds * 1000))ms uncovered — "
+            + "estimate \(estimateSeconds)s, corrections pending"
+        )
+    }
+
+    /// One correction poll. Runs on the production timer; tests drive it directly.
+    func pollSeekCorrection() {
+        guard var pending = pendingSeekCorrection else { return }
+        let now = seekCorrectionNow()
+        let nowSeconds = Double(playbackPositionMs()) / 1000.0
+        // The window measures PLAYING time, not wall-clock time: the sink holds episode
+        // playback paused for the rest of the turn's answer, and matching cannot converge
+        // while paused — so a paused interval must not spend the budget .
+        // An interval during which the head advanced counts in full; a paused one does not.
+        if nowSeconds > pending.expectedPlaybackSeconds {
+            pending.playingSeconds += now - pending.lastTickAt
+        }
+        pending.lastTickAt = now
+        // The window is measured on the session clock, never by counting ticks: a delayed
+        // timer must not stretch it.
+        if pending.playingSeconds >= seekCorrectionWindowSeconds {
+            cancelPendingSeekCorrection(reason: "correction window expired")
+            return
+        }
+        // The playing-time window alone could leave a seek issued while the episode is paused
+        // polling forever: a paused head never spends the budget. A wall-clock cap on the
+        // session's total age ends it regardless .
+        if now - pending.capAnchorSeconds >= seekCorrectionSessionMaxSeconds {
+            cancelPendingSeekCorrection(reason: "correction session expired")
+            return
+        }
+        // An episode change cancels even when the new episode's position happens to sit within
+        // the tolerance: a correction must never seek a different episode.
+        if pending.episodeId != currentSeekCorrectionEpisodeId() {
+            cancelPendingSeekCorrection(reason: "episode changed")
+            return
+        }
+        // ANY playback change the sink did not command cancels the correction: a user seek or
+        // skip, a pause-and-resume elsewhere, an episode change. Normal playback advances well
+        // under the tolerance per tick, so only a real discontinuity lands here.
+        if abs(nowSeconds - pending.expectedPlaybackSeconds) > seekCorrectionToleranceSeconds {
+            cancelPendingSeekCorrection(reason: "playback changed outside the correction")
+            return
+        }
+        // The tolerance measures the jump since the PREVIOUS tick, not since the seek: ordinary
+        // playback advances the head between ticks and must not look like a discontinuity.
+        pending.expectedPlaybackSeconds = nowSeconds
+        pendingSeekCorrection = pending
+        if let matched = fingerprintMapper.matchedReferenceTime(forPlaybackTime: nowSeconds) {
+            // POSITION RULE (plan step 2): the mapped target is `T = p + (target − r)`. Seek
+            // only when T lands MORE than 3 s before where this action's last seek landed
+            // (overshoot — we sought past it) or MORE than 3 s after the current head (still
+            // ahead — we stopped short). A T in between means playback reached the target on
+            // its own between the seek and convergence. No elapsed-time term: how long the
+            // convergence took says nothing about where the target is.
+            let mappedTarget = nowSeconds + Double(pending.targetReferenceMs) / 1000.0 - matched
+            let overshot = mappedTarget < pending.lastSeekLanding - 3
+            let stillAhead = mappedTarget > nowSeconds + 3
+            guard overshot || stillAhead else {
+                // Playback reached the target on its own between the seek and convergence.
+                cancelPendingSeekCorrection(reason: "target reached without correction")
+                return
+            }
+            guard pending.correctionsRemaining > 0 else {
+                // Two corrections used: stay where playback is.
+                cancelPendingSeekCorrection(reason: "corrections exhausted")
+                return
+            }
+            let rawDestination = Int(mappedTarget.rounded())
+            // Lower-bound clamp only: PlaybackManagerSink.seekTo bounds the result against
+            // the real episode duration, but a negative value there means an offset back
+            // from the END, so never hand it one.
+            let destination = max(rawDestination, 0)
+            let durationSeconds = Int(playbackManager?.duration().rounded() ?? 0)
+            _ = playbackSink.seekTo(positionSeconds: destination, episodeDurationSeconds: durationSeconds)
+            pending.correctionsRemaining -= 1
+            pending.expectedPlaybackSeconds = Double(destination)
+            pending.lastSeekLanding = Double(destination)
+            pendingSeekCorrection = pending
+            return
+        }
+        // Not on matched content yet: keep matching at the new spot. The session's single
+        // repeating timer keeps firing; no new timer is created per poll.
+    }
+
+    private func currentSeekCorrectionEpisodeId() -> String? {
+        if let source = seekCorrectionEpisodeId { return source() }
+        return playbackManager?.currentEpisode?.uuid
+    }
+
+    /// Opens the session's ONE repeating tick timer. Called only when a correction session
+    /// starts; polls never reschedule.
+    private func scheduleNextCorrectionTick() {
+        guard let scheduler = seekCorrectionScheduler else { return }
+        stopCorrectionTickTimer()
+        correctionTickToken = scheduler(seekCorrectionTickInterval) { [weak self] in
+            guard let self else { return }
+            Task { @MainActor in self.pollSeekCorrection() }
+        }
+    }
+
+    private func stopCorrectionTickTimer() {
+        if let canceller = seekCorrectionTickCanceller {
+            canceller(correctionTickToken)
+        } else if let timer = correctionTickToken as? Timer {
+            timer.invalidate()
+        }
+        correctionTickToken = nil
+    }
+
+    private func cancelPendingSeekCorrection(reason: String) {
+        guard pendingSeekCorrection != nil else { return }
+        pendingSeekCorrection = nil
+        stopCorrectionTickTimer()
+        FileLog.shared.addMessage("[VoicePipeline] seek correction ended: \(reason)")
     }
 }
 

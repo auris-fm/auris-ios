@@ -292,12 +292,21 @@ private final class MatrixPlaybackSink: VoicePlaybackSink {
 
 private struct MatrixFingerprintMapper: FingerprintMappingProviding {
     var playbackSecondsForReference: [TimeInterval: TimeInterval] = [:]
+    /// Whether the mapping's anchors bracket the target. This double models a fully
+    /// committed map: set false on a case that exercises the unbracketed path.
+    var referenceBracketed = true
 
     func playbackTime(forReferenceTime referenceTime: TimeInterval) -> TimeInterval? {
         playbackSecondsForReference[referenceTime]
     }
 
+    func isBracketedReference(_ referenceTime: TimeInterval) -> Bool? {
+        referenceBracketed
+    }
+
     func matchedReferenceTime(forPlaybackTime playbackTime: TimeInterval) -> TimeInterval? { nil }
+
+    func observedOffsetSeconds(beforeReferenceTime referenceTime: TimeInterval) -> Double? { nil }
 }
 
 private final class MatrixAnalytics: AnalyticsService {
