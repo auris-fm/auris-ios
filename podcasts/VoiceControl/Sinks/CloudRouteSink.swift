@@ -1249,11 +1249,23 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // nothing at all. Reading the request id from this variable rather than from the held
         // follow-up is deliberate — the hold is already gone by the time the disposition is acted on.
         var interruptUndeliveredForRequestId: String? = nil
+        // The predecessor's token, captured BEFORE the interrupt send (see the claim block).
+        var interruptedPriorToken: CloudTurnToken? = nil
         if !isRetainedFollowUpSubmission,
            let priorRequestId = activeResultSocket?.requestId,
-           (activeResultSocketOwner.map { !$0.isCancelled }) ?? false,
+           let priorOwner = activeResultSocketOwner,
+           !priorOwner.isCancelled,
            interruptionState.claimInterruptEmission(forRequestId: priorRequestId) {
             interruptedRequestIdForThisTurn = priorRequestId
+            // CAPTURE BEFORE THE SEND, not after it. The send is async, so a terminal that lands
+            // while it is in flight ends the predecessor's route and clears the sink's active
+            // turn; reading `activeTurn` afterwards saw nil, skipped the acknowledgement wait,
+            // and dispatched this turn as an ordinary one. The token outlives its turn and the
+            // latch returns a resolution recorded while nobody waited, so this capture covers
+            // every interleaving. It is `activeResultSocketOwner` — the token the guard above
+            // just checked and the owner of the socket being interrupted — not `activeTurn`,
+            // which is set earlier and equals that owner only by an unwritten invariant.
+            interruptedPriorToken = priorOwner
             interruptionState.hold(
                 request: request,
                 utteranceId: utteranceId,
@@ -1280,15 +1292,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             }
         }
 
-        // THE INTERRUPTION DECIDED AGAINST WAITING, SO ONE OF TWO THINGS HAPPENED and each ends the
-        // turn here rather than falling through into this utterance's own dispatch.
+        // THE INTERRUPTION DECIDED AGAINST WAITING, SO ONE THING HAPPENED, AND IT ENDS THE
+        // TURN HERE rather than falling through into this utterance's own dispatch:
         //
         //  - `interruptedRequestIdForThisTurn` is nil because the interrupt was undelivered and the
         //    hold was released. No acknowledgement can arrive — there is no live registration to
         //    receive a terminal on — so the utterance must END LOCALLY: nothing of it may be
         //    submitted, because submitting it would assert a settlement that never happened.
-        //  - The arm above could not run because the sink had no `activeTurn` to wait on; the same
-        //    reasoning applies, so it ends locally too.
         //
         // The abandonment arm does NOT land here: a turn that never authenticated has no settlement
         // to wait for and no history to correct, so it is submitted as an ordinary new turn.
@@ -1309,7 +1319,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             )
         }
 
-        if interruptedRequestIdForThisTurn != nil, let priorToken = activeTurn {
+        if interruptedRequestIdForThisTurn != nil, let priorToken = interruptedPriorToken {
             // KEEP THE INTERRUPTED TURN'S RECEIVE ALIVE UNTIL ITS TERMINAL (reviewer ff00457c
             // item 1), now that the interrupt has been SENT. The interrupt needs that turn's
             // terminal to resolve the hold, and the `cancel()` below would otherwise end its

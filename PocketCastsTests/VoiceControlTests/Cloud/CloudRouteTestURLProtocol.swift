@@ -720,6 +720,14 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
         scriptLock.lock(); authSendGate = gate; authSendEntered = entered; scriptLock.unlock()
     }
 
+    /// TEST-ONLY: parks the interrupt send inside `send()` after the frame is recorded and its
+    /// delivery is marked. See the send-in-flight note at the interrupt branch in `send()`.
+    private var interruptSendGate: Gate?
+    private var interruptSendEntered: Promise<Void>?
+    func holdInterruptSendUntilReleased(_ gate: Gate, entered: Promise<Void>) {
+        scriptLock.lock(); interruptSendGate = gate; interruptSendEntered = entered; scriptLock.unlock()
+    }
+
     func send(_ message: URLSessionWebSocketTask.Message) async throws {
         if throwsBeforeRecording { throw URLError(.notConnectedToInternet) }
         // The park sits AFTER the producer's "send invoked" mark and BEFORE the frame is recorded,
@@ -745,6 +753,22 @@ final class StubWebSocketTask: CloudRouteClient.WebSocketTasking {
             // DELIVERED to this (still open) socket: the frame is on the wire before any delay or
             // throw below, so this is the event that fixes "interrupt reached A while A was open".
             markInterruptDelivered()
+            // TEST-ONLY send-in-flight park: keeps the interrupt send SUSPENDED after delivery
+            // has been marked, so a control can settle the predecessor's terminal — a refusal,
+            // even — while the successor's send has not returned yet. That is the window where
+            // the predecessor's route ends and the successor must still wait on the token it
+            // captured. Consumed once; a second interrupt of the same socket never parks.
+            let parked: (Gate, Promise<Void>)? = {
+                scriptLock.lock(); defer { scriptLock.unlock() }
+                guard let gate = interruptSendGate, let entered = interruptSendEntered else { return nil }
+                interruptSendGate = nil
+                interruptSendEntered = nil
+                return (gate, entered)
+            }()
+            if let (gate, entered) = parked {
+                entered.resolve(())
+                _ = try? await gate.wait(untilCancelled: { self.isCancelledSocket })
+            }
         }
         // LOAD INJECTION: a slow host is another kind of probe.
         // A control whose attribution moves when the transport is slower is timing-dependent, so

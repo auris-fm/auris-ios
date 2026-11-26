@@ -6417,6 +6417,137 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         try await checkLocalInterruptionEndReleasesGraceHold(refused: false)
     }
 
+    /// DETERMINISTIC red for the send-in-flight race: the interrupt send is asynchronous, and a
+    /// terminal that lands while it is suspended (here: a refusal, delivered by the control while
+    /// the send is parked INSIDE the stub's send) ends the predecessor's route and clears the
+    /// sink's active turn. The successor must still end `.refused` and submit nothing, because it
+    /// waits on the token it captured BEFORE the send — not on `activeTurn` read after it.
+    /// Against the unfixed sink this case fails EVERY run: the post-send read saw no active turn,
+    /// skipped the acknowledgement wait, and the successor dispatched as an ordinary turn.
+    func testARefusalSettledWhileTheInterruptSendIsInFlightEndsTheSuccessorRefused() async throws {
+        // Under load: every frame delayed, as in the sibling cases the ordering must survive.
+        StubWebSocketTask.sendDelayNanoseconds = 20_000_000
+        addTeardownBlock { StubWebSocketTask.sendDelayNanoseconds = nil }
+        // A's OWN fixture carries the refusal; the gate withholds it until the control releases it.
+        self.nextTurnFixture = """
+            event: error
+            data: {"code":"invalid_request","message":"interrupt does not reference the active turn"}
+
+            """
+        let gate = holdNextTurn()
+        addTeardownBlock { gate.release() }
+        let state = CloudInterruptionState()
+        holdCounters = (AtomicInteger(), AtomicInteger())
+        let ledger = HoldLedger()
+        holdLedger = ledger
+        addTeardownBlock { self.holdLedger = nil }
+        let sink = makeSink(
+            withHoldCounters: true,
+            acknowledgementTimeout: 30,
+            interruptionState: state
+        )
+
+        let prior = Task {
+            await sink.routeToCloud(
+                request: "prior question", tier: .free, context: self.sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-grace-a"
+            )
+        }
+        var registered = false
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            let live = await MainActor.run { sink.activeResultSocketForTesting?.boundIdentity != nil }
+            if live { registered = true; break }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertTrue(registered, "premise: A's transport must be registered")
+        let priorTask = try XCTUnwrap(capturedTask)
+        // ORDER BY EVENT: A must be fully AUTHENTICATED before B claims — its producer has
+        // reached its first receive (which the gate then parks). Without this, B's interrupt
+        // raced A's authentication send and A counted as abandoned, never refused.
+        try await waitUntil("A's producer is parked at its gated receive", timeout: 10) { priorTask.receiveEntered }
+        XCTAssertFalse(priorTask.sentInterrupt, "premise: nothing interrupted yet")
+
+        // HOLD THE INTERRUPT SEND IN FLIGHT: the predecessor's own stub parks the send after the
+        // frame is recorded and its delivery is marked, so the refusal below settles while B's
+        // send has not returned.
+        let sendGate = Gate()
+        let sendEntered = Promise<Void>()
+        priorTask.holdInterruptSendUntilReleased(sendGate, entered: sendEntered)
+
+        self.nextTurnFixture = Self.doneOnlyFixture
+        let b = Task {
+            await sink.routeToCloud(
+                request: "play the next one", tier: .free, context: self.sampleContext(),
+                origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-grace-b"
+            )
+        }
+        try await waitUntil("B takes its own grace hold", timeout: 10) { ledger.countTaken >= 2 }
+        try await waitUntil("B's interrupt send is parked in flight", timeout: 10) { priorTask.sentInterrupt }
+        _ = await sendEntered.value()
+
+        // Settle A's refusal WHILE the send is parked, and let A retire fully, so the post-send
+        // world the successor now walks into has no active turn at all.
+        gate.release()
+        _ = await prior.value
+        XCTAssertTrue(
+            state.isSuppressed("u-grace-b"),
+            "premise: the refusal suppressed the retained utterance before the send resumed"
+        )
+
+        sendGate.release()
+        let bResult = await b.value
+        XCTAssertEqual(
+            bResult.outcome, .refused,
+            "a refusal settled while the interrupt send was in flight still ends the successor locally"
+        )
+        // The successor's own client is the last one the factory built.
+        let bTask = try XCTUnwrap(capturedTask)
+        XCTAssertTrue(bTask !== priorTask, "premise: B built its own transport")
+        XCTAssertFalse(
+            bTask.sentTextFrames.contains { $0.contains("\"authenticate\"") },
+            "B must submit NOTHING — frames=\(bTask.sentTextFrames)"
+        )
+    }
+
+    /// PIN for the retired-before-claim ordering: when the predecessor's terminal is fully
+    /// processed and its route has returned before the successor claims, the sink has no live
+    /// registration to interrupt, so the successor proceeds as an ORDINARY turn and dispatches.
+    /// A sink that instead ends such a successor locally refuses turns nothing was interrupted.
+    func testARetiredPredecessorLeavesItsSuccessorAnOrdinaryTurn() async throws {
+        StubWebSocketTask.sendDelayNanoseconds = 20_000_000
+        addTeardownBlock { StubWebSocketTask.sendDelayNanoseconds = nil }
+        self.nextTurnFixture = Self.doneOnlyFixture
+        let sink = makeSink()
+
+        let priorResult = await sink.routeToCloud(
+            request: "prior question", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-grace-a"
+        )
+        XCTAssertEqual(priorResult.outcome, .completed, "premise: the predecessor fully retired")
+        let priorTask = try XCTUnwrap(capturedTask)
+
+        self.nextTurnFixture = Self.doneOnlyFixture
+        let successorResult = await sink.routeToCloud(
+            request: "play the next one", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: .followUp, utteranceId: "u-grace-b"
+        )
+        XCTAssertEqual(
+            successorResult.outcome, .completed,
+            "a successor arriving after the predecessor fully retired proceeds as an ordinary turn"
+        )
+        let successorTask = try XCTUnwrap(capturedTask)
+        XCTAssertTrue(successorTask !== priorTask, "premise: the successor built its own transport")
+        XCTAssertTrue(
+            successorTask.sentTextFrames.contains { $0.contains("\"authenticate\"") },
+            "the successor dispatched its own turn"
+        )
+        XCTAssertFalse(
+            priorTask.sentInterrupt,
+            "nothing may interrupt a turn that already retired"
+        )
+    }
+
     private func checkLocalInterruptionEndReleasesGraceHold(refused: Bool) async throws {
         // UNDER LOAD: every frame this stub sends is delayed, so the ordering these cases assert
         // must survive a slow host rather than only a quiet machine.
