@@ -1169,33 +1169,20 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // nothing at all. Reading the request id from this variable rather than from the held
         // follow-up is deliberate — the hold is already gone by the time the disposition is acted on.
         var interruptUndeliveredForRequestId: String? = nil
-        // The predecessor's token, captured BEFORE the interrupt send (see the claim block). The
-        // send is async: a terminal that lands while it is in flight (a refusal, or a done) ends
-        // the predecessor's route and clears `activeTurn`. Reading `activeTurn` after the send
-        // then saw nil, SKIPPED the acknowledgement wait entirely, and let this turn fall through
-        // into its own dispatch — submitting the very utterance the server had just refused to
-        // settle (observed on the wire: interrupt sent, refusal processed, then the successor
-        // authenticating as an ordinary completed turn). The token object outlives its turn, and
-        // `awaitAcknowledgement` returns a resolution recorded while nobody waited, so a capture
-        // before the send covers every interleaving through the same one-shot latch. A turn that
-        // was ALREADY retired when this turn claimed (no token to capture) never had a settlement
-        // to wait for and keeps proceeding as an ordinary turn.
+        // The predecessor's token, captured BEFORE the interrupt send (see the claim block). A nil
+        // capture means the predecessor had already retired before this turn claimed: nothing to
+        // wait on, so this turn proceeds as an ordinary one.
         var interruptedPriorToken: CloudTurnToken? = nil
         if !isRetainedFollowUpSubmission,
            let priorRequestId = activeResultSocket?.requestId,
            (activeResultSocketOwner.map { !$0.isCancelled }) ?? false,
            interruptionState.claimInterruptEmission(forRequestId: priorRequestId) {
             interruptedRequestIdForThisTurn = priorRequestId
-            // CAPTURE THE PREDECESSOR'S TOKEN BEFORE THE SEND, not after it. The send is async: a
-            // terminal that lands while it is in flight (a refusal, or a done) ends the
-            // predecessor's route and clears `activeTurn`. Reading `activeTurn` after the send
-            // then saw nil, SKIPPED the acknowledgement wait entirely, and let this turn fall
-            // through into its own dispatch — submitting the very utterance the server had just
-            // refused to settle (observed on the wire: interrupt sent, refusal processed, then
-            // the successor authenticating as an ordinary completed turn). The token object
-            // outlives its turn, and `awaitAcknowledgement` returns a resolution recorded while
-            // nobody waited, so a capture before the send covers every interleaving through the
-            // same one-shot latch.
+            // CAPTURE BEFORE THE SEND, not after it. The send is async, so a terminal that lands
+            // while it is in flight ends the predecessor's route and clears `activeTurn`; reading
+            // `activeTurn` afterwards saw nil, skipped the acknowledgement wait, and dispatched
+            // this turn as an ordinary one. The token outlives its turn and the latch returns a
+            // resolution recorded while nobody waited, so this capture covers every interleaving.
             interruptedPriorToken = activeTurn
             interruptionState.hold(
                 request: request,
@@ -1252,9 +1239,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             )
         }
 
-        if interruptedRequestIdForThisTurn != nil, let priorToken = interruptedPriorToken ?? activeTurn {
-            // `interruptedPriorToken` is the pre-send capture; `activeTurn` only matters when the
-            // capture raced the predecessor's retirement inside the claim block itself.
+        if interruptedRequestIdForThisTurn != nil, let priorToken = interruptedPriorToken {
+            // `interruptedPriorToken` was captured before the send with no await in between, so a
+            // nil capture already meant "retired before the claim" (handled above). The capture
+            // covers the send-in-flight retirement: the token object outlives its turn, and
+            // `awaitAcknowledgement` returns a resolution recorded while nobody waited, so every
+            // interleaving resolves through the same one-shot latch.
             // KEEP THE INTERRUPTED TURN'S RECEIVE ALIVE UNTIL ITS TERMINAL (reviewer ff00457c
             // item 1), now that the interrupt has been SENT. The interrupt needs that turn's
             // terminal to resolve the hold, and the `cancel()` below would otherwise end its
