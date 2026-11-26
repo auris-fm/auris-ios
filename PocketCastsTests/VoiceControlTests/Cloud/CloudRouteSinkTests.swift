@@ -1582,7 +1582,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
     /// An episode change cancels the correction even when the new episode's position sits
     /// within the tolerance of the expected one: a correction must never seek another episode.
-    func testAnEpisodeChangeCancelsTheCorrectionEvenWithinThePositionTolerance() async {
+    func testAnEpisodeChangeCancelsTheCorrection() async {
         self.uncoveredSeekFixture()
         var episodeId: String? = "ep-a"
         let epLock = NSLock()
