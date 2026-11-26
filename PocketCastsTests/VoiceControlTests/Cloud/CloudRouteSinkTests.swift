@@ -6523,7 +6523,12 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         }
         let dropped = try XCTUnwrap(dropLine, "the visible-failure drop was never logged")
         XCTAssertTrue(dropped.contains("7 buffered"), "the drop records the frame count: \(dropped)")
-        try await Task.sleep(nanoseconds: 300_000_000)
+        // Assert after the player has ACTUALLY stopped (every start attempt happens on the
+        // runner before the stop confirmation), not after a wall-clock nap a 4th attempt
+        // could hide inside.
+        try await waitUntil("the failed turn's playback settled", timeout: 5) {
+            !player.hasOutstandingOutput && !player.hasPendingAudio
+        }
         XCTAssertEqual(attempts.attempts(), 3, "no attempt beyond the budget")
         XCTAssertEqual(player.schedulingBoundaryCount, boundariesBefore, "nothing was scheduled — the audio was dropped, visibly")
         // THE RECORD: a failed answer is countable from the turn records, not only from the
@@ -6585,22 +6590,29 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                 request: "audio", tier: .free, context: sampleContext(),
                 origin: cloudTestOrigin, selection: .wakeWord, utteranceId: "u-t17d")
         }
-        // WAIT FOR THE DROP before releasing the producer, so the later frames really do
-        // arrive into a terminal turn.
+        // WAIT FOR THE DELEGATE CALLBACK ITSELF (its sink log line) before releasing the
+        // producer, so the later frames really do arrive into a terminal turn — the earlier
+        // "dropping" line can beat the main-queue callback, and the test then passed by
+        // timing rather than by the guarantee it pins.
         let dropDeadline = Date().addingTimeInterval(10)
-        var dropped = false
-        while !dropped && Date() < dropDeadline {
-            dropped = await FileLog.shared.logFileAsString()
+        var callbackFired = false
+        while !callbackFired && Date() < dropDeadline {
+            callbackFired = await FileLog.shared.logFileAsString()
                 .dropFirst(logLengthAtStart).split(separator: "\n").map(String.init)
-                .contains { $0.contains("cloud audio engine never started — dropping") }
-            if !dropped { try await Task.sleep(nanoseconds: 20_000_000) }
+                .contains { $0.contains("cloud playback FAILED") }
+            if !callbackFired { try await Task.sleep(nanoseconds: 20_000_000) }
         }
-        XCTAssertTrue(dropped, "the first 7 frames never exhausted the budget")
+        XCTAssertTrue(callbackFired, "the player's failure callback never reached the sink")
         producerRelease.signal()
 
         let result = await route.value
         XCTAssertEqual(result.outcome, .completed, "the transport turn still completes")
-        try await Task.sleep(nanoseconds: 800_000_000)
+        // Assert after the player has ACTUALLY stopped (every start attempt happens on the
+        // runner before the stop confirmation), not after a wall-clock nap a 4th attempt
+        // could hide inside.
+        try await waitUntil("the streamed turn's playback settled", timeout: 5) {
+            !player.hasOutstandingOutput && !player.hasPendingAudio
+        }
         XCTAssertEqual(attempts.value(), 3, "no start attempt beyond the budget, even with more frames")
         XCTAssertEqual(player.schedulingBoundaryCount, boundariesBefore, "nothing scheduled — the whole answer was discarded, visibly")
         let further = await FileLog.shared.logFileAsString()
