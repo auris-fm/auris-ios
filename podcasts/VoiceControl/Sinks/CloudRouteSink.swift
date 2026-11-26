@@ -388,9 +388,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     private let seekCorrectionScheduler: ((TimeInterval, @escaping () -> Void) -> Any?)?
     /// Stops a correction tick token. Tests inject a counter; production invalidates Timers.
     private let seekCorrectionTickCanceller: ((Any?) -> Void)?
-    /// The correction window's clock (injected for tests; wall clock in production).
-    /// Monotonic session clock (never wall time: a wall-clock change mid-session
-    /// must not shorten or stretch a correction window).
+    /// The correction window's clock (injected for tests; `CACurrentMediaTime` in
+    /// production). Monotonic, never wall time: a wall-clock change mid-session must not
+    /// shorten or stretch a correction window.
     private let seekCorrectionNow: () -> TimeInterval
     /// The episode the correction belongs to (injected for tests; the manager's current
     /// episode uuid in production). A correction must never seek a different episode.
@@ -2972,10 +2972,10 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // COVERAGE is asked of the bracketing anchors, not of the reverse map: the map
         // extrapolates past its last anchor, so an ad-shifted target already seen would otherwise
         // read as mapped and be sought at an assumed position — exactly the case the correction
-        // exists for . A mapping that cannot answer the bracketing question is
+        // exists for. A mapping that cannot answer the bracketing question is
         // treated as uncovered, so the seek estimates and corrects rather than silently trusting
         // an unverifiable position.
-        let playbackSeconds = fingerprintMapper.isBracketedReference(referenceSeconds) == true
+        let playbackSeconds = fingerprintMapper.isBracketedReference(referenceSeconds)
             ? fingerprintMapper.playbackTime(forReferenceTime: referenceSeconds)
             : nil
         guard let playbackSeconds else {
@@ -2996,7 +2996,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         let seconds = Int(playbackSeconds.rounded())
         // A MOVING action supersedes any correction a previous action had pending — but only
         // here, where playback actually moves: a refused `play_quote` moved nothing and must
-        // not scrap an earlier action's session .
+        // not scrap an earlier action's session.
         cancelPendingSeekCorrection(reason: "superseded by another moving action")
         // Negative positionSeconds is an offset back from the episode end.
         // Use the duration-aware overload so the sink resolves and bounds it.
@@ -3021,7 +3021,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // A negative reference target (an offset back from the end) or a negative estimate can
         // land before the episode start; the duration-aware seekTo reinterprets a negative
         // value as an offset back from the END, which would jump the listener near the end.
-        // Clamp to the start instead . A negative TARGET is unreachable, so
+        // Clamp to the start instead. A negative TARGET is unreachable, so
         // there is no correction to open: the plain seek is the whole answer. A merely negative
         // ESTIMATE (the target itself is positive) keeps its session — matching may still pull
         // the correction toward it.
@@ -3054,7 +3054,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         let nowSeconds = Double(playbackPositionMs()) / 1000.0
         // The window measures PLAYING time, not wall-clock time: the sink holds episode
         // playback paused for the rest of the turn's answer, and matching cannot converge
-        // while paused — so a paused interval must not spend the budget .
+        // while paused — so a paused interval must not spend the budget.
         // An interval during which the head advanced counts in full; a paused one does not.
         if nowSeconds > pending.expectedPlaybackSeconds {
             pending.playingSeconds += now - pending.lastTickAt
@@ -3068,7 +3068,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         }
         // The playing-time window alone could leave a seek issued while the episode is paused
         // polling forever: a paused head never spends the budget. A wall-clock cap on the
-        // session's total age ends it regardless .
+        // session's total age ends it regardless.
         if now - pending.capAnchorSeconds >= seekCorrectionSessionMaxSeconds {
             cancelPendingSeekCorrection(reason: "correction session expired")
             return

@@ -300,7 +300,7 @@ private struct MatrixFingerprintMapper: FingerprintMappingProviding {
         playbackSecondsForReference[referenceTime]
     }
 
-    func isBracketedReference(_ referenceTime: TimeInterval) -> Bool? {
+    func isBracketedReference(_ referenceTime: TimeInterval) -> Bool {
         referenceBracketed
     }
 

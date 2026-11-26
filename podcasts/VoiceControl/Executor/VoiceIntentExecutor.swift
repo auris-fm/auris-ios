@@ -29,9 +29,10 @@ protocol FingerprintMappingProviding {
     /// reverse map happily extrapolates a position for it.
     ///
     /// Only the action conversion needs this question, and there is no default: a mapping
-    /// that cannot answer it honestly must say so explicitly. "Unknown" must never read as
-    /// "covered" by accident, or a seek stops correcting.
-    func isBracketedReference(_ referenceTime: TimeInterval) -> Bool?
+    /// that cannot answer it honestly must answer `false` explicitly. "Unknown" must never
+    /// read as "covered" by accident, or a seek stops correcting, so the answer is not
+    /// optional — a conformer has to pick an answer, and the safe one to pick is `false`.
+    func isBracketedReference(_ referenceTime: TimeInterval) -> Bool
 }
 
 final class CloudPlaybackContextState {

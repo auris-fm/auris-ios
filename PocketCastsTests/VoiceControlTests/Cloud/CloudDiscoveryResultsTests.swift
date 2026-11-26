@@ -236,5 +236,5 @@ private struct RecordingMapperForResults: FingerprintMappingProviding {
     func playbackTime(forReferenceTime referenceTime: TimeInterval) -> TimeInterval? { referenceTime }
     func matchedReferenceTime(forPlaybackTime playbackTime: TimeInterval) -> TimeInterval? { playbackTime }
     func observedOffsetSeconds(beforeReferenceTime referenceTime: TimeInterval) -> Double? { nil }
-    func isBracketedReference(_ referenceTime: TimeInterval) -> Bool? { nil }
+    func isBracketedReference(_ referenceTime: TimeInterval) -> Bool { false }
 }

@@ -773,5 +773,5 @@ private struct MockFingerprintMapper: FingerprintMappingProviding {
 
     func observedOffsetSeconds(beforeReferenceTime referenceTime: TimeInterval) -> Double? { nil }
 
-    func isBracketedReference(_ referenceTime: TimeInterval) -> Bool? { nil }
+    func isBracketedReference(_ referenceTime: TimeInterval) -> Bool { false }
 }

@@ -392,7 +392,7 @@ final class FingerprintTimingManager: NSObject, @unchecked Sendable {
     /// `isWithinMatchedContent(forPlaybackTime:)`, and the question the action conversion asks:
     /// past the last anchor the reverse map still extrapolates a position, but that position is
     /// an assumption, not a measurement, so the seek must estimate and then correct.
-    func isBracketedReference(_ referenceTime: Double) -> Bool? {
+    func isBracketedReference(_ referenceTime: Double) -> Bool {
         dispatchPrecondition(condition: .notOnQueue(queue))
         return queue.sync {
             Self.isBracketedReference(referenceTime, in: main.referenceToPlayback)

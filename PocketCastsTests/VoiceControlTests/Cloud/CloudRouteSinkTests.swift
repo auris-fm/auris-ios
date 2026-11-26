@@ -3879,7 +3879,9 @@ private struct RecordingFingerprintMapper: FingerprintMappingProviding {
     /// The mapping's own coverage answer: nil means "this double cannot tell". Set on the cases
     /// that ask the coverage question; a case that leaves it nil exercises the unverifiable
     /// mapping (which the sink must treat as uncovered, never as covered).
-    var referenceBracketed: Bool?
+    /// The test double's answer to the coverage question. Defaults to false: an unknown
+    /// mapping must never read as covered.
+    var referenceBracketed = false
 
     func matchedReferenceTime(forPlaybackTime playbackTime: TimeInterval) -> TimeInterval? {
         matchedReferenceForPlayback[playbackTime]
@@ -3895,7 +3897,7 @@ private struct RecordingFingerprintMapper: FingerprintMappingProviding {
         return observedOffsets[nearest]
     }
 
-    func isBracketedReference(_ referenceTime: TimeInterval) -> Bool? {
+    func isBracketedReference(_ referenceTime: TimeInterval) -> Bool {
         referenceBracketed
     }
 }
