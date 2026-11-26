@@ -323,6 +323,55 @@ final class FingerprintTimingManagerTests: XCTestCase {
         XCTAssertFalse(FingerprintTimingManager.isWithinMatchedContent(forPlaybackTime: 14.1, in: entries))
     }
 
+    // MARK: - Reference-side coverage (seek-and-correct, review item 1)
+
+    // The ad pair from timeline-alignment.md § Action position conversion: reference 100 s sits
+    // at playback 100 s, and reference 104 s sits at playback 164 s — a 60 s ad was inserted
+    // between them. Reference 102 s is INSIDE the ad, so it is not covered, even though the
+    // reference-side gap between the bracketing anchors is only 4 s.
+    //
+    // This is the case that fails when only the reference gap is checked: 104 - 100 = 4 <= 8,
+    // so a reference-only bracket call returns "covered" and the seek goes to the interpolated
+    // mid-ad position instead of estimating and correcting.
+    private static let adPairAnchors: [Entry] = [
+        Entry(playbackTime: 100, referenceTime: 100),
+        Entry(playbackTime: 164, referenceTime: 104)
+    ]
+
+    func testNotBracketedInsideAdWherePlaybackGapIsWide() {
+        XCTAssertFalse(FingerprintTimingManager.isBracketedReference(102, in: Self.adPairAnchors))
+    }
+
+    func testBracketedOnRealContentAcrossTheSamePair() {
+        // Just before the ad starts, the anchors are close on BOTH clocks.
+        let entries = [
+            Entry(playbackTime: 100, referenceTime: 100),
+            Entry(playbackTime: 101, referenceTime: 101)
+        ]
+        XCTAssertTrue(FingerprintTimingManager.isBracketedReference(100.5, in: entries))
+    }
+
+    func testBracketedStaysTrueAfterTheAdOnBothClocks() {
+        // Past the ad, anchors resume close together on both clocks (104→164, 105→165).
+        let entries = Self.adPairAnchors + [
+            Entry(playbackTime: 165, referenceTime: 105),
+            Entry(playbackTime: 166, referenceTime: 106)
+        ]
+        XCTAssertTrue(FingerprintTimingManager.isBracketedReference(105.5, in: entries))
+    }
+
+    func testNotBracketedBeforeFirstAnchor() {
+        XCTAssertFalse(FingerprintTimingManager.isBracketedReference(99, in: Self.adPairAnchors))
+    }
+
+    func testNotBracketedPastLastAnchor() {
+        XCTAssertFalse(FingerprintTimingManager.isBracketedReference(110, in: Self.adPairAnchors))
+    }
+
+    func testNotBracketedWithEmptyMapping() {
+        XCTAssertFalse(FingerprintTimingManager.isBracketedReference(10, in: []))
+    }
+
     // MARK: - On-demand chapter seek: search-window bounds
 
     func testColdSearchWindowStartsAtReferenceAndUsesColdBudget() {
