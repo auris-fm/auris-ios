@@ -1648,6 +1648,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // The server names the codec for this turn's binary frames;
                     // the player decodes at that rate rather than the hardware's.
                     audioPlayer.setNegotiatedCodec(codec)
+                    // A NEW TURN for the audio player too: its failed-start budget and any
+                    // terminal failure left by an earlier turn must not shadow this one.
+                    audioPlayer.beginTurn()
                     // THE CONVERSATION BECAME REAL. `connected` is sent only after admission, so
                     // this frame — not the send that preceded it — is the client's only evidence
                     // that the server holds the conversation this turn named. Recorded where the
@@ -2930,6 +2933,19 @@ extension CloudRouteSink {
 
     func audioPlayerDidTakeFirstAudible(at instant: Double) {
         writeHeldLatencyRecord(firstAudible: instant)
+    }
+
+    func audioPlayerDidFailPlayback(droppedFrameCount: Int) {
+        // The turn's buffered answer was dropped because the audio engine never started.
+        // Same surface as every other playback failure: the held latency record is written
+        // as it stands (no first audible — there was none), so the outcome is recorded and
+        // the turn's playback state is never left waiting for audio that will not come. The
+        // hold release itself still rides `audioPlayerDidStop`, which fires when the drain
+        // quiesces after this drop.
+        FileLog.shared.addMessage(
+            "[VoicePipeline] cloud playback FAILED — audio engine never started, "
+            + "\(droppedFrameCount) frame(s) of the turn's answer discarded")
+        writeHeldLatencyRecord(firstAudible: nil)
     }
 
     func audioPlayerDidStop(drainEpoch: Int) {

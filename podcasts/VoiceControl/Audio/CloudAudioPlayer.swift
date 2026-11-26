@@ -32,6 +32,10 @@ final class CloudAudioPlayer: @unchecked Sendable {
         /// because the player clears its mark when the turn's audio ends, which can happen before
         /// a delivery hopped to the main queue runs.
         func audioPlayerDidTakeFirstAudible(at instant: Double)
+        /// Called when the turn's buffered answer is DROPPED because the audio engine never
+        /// started: the bounded per-turn start budget ran out, so playback ends as a failure
+        /// instead of silently losing the audio. `droppedFrameCount` is what was discarded.
+        func audioPlayerDidFailPlayback(droppedFrameCount: Int)
     }
 
     /// Codecs this player can actually decode and play.
@@ -708,16 +712,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
                     renderStopDeadline = nil
                 } else if bufferedFrameCount > 0 {
                     logEngineStartFailureOnce()
-                    // BACK OFF, don't hammer: every start attempt on a contended audio server
-                    // costs a CoreAudio round trip that can take the process down (observed as
-                    // an RPC-timeout abort inside AVAudioEngine.start), so consecutive failures
-                    // double the interval instead of retrying at a fixed beat.
-                    consecutiveStartFailures += 1
-                    let interval = min(Self.engineStartRetryInterval
-                        * pow(2, Double(consecutiveStartFailures - 1)), Self.engineStartRetryCap)
-                    runnerLock.lock()
-                    renderCatchUpWake = Date().addingTimeInterval(interval)
-                    runnerLock.unlock()
+                    noteFailedStartAndWakeRetry()
                 }
             } else {
                 isPlaying = true
@@ -976,6 +971,8 @@ final class CloudAudioPlayer: @unchecked Sendable {
         self.engine = engine
         self.playerNode = playerNode
         engineStartFailureLogged = false
+        startAttemptsUsed = 0
+        startFailureTerminal = false
         observeTiming("start")
 
         if let delegate {
@@ -1165,19 +1162,89 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// boundary exists to catch.
     private var nodeIncarnationFrames: Double = 0
 
-    /// How long the runner waits before the FIRST retry of a failed engine start. Consecutive
-    /// failures double it (see the backoff at the retry sites): every start attempt on a
-    /// contended audio server risks an abort, so retries must thin out, not hammer.
-    private static let engineStartRetryInterval: TimeInterval = 0.25
+    /// Delays between the failed-start retries: the first retry after 250 ms (a transient
+    /// throw, like an audio session returning after an interruption, recovers quickly), the
+    /// second after 1 s. Every start attempt on a contended audio server also risks an abort
+    /// (an RPC-timeout kill inside AVAudioEngine.start), so attempts are FINITE per turn.
+    private static let engineStartRetryDelays: [TimeInterval] = [0.25, 1.0]
 
-    /// Backoff ceiling for failed-start retries.
-    private static let engineStartRetryCap: TimeInterval = 2.0
+    /// Start attempts allowed per turn, SHARED between the runner and the drain. After the
+    /// third failure the turn's buffered answer is dropped and playback ends as a visible
+    /// failure — open-ended retrying would risk the abort above on every retry beat for as
+    /// long as the turn lasts, and a single attempt would lose recoverable audio.
+    private static let maxStartAttemptsPerTurn = 3
 
-    /// Consecutive failed starts on this player; reset when an engine actually starts.
-    private var consecutiveStartFailures = 0
+    /// Start attempts spent this turn. Reset by `beginTurn()` (a new turn) and when an engine
+    /// actually starts.
+    private var startAttemptsUsed = 0
+
+    /// True once this turn's start budget ran out and the buffered answer was dropped. No
+    /// further start attempts this turn; reset by `beginTurn()` and on a successful start.
+    private var startFailureTerminal = false
 
     /// How long the drain waits on a failing engine before dropping the turn's remaining audio.
     private static let drainStartRetryBudget: TimeInterval = 3.0
+
+    /// Empties the frame buffer, returning how many frames were discarded. Same bookkeeping
+    /// as `cancel()`'s clear, without any of its stop semantics.
+    private func discardBufferedFrames() -> Int {
+        bufferLock.lock()
+        let dropped = buffer.count
+        buffer.removeAll()
+        if timingEnabled { timingQueuedBytes = 0 }
+        bufferLock.unlock()
+        return dropped
+    }
+
+    /// Records a failed start against the per-turn budget. Returns true when the budget has
+    /// run out (no further attempts this turn; the drop already happened); false when a
+    /// retry wake is warranted.
+    private func noteFailedStart() -> Bool {
+        startAttemptsUsed += 1
+        guard startAttemptsUsed < Self.maxStartAttemptsPerTurn else {
+            dropBufferedAnswerAsFailedPlayback()
+            return true
+        }
+        return false
+    }
+
+    /// Runner-side failed start: spend the budget, then arm the backoff wake (250 ms, then
+    /// 1 s). A budget that ran out has already dropped the answer and needs no wake.
+    private func noteFailedStartAndWakeRetry() {
+        guard !noteFailedStart(), !startFailureTerminal else { return }
+        runnerLock.lock()
+        renderCatchUpWake = Date().addingTimeInterval(Self.engineStartRetryDelays[
+            min(startAttemptsUsed - 1, Self.engineStartRetryDelays.count - 1)])
+        runnerLock.unlock()
+    }
+
+    /// THE VISIBLE FAILURE (bounded-retry ruling): the turn's start budget ran out with the
+    /// engine still down, so the buffered answer is dropped — recorded in the log with its
+    /// frame count and reported to the delegate, so the turn's playback ends as a failure
+    /// instead of silence nobody can see.
+    private func dropBufferedAnswerAsFailedPlayback() {
+        guard !startFailureTerminal else { return }
+        startFailureTerminal = true
+        let dropped = discardBufferedFrames()
+        FileLog.shared.addMessage(
+            "[VoicePipeline] cloud audio engine never started — dropping \(dropped) buffered "
+            + "frame(s); the turn's playback ends as a failure")
+        runnerLock.lock()
+        renderCatchUpWake = nil
+        runnerLock.unlock()
+        DispatchQueue.main.async { [weak self] in
+            self?.delegate?.audioPlayerDidFailPlayback(droppedFrameCount: dropped)
+        }
+    }
+
+    /// A NEW TURN: the failed-start budget and any terminal failure from the previous turn
+    /// must not shadow this one — a later turn's streak starts again at the first retry delay.
+    func beginTurn() {
+        runnerLock.lock()
+        startAttemptsUsed = 0
+        startFailureTerminal = false
+        runnerLock.unlock()
+    }
 
     /// Logs the FIRST failure of a consecutive failed-start streak, so a persistent outage
     /// produces one line, not one per retry.
@@ -1187,8 +1254,9 @@ final class CloudAudioPlayer: @unchecked Sendable {
         guard !engineStartFailureLogged else { return }
         engineStartFailureLogged = true
         FileLog.shared.addMessage(
-            "[VoicePipeline] cloud audio engine not running — retrying every "
-            + "\(Int(Self.engineStartRetryInterval * 1000)) ms; the turn's audio plays when the engine starts")
+            "[VoicePipeline] cloud audio engine start failed — playback will retry (bounded per "
+            + "turn: \(Self.maxStartAttemptsPerTurn) attempts); buffered audio is retained until it "
+            + "plays or the turn ends")
     }
 
     /// Whether this incarnation has already logged its first scheduled buffer. Reset when the
@@ -1580,32 +1648,25 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // Retrying HERE is the last chance to schedule the turn's answer before the stop drops
         // everything: a drain that finds output available but no engine gives the start bounded
         // attempts instead of silently consuming the frames through the no-engine path.
-        if playerNode == nil, !isBufferEmpty, Self.audioOutputIsAvailable {
+        if playerNode == nil, !isBufferEmpty, !startFailureTerminal, Self.audioOutputIsAvailable {
             let retryDeadline = Date().addingTimeInterval(Self.drainStartRetryBudget)
             var failureLogged = false
-            var drainAttempt = 0
-            while playerNode == nil, !isBufferEmpty, Date() < retryDeadline {
-                if startEngine() {
-                    consecutiveStartFailures = 0
-                    break
-                }
+            while playerNode == nil, !isBufferEmpty, !startFailureTerminal, Date() < retryDeadline {
+                if startEngine() { break }
                 if !failureLogged {
                     failureLogged = true
                     FileLog.shared.addMessage(
                         "[VoicePipeline] cloud audio engine down at drain — retrying up to "
                         + "\(Int(Self.drainStartRetryBudget)) s before the turn's remaining audio is dropped")
                 }
-                drainAttempt += 1
-                Thread.sleep(forTimeInterval: min(
-                    Self.engineStartRetryInterval * pow(2, Double(drainAttempt - 1)),
-                    Self.engineStartRetryCap))
+                // The SAME per-turn budget the runner spends. Once it runs out the drop is the
+                // visible failure, not a fourth attempt.
+                if noteFailedStart() { break }
+                Thread.sleep(forTimeInterval: Self.engineStartRetryDelays[
+                    min(startAttemptsUsed - 1, Self.engineStartRetryDelays.count - 1)])
             }
-            // The budget ran out with the engine still down: the frames remaining now are
-            // dropped by the drain below, and that loss is recorded rather than silent.
             if playerNode == nil, !isBufferEmpty {
-                FileLog.shared.addMessage(
-                    "[VoicePipeline] cloud audio engine still down after "
-                    + "\(Int(Self.drainStartRetryBudget)) s — dropping \(bufferedFrameCount) buffered frame(s) of the turn's answer")
+                dropBufferedAnswerAsFailedPlayback()
             }
         }
         // Play any remaining frames.
@@ -1838,4 +1899,6 @@ final class CloudAudioPlayer: @unchecked Sendable {
 extension CloudAudioPlayer.Delegate {
     /// Optional: only a delegate that holds something for the first audible instant needs it.
     func audioPlayerDidTakeFirstAudible(at instant: Double) {}
+
+    func audioPlayerDidFailPlayback(droppedFrameCount: Int) {}
 }
