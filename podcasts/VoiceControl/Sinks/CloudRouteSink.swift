@@ -384,7 +384,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     private let playbackSink: VoicePlaybackSink
     private let fingerprintMapper: FingerprintMappingProviding
     private let seekCorrectionTickInterval: TimeInterval
-    private let seekCorrectionToleranceSeconds: Double
     private let seekCorrectionScheduler: ((TimeInterval, @escaping () -> Void) -> Any?)?
     /// Stops a correction tick token. Tests inject a counter; production invalidates Timers.
     private let seekCorrectionTickCanceller: ((Any?) -> Void)?
@@ -720,7 +719,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // reference target seeks its estimate and is corrected after matching converges. The
         // poll runs on this scheduler; production repeats on a timer, tests drive ticks.
         seekCorrectionTickInterval: TimeInterval = 1.0,
-        seekCorrectionToleranceSeconds: Double = 5.0,
         seekCorrectionScheduler: ((TimeInterval, @escaping () -> Void) -> Any?)? = { interval, fire in
             let timer = Timer(timeInterval: interval, repeats: true) { _ in fire() }
             RunLoop.main.add(timer, forMode: .common)
@@ -754,7 +752,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         self.playbackSink = playbackSink
         self.fingerprintMapper = fingerprintMapper
         self.seekCorrectionTickInterval = seekCorrectionTickInterval
-        self.seekCorrectionToleranceSeconds = seekCorrectionToleranceSeconds
         self.seekCorrectionScheduler = seekCorrectionScheduler
         self.seekCorrectionTickCanceller = seekCorrectionTickCanceller
         self.seekCorrectionNow = seekCorrectionNow ?? { CACurrentMediaTime() }
@@ -3044,9 +3041,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // the correction toward it.
         let estimateSeconds = max(rawEstimateSeconds, 0)
         let sessionStart = seekCorrectionNow()
-        // The session is opened BEFORE the estimate seek issues, carrying its destination as
-        // the own-seek mark: the real path posts the seek event from inside the seek call, so
-        // the mark must exist before that call returns.
+        // The session is opened BEFORE the estimate seek issues: the real path posts the seek
+        // event synchronously from inside that call, while `ownSeekInFlight` is set.
         if referenceSeconds >= 0 {
             pendingSeekCorrection = PendingSeekCorrection(
                 targetReferenceMs: targetReferenceMs,
@@ -3144,8 +3140,8 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // from the END, so never hand it one.
             let destination = max(rawDestination, 0)
             let durationSeconds = Int(playbackManager?.duration().rounded() ?? 0)
-            // The own-seek mark goes down BEFORE the seek issues and lifts the moment the
-            // call returns: the real path posts the event synchronously inside it.
+            // `ownSeekInFlight` covers exactly the call: the real path posts the seek event
+            // synchronously from inside it.
             dispatchPrecondition(condition: .onQueue(.main))
             ownSeekInFlight = true
             _ = playbackSink.seekTo(positionSeconds: destination, episodeDurationSeconds: durationSeconds)

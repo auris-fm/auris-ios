@@ -1318,6 +1318,29 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
     /// A user seek 2 s from the sink's own landing must still cancel: the own-seek mark is
     /// the recorded destination itself, not a wide proximity window.
+    /// Delivery through the real observer is SYNCHRONOUS: an event posted inside the sink's
+    /// own seek is handled before the call returns. A foreign target posted there is still
+    /// ignored, which holds only while delivery stays inside the in-flight window — if the
+    /// observer ever queued it (delivering after the flag lifted), this fails. No time
+    /// involved.
+    func testAForeignEventInsideTheSinksOwnSeekIsIgnored() async {
+        self.uncoveredSeekFixture()
+        mapper.observedOffsets = [100.0: 15.0]
+        mapper.matchedReferenceForPlayback = [216.0: 190.0, 230.0: 180.0]
+        playback.postsSeekEventOnSeekTo = true
+        playback.seekEventOverrideTarget = 999
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-25")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(215)), "premise: the estimate seek ran")
+        playback.setPositionMs(216_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        XCTAssertTrue(playback.calls.contains(.seekTo(226)), "delivery is synchronous inside the in-flight window: the foreign event is ignored and the first correction lands (216 + (200 - 190))")
+        playback.setPositionMs(230_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        XCTAssertTrue(playback.calls.contains(.seekTo(250)), "and the second correction lands (230 + (200 - 180))")
+    }
+
     /// The sink clamps destinations against the episode duration one layer down: a seek past
     /// the end posts an event for the CLAMPED value, not the destination the sink commanded.
     /// The own-seek mark is the in-flight call, not the value, so that event must not cancel.
@@ -1334,9 +1357,6 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         playback.setPositionMs(216_000)
         await MainActor.run { sink.pollSeekCorrection() }
         XCTAssertTrue(playback.calls.contains(.seekTo(226)), "the estimate seek's clamped event does not cancel the session; the first correction lands (216 + (200 - 190))")
-        for _ in 1...10 {
-            await MainActor.run { usleep(5_000) }
-        }
         playback.setPositionMs(230_000)
         await MainActor.run { sink.pollSeekCorrection() }
         XCTAssertTrue(playback.calls.contains(.seekTo(250)), "the corrective seek's clamped event does not cancel either; the second correction lands (230 + (200 - 180))")
@@ -1426,10 +1446,6 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         playback.setPositionMs(216_000)
         await MainActor.run { sink.pollSeekCorrection() }
         XCTAssertTrue(playback.calls.contains(.seekTo(226)), "premise: the first correction ran")
-        // The own-seek events are queued for the main queue; drain before polling again.
-        for _ in 1...10 {
-            await MainActor.run { usleep(5_000) }
-        }
         playback.setPositionMs(230_000)
         await MainActor.run { sink.pollSeekCorrection() }
         XCTAssertTrue(playback.calls.contains(.seekTo(250)), "the session survives its own inline-posted seek event and spends its second correction (230 + (200 - 180))")
