@@ -1316,8 +1316,6 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertFalse(anySeek, "a user seek through the manager cancels the pending correction")
     }
 
-    /// A user seek 2 s from the sink's own landing must still cancel: the own-seek mark is
-    /// the recorded destination itself, not a wide proximity window.
     /// Delivery through the real observer is SYNCHRONOUS: an event posted inside the sink's
     /// own seek is handled before the call returns. A foreign target posted there is still
     /// ignored, which holds only while delivery stays inside the in-flight window — if the

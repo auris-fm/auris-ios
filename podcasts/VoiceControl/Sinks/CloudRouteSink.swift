@@ -3099,8 +3099,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             cancelPendingSeekCorrection(reason: "correction session expired")
             return
         }
-        // An episode change cancels even when the new episode's position happens to sit within
-        // the tolerance: a correction must never seek a different episode.
+        // An episode change cancels: a correction must never seek a different episode.
         if pending.episodeId != currentSeekCorrectionEpisodeId() {
             cancelPendingSeekCorrection(reason: "episode changed")
             return
