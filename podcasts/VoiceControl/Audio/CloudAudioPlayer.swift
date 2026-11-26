@@ -708,8 +708,15 @@ final class CloudAudioPlayer: @unchecked Sendable {
                     renderStopDeadline = nil
                 } else if bufferedFrameCount > 0 {
                     logEngineStartFailureOnce()
+                    // BACK OFF, don't hammer: every start attempt on a contended audio server
+                    // costs a CoreAudio round trip that can take the process down (observed as
+                    // an RPC-timeout abort inside AVAudioEngine.start), so consecutive failures
+                    // double the interval instead of retrying at a fixed beat.
+                    consecutiveStartFailures += 1
+                    let interval = min(Self.engineStartRetryInterval
+                        * pow(2, Double(consecutiveStartFailures - 1)), Self.engineStartRetryCap)
                     runnerLock.lock()
-                    renderCatchUpWake = Date().addingTimeInterval(Self.engineStartRetryInterval)
+                    renderCatchUpWake = Date().addingTimeInterval(interval)
                     runnerLock.unlock()
                 }
             } else {
@@ -1158,9 +1165,16 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// boundary exists to catch.
     private var nodeIncarnationFrames: Double = 0
 
-    /// How long the runner waits before retrying a failed engine start. Long enough to let a
-    /// contended audio server recover, short enough that a turn's answer is not visibly delayed.
+    /// How long the runner waits before the FIRST retry of a failed engine start. Consecutive
+    /// failures double it (see the backoff at the retry sites): every start attempt on a
+    /// contended audio server risks an abort, so retries must thin out, not hammer.
     private static let engineStartRetryInterval: TimeInterval = 0.25
+
+    /// Backoff ceiling for failed-start retries.
+    private static let engineStartRetryCap: TimeInterval = 2.0
+
+    /// Consecutive failed starts on this player; reset when an engine actually starts.
+    private var consecutiveStartFailures = 0
 
     /// How long the drain waits on a failing engine before dropping the turn's remaining audio.
     private static let drainStartRetryBudget: TimeInterval = 3.0
@@ -1569,15 +1583,22 @@ final class CloudAudioPlayer: @unchecked Sendable {
         if playerNode == nil, !isBufferEmpty, Self.audioOutputIsAvailable {
             let retryDeadline = Date().addingTimeInterval(Self.drainStartRetryBudget)
             var failureLogged = false
+            var drainAttempt = 0
             while playerNode == nil, !isBufferEmpty, Date() < retryDeadline {
-                if startEngine() { break }
+                if startEngine() {
+                    consecutiveStartFailures = 0
+                    break
+                }
                 if !failureLogged {
                     failureLogged = true
                     FileLog.shared.addMessage(
                         "[VoicePipeline] cloud audio engine down at drain — retrying up to "
                         + "\(Int(Self.drainStartRetryBudget)) s before the turn's remaining audio is dropped")
                 }
-                Thread.sleep(forTimeInterval: Self.engineStartRetryInterval)
+                drainAttempt += 1
+                Thread.sleep(forTimeInterval: min(
+                    Self.engineStartRetryInterval * pow(2, Double(drainAttempt - 1)),
+                    Self.engineStartRetryCap))
             }
             // The budget ran out with the engine still down: the frames remaining now are
             // dropped by the drain below, and that loss is recorded rather than silent.

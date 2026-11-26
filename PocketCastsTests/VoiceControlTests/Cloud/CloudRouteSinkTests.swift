@@ -6466,9 +6466,11 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
         // The player must have been given audio: the enqueue path ran, and by the end of the turn
         // the audio has drained rather than been dropped.
-        let enqueued = await MainActor.run { sink.audioPlayerForTesting?.framesEnqueuedForTesting }
+        let playerRef = await MainActor.run { sink.audioPlayerForTesting }
+        let player = try XCTUnwrap(playerRef)
+        let enqueued = player.framesEnqueuedForTesting
         XCTAssertTrue(
-            (enqueued ?? 0) > 0,
+            enqueued > 0,
             "binary audio must be DELIVERED to the player — otherwise an output assertion proves nothing"
         )
         // SCOPE: this is DELIVERY and buffer state, not proof that speech was RENDERED. The player's
@@ -6478,8 +6480,13 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // frames can legitimately arrive at the player after `done` was processed (the socket
         // delivers them independently of the event stream), and the drain only consumes what had
         // arrived. Reading once races that delivery; the barrier bounds it instead.
+        // `hasPendingAudio` is buffer-lock guarded and not actor isolated, so the barrier reads
+        // it directly — `waitUntil`'s closure runs off the main actor, and an
+        // `assumeIsolated` here traps the process when the closure lands off main.
+        // `player` was captured on the main actor above; `hasPendingAudio` itself is
+        // buffer-lock guarded and safe to call from `waitUntil`'s off-main closure.
         try await waitUntil("the turn's audio drained after done", timeout: 5) {
-            MainActor.assumeIsolated { !(sink.audioPlayerForTesting?.hasPendingAudio ?? true) }
+            !player.hasPendingAudio
         }
     }
 
