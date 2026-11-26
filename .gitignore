@@ -53,7 +53,7 @@ build/
 
 # CPU llama.cpp pin (built by scripts/build-llama-ios.sh; Metal off)
 ThirdParty/llama.cpp
-ThirdParty/llama-cpp-build/
+ThirdParty/llama-cpp-build
 
 # Local-only operator harnesses: live-network probes are never committed
 LocalMintTokenProbe.swift
