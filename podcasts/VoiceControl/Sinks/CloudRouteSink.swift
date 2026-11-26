@@ -1210,15 +1210,17 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             }
         }
 
-        // THE INTERRUPTION DECIDED AGAINST WAITING, SO ONE OF TWO THINGS HAPPENED and each ends the
-        // turn here rather than falling through into this utterance's own dispatch.
+        // THE INTERRUPTION DECIDED AGAINST WAITING, SO ONE THING HAPPENED, AND IT ENDS THE
+        // TURN HERE rather than falling through into this utterance's own dispatch:
         //
         //  - `interruptedRequestIdForThisTurn` is nil because the interrupt was undelivered and the
         //    hold was released. No acknowledgement can arrive — there is no live registration to
         //    receive a terminal on — so the utterance must END LOCALLY: nothing of it may be
         //    submitted, because submitting it would assert a settlement that never happened.
-        //  - The arm above could not run because the sink had no `activeTurn` to wait on; the same
-        //    reasoning applies, so it ends locally too.
+        //
+        // (A nil token capture is NOT this arm: the predecessor retired before this turn claimed,
+        // so there was never a settlement to wait for, and the turn below proceeds as an ordinary
+        // one.)
         //
         // The abandonment arm does NOT land here: a turn that never authenticated has no settlement
         // to wait for and no history to correct, so it is submitted as an ordinary new turn.
@@ -1240,8 +1242,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         }
 
         if interruptedRequestIdForThisTurn != nil, let priorToken = interruptedPriorToken {
-            // `interruptedPriorToken` was captured before the send with no await in between, so a
-            // nil capture already meant "retired before the claim" (handled above). The capture
+            // A NIL capture cannot reach this wait: it would mean the predecessor retired before
+            // the claim, and that turn proceeds as an ordinary one below — there is no token to
+            // wait on, and no settlement to miss. The capture
             // covers the send-in-flight retirement: the token object outlives its turn, and
             // `awaitAcknowledgement` returns a resolution recorded while nobody waited, so every
             // interleaving resolves through the same one-shot latch.
