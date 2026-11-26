@@ -693,15 +693,50 @@ final class CloudAudioPlayer: @unchecked Sendable {
             renderCatchUpRecheckForTesting = nil
             runnerLock.unlock()
 
+            consumeBeginTurnRequest()
             processFrames()
             recheck?()
         }
     }
 
+    private func consumeBeginTurnRequest() {
+        runnerLock.lock()
+        guard beginTurnRequested else {
+            runnerLock.unlock()
+            return
+        }
+        beginTurnRequested = false
+        startAttemptsUsed = 0
+        startFailureTerminal = false
+        framesDiscardedAfterTerminal = 0
+        discardedAfterTerminalLogged = false
+        runnerLock.unlock()
+    }
+
     private func processFrames() {
+        // A `beginTurn()` request can land while this cycle was already running (the sink
+        // binds the new turn's budget between frames): consume it HERE, before any start
+        // attempt or terminal discard, so the new turn's frames are never read as the old
+        // turn's.
+        consumeBeginTurnRequest()
         // Check if we have enough frames to start/resume.
         if hasEnoughFramesToPlay {
-            if !isPlaying {
+            if !isPlaying, startFailureTerminal {
+                // THE BUDGET ALREADY RAN OUT this turn. A streamed answer keeps sending frames
+                // after the drop; starting again here would be the 4th, 5th… attempt — exactly
+                // the repeated abort risk the ruling caps. Discard what is buffered and count
+                // it; one extra log line records the continued loss.
+                let more = discardBufferedFrames()
+                if more > 0 {
+                    framesDiscardedAfterTerminal += more
+                    if !discardedAfterTerminalLogged {
+                        discardedAfterTerminalLogged = true
+                        FileLog.shared.addMessage(
+                            "[VoicePipeline] cloud audio engine never started — discarding further "
+                            + "streamed frames (\(framesDiscardedAfterTerminal) so far) until the turn ends")
+                    }
+                }
+            } else if !isPlaying {
                 // A FAILED START must not read as playing. Marking `isPlaying` here made the
                 // runner consume every buffered frame through the no-engine `playFrame` path —
                 // the turn's answer silently discarded, nothing scheduled, no retry while the
@@ -1182,9 +1217,6 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// further start attempts this turn; reset by `beginTurn()` and on a successful start.
     private var startFailureTerminal = false
 
-    /// How long the drain waits on a failing engine before dropping the turn's remaining audio.
-    private static let drainStartRetryBudget: TimeInterval = 3.0
-
     /// Empties the frame buffer, returning how many frames were discarded. Same bookkeeping
     /// as `cancel()`'s clear, without any of its stop semantics.
     private func discardBufferedFrames() -> Int {
@@ -1239,12 +1271,22 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     /// A NEW TURN: the failed-start budget and any terminal failure from the previous turn
     /// must not shadow this one — a later turn's streak starts again at the first retry delay.
+    /// The budget state is RUNNER-OWNED (the runner and its drain are the only readers and
+    /// writers), so this hands the reset to the runner as a request the runner consumes at the
+    /// top of its next cycle — before the turn's first frames reach a start attempt.
     func beginTurn() {
         runnerLock.lock()
-        startAttemptsUsed = 0
-        startFailureTerminal = false
+        beginTurnRequested = true
+        runnerLock.signal()
         runnerLock.unlock()
     }
+
+    /// Set by `beginTurn()`, consumed by the runner at the top of its cycle.
+    private var beginTurnRequested = false
+
+    /// Frames discarded after a terminal start failure, counted for the one extra log line.
+    private var framesDiscardedAfterTerminal = 0
+    private var discardedAfterTerminalLogged = false
 
     /// Logs the FIRST failure of a consecutive failed-start streak, so a persistent outage
     /// produces one line, not one per retry.
@@ -1649,18 +1691,19 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // everything: a drain that finds output available but no engine gives the start bounded
         // attempts instead of silently consuming the frames through the no-engine path.
         if playerNode == nil, !isBufferEmpty, !startFailureTerminal, Self.audioOutputIsAvailable {
-            let retryDeadline = Date().addingTimeInterval(Self.drainStartRetryBudget)
             var failureLogged = false
-            while playerNode == nil, !isBufferEmpty, !startFailureTerminal, Date() < retryDeadline {
+            // The SAME per-turn budget the runner spends — the bound is the budget itself,
+            // not a second deadline. Once it runs out the drop is the visible failure, not
+            // a fourth attempt.
+            while playerNode == nil, !isBufferEmpty, !startFailureTerminal {
                 if startEngine() { break }
                 if !failureLogged {
                     failureLogged = true
                     FileLog.shared.addMessage(
-                        "[VoicePipeline] cloud audio engine down at drain — retrying up to "
-                        + "\(Int(Self.drainStartRetryBudget)) s before the turn's remaining audio is dropped")
+                        "[VoicePipeline] cloud audio engine down at drain — the turn's remaining "
+                        + "start budget (\(Self.maxStartAttemptsPerTurn - startAttemptsUsed) attempt(s)) "
+                        + "runs before the audio is dropped")
                 }
-                // The SAME per-turn budget the runner spends. Once it runs out the drop is the
-                // visible failure, not a fourth attempt.
                 if noteFailedStart() { break }
                 Thread.sleep(forTimeInterval: Self.engineStartRetryDelays[
                     min(startAttemptsUsed - 1, Self.engineStartRetryDelays.count - 1)])

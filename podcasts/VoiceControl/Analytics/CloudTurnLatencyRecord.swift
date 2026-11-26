@@ -44,12 +44,23 @@ final class CloudTurnLatencyRecord: Equatable {
     /// end-of-speech-to-request time is not the phone's normal send path. Tagged on the line so
     /// medians can separate or exclude these turns.
     let followUpHeld: Bool
+    /// Set when the turn's buffered answer was DROPPED because the audio engine never started:
+    /// `first_audible=absent` alone is indistinguishable from a turn that never had audio, and a
+    /// failed answer must be countable from the records, not only from the log.
+    var playbackFailed: Bool
+    /// The frames discarded with that failure, when it happened.
+    var droppedFrames: Int?
 
-    init(requestId: String, endOfSpeech: Double?, endpointDecision: Double? = nil, followUpHeld: Bool = false) {
+    init(
+        requestId: String, endOfSpeech: Double?, endpointDecision: Double? = nil,
+        followUpHeld: Bool = false, playbackFailed: Bool = false, droppedFrames: Int? = nil
+    ) {
         self.requestId = requestId
         self.endOfSpeech = endOfSpeech
         self.endpointDecision = endpointDecision
         self.followUpHeld = followUpHeld
+        self.playbackFailed = playbackFailed
+        self.droppedFrames = droppedFrames
     }
 
     /// Milliseconds of capture-side hangover between the last speech sample and the endpoint
@@ -119,6 +130,7 @@ final class CloudTurnLatencyRecord: Equatable {
         if let audioFrames { parts.append("audio_frames=\(audioFrames)") }
         if let bufferClears { parts.append("buffer_cleared=\(bufferClears)") }
         if followUpHeld { parts.append("follow_up=held") }
+        if playbackFailed { parts.append("playback_failed=true dropped_frames=\(droppedFrames ?? 0)") }
         return parts.joined(separator: " ")
     }
 }

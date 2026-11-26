@@ -6526,6 +6526,92 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         try await Task.sleep(nanoseconds: 300_000_000)
         XCTAssertEqual(attempts.attempts(), 3, "no attempt beyond the budget")
         XCTAssertEqual(player.schedulingBoundaryCount, boundariesBefore, "nothing was scheduled — the audio was dropped, visibly")
+        // THE RECORD: a failed answer is countable from the turn records, not only from the
+        // log — `first_audible=absent` alone would read like a turn that never had audio.
+        var failedLine: String?
+        let recordDeadline = Date().addingTimeInterval(5)
+        while failedLine == nil && Date() < recordDeadline {
+            failedLine = await FileLog.shared.logFileAsString()
+                .split(separator: "\n").map(String.init)
+                .last { $0.contains("request_id=u-t17b") && $0.contains("cloudTurnLatency") }
+            if failedLine == nil { try await Task.sleep(nanoseconds: 50_000_000) }
+        }
+        let record = try XCTUnwrap(failedLine, "the turn's latency record was never written")
+        XCTAssertTrue(record.contains("playback_failed=true dropped_frames=7"), record)
+    }
+
+    /// FRAMES STREAMING IN AFTER THE DROP GET NO FOURTH START.
+    ///
+    /// The first 7 frames exhaust the budget and are dropped; the answer keeps streaming
+    /// (5 more frames, then done). The terminal failure must hold for the rest of the turn:
+    /// exactly 3 attempts total, the later frames discarded and counted, never a 4th start.
+    @MainActor
+    func testAFramesStreamingAfterTheDropGetNoFourthStart() async throws {
+        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        final class AttemptCounter: @unchecked Sendable {
+            private let lock = NSLock()
+            private var n = 0
+            func bump() { lock.lock(); n += 1; lock.unlock() }
+            func value() -> Int { lock.lock(); defer { lock.unlock() }; return n }
+        }
+        let attempts = AttemptCounter()
+        CloudAudioPlayer.configureEngineForTesting = { engine in
+            attempts.bump()
+            throw NSError(domain: "t17", code: 4)
+        }
+        addTeardownBlock {
+            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
+            CloudAudioPlayer.configureEngineForTesting = nil
+        }
+        let producerRelease = DispatchSemaphore(value: 0)
+        // Eleven binary PCM messages, then park before done: the first 7 exhaust the budget
+        // while the producer is parked; releasing it streams the rest into a terminal turn.
+        blockProducerAfterFrames = (7, producerRelease)
+        addTeardownBlock { self.blockProducerAfterFrames = nil }
+        self.nextTurnFixture = Self.doneOnlyFixture
+        self.nextTurnAudioPayloads = (0..<12).map { _ in Data(repeating: 0x44, count: 4_800 * 2) }
+        playback.setPlaying(true)
+        let sink = makeSink()
+        let player = try XCTUnwrap(sink.audioPlayerForTesting)
+        let boundariesBefore = player.schedulingBoundaryCount
+        addTeardownBlock { @MainActor in
+            let stop = player.cancel()
+            _ = await player.awaitActualStop(after: stop)
+        }
+        let logLengthAtStart = await FileLog.shared.logFileAsString().count
+
+        let route = Task { () -> CloudRouteResult in
+            await sink.routeToCloud(
+                request: "audio", tier: .free, context: sampleContext(),
+                origin: cloudTestOrigin, selection: .wakeWord, utteranceId: "u-t17d")
+        }
+        // WAIT FOR THE DROP before releasing the producer, so the later frames really do
+        // arrive into a terminal turn.
+        let dropDeadline = Date().addingTimeInterval(10)
+        var dropped = false
+        while !dropped && Date() < dropDeadline {
+            dropped = await FileLog.shared.logFileAsString()
+                .dropFirst(logLengthAtStart).split(separator: "\n").map(String.init)
+                .contains { $0.contains("cloud audio engine never started — dropping") }
+            if !dropped { try await Task.sleep(nanoseconds: 20_000_000) }
+        }
+        XCTAssertTrue(dropped, "the first 7 frames never exhausted the budget")
+        producerRelease.signal()
+
+        let result = await route.value
+        XCTAssertEqual(result.outcome, .completed, "the transport turn still completes")
+        try await Task.sleep(nanoseconds: 800_000_000)
+        XCTAssertEqual(attempts.value(), 3, "no start attempt beyond the budget, even with more frames")
+        XCTAssertEqual(player.schedulingBoundaryCount, boundariesBefore, "nothing scheduled — the whole answer was discarded, visibly")
+        let further = await FileLog.shared.logFileAsString()
+            .dropFirst(logLengthAtStart).split(separator: "\n").map(String.init)
+            .filter { $0.contains("discarding further streamed frames") }
+        XCTAssertFalse(further.isEmpty, "the streamed-in frames' loss is recorded")
+        let record = await FileLog.shared.logFileAsString()
+            .split(separator: "\n").map(String.init)
+            .last { $0.contains("request_id=u-t17d") && $0.contains("cloudTurnLatency") }
+        let line = try XCTUnwrap(record, "the turn's latency record was never written")
+        XCTAssertTrue(line.contains("playback_failed=true"), line)
     }
 
     /// A FAILURE STREAK IN A LATER TURN STARTS THE BUDGET FRESH.
@@ -6574,7 +6660,10 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                 .filter { $0.contains("cloud audio engine never started — dropping") }
         }
 
-        self.nextTurnFixture = Self.doneOnlyFixture
+        // `connected` must be part of each turn's fixture: it is where the sink binds the
+        // new turn's fresh budget on the player, and the binding is what this case tests.
+        let connectedFixture = "event: connected\ndata: {\"codec\":\"pcm_s16le@24k\"}\n\n" + Self.doneOnlyFixture
+        self.nextTurnFixture = connectedFixture
         self.nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x33, count: 4_800 * 2) }
         let first = await sink.routeToCloud(
             request: "audio one", tier: .free, context: sampleContext(),
@@ -6593,7 +6682,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             !player.hasOutstandingOutput && !player.hasPendingAudio
         }
 
-        self.nextTurnFixture = Self.doneOnlyFixture
+        self.nextTurnFixture = connectedFixture
         self.nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x33, count: 4_800 * 2) }
         let boundariesBefore = player.schedulingBoundaryCount
         let second = await sink.routeToCloud(
