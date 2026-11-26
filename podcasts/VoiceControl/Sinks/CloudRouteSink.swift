@@ -412,10 +412,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         /// destination after. The correction rule measures the mapped target against this,
         /// not against the drifting head.
         var lastSeekLanding: Double
-        /// The destination of a seek THIS sink issued, recorded BEFORE the seek is issued so
-        /// its event can never outrun the mark. The seek event for this exact destination is
-        /// the sink's own and is ignored (one-shot); any other target is a real user seek.
-        var ownSeekTargetSeconds: Double?
         /// The cap anchor on the monotonic clock: the seek time, overwritten by the answer
         /// hold's release when that comes later — the cap counts 120 s from the LATER of the
         /// two. Stamped by `restoreTransientAudioState` at every site that ends the pause.
@@ -429,6 +425,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         let episodeId: String?
     }
     private var pendingSeekCorrection: PendingSeekCorrection?
+    /// True only WITHIN a `playbackSink.seekTo` call the sink itself issues: the seek event
+    /// posts synchronously on main inside that call, so an event arriving while this is set
+    /// is the sink's own. Cleared as soon as the call returns. Same shape as Android's
+    /// `ownSeekInFlight`.
+    private var ownSeekInFlight = false
     private var seekEventObserver: NSObjectProtocol?
     private var correctionTickToken: Any?
     private let playbackPositionMs: () -> Int64
@@ -3052,14 +3053,16 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                 correctionsRemaining: 2,
                 expectedPlaybackSeconds: Double(estimateSeconds),
                 lastSeekLanding: Double(estimateSeconds),
-                ownSeekTargetSeconds: Double(estimateSeconds),
                 capAnchorSeconds: sessionStart,
                 playingSeconds: 0,
                 lastTickAt: sessionStart,
                 episodeId: currentSeekCorrectionEpisodeId()
             )
         }
+        dispatchPrecondition(condition: .onQueue(.main))
+        ownSeekInFlight = true
         _ = playbackSink.seekTo(positionSeconds: estimateSeconds, episodeDurationSeconds: durationSeconds)
+        ownSeekInFlight = false
         if referenceSeconds < 0 { return }
         scheduleNextCorrectionTick()
         FileLog.shared.addMessage(
@@ -3141,14 +3144,20 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             // from the END, so never hand it one.
             let destination = max(rawDestination, 0)
             let durationSeconds = Int(playbackManager?.duration().rounded() ?? 0)
-            // The own-seek mark goes down BEFORE the seek issues (see the session field).
-            pending.ownSeekTargetSeconds = Double(destination)
-            pendingSeekCorrection = pending
+            // The own-seek mark goes down BEFORE the seek issues and lifts the moment the
+            // call returns: the real path posts the event synchronously inside it.
+            dispatchPrecondition(condition: .onQueue(.main))
+            ownSeekInFlight = true
             _ = playbackSink.seekTo(positionSeconds: destination, episodeDurationSeconds: durationSeconds)
-            pending.correctionsRemaining -= 1
-            pending.expectedPlaybackSeconds = Double(destination)
-            pending.lastSeekLanding = Double(destination)
-            pendingSeekCorrection = pending
+            ownSeekInFlight = false
+            // The seek call may have led to a cancellation elsewhere (a user seek in the
+            // same instant): re-read the session, never write back through the stale copy,
+            // and never leave a timer running without a session.
+            guard var session = pendingSeekCorrection else { return }
+            session.correctionsRemaining -= 1
+            session.expectedPlaybackSeconds = Double(destination)
+            session.lastSeekLanding = Double(destination)
+            pendingSeekCorrection = session
             return
         }
         // Not on matched content yet: keep matching at the new spot. The session's single
@@ -3181,18 +3190,13 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     }
 
     /// THE user-seek surface: every position change funnels through `PlaybackManager.seekTo`,
-    /// which posts `playbackSeekPerformed` — scrubber, skip buttons, chapter jumps, remote
-    /// commands (lock screen, CarPlay, Bluetooth), Watch, bookmarks, shortcuts, and sync.
-    /// A seek whose target matches the destination this sink recorded before issuing its own
-    /// seek is the sink's own (consumed once); ANY other target — including one 2 s off the
-    /// landing — is a real user seek and cancels the pending correction.
+    /// which posts `playbackSeekPerformed` synchronously on main — scrubber, skip buttons,
+    /// chapter jumps, remote commands (lock screen, CarPlay, Bluetooth), Watch, bookmarks,
+    /// shortcuts, and sync. Events arriving while the sink's own seek is in flight are its
+    /// own; every other event is a real user seek and cancels the pending correction.
     private func handlePlaybackSeekEvent(targetSeconds: TimeInterval) {
-        guard var pending = pendingSeekCorrection else { return }
-        if let own = pending.ownSeekTargetSeconds, abs(targetSeconds - own) < 0.5 {
-            pending.ownSeekTargetSeconds = nil
-            pendingSeekCorrection = pending
-            return
-        }
+        guard pendingSeekCorrection != nil else { return }
+        if ownSeekInFlight { return }
         cancelPendingSeekCorrection(reason: "superseded by a user seek")
     }
 

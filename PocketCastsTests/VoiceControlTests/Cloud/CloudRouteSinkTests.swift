@@ -1316,36 +1316,77 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertFalse(anySeek, "a user seek through the manager cancels the pending correction")
     }
 
-    /// The sink's OWN corrective seek funnels through the same manager and raises the same
-    /// event; it must be recognised and ignored, or every correction would cancel itself.
-    func testOurOwnCorrectiveSeekEventDoesNotCancel() async {
+    /// A user seek 2 s from the sink's own landing must still cancel: the own-seek mark is
+    /// the recorded destination itself, not a wide proximity window.
+    /// The sink clamps destinations against the episode duration one layer down: a seek past
+    /// the end posts an event for the CLAMPED value, not the destination the sink commanded.
+    /// The own-seek mark is the in-flight call, not the value, so that event must not cancel.
+    func testAClampChangedOwnSeekEventDoesNotCancel() async {
         self.uncoveredSeekFixture()
-        // RecordingFingerprintMapper is a value captured at makeSink time, so both
-        // convergence points are registered up front: 216 matches 190, 230 matches 180.
         mapper.observedOffsets = [100.0: 15.0]
         mapper.matchedReferenceForPlayback = [216.0: 190.0, 230.0: 180.0]
+        playback.postsSeekEventOnSeekTo = true
+        playback.postsSeekEventClampedToDuration = true
         let sink = makeSink()
-        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-19")
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-23")
 
         XCTAssertTrue(playback.calls.contains(.seekTo(215)), "premise: estimate seek ran")
         playback.setPositionMs(216_000)
         await MainActor.run { sink.pollSeekCorrection() }
-        XCTAssertTrue(playback.calls.contains(.seekTo(226)), "premise: the first correction ran")
-        // The manager reports the sink's own corrective seek - same target it commanded.
+        XCTAssertTrue(playback.calls.contains(.seekTo(226)), "the estimate seek's clamped event does not cancel the session; the first correction lands (216 + (200 - 190))")
+        for _ in 1...10 {
+            await MainActor.run { usleep(5_000) }
+        }
+        playback.setPositionMs(230_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        XCTAssertTrue(playback.calls.contains(.seekTo(250)), "the corrective seek's clamped event does not cancel either; the second correction lands (230 + (200 - 180))")
+    }
+
+    /// A user seek right after the sink's own estimate seek - outside the in-flight window -
+    /// cancels the session, stops the only correction timer, and no later poll resurrects
+    /// either. (A seek in the SAME instant posts inside the in-flight window and merges with
+    /// the own seek - the design's documented cost, same as Android's ownSeekInFlight.)
+    func testAUserSeekRightAfterTheEstimateSeekCancelsAndLeavesNoTimer() async {
+        self.uncoveredSeekFixture()
+        mapper.observedOffsets = [100.0: 15.0]
+        mapper.matchedReferenceForPlayback = [216.0: 190.0]
+        var liveTokens: [ObjectIdentifier] = []
+        var cancelledTokens: [ObjectIdentifier] = []
+        let lock = NSLock()
+        let scheduler: (TimeInterval, @escaping () -> Void) -> Any? = { _, _ in
+            let token = NSObject()
+            lock.lock(); liveTokens.append(ObjectIdentifier(token)); lock.unlock()
+            return token
+        }
+        let canceller: (Any?) -> Void = { token in
+            guard let token else { return }
+            lock.lock(); cancelledTokens.append(ObjectIdentifier(token as AnyObject)); lock.unlock()
+        }
+        let sink = makeSink(seekCorrectionScheduler: scheduler, seekCorrectionTickCanceller: canceller)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-24")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(215)), "premise: the estimate seek ran")
         NotificationCenter.default.post(
             name: Constants.Notifications.playbackSeekPerformed,
             object: nil,
-            userInfo: [Constants.Notifications.playbackSeekTargetSecondsKey: TimeInterval(226)]
+            userInfo: [Constants.Notifications.playbackSeekTargetSecondsKey: TimeInterval(999)]
         )
-        // Convergence again, off by more than 3 s from the new landing: the second and
-        // final correction must still be available.
-        playback.setPositionMs(230_000)
+        playback.setPositionMs(216_000)
         await MainActor.run { sink.pollSeekCorrection() }
-        XCTAssertTrue(playback.calls.contains(.seekTo(250)), "the session survives its own seek's event and spends its second correction (230 + (200 - 180))")
+        playback.clearCalls()
+        playback.setPositionMs(216_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        let anySeek = playback.calls.contains { if case .seekTo = $0 { return true }; return false }
+        XCTAssertFalse(anySeek, "the user seek cancels the session before any correction")
+        lock.lock()
+        let live = liveTokens.count
+        let cancelled = cancelledTokens
+        lock.unlock()
+        XCTAssertEqual(live, 1, "the session opened exactly one timer")
+        XCTAssertEqual(cancelled.count, 1, "the cancellation stopped that timer")
+        XCTAssertEqual(cancelled.first, liveTokens.first, "the stopped timer is the session's own")
     }
 
-    /// A user seek 2 s from the sink's own landing must still cancel: the own-seek mark is
-    /// the recorded destination itself, not a wide proximity window.
     func testAUserSeekTwoSecondsFromTheLandingCancels() async {
         self.uncoveredSeekFixture()
         mapper.observedOffsets = [100.0: 15.0]
@@ -3999,6 +4040,13 @@ private final class RecordingPlaybackSink: VoicePlaybackSink, @unchecked Sendabl
     /// When true, every seekTo posts the user-seek event inline, like the real
     /// PlaybackManager does.
     var postsSeekEventOnSeekTo = false
+    /// With `postsSeekEventOnSeekTo`, posts the event clamped to the duration handed to the
+    /// seek — what PlaybackManagerSink's clamp does to a destination past the episode end,
+    /// so the posted target differs from the value the sink commanded.
+    var postsSeekEventClampedToDuration = false
+    /// With `postsSeekEventOnSeekTo`, posts THIS target instead of the seek destination —
+    /// a user seek landing in the same instant as the sink's own seek.
+    var seekEventOverrideTarget: Int?
 
     func clearCalls() {
         lock.lock(); storedCalls = []; lock.unlock()
@@ -4058,10 +4106,18 @@ private final class RecordingPlaybackSink: VoicePlaybackSink, @unchecked Sendabl
         // Models the REAL path: PlaybackManagerSink's seek lands in
         // PlaybackManager.seekTo, which posts the seek event from inside the call.
         if postsSeekEventOnSeekTo {
+            let target: Double
+            if postsSeekEventClampedToDuration {
+                target = Double(min(max(positionSeconds, 0), max(episodeDurationSeconds, 0)))
+            } else if let override = seekEventOverrideTarget {
+                target = Double(override)
+            } else {
+                target = Double(positionSeconds)
+            }
             NotificationCenter.default.post(
                 name: Constants.Notifications.playbackSeekPerformed,
                 object: nil,
-                userInfo: [Constants.Notifications.playbackSeekTargetSecondsKey: Double(positionSeconds)]
+                userInfo: [Constants.Notifications.playbackSeekTargetSecondsKey: target]
             )
         }
         return .silent
