@@ -412,9 +412,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         /// destination after. The correction rule measures the mapped target against this,
         /// not against the drifting head.
         var lastSeekLanding: Double
-        /// When the action's estimate seek ran, on the monotonic session clock. The session
-        /// cap uses this until the answer hold releases (see `capAnchorSeconds`).
-        let startedAt: TimeInterval
         /// The cap anchor on the monotonic clock: the seek time, overwritten by the answer
         /// hold's release when that comes later — the cap counts 120 s from the LATER of the
         /// two. Stamped by `restoreTransientAudioState` at every site that ends the pause.
@@ -428,6 +425,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         let episodeId: String?
     }
     private var pendingSeekCorrection: PendingSeekCorrection?
+    private var seekEventObserver: NSObjectProtocol?
     private var correctionTickToken: Any?
     private let playbackPositionMs: () -> Int64
     private let cloudPlaybackContextState: CloudPlaybackContextState
@@ -773,6 +771,20 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         let resolvedAudioPlayer = audioPlayer ?? CloudAudioPlayer()
         self.audioPlayer = resolvedAudioPlayer
         resolvedAudioPlayer.delegate = self
+        // Assigned last: the escaping closure captures `self`, which Swift forbids before
+        // every stored property is initialized.
+        seekEventObserver = NotificationCenter.default.addObserver(
+            forName: Constants.Notifications.playbackSeekPerformed,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let self,
+                  let target = note.userInfo?[Constants.Notifications.playbackSeekTargetSecondsKey] as? TimeInterval
+            else { return }
+            MainActor.assumeIsolated {
+                self.handlePlaybackSeekEvent(targetSeconds: target)
+            }
+        }
     }
 
     /// Renders a negotiated discovery result (result / no-match). Rendering
@@ -3034,7 +3046,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             correctionsRemaining: 2,
             expectedPlaybackSeconds: Double(estimateSeconds),
             lastSeekLanding: Double(estimateSeconds),
-            startedAt: sessionStart,
             capAnchorSeconds: sessionStart,
             playingSeconds: 0,
             lastTickAt: sessionStart,
@@ -3066,6 +3077,12 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             cancelPendingSeekCorrection(reason: "correction window expired")
             return
         }
+        // While the answer hold is still ACTIVE the cap cannot run out: the cap counts from
+        // the hold's release, so the anchor keeps moving with the clock until then. Without
+        // this, one long answer (> 120 s) exhausts the session before playback resumes.
+        if didAutoPause && wasPlayingBeforeHold {
+            pending.capAnchorSeconds = now
+        }
         // The playing-time window alone could leave a seek issued while the episode is paused
         // polling forever: a paused head never spends the budget. A wall-clock cap on the
         // session's total age ends it regardless.
@@ -3079,18 +3096,16 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             cancelPendingSeekCorrection(reason: "episode changed")
             return
         }
-        // ANY playback change the sink did not command cancels the correction: a user seek or
-        // skip, a pause-and-resume elsewhere, an episode change. Normal playback advances well
-        // under the tolerance per tick, so only a real discontinuity lands here.
-        if abs(nowSeconds - pending.expectedPlaybackSeconds) > seekCorrectionToleranceSeconds {
-            cancelPendingSeekCorrection(reason: "playback changed outside the correction")
-            return
-        }
-        // The tolerance measures the jump since the PREVIOUS tick, not since the seek: ordinary
-        // playback advances the head between ticks and must not look like a discontinuity.
+        // A playback change the sink did not command is detected by EVENT, not by guessing
+        // from the head position: every user position change funnels through
+        // `PlaybackManager.seekTo`, which posts `playbackSeekPerformed` (see
+        // `handlePlaybackSeekEvent`). Ordinary playback — at any rate, however late a tick
+        // fires — never looks like a discontinuity here, so only `expectedPlaybackSeconds`
+        // tracking for the playing-time window remains.
         pending.expectedPlaybackSeconds = nowSeconds
         pendingSeekCorrection = pending
         if let matched = fingerprintMapper.matchedReferenceTime(forPlaybackTime: nowSeconds) {
+
             // POSITION RULE (plan step 2): the mapped target is `T = p + (target − r)`. Seek
             // only when T lands MORE than 3 s before where this action's last seek landed
             // (overshoot — we sought past it) or MORE than 3 s after the current head (still
@@ -3150,6 +3165,23 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             timer.invalidate()
         }
         correctionTickToken = nil
+    }
+
+    /// THE user-seek surface: every position change funnels through `PlaybackManager.seekTo`,
+    /// which posts `playbackSeekPerformed` — scrubber, skip buttons, chapter jumps, remote
+    /// commands (lock screen, CarPlay, Bluetooth), Watch, bookmarks, shortcuts, and sync.
+    /// A seek the sink did not command itself cancels the pending correction; the sink's own
+    /// seeks land within a small tolerance of the destination it recorded and are ignored.
+    private func handlePlaybackSeekEvent(targetSeconds: TimeInterval) {
+        guard let pending = pendingSeekCorrection else { return }
+        if abs(targetSeconds - pending.lastSeekLanding) <= seekCorrectionToleranceSeconds { return }
+        cancelPendingSeekCorrection(reason: "superseded by a user seek")
+    }
+
+    deinit {
+        if let seekEventObserver {
+            NotificationCenter.default.removeObserver(seekEventObserver)
+        }
     }
 
     private func cancelPendingSeekCorrection(reason: String) {
