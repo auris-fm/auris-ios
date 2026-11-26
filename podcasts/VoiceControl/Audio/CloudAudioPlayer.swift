@@ -1001,8 +1001,9 @@ final class CloudAudioPlayer: @unchecked Sendable {
             }
             try engine.start()
         } catch {
-            FileLog.shared.addMessage(
-                "[VoicePipeline] cloud audio engine start failed: \(error.localizedDescription) — playback will retry; buffered audio is retained until it plays or the turn ends")
+            // ONE FileLog line per failure streak (the once-guard), carrying the FIRST
+            // error's description; os_log keeps the per-attempt detail cheaply.
+            logEngineStartFailureOnce(error.localizedDescription)
             os_log(.error, "CloudAudioPlayer: engine start failed: %@", error.localizedDescription)
             return false
         }
@@ -1296,13 +1297,14 @@ final class CloudAudioPlayer: @unchecked Sendable {
     /// produces one line, not one per retry.
     private var engineStartFailureLogged = false
 
-    private func logEngineStartFailureOnce() {
+    private func logEngineStartFailureOnce(_ detail: String? = nil) {
         guard !engineStartFailureLogged else { return }
         engineStartFailureLogged = true
+        let first = detail.map { " First failure: \($0)." } ?? ""
         FileLog.shared.addMessage(
             "[VoicePipeline] cloud audio engine start failed — playback will retry (bounded per "
             + "turn: \(Self.maxStartAttemptsPerTurn) attempts); buffered audio is retained until it "
-            + "plays or the turn ends")
+            + "plays or the turn ends.\(first)")
     }
 
     /// Whether this incarnation has already logged its first scheduled buffer. Reset when the

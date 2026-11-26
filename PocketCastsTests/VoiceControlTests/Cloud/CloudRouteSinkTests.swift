@@ -6545,6 +6545,60 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertTrue(record.contains("playback_failed=true dropped_frames=7"), record)
     }
 
+    /// A STRAGGLER FRAME BELOW THE RESUME THRESHOLD IS STILL DISCARDED.
+    ///
+    /// The budget drops the first 6 frames; the 7th arrives after the terminal failure, one
+    /// frame deep — below the 5-frame resume threshold, so no start attempt could ever see
+    /// it. The terminal discard must take it at any depth: otherwise it sits in the buffer,
+    /// holds the turn's quiescence, and the drain consumes it through the no-engine path
+    /// silently. On the pre-fix player this case fails: the discard line never appears.
+    @MainActor
+    func testAStragglerFrameBelowTheResumeThresholdIsStillDiscarded() async throws {
+        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        CloudAudioPlayer.configureEngineForTesting = { _ in
+            throw NSError(domain: "t17", code: 5)
+        }
+        addTeardownBlock {
+            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
+            CloudAudioPlayer.configureEngineForTesting = nil
+        }
+        // Park the producer after SIX frames — before the 7th — so the drop lands on 6
+        // buffered frames and the straggler arrives only after the release.
+        let producerRelease = DispatchSemaphore(value: 0)
+        blockProducerAfterFrames = (6, producerRelease)
+        addTeardownBlock { self.blockProducerAfterFrames = nil }
+        self.nextTurnFixture = "event: connected\ndata: {\"codec\":\"pcm_s16le@24k\"}\n\n" + Self.doneOnlyFixture
+        self.nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x55, count: 4_800 * 2) }
+        playback.setPlaying(true)
+        let sink = makeSink()
+        let player = try XCTUnwrap(sink.audioPlayerForTesting)
+        let boundariesBefore = player.schedulingBoundaryCount
+        addTeardownBlock { @MainActor in
+            let stop = player.cancel()
+            _ = await player.awaitActualStop(after: stop)
+        }
+        let logLengthAtStart = await FileLog.shared.logFileAsString().count
+
+        let result = await sink.routeToCloud(
+            request: "audio", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: .wakeWord, utteranceId: "u-t17e")
+        XCTAssertEqual(result.outcome, .completed, "the route settles even with a sub-threshold straggler")
+        // THE STRAGGLER: exactly one frame arrived after the terminal failure and was
+        // discarded at that depth — the red-on-pre-fix line.
+        let discarding = await FileLog.shared.logFileAsString()
+            .dropFirst(logLengthAtStart).split(separator: "\n").map(String.init)
+            .first { $0.contains("discarding further streamed frames") }
+        let line = try XCTUnwrap(discarding, "the straggler was never discarded by the terminal gate")
+        XCTAssertTrue(line.contains("1 so far"), line)
+        XCTAssertEqual(player.schedulingBoundaryCount, boundariesBefore, "nothing was scheduled")
+        // And the record still carries the failure with the frames dropped AT the failure.
+        let record = await FileLog.shared.logFileAsString()
+            .split(separator: "\n").map(String.init)
+            .last { $0.contains("request_id=u-t17e") && $0.contains("cloudTurnLatency") }
+        let recordLine = try XCTUnwrap(record, "the turn's latency record was never written")
+        XCTAssertTrue(recordLine.contains("playback_failed=true dropped_frames=6"), recordLine)
+    }
+
     /// FRAMES STREAMING IN AFTER THE DROP GET NO FOURTH START.
     ///
     /// The first 7 frames exhaust the budget and are dropped; the answer keeps streaming
