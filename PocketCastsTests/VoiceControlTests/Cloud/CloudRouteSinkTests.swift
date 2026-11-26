@@ -6402,6 +6402,58 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// NONEMPTY audio in front of the player. Without this, "no audio pending" afterwards cannot
     /// be distinguished from "no audio ever arrived", which is exactly how the first version of
     /// the output assertion was vacuous.
+    /// A FAILED ENGINE START MUST NOT SILENTLY CONSUME THE TURN'S AUDIO.
+    ///
+    /// The player marked itself playing even when `engine.start()` threw, so the runner
+    /// consumed every buffered frame through the no-engine `playFrame` path: nothing was ever
+    /// scheduled, the turn reported success, and the answer's audio was gone. This case makes
+    /// the first start attempt throw through the existing test seam and asserts the audio is
+    /// scheduled once a retry succeeds. Under the old behavior it fails: the boundary never
+    /// fires because the frames were consumed with no engine at all.
+    @MainActor
+    func testAFailedEngineStartIsRetriedAndTheAudioStillSchedules() async throws {
+        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        // THROW ONCE: the first attempt fails the way a contended or halted audio server fails;
+        // later attempts install a real offline-rendering engine so the retry can succeed.
+        final class ThrowOnce: @unchecked Sendable {
+            private let lock = NSLock()
+            private var thrown = false
+            func arm(_ engine: AVAudioEngine) throws {
+                lock.lock(); defer { lock.unlock() }
+                if !thrown { thrown = true; throw NSError(domain: "t17", code: 1) }
+                let fmt = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1))
+                try engine.enableManualRenderingMode(.offline, format: fmt, maximumFrameCount: 4_096)
+            }
+        }
+        let throwOnce = ThrowOnce()
+        CloudAudioPlayer.configureEngineForTesting = { engine in try throwOnce.arm(engine) }
+        addTeardownBlock {
+            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
+            CloudAudioPlayer.configureEngineForTesting = nil
+        }
+        self.nextTurnFixture = Self.doneOnlyFixture
+        self.nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x33, count: 4_800 * 2) }
+        playback.setPlaying(true)
+        let sink = makeSink()
+        let player = try XCTUnwrap(sink.audioPlayerForTesting)
+        let boundariesBefore = player.schedulingBoundaryCount
+        addTeardownBlock { @MainActor in
+            let stop = player.cancel()
+            _ = await player.awaitActualStop(after: stop)
+        }
+
+        let result = await sink.routeToCloud(
+            request: "audio", tier: .free, context: sampleContext(),
+            origin: cloudTestOrigin, selection: .wakeWord, utteranceId: "u-t17")
+        XCTAssertEqual(result.outcome, .completed, "the turn completes")
+        XCTAssertEqual(player.framesEnqueuedForTesting, 7, "premise: the frames arrived")
+        // The audio must be SCHEDULED — the failed first start must not have consumed the
+        // frames silently. The retry wake re-enters the runner without a new frame.
+        try await waitUntil("the retried start schedules the audio", timeout: 5) {
+            player.schedulingBoundaryCount > boundariesBefore
+        }
+    }
+
     func testATurnCarryingBinaryAudioActuallyReachesThePlayer() async throws {
         self.nextTurnFixture = Self.doneOnlyFixture
         self.nextTurnAudioPayloads = [Self.audioPayload]
@@ -6415,7 +6467,6 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // The player must have been given audio: the enqueue path ran, and by the end of the turn
         // the audio has drained rather than been dropped.
         let enqueued = await MainActor.run { sink.audioPlayerForTesting?.framesEnqueuedForTesting }
-        let pending = await MainActor.run { sink.audioPlayerForTesting?.hasPendingAudio }
         XCTAssertTrue(
             (enqueued ?? 0) > 0,
             "binary audio must be DELIVERED to the player — otherwise an output assertion proves nothing"
@@ -6423,7 +6474,13 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // SCOPE: this is DELIVERY and buffer state, not proof that speech was RENDERED. The player's
         // decode/render path is not observed here, so a case reading these two facts must not be
         // described as showing that audio was heard.
-        XCTAssertEqual(pending, false, "the turn completed, so its audio buffer must be empty")
+        // The buffer must reach empty via an EXPLICIT BARRIER, not an immediate read: audio
+        // frames can legitimately arrive at the player after `done` was processed (the socket
+        // delivers them independently of the event stream), and the drain only consumes what had
+        // arrived. Reading once races that delivery; the barrier bounds it instead.
+        try await waitUntil("the turn's audio drained after done", timeout: 5) {
+            MainActor.assumeIsolated { !(sink.audioPlayerForTesting?.hasPendingAudio ?? true) }
+        }
     }
 
     /// AN INTERRUPTED `done` DISCARDS OUTPUT WITHOUT DRAINING IT
