@@ -719,23 +719,27 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // attempt or terminal discard, so the new turn's frames are never read as the old
         // turn's.
         consumeBeginTurnRequest()
+        // THE TERMINAL FAILURE DISCARDS AT ANY DEPTH, not just at the resume threshold: a
+        // frame that straggles in after the drop (below the 5-frame threshold) would
+        // otherwise sit in the buffer, hold the turn's quiescence, and be consumed by the
+        // drain's no-engine path — invisible loss of exactly the kind this fix removes.
+        if startFailureTerminal, bufferedFrameCount > 0 {
+            let more = discardBufferedFrames()
+            framesDiscardedAfterTerminal += more
+            if !discardedAfterTerminalLogged {
+                discardedAfterTerminalLogged = true
+                FileLog.shared.addMessage(
+                    "[VoicePipeline] cloud audio engine never started — discarding further "
+                    + "streamed frames (\(framesDiscardedAfterTerminal) so far) until the turn ends")
+            }
+        }
         // Check if we have enough frames to start/resume.
         if hasEnoughFramesToPlay {
             if !isPlaying, startFailureTerminal {
                 // THE BUDGET ALREADY RAN OUT this turn. A streamed answer keeps sending frames
                 // after the drop; starting again here would be the 4th, 5th… attempt — exactly
-                // the repeated abort risk the ruling caps. Discard what is buffered and count
-                // it; one extra log line records the continued loss.
-                let more = discardBufferedFrames()
-                if more > 0 {
-                    framesDiscardedAfterTerminal += more
-                    if !discardedAfterTerminalLogged {
-                        discardedAfterTerminalLogged = true
-                        FileLog.shared.addMessage(
-                            "[VoicePipeline] cloud audio engine never started — discarding further "
-                            + "streamed frames (\(framesDiscardedAfterTerminal) so far) until the turn ends")
-                    }
-                }
+                // the repeated abort risk the ruling caps. Anything buffered was discarded
+                // above, at any depth.
             } else if !isPlaying {
                 // A FAILED START must not read as playing. Marking `isPlaying` here made the
                 // runner consume every buffered frame through the no-engine `playFrame` path —
