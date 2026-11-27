@@ -161,15 +161,15 @@ final class EchoReferenceWiringTests: XCTestCase {
     /// player has no reference to append to and the count never moves.
     @MainActor
     func test_cloudProducerAppendsThroughTheRealPlayer() throws {
-        let assembly = VoiceControlAssembly()
-        guard let service = assembly.buildVoiceControlService() else {
+        // The player is constructed HERE and injected through the assembly, so the wiring this
+        // case checks is observed on the instance the test owns.
+        let player = CloudAudioPlayer()
+        guard let service = VoiceControlAssembly().buildVoiceControlService(audioPlayer: player) else {
             XCTFail("the assembly built no service, so the case proves nothing")
             return
         }
 
-        let player = service.executorForTesting.cloudRouteSinkForTesting.audioPlayerForTesting
-        let reference = player?.emittedPCMReference
-        XCTAssertNotNil(player, "the sink has no cloud player, so there is no producer to drive")
+        let reference = player.emittedPCMReference
         XCTAssertNotNil(
             reference,
             "the assembly did not wire the emitted reference into the cloud player"
@@ -178,7 +178,7 @@ final class EchoReferenceWiringTests: XCTestCase {
 
         // Built at the player's negotiated rate so no resampling surprise enters the
         // assertion: the appended count is then the buffer's own frame count.
-        let rate = player?.negotiatedSampleRateForTesting ?? 24_000
+        let rate = player.negotiatedSampleRateForTesting
         let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1)!
         guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1_600) else {
             XCTFail("could not build a buffer")
@@ -198,7 +198,7 @@ final class EchoReferenceWiringTests: XCTestCase {
         // A node that reports no render time yields no anchor, so the append is still
         // observable through the stream index and the anchor stays as the previous case
         // left it. The append is what this case is about.
-        player?.appendToEmittedReference(buffer, node: node)
+        player.appendToEmittedReference(buffer, node: node)
 
         // The producer resamples the buffer from its negotiated rate into the pipeline rate,
         // so the appended count is the buffer's duration at that rate rather than the

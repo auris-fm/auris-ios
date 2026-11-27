@@ -52,7 +52,6 @@ final class PreTerminalRefusalClientControl: SocketCapturingTestCase {
 
     override func tearDown() {
         CloudRouteTestURLProtocol.reset()
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
         defaults.removePersistentDomain(forName: suiteName)
         super.tearDown()
     }

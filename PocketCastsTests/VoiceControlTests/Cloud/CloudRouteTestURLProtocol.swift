@@ -170,7 +170,14 @@ struct StubTokenProvider: CloudTokenProviding {
 /// so the case can assert on the frames the client *sent*. Held per instance
 /// rather than in a process-wide global, which would leak between tests.
 class SocketCapturingTestCase: XCTestCase {
-    var capturedTask: StubWebSocketTask?
+    /// Lock-guarded: client factories write it from the route's own context while tests and
+    /// waitUntil polls read it from other executors (a bare property was a TSan-reported race).
+    private let capturedTaskLock = NSLock()
+    private var capturedTaskStorage: StubWebSocketTask?
+    var capturedTask: StubWebSocketTask? {
+        get { capturedTaskLock.lock(); defer { capturedTaskLock.unlock() }; return capturedTaskStorage }
+        set { capturedTaskLock.lock(); capturedTaskStorage = newValue; capturedTaskLock.unlock() }
+    }
 }
 
 /// A valid prepared conversation for envelope construction in tests. Each call

@@ -2,6 +2,7 @@
 
 require 'dotenv'
 require 'open3'
+require 'fileutils'
 require 'tmpdir'
 
 fastlane_version '2.0'
@@ -697,6 +698,99 @@ platform :ios do
   #
   lane :trigger_release_build do |branch_to_build:, platform: 'ios', notify_slack: nil, create_release: nil|
     trigger_buildkite_release_build(branch: branch_to_build, beta: false, platform: platform, notify_slack: notify_slack, create_release: create_release)
+  end
+
+  # ------------------------------------------------------------------
+  # Auris beta distribution (TestFlight, internal testers)
+  #
+  # Independent of the upstream release choreography below: the app signs
+  # with the project's own identifiers (`fm.auris` and the project's
+  # DEVELOPMENT_TEAM) via automatic signing and the App Store Connect API
+  # key from the environment. No upstream lane, cert store or team id is
+  # used, and nothing here touches the enterprise/prototype configuration.
+  # ------------------------------------------------------------------
+
+  AURIS_BUILD_OUTPUT_NAME = 'auris'
+  AURIS_XCARCHIVE_PATH = File.join(ARTIFACTS_FOLDER, "#{AURIS_BUILD_OUTPUT_NAME}.xcarchive")
+  AURIS_IPA_PATH = File.join(ARTIFACTS_FOLDER, "#{AURIS_BUILD_OUTPUT_NAME}.ipa")
+  AURIS_XCARCHIVE_ZIP_PATH = File.join(ARTIFACTS_FOLDER, "#{AURIS_BUILD_OUTPUT_NAME}.xcarchive.zip")
+
+  # Writes the App Store Connect API key (from the three env vars the
+  # upload uses) into a fresh temporary directory so xcodebuild can read
+  # it during automatic signing, and returns [dir, shell-string]: the
+  # directory must be removed by the caller in an `ensure` — a CI run
+  # must not leave the private key on disk. Raises when the key is
+  # absent, so the failure is at the start, not at the export step.
+  def with_signing_key
+    require_env_vars!(*ASC_API_KEY_ENV_VARS)
+    key_id = ENV['APP_STORE_CONNECT_API_KEY_KEY_ID']
+    issuer_id = ENV['APP_STORE_CONNECT_API_KEY_ISSUER_ID']
+    key_path = File.join(Dir.mktmpdir('auris-asc-key'), "AuthKey_#{key_id}.p8")
+    File.write(key_path, ENV['APP_STORE_CONNECT_API_KEY_KEY'])
+    File.chmod(0o600, key_path)
+    flags = "-allowProvisioningUpdates -authenticationKeyPath #{key_path.shellescape} -authenticationKeyID #{key_id.shellescape} -authenticationKeyIssuerID #{issuer_id.shellescape}"
+    [File.dirname(key_path), flags]
+  end
+
+  # Archives the Auris app for TestFlight. The speech runtime is linked
+  # into the binary by the project config (`-llfm_runtime` from
+  # `ThirdParty/llama-cpp-build/$(LLAMA_SLICE)/lfm`), so a device archive
+  # cannot exist without it: a missing device build fails the link, not
+  # the upload.
+  #
+  # @param build_number [String, nil] When given, overrides `VERSION_LONG`
+  #   (`CURRENT_PROJECT_VERSION`). Defaults to the xcconfig value.
+  #
+  lane :auris_beta_build do |build_number: nil|
+    key_dir, key_flags = with_signing_key
+    begin
+      xcargs = key_flags
+      xcargs = "#{build_number ? "VERSION_LONG=#{build_number} " : ''}#{xcargs}"
+
+      build_app(
+        scheme: SCHEME,
+        include_symbols: true,
+        clean: true,
+        xcargs: xcargs,
+        export_xcargs: key_flags,
+        export_options: {
+          method: 'app-store',
+          manageAppVersionAndBuildNumber: false,
+          signingStyle: 'automatic'
+        },
+        archive_path: AURIS_XCARCHIVE_PATH,
+        output_directory: ARTIFACTS_FOLDER,
+        output_name: AURIS_BUILD_OUTPUT_NAME,
+        # gym's default log directory is outside the checkout, so the step's
+        # artifacts/*.log glob would collect nothing. Keep the xcodebuild log
+        # with the archive it describes.
+        buildlog_path: ARTIFACTS_FOLDER
+      )
+
+      # `build_app` writes the ipa and its dSYM zip but leaves the .xcarchive
+      # unzipped. Zip it so a gate-off dry run keeps an installable, inspectable
+      # archive — the pipeline declares artifacts/*.xcarchive.zip.
+      zip(path: AURIS_XCARCHIVE_PATH, output_path: AURIS_XCARCHIVE_ZIP_PATH)
+    ensure
+      FileUtils.remove_entry_secure(key_dir)
+    end
+  end
+
+  # Uploads the archived Auris ipa to TestFlight for internal testers.
+  #
+  # @param ipa_path [String] Path to the `.ipa` file to upload.
+  # @param skip_waiting [Boolean] When true, returns right after the upload
+  #   instead of waiting for App Store Connect processing.
+  #
+  lane :auris_beta_upload do |ipa_path: AURIS_IPA_PATH, skip_waiting: true|
+    require_env_vars!(*ASC_API_KEY_ENV_VARS)
+
+    upload_to_testflight(
+      ipa: ipa_path,
+      distribute_external: false,
+      skip_waiting_for_build_processing: skip_waiting,
+      api_key: app_store_connect_api_key
+    )
   end
 
   # Builds the app binary for distribution to App Store Connect
