@@ -6717,15 +6717,17 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     @MainActor
     func testAStartFailureStreakInALaterTurnStartsTheBudgetFresh() async throws {
         CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
-        // Turn 1: always throws — the budget is exhausted. Turn 2: throws FOUR times (its
-        // whole budget), then the offline engine on the fifth — the audio must still schedule,
-        // which is only possible if the budget (and terminal flag) were reset for the new turn.
+        // The counter is SHARED across both turns: turn one burns calls 1-3 (its whole
+        // budget). Turn two therefore throws on calls 4-5 — twice, recovering on its THIRD
+        // and last attempt. That depth is the point: a partial reset (a budget restored to
+        // 1 or 2 instead of 3) would leave turn two's answer dropped, so only a full
+        // three-attempt reset lets the audio schedule.
         final class TwoPhase: @unchecked Sendable {
             private let lock = NSLock()
             private var count = 0
             func arm(_ engine: AVAudioEngine) throws {
                 lock.lock(); count += 1; let n = count; lock.unlock()
-                if n <= 4 { throw NSError(domain: "t17", code: 3) }
+                if n <= 5 { throw NSError(domain: "t17", code: 3) }
                 let fmt = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1))
                 try engine.enableManualRenderingMode(.offline, format: fmt, maximumFrameCount: 4_096)
             }
