@@ -3434,10 +3434,11 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         )
         let producerRelease = DispatchSemaphore(value: 0)
         // NINE received frames: `connected` first, then seven binary PCM messages, then `done`.
-        // The park counts RECEIVED frames, so parking at nine lands after the last audio frame
-        // and before `done` — the turn can still read its terminal while the producer is held.
-        // (Under the stub's old audio-before-text order eight worked; with `connected` now
-        // leading, parking at eight would land on the last audio frame instead.)
+        // Parking at nine holds `done` BACK: the producer is parked holding the terminal, so the
+        // turn cannot complete until the release below delivers it — exactly the held-producer
+        // state this exercise needs. (Under the stub's old audio-before-text order eight worked;
+        // with `connected` now leading, parking at eight would hold the last audio frame
+        // instead, and the turn would block on audio rather than on its terminal.)
         blockProducerAfterFrames = (9, producerRelease)
         nextTurnFixture = Self.doneOnlyFixture
         nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x11, count: 4_800 * 2) }
