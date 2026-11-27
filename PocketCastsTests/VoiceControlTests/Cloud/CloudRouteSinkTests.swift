@@ -2887,6 +2887,30 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
     /// This is the client half of the conversation-lifecycle rule: `connected` is sent only after
     /// the server admits a turn, so it — not the sending of a request — is the evidence that a
     /// conversation exists.
+    /// DETERMINISTIC SETTLE-BEFORE-WAIT: a resolution recorded while nobody is parked is
+    /// returned to the next waiter immediately — the latch remembers the outcome even though
+    /// the ticket it rode in on is gone. Pins the first half of the one-shot contract the
+    /// acknowledgement latch owes the interruption path.
+    @MainActor
+    func testASettlementLandingBeforeTheWaiterParksIsReturnedImmediately() async throws {
+        let token = CloudRouteSink.CloudTurnToken()
+        token.markAcknowledgement(.refused)
+        let waited = await token.awaitAcknowledgement(timeout: 0.05)
+        XCTAssertEqual(waited, .refused, "the parked waiter reads the recorded resolution, not the bound's default")
+    }
+
+    /// DETERMINISTIC DOUBLE-SETTLE: a second mark of the same latch settles nothing — a waiter
+    /// still reads the FIRST winner, not the later mark. Pins the second half of the one-shot
+    /// contract: exactly one winner per latch, whoever arrives first.
+    @MainActor
+    func testASecondSettlementOfTheSameLatchSettlesNothingAndTheWaiterReadsTheFirstWinner() async throws {
+        let token = CloudRouteSink.CloudTurnToken()
+        token.markAcknowledgement(.acknowledged)
+        token.markAcknowledgement(.refused)
+        let waited = await token.awaitAcknowledgement(timeout: 0.05)
+        XCTAssertEqual(waited, .acknowledged, "the waiter reads the first winner, not the later mark")
+    }
+
     func testOnlyAnAcknowledgedConversationIsResumedByTheNextFollowUp() async throws {
         for acknowledge in [true, false] {
             let manager = CloudConversationManager()
