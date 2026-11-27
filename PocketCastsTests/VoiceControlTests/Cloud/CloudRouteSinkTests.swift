@@ -6549,9 +6549,11 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     ///
     /// The budget drops the first 6 frames; the 7th arrives after the terminal failure, one
     /// frame deep — below the 5-frame resume threshold, so no start attempt could ever see
-    /// it. The terminal discard must take it at any depth: otherwise it sits in the buffer,
-    /// holds the turn's quiescence, and the drain consumes it through the no-engine path
-    /// silently. On the pre-fix player this case fails: the discard line never appears.
+    /// it. The terminal discard must take it at any depth: otherwise it sits in the buffer
+    /// until the drain consumes it through the no-engine path — a SILENT loss the latency
+    /// record cannot see. Red on `d8159be05` is a clean assertion failure, and that is the
+    /// point: the route still settles there (the drain eats the straggler quietly), so only
+    /// the discard assertion catches the loss — the route's completion proves nothing.
     @MainActor
     func testAStragglerFrameBelowTheResumeThresholdIsStillDiscarded() async throws {
         CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
@@ -6562,12 +6564,17 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
             CloudAudioPlayer.configureEngineForTesting = nil
         }
-        // Park the producer after SIX frames — before the 7th — so the drop lands on 6
-        // buffered frames and the straggler arrives only after the release.
+        // The park fires on the Nth RECEIVED frame, before delivering it: with no connected
+        // frame ahead of the audio (matching the streamed-frames sibling), parking at 7
+        // delivers exactly SIX audio frames — the drop lands on 6 buffered frames — and the
+        // straggler (the 7th) arrives only after the release.
         let producerRelease = DispatchSemaphore(value: 0)
-        blockProducerAfterFrames = (6, producerRelease)
-        addTeardownBlock { self.blockProducerAfterFrames = nil }
-        self.nextTurnFixture = "event: connected\ndata: {\"codec\":\"pcm_s16le@24k\"}\n\n" + Self.doneOnlyFixture
+        blockProducerAfterFrames = (7, producerRelease)
+        addTeardownBlock {
+            producerRelease.signal()
+            self.blockProducerAfterFrames = nil
+        }
+        self.nextTurnFixture = Self.doneOnlyFixture
         self.nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x55, count: 4_800 * 2) }
         playback.setPlaying(true)
         let sink = makeSink()
@@ -6579,10 +6586,34 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         }
         let logLengthAtStart = await FileLog.shared.logFileAsString().count
 
-        let result = await sink.routeToCloud(
-            request: "audio", tier: .free, context: sampleContext(),
-            origin: cloudTestOrigin, selection: .wakeWord, utteranceId: "u-t17e")
+        let route = Task {
+            await sink.routeToCloud(
+                request: "audio", tier: .free, context: sampleContext(),
+                origin: cloudTestOrigin, selection: .wakeWord, utteranceId: "u-t17f")
+        }
+        // WAIT FOR THE DELEGATE CALLBACK ITSELF (its sink log line) before releasing the
+        // producer, so the straggler really does arrive into a terminal turn — no timing.
+        let dropDeadline = Date().addingTimeInterval(10)
+        var callbackFired = false
+        while !callbackFired && Date() < dropDeadline {
+            callbackFired = await FileLog.shared.logFileAsString()
+                .dropFirst(logLengthAtStart).split(separator: "\n").map(String.init)
+                .contains { $0.contains("cloud playback FAILED") }
+            if !callbackFired { try await Task.sleep(nanoseconds: 20_000_000) }
+        }
+        XCTAssertTrue(callbackFired, "the player's failure callback never reached the sink")
+        // OPEN THE PARK THROUGH THE HARNESS, not a bare signal: a bare signal only opens the
+        // CURRENT wait — the next frame's `registerProductionPark` finds the semaphore not in
+        // `releasedParks` and parks the producer AGAIN, so the terminal never arrives and the
+        // route hangs. `releaseProductionParks` marks the park opened, so every later frame
+        // (and `done`) flows.
+        StubWebSocketTask.releaseProductionParks()
+
+        let result = await route.value
         XCTAssertEqual(result.outcome, .completed, "the route settles even with a sub-threshold straggler")
+        try await waitUntil("the straggler turn's playback settled", timeout: 5) {
+            !player.hasOutstandingOutput && !player.hasPendingAudio
+        }
         // THE STRAGGLER: exactly one frame arrived after the terminal failure and was
         // discarded at that depth — the red-on-pre-fix line.
         let discarding = await FileLog.shared.logFileAsString()
@@ -6594,7 +6625,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // And the record still carries the failure with the frames dropped AT the failure.
         let record = await FileLog.shared.logFileAsString()
             .split(separator: "\n").map(String.init)
-            .last { $0.contains("request_id=u-t17e") && $0.contains("cloudTurnLatency") }
+            .last { $0.contains("request_id=u-t17f") && $0.contains("cloudTurnLatency") }
         let recordLine = try XCTUnwrap(record, "the turn's latency record was never written")
         XCTAssertTrue(recordLine.contains("playback_failed=true dropped_frames=6"), recordLine)
     }
@@ -6657,7 +6688,9 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             if !callbackFired { try await Task.sleep(nanoseconds: 20_000_000) }
         }
         XCTAssertTrue(callbackFired, "the player's failure callback never reached the sink")
-        producerRelease.signal()
+        // OPEN THE PARK THROUGH THE HARNESS (see the straggler test): a bare signal would let
+        // the very next frame re-park the producer, and `done` would never arrive.
+        StubWebSocketTask.releaseProductionParks()
 
         let result = await route.value
         XCTAssertEqual(result.outcome, .completed, "the transport turn still completes")
