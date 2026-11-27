@@ -250,10 +250,21 @@ extension CloudRouteClient {
     ) -> (client: CloudRouteClient, task: StubWebSocketTask) {
         var messages: [URLSessionWebSocketTask.Message] = []
         let textFrames = StubWebSocketTask.frames(fromFixture: fixture)
-        // Interleave: deliver each audio payload, then the text frames that follow it. With no
-        // payloads this is exactly the previous text-only behaviour.
+        // PRODUCTION ORDER: the server's first frame is always `connected` — it names the codec
+        // the binary frames use, and the sink binds the turn's fresh budget on it. So the
+        // fixture's leading `connected` goes first, then the audio payloads, then the remaining
+        // text frames. Any test that relied on audio-before-`connected` was testing an order
+        // production cannot produce. Fixtures with no `connected` frame keep the previous
+        // audio-then-text order.
+        var leading: [String] = []
+        var trailing = textFrames
+        if let idx = textFrames.firstIndex(where: { $0.contains(#""type":"connected""#) }) {
+            leading = Array(textFrames[...idx])
+            trailing = Array(textFrames[(textFrames.index(after: idx))...])
+        }
+        messages.append(contentsOf: leading.map { .string($0) })
         messages.append(contentsOf: audioPayloads.map { .data($0) })
-        messages.append(contentsOf: textFrames.map { .string($0) })
+        messages.append(contentsOf: trailing.map { .string($0) })
         let task = StubWebSocketTask(messages)
         // Install holds BEFORE the client exists: the producer parks at its FIRST receive, so a
         // cancellation-insensitive park cannot be raced by stream end.
