@@ -6399,10 +6399,6 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                                 elapsed: Date().timeIntervalSince(start), polls: polls)
     }
 
-    /// POSITIVE CONTROL for the audio path: a turn carrying binary audio must actually put
-    /// NONEMPTY audio in front of the player. Without this, "no audio pending" afterwards cannot
-    /// be distinguished from "no audio ever arrived", which is exactly how the first version of
-    /// the output assertion was vacuous.
     /// A FAILED ENGINE START MUST NOT SILENTLY CONSUME THE TURN'S AUDIO.
     ///
     /// The player marked itself playing even when `engine.start()` threw, so the runner
@@ -6721,15 +6717,15 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     @MainActor
     func testAStartFailureStreakInALaterTurnStartsTheBudgetFresh() async throws {
         CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
-        // Turn 1: always throws — the budget is exhausted. Turn 2: throws once, then the
-        // offline engine — the audio must still schedule, which is only possible if the
-        // budget (and terminal flag) were reset for the new turn.
+        // Turn 1: always throws — the budget is exhausted. Turn 2: throws FOUR times (its
+        // whole budget), then the offline engine on the fifth — the audio must still schedule,
+        // which is only possible if the budget (and terminal flag) were reset for the new turn.
         final class TwoPhase: @unchecked Sendable {
             private let lock = NSLock()
             private var count = 0
             func arm(_ engine: AVAudioEngine) throws {
                 lock.lock(); count += 1; let n = count; lock.unlock()
-                if n <= 3 { throw NSError(domain: "t17", code: 3) }
+                if n <= 4 { throw NSError(domain: "t17", code: 3) }
                 let fmt = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1))
                 try engine.enableManualRenderingMode(.offline, format: fmt, maximumFrameCount: 4_096)
             }
@@ -6797,6 +6793,10 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertEqual(dropsAfterReset.count, 1, "exactly turn one dropped; turn two recovered")
     }
 
+    /// POSITIVE CONTROL for the audio path: a turn carrying binary audio must actually put
+    /// NONEMPTY audio in front of the player. Without this, "no audio pending" afterwards cannot
+    /// be distinguished from "no audio ever arrived", which is exactly how the first version of
+    /// the output assertion was vacuous.
     func testATurnCarryingBinaryAudioActuallyReachesThePlayer() async throws {
         self.nextTurnFixture = Self.doneOnlyFixture
         self.nextTurnAudioPayloads = [Self.audioPayload]

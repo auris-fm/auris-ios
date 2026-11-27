@@ -1718,10 +1718,28 @@ final class CloudAudioPlayer: @unchecked Sendable {
                 dropBufferedAnswerAsFailedPlayback()
             }
         }
-        // Play any remaining frames.
+        // Play any remaining frames — unless the turn's start failure is terminal: then
+        // discard instead, so a straggler that lands between the runner's last cycle and this
+        // drain cannot slip through the no-engine path as an unrecorded loss. The drain's
+        // discard carries its own log line when it is the one doing the losing (the runner's
+        // any-depth discard may already have logged).
+        var stragglerDroppedAtDrain = 0
         while true {
             guard let frame = dequeueFrame() else { break }
+            if startFailureTerminal {
+                stragglerDroppedAtDrain += 1
+                continue
+            }
             playFrame(frame)
+        }
+        if stragglerDroppedAtDrain > 0 {
+            framesDiscardedAfterTerminal += stragglerDroppedAtDrain
+            if !discardedAfterTerminalLogged {
+                discardedAfterTerminalLogged = true
+                FileLog.shared.addMessage(
+                    "[VoicePipeline] cloud audio engine never started — discarding further "
+                    + "streamed frames (\(framesDiscardedAfterTerminal) so far) until the turn ends")
+            }
         }
         // Scheduling the last buffer is not playback completion. Keep this node alive until
         // its measured position reaches the scheduled end. A stalled/unreadable engine is
