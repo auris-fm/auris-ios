@@ -63,3 +63,4 @@ __pycache__/
 # Local review material for the chat process; not part of the repo.
 evidence/
 helper-evidence/
+.plain-dd/
