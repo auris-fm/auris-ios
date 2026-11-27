@@ -3131,6 +3131,25 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
 }
 
 
+/// A tiny lock-guarded array for stop notifications captured in tests: the capture closure
+/// runs on the player's delivery path while the waitUntil conditions poll from another
+/// executor, so a bare array is a data race. Its lock, not test isolation, is what makes the
+/// captured array safe — the waitUntil conditions still run off-main.
+private final class NotificationCaptureBox {
+    private let lock = NSLock()
+    private var items: [() -> Void] = []
+    func append(_ item: @escaping () -> Void) {
+        lock.lock(); items.append(item); lock.unlock()
+    }
+    var count: Int {
+        lock.lock(); defer { lock.unlock() }; return items.count
+    }
+    var isEmpty: Bool { count == 0 }
+    subscript(index: Int) -> () -> Void {
+        lock.lock(); defer { lock.unlock() }; return items[index]
+    }
+}
+
 /// A playback double whose reads and writes are SYNCHRONIZED.
 ///
 /// The sink calls it from its own serial task while a test reads it from the test task, so the
@@ -3341,6 +3360,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertEqual(fresh.wait(timeout: .now() + 0.5), .success, "release opens the fresh park")
     }
 
+    @MainActor
     func testDoneKeepsTheHoldWhileOnlyScheduledAudioRemains() async throws {
         try await exerciseScheduledOnlyDone(coalesceBeforeDone: false)
     }
@@ -5067,7 +5087,15 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// "A is still in flight when B starts", which is the whole premise of these
     /// cases; the socket is also where "the losing turn was closed, not left
     /// running" is observable (`StubWebSocketTask.cancelled`).
-    private var heldTurn: (task: StubWebSocketTask, gate: Gate)?
+    /// The held-turn record is written inside the client factory (which runs on the route's
+    /// own context) and read from the test body / polling helpers, so it is lock-guarded:
+    /// a bare property raced here under Thread Sanitizer.
+    private let heldTurnLock = NSLock()
+    private var heldTurnStorage: (task: StubWebSocketTask, gate: Gate)?
+    private var heldTurn: (task: StubWebSocketTask, gate: Gate)? {
+        get { heldTurnLock.lock(); defer { heldTurnLock.unlock() }; return heldTurnStorage }
+        set { heldTurnLock.lock(); heldTurnStorage = newValue; heldTurnLock.unlock() }
+    }
 
     /// BOUNDED completion probe (review 9fc2603e): an INDEPENDENT completion flag set by a
     /// detached watcher; the probe polls the flag under a bound and NEVER awaits the watched
@@ -5496,12 +5524,14 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// BEFORE that dispatch suppresses the successor at the service's admission gate instead, and
     /// the arm under test never runs — measured, and the reason an earlier version of this control
     /// passed without the fix.
+    @MainActor
     func testARefusedInterruptionReleasesTheGraceHoldItsTurnTook() async throws {
         try await checkLocalInterruptionEndReleasesGraceHold(refused: true)
     }
 
     /// The same obligation when no acknowledgement can ever arrive. Production hits this on a slow or
     /// lost interrupt acknowledgement — a bad network, not a race.
+    @MainActor
     func testAnUnacknowledgedInterruptionReleasesTheGraceHoldItsTurnTook() async throws {
         try await checkLocalInterruptionEndReleasesGraceHold(refused: false)
     }
@@ -5513,6 +5543,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// waits on the token it captured BEFORE the send — not on `activeTurn` read after it.
     /// Against the unfixed sink this case fails EVERY run: the post-send read saw no active turn,
     /// skipped the acknowledgement wait, and the successor dispatched as an ordinary turn.
+    @MainActor
     func testARefusalSettledWhileTheInterruptSendIsInFlightEndsTheSuccessorRefused() async throws {
         // Under load: every frame delayed, as in the sibling cases the ordering must survive.
         StubWebSocketTask.sendDelayNanoseconds = 20_000_000
@@ -6255,6 +6286,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// Ordering is CONTROLLED: A's output is held, the case waits on an EXPLICIT BARRIER until B
     /// has reached the transport, then releases A — so A's action arrives after A lost the turn.
     /// A's stream is fed one event per receive, so releasing A delivers its ACTION.
+    @MainActor
     func testSupersededTurnsLateActionIsSuppressedAfterSuccessorInstallsItsToken() async throws {
         defer { self.heldTurn = nil }
 
@@ -6839,6 +6871,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// NONEMPTY audio in front of the player. Without this, "no audio pending" afterwards cannot
     /// be distinguished from "no audio ever arrived", which is exactly how the first version of
     /// the output assertion was vacuous.
+    @MainActor
     func testATurnCarryingBinaryAudioActuallyReachesThePlayer() async throws {
         self.nextTurnFixture = Self.doneOnlyFixture
         self.nextTurnAudioPayloads = [Self.audioPayload]
@@ -7284,6 +7317,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// the resumed episode. Awaiting the route's return therefore stops BEFORE restoration, which is
     /// why an earlier attempt saw the resume appear on some runs and not others. This case drives
     /// the drain event the player actually sends, so restoration is awaited rather than raced.
+    @MainActor
     func testHeldLiveStaleRefusalOrderingIsDeterministicAndRestoresPlayback() async throws {
         self.nextTurnFixture = Self.doneOnlyFixture
         let gate = holdNextTurn()
@@ -7359,6 +7393,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// restoration, and the release of the drain lets the player's REAL stop notification run —
     /// asserted on the same turn, so a mismatch between the turn that carried the audio and the
     /// turn the assertions read would fail.
+    @MainActor
     func testSingleOwnerPendingAudioDefersRestorationUntilItsOwnDrain() async throws {
         let manager = CloudConversationManager()
         manager.registerLiveOrigin(cloudTestOrigin)
@@ -7421,6 +7456,9 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     ///
     /// Clearing the shared flag prevents a DUPLICATE restoration; this asks whether the FIRST
     /// notification restores too early, which is the obligation the case names.
+    /// The captured stop notifications live in a lock-guarded box (the waitUntil polls run
+    /// off-main); @MainActor keeps the rest of the test's state single-threaded.
+    @MainActor
     func testACapturedOlderTurnNotificationDoesNotRestoreWhileTheInheritorIsInFlight() async throws {
         let manager = CloudConversationManager()
         manager.registerLiveOrigin(cloudTestOrigin)
@@ -7430,10 +7468,12 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         let maybePlayer = await MainActor.run { sinkPlayer }
         let player = try XCTUnwrap(maybePlayer, "the sink must own an audio player")
 
-        // CAPTURE A's real notification instead of letting it be delivered.
-        var capturedNotification: (() -> Void)?
+        // CAPTURE A's real notification instead of letting it be delivered. The capture
+        // closure runs on the player's delivery path, so the captured value is lock-guarded
+        // like its sibling test's box.
+        let capturedNotificationBox = NotificationCaptureBox()
         await MainActor.run {
-            player.setCapturedStopNotificationForTesting { _, deliver in capturedNotification = deliver }
+            player.setCapturedStopNotificationForTesting { _, deliver in capturedNotificationBox.append(deliver) }
         }
         defer { Task { @MainActor in player.setCapturedStopNotificationForTesting(nil) } }
 
@@ -7455,9 +7495,9 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         // (2) A's REAL drain produces its notification, captured.
         await MainActor.run { player.setDrainHoldForTesting(false) }
         try await waitUntil("turn A's real drain produced its stop notification") {
-            capturedNotification != nil
+            !capturedNotificationBox.isEmpty
         }
-        let deliverAsNotification = try XCTUnwrap(capturedNotification, "A's notification must exist")
+        let deliverAsNotification = try XCTUnwrap(capturedNotificationBox.isEmpty ? nil : capturedNotificationBox[0], "A's notification must exist")
 
         // (3) TURN B: starts and INHERITS the hold, held before its `done`.
         let gate = holdNextTurn()
@@ -7509,6 +7549,9 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// contained B — so A's notification restored and CLEARED B's deferred record. Identity of the
     /// arriving stop is what distinguishes them, so the notification carries the identity captured
     /// when it was scheduled.
+    /// The captured stop notifications live in a lock-guarded box (the waitUntil polls run
+    /// off-main); @MainActor keeps the rest of the test's state single-threaded.
+    @MainActor
     func testAnOldNotificationDoesNotClearTheDeferringSuccessorsRecord() async throws {
         let manager = CloudConversationManager()
         manager.registerLiveOrigin(cloudTestOrigin)
@@ -7518,7 +7561,11 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         let maybePlayer = await MainActor.run { sinkPlayer }
         let player = try XCTUnwrap(maybePlayer, "the sink must own an audio player")
 
-        var capturedNotifications: [() -> Void] = []
+        // The stop-notification closure is invoked from the player's own delivery hop; the
+        // waitUntil conditions read the array from the polling executor. A lock gives the
+        // captured state one owner — a bare array raced here (TSan, and the crash behind
+        // Buildkite #245).
+        let capturedNotifications = NotificationCaptureBox()
         await MainActor.run {
             player.setCapturedStopNotificationForTesting { _, deliver in capturedNotifications.append(deliver) }
         }
