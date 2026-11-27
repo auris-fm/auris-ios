@@ -60,9 +60,13 @@ assert_toolchain() {
 # internal contributor's machine is provisioned. Either is fine; neither, or a
 # stub-shaped one, is not.
 # `replace_secrets.rb` does `line % secrets`, so every %{key} in the template
-# must exist AND be non-empty: a missing key raises KeyError deep inside the
-# build phase, and an empty one substitutes "" as readily as a real value —
-# producing exactly the blank-credentials build this step exists to refuse.
+# must exist: a missing key raises KeyError deep inside the build phase. EMPTY
+# values are accepted — the beta-feature audit of the template (task
+# #core:#116) found every credential optional: the app hides or degrades the
+# feature cleanly when the value is blank, so a credentials-less beta build
+# runs. A value that is not a string is still refused: Ruby interpolates
+# `""` for nil and `"false"` for false, so a mistyped credential would pass a
+# presence check and land in the build as a bogus literal.
 # `timestamp` is supplied by the script itself, not by the secrets file.
 assert_complete_secrets() {
   local json="$1" tpl=podcasts/Credentials/ApiCredentials.tpl
@@ -81,16 +85,17 @@ if not isinstance(secrets, dict):
 # with a digit or capital must not escape the check.
 keys = set(re.findall(r'%\{([^}]*)\}', open(tpl_path).read())) - {'timestamp'}
 missing = sorted(k for k in keys if k not in secrets)
-# A credential is a non-empty STRING. `null` interpolates to "" and `false` to
-# "false" in Ruby, and str(None) == "None" would pass a truthiness check.
-empty = sorted(k for k in keys
-               if k in secrets and not (isinstance(secrets[k], str) and secrets[k].strip()))
-if missing or empty:
+# A credential is a STRING — empty is fine, a wrong type is not. `null`
+# interpolates to "" and `false` to "false" in Ruby, and str(None) == "None"
+# would pass a truthiness check, so the TYPE is what the check pins.
+wrong_type = sorted(k for k in keys
+                    if k in secrets and not isinstance(secrets[k], str))
+if missing or wrong_type:
     if missing:
         print(f"{json_path} is missing credentials: {', '.join(missing)}")
-    if empty:
-        print(f"{json_path} has empty credentials: {', '.join(empty)}")
-    print("refusing to archive a build testers cannot use")
+    if wrong_type:
+        print(f"{json_path} has non-string credentials: {', '.join(wrong_type)}")
+    print("refusing to archive a build that would fail or misbehave")
     sys.exit(1)
 PYSECRETS
 }
