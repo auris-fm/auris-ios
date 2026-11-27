@@ -1696,8 +1696,10 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
             // have no producer site to be mapped from. The control needs a real transcript.
             chain.backend.stubTranscript = "play the next episode"
             var released = false
+            var routedCaptureID: UUID?
             chain.engine.onRoutingInputWithContext = { _, context in
                 // THE producer states no outcome: the mapping must come from the collector.
+                routedCaptureID = context?.id
                 chain.engine.contributionCollector?.engineReported(
                     stage: "execution",
                     outcome: .init(state: state, reason: reason),
@@ -1707,6 +1709,14 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                 return true
             }
             let watermark = await recordWatermark()
+            // A neighbour's record, still undelivered when this case's watermark was taken, lands
+            // AFTER it and is "fresh" for this case — exactly the leak where an unobserved
+            // row read a record that carried an outcome member. Seed that neighbour
+            // deterministically: an entry with an outcome member, created inside this case's
+            // fresh window, oldest-first in the queue.
+            try seedQueueRecord(
+                name: "decoy-\(label)", captureID: "dedec0d1-0000-0000-0000-000000000000",
+                executionOutcome: ["outcome": "success", "reason": "seed"])
             await chain.backend.emitSpeechThenSilence(
                 level: 0.6, speechSamples: 20 * 160, silenceSamples: 20 * 160)
             let deadline = Date().addingTimeInterval(5)
@@ -1714,9 +1724,14 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
                 try await Task.sleep(nanoseconds: 20_000_000)
             }
             XCTAssertTrue(released, "\(label): the consumer must be handed the capture")
-            _ = await waitForReadyEntries(1)
-            let freshRecords = try await durableRecordsSince(watermark)
-            let record = try XCTUnwrap(freshRecords.first, label)
+            let captureID = try XCTUnwrap(routedCaptureID, "\(label): the routing handoff names the capture")
+            // Read-back must pair by THIS case's capture id, never by queue order: a
+            // neighbour's record that lands inside this case's fresh window sorts first,
+            // and waiting for "any fresh entry" stops at that neighbour — so wait for the
+            // record whose capture_id is this case's own.
+            let awaited = try await durableRecord(forCaptureID: captureID, since: watermark)
+            let record = try XCTUnwrap(awaited,
+                "\(label): no fresh entry ever named capture \(captureID.uuidString)")
             let exec = try XCTUnwrap(
                 (record["observations"] as? [String: Any])?["execution"] as? [String: Any], label)
             if let expected {
@@ -2241,6 +2256,36 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
         return records
     }
 
+    /// The durable record naming THIS capture, waiting until it lands.
+    ///
+    /// Waiting for any fresh entry is not enough here: a neighbour's record inside this case's
+    /// fresh window satisfies that wait at once, while this case's own record may still be in
+    /// flight. Identity (capture id) is the only safe pairing, so poll until a fresh entry's
+    /// record names the expected capture, then return it.
+    private func durableRecord(forCaptureID captureID: UUID, since watermark: Set<String>) async throws -> [String: Any]? {
+        let wanted = captureID.uuidString.lowercased()
+        let deadline = Date().addingTimeInterval(5)
+        var freshNames = Set<String>()
+        while Date() < deadline {
+            let entries = await queue.entries()
+            freshNames = Set(entries.map { $0.name }).subtracting(watermark)
+            var freshRecords: [[String: Any]] = []
+            for entry in entries where freshNames.contains(entry.name) {
+                let metadata = try Data(contentsOf: entry.url.appendingPathComponent("metadata.json"))
+                if let record = try? JSONSerialization.jsonObject(with: metadata) as? [String: Any] {
+                    freshRecords.append(record)
+                }
+            }
+            if let mine = freshRecords.first(where: {
+                ($0["capture_id"] as? String)?.lowercased() == wanted
+            }) {
+                return mine
+            }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        return nil
+    }
+
     /// Durable records that appeared after this control started looking.
     ///
     /// Identity is the only safe filter here. Other controls in this class publish synthetic records
@@ -2250,6 +2295,21 @@ final class VoiceSharingEndToEndEngineToDurableQueueTests: XCTestCase {
     /// and only captures not already present are considered its own.
     private func recordWatermark() async -> Set<String> {
         Set(await queue.entries().map { $0.name })
+    }
+
+    /// Writes an entry straight into the queue directory, standing in for a
+    /// neighbour's record that lands after this case's watermark. The audio
+    /// file exists but is empty: the read-back reads metadata only.
+    private func seedQueueRecord(name: String, captureID: String, executionOutcome: [String: Any]) throws {
+        let directory = root.appendingPathComponent(name, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let record: [String: Any] = [
+            "capture_id": captureID,
+            "observations": ["execution": executionOutcome],
+        ]
+        try JSONSerialization.data(withJSONObject: record)
+            .write(to: directory.appendingPathComponent("metadata.json"))
+        try Data().write(to: directory.appendingPathComponent("audio.wav"))
     }
 
     private func durableRecordsSince(_ watermark: Set<String>, _ file: StaticString = #filePath,
