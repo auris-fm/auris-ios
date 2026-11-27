@@ -1070,6 +1070,34 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertTrue(playback.calls.contains(.seekTo(235)), "the correction seeks by the difference (200 − 180)")
     }
 
+    /// A convergence that lands ON the target ends the session without seeking: the mapped
+    /// target sits within 3 s of the head from below and no more than 3 s ahead, so playback
+    /// reached the target on its own between the estimate seek and convergence. Red against a
+    /// mutation that seeks anyway (treats the in-band convergence as still-ahead).
+    func testAConvergenceOnTheTargetEndsTheSessionWithoutSeeking() async {
+        self.uncoveredSeekFixture()
+        mapper.observedOffsets = [100.0: 15.0]
+        // The estimate seeks 215 s; at convergence the head sits at reference 199.5 s with the
+        // target at 200 s — in band (not overshot, not still ahead by more than 3 s).
+        mapper.matchedReferenceForPlayback = [215.0: 199.5]
+        let sink = makeSink()   // no scheduler: the test drives each tick
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-reached")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(215)), "premise: the estimate seek ran (200 + 15 observed)")
+        let seeksBefore = playback.calls.filter { $0 == .seekTo(215) }.count
+        playback.setPositionMs(215_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        XCTAssertEqual(playback.calls.filter { $0 == .seekTo(215) }.count, seeksBefore,
+                       "the on-target convergence must not seek")
+        func straySeeks() -> [Int] {
+            playback.calls.compactMap { if case let .seekTo(position) = $0, position != 215 { return position }; return nil }
+        }
+        XCTAssertTrue(straySeeks().isEmpty, "no corrective seek: playback already reached the target (got \(straySeeks()))")
+        // And the session is over: a later poll seeks nothing either.
+        await MainActor.run { sink.pollSeekCorrection() }
+        XCTAssertTrue(straySeeks().isEmpty, "the session ended: a later poll must not resurrect a correction")
+    }
+
     /// Corrections are capped at two per action: a third convergence that still differs by
     /// more than 3 s produces no further seek.
     func testCorrectionsAreCappedAtTwo() async {
