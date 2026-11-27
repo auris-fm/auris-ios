@@ -3108,16 +3108,10 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
 }
 
 
-/// A playback double whose reads and writes are SYNCHRONIZED.
-///
-/// The sink calls it from its own serial task while a test reads it from the test task, so the
-/// unlocked `var calls` / `var isPlaying` this replaces were a data race: a resume could land
-/// after a read and the same assertion then saw 1 or 0 across identical runs. Everything below is
-/// behind one lock, and `awaitResume()` waits on the lock rather than polling a copied array, so a
-/// test observes the state the double actually holds.
 /// A tiny lock-guarded array for stop notifications captured in tests: the capture closure
 /// runs on the player's delivery path while the waitUntil conditions poll from another
-/// executor, so a bare array is a data race.
+/// executor, so a bare array is a data race. Its lock, not test isolation, is what makes the
+/// captured array safe — the waitUntil conditions still run off-main.
 private final class NotificationCaptureBox {
     private let lock = NSLock()
     private var items: [() -> Void] = []
@@ -3133,6 +3127,13 @@ private final class NotificationCaptureBox {
     }
 }
 
+/// A playback double whose reads and writes are SYNCHRONIZED.
+///
+/// The sink calls it from its own serial task while a test reads it from the test task, so the
+/// unlocked `var calls` / `var isPlaying` this replaces were a data race: a resume could land
+/// after a read and the same assertion then saw 1 or 0 across identical runs. Everything below is
+/// behind one lock, and `awaitResume()` waits on the lock rather than polling a copied array, so a
+/// test observes the state the double actually holds.
 private final class RecordingPlaybackSink: VoicePlaybackSink, @unchecked Sendable {
     /// Host playing at the moment the turn reads it. `pause()` and `resume()`
     /// keep it true to playback: a constant `true` hides a lost hold, because a
@@ -7432,9 +7433,8 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     ///
     /// Clearing the shared flag prevents a DUPLICATE restoration; this asks whether the FIRST
     /// notification restores too early, which is the obligation the case names.
-    /// Player-notification state in this test is touched from the audio player's
-    /// stop-notification closure; run the whole test on the main actor so the captured
-    /// state has one owner (the pattern of the sibling @MainActor tests).
+    /// The captured stop notifications live in a lock-guarded box (the waitUntil polls run
+    /// off-main); @MainActor keeps the rest of the test's state single-threaded.
     @MainActor
     func testACapturedOlderTurnNotificationDoesNotRestoreWhileTheInheritorIsInFlight() async throws {
         let manager = CloudConversationManager()
@@ -7526,9 +7526,8 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// contained B — so A's notification restored and CLEARED B's deferred record. Identity of the
     /// arriving stop is what distinguishes them, so the notification carries the identity captured
     /// when it was scheduled.
-    /// Player-notification state in this test is touched from the audio player's
-    /// stop-notification closure; run the whole test on the main actor so the captured
-    /// state has one owner (the pattern of the sibling @MainActor tests).
+    /// The captured stop notifications live in a lock-guarded box (the waitUntil polls run
+    /// off-main); @MainActor keeps the rest of the test's state single-threaded.
     @MainActor
     func testAnOldNotificationDoesNotClearTheDeferringSuccessorsRecord() async throws {
         let manager = CloudConversationManager()
