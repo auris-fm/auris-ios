@@ -343,9 +343,8 @@ run_env BUNDLE_CHECK_EXIT=0
 [[ "$(env_calls)" != *"bundle install"* ]] || fail "reinstalled gems that were present (calls: $(env_calls))"
 report "does not reinstall gems that are already present"
 
-# 9. A release archive must never be built from the empty credentials stub:
-#    that would ship testers an app with blank API keys. Absent file ⇒ refuse,
-#    before any archive, and never generate a stub here.
+# 9. A release archive needs A credentials file to shape-check: an absent one
+#    refuses before any archive, and this step never generates one.
 make_env_repo
 rm -f "$TMP/env/podcasts/Credentials/LocalApiCredentials.swift"
 run_env
@@ -365,15 +364,32 @@ run_env
 [[ "$(env_calls)" != *"auris_beta_build"* ]] || fail "archived from the template (calls: $(env_calls))"
 report "refuses a credentials file that still holds template placeholders"
 
-# 9c. An EMPTY-valued credentials file is a stub too: `make external_contributor`
-#     strips the placeholders to empty strings, so emptiness is the real shape
-#     of the stub this step must refuse.
+# 9c. An EMPTY-valued credentials file ARCHIVES: `make external_contributor`
+#     strips the placeholders to empty strings, and every credential is
+#     optional — the app hides or degrades the feature when a value is blank.
+#     The local file follows the same shape rule as the JSON source; only an
+#     unreplaced %{…} placeholder refuses (pinned by 9b). Mutant: restoring
+#     the empty-also-refuses pattern (this row goes red).
 make_env_repo
 sed 's/%{[^}]*}//g' "$TMP/env/podcasts/Credentials/ApiCredentials.tpl" > "$TMP/env/podcasts/Credentials/LocalApiCredentials.swift"
 run_env
-[[ "$status" != 0 ]] || fail "archived from the empty-valued stub"
-[[ "$(env_calls)" != *"auris_beta_build"* ]] || fail "archived from the empty stub (calls: $(env_calls))"
-report "refuses the empty-valued stub make external_contributor produces"
+[[ "$status" == 0 ]] || fail "refused the empty-valued credentials file (got: $out)"
+[[ "$(env_calls)" == *"auris_beta_build"* ]] || fail "did not archive the empty-valued credentials file (calls: $(env_calls))"
+report "archives the empty-valued file make external_contributor produces"
+
+# 9c-3. The whitespace rule reaches the LOCAL file too: one value of " " in an
+#       otherwise-blank LocalApiCredentials.swift refuses — the same broken-
+#       button case the JSON row pins, through the source that wins in the
+#       build. Red against a head whose local branch greps placeholders only.
+make_env_repo
+sed 's/%{[^}]*}//g' "$TMP/env/podcasts/Credentials/ApiCredentials.tpl" \
+  | awk '{if (!done && /""/) {sub(/""/, "\" \"", $0); done=1}; print}' \
+  > "$TMP/env/podcasts/Credentials/LocalApiCredentials.swift"
+run_env
+[[ "$status" != 0 ]] || fail "archived with a whitespace-only value in the local credentials file"
+[[ "$(env_calls)" != *"auris_beta_build"* ]] || fail "archived with a local whitespace-only credential (calls: $(env_calls))"
+report "refuses a whitespace-only value in the local credentials file"
+
 
 # 9d. Real credentials present: the archive proceeds. Pins that the refusal is
 #     about the values, not a blanket ban on the file.
@@ -443,16 +459,18 @@ run_env
 [[ "$(env_calls)" != *"auris_beta_build"* ]] || fail "archived from empty internal secrets (calls: $(env_calls))"
 report "refuses an internal secrets file with no values"
 
-# 14d. Keys present but EMPTY is the same blank-credentials build the stub
-#      produces: replace_secrets.rb substitutes "" as readily as a real value,
-#      so shape alone is not enough. Mutant: accepting any non-`{}` object.
+# 14d. Keys present but EMPTY now ARCHIVE: the beta-feature audit of the
+#      template found every credential optional — the app hides or degrades
+#      the feature cleanly when a value is blank, so a credentials-less beta
+#      runs. Only the shape is guarded: presence and string-ness. Mutant:
+#      restoring the non-empty requirement (this row goes red).
 make_env_repo
 rm -f "$TMP/env/podcasts/Credentials/LocalApiCredentials.swift"
 write_secrets ""
 run_env
-[[ "$status" != 0 ]] || fail "archived from empty-valued internal secrets"
-[[ "$(env_calls)" != *"auris_beta_build"* ]] || fail "archived from empty-valued internal secrets (calls: $(env_calls))"
-report "refuses internal secrets whose keys hold empty values"
+[[ "$status" == 0 ]] || fail "refused all-empty internal secrets (got: $out)"
+[[ "$(env_calls)" == *"auris_beta_build"* ]] || fail "did not archive all-empty internal secrets (calls: $(env_calls))"
+report "archives internal secrets whose keys hold empty values"
 
 # 14e. A MISSING key is worse than an empty one: `line % secrets` raises KeyError,
 #      so the archive would fail deep inside the build phase. Refuse up front and
@@ -467,7 +485,7 @@ run_env
 report "refuses internal secrets missing a template key, naming it"
 
 # 14f. Every template key present with a real value: archives. Pins that the
-#      check is about completeness and non-emptiness, not a blanket refusal.
+#      check is about presence and type, not a blanket refusal.
 make_env_repo
 rm -f "$TMP/env/podcasts/Credentials/LocalApiCredentials.swift"
 write_secrets
@@ -476,10 +494,10 @@ run_env
 [[ "$(env_calls)" == *"auris_beta_build"* ]] || fail "did not archive with complete internal secrets (calls: $(env_calls))"
 report "archives when every template key has a real value"
 
-# 14g. A JSON null or false is not a credential. `str(None)` is "None", so a
-#      truthiness check on the stringified value passes and Ruby interpolates an
-#      empty string for nil / "false" for false — a blank or bogus credential in
-#      a build testers install. Mutant: `not str(secrets[k]).strip()`.
+# 14g. A JSON null or false is not a credential. `str(None)` is "None" and
+#      Ruby interpolates "" for nil / "false" for false, so a mistyped value
+#      would land in the build as a bogus literal. Empty strings stay legal;
+#      the wrong TYPE does not. Mutant: `isinstance(secrets[k], str)` dropped.
 make_env_repo
 rm -f "$TMP/env/podcasts/Credentials/LocalApiCredentials.swift"
 write_secrets
@@ -492,6 +510,22 @@ run_env
 [[ "$status" != 0 ]] || fail "archived with null/false credentials"
 [[ "$(env_calls)" != *"auris_beta_build"* ]] || fail "archived with null/false credentials (calls: $(env_calls))"
 report "refuses non-string credential values (null, false)"
+# 14d-2. The whitespace refusal is targeted, not a blanket: real values with
+#        exactly one key holding " " refuse and name that key; "" everywhere
+#        (14d) still archives. Mutant: refusing "" too (14d goes red), or no
+#        whitespace check at all (this row goes red).
+make_env_repo
+rm -f "$TMP/env/podcasts/Credentials/LocalApiCredentials.swift"
+write_secrets
+python3 - "$TMP/.configure/pocketcasts-ios/secrets/pocket_casts_credentials.json" <<'PYJSON'
+import json,sys
+d=json.load(open(sys.argv[1])); d['sharing_server_secret']=' '
+json.dump(d, open(sys.argv[1],'w'))
+PYJSON
+run_env
+[[ "$status" != 0 ]] || fail "archived with a whitespace-only credential among real ones"
+[[ "$out" == *"whitespace-only credentials: sharing_server_secret"* ]] || fail "whitespace-only value not named (got: $out)"
+report "refuses one whitespace-only credential among real values, naming it"
 
 # 14h. The required keys come from the TEMPLATE, so the pattern must match any
 #      placeholder Ruby would substitute, not just lowercase-and-underscore.
