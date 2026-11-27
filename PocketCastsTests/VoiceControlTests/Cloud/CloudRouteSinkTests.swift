@@ -1578,7 +1578,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
 
     /// An episode change cancels the correction even when the new episode's position sits
-    /// within the tolerance of the expected one: a correction must never seek another episode.
+    /// close enough to the expected one to converge numerically: only the episode-identity
+    /// check rejects the poll, so a correction must never seek another episode.
     func testAnEpisodeChangeCancelsTheCorrection() async {
         self.uncoveredSeekFixture()
         var episodeId: String? = "ep-a"
@@ -1591,7 +1592,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
         XCTAssertTrue(playback.calls.contains(.seekTo(200)), "premise: the estimate seek ran")
         // The user switches episodes; the new episode happens to sit 1 s from the expected
-        // position — inside the 5 s tolerance, so only the identity check can catch it.
+        // position — close enough that only the episode-identity check can reject the poll.
         epLock.lock(); episodeId = "ep-b"; epLock.unlock()
         playback.setPositionMs(201_000)
         // Clear BEFORE the poll under test and assert straight after it: the double's seekTo
