@@ -13,10 +13,16 @@ class TokenHelper {
     private static let renewalLock = NSLock()
     private let backgroundState: (() -> Bool)?
     private let urlConnection: URLConnection
+    /// Injectable login-state check. Production reads the shared settings; tests inject a fixed
+    /// answer so a request helper cannot be tipped into the acquire path by keychain or defaults
+    /// state the test does not own (a persisted account uuid from the host or an earlier suite
+    /// turns every renewal into an identity mismatch — a local-only failure with CI green).
+    private let isLoggedIn: () -> Bool
 
-    init(urlConnection: URLConnection, backgroundState: (() -> Bool)? = nil) {
+    init(urlConnection: URLConnection, backgroundState: (() -> Bool)? = nil, isLoggedIn: @escaping () -> Bool = { SyncManager.isUserLoggedIn() }) {
         self.urlConnection = urlConnection
         self.backgroundState = backgroundState
+        self.isLoggedIn = isLoggedIn
     }
 
     func callSecureUrl(request: URLRequest, completion: @escaping ((HTTPURLResponse?, Data?, Error?) -> Void)) {
@@ -48,7 +54,7 @@ class TokenHelper {
             mutableRequest.setValue(privateUserAgent, forHTTPHeaderField: ServerConstants.HttpHeaders.userAgent)
         }
 
-        if SyncManager.isUserLoggedIn() {
+        if isLoggedIn() {
             let token: String
             if let storedToken = ServerSettings.syncingV2Token {
                 token = storedToken
@@ -69,7 +75,8 @@ class TokenHelper {
             }
 
             if httpResponse.statusCode == ServerConstants.HttpConstants.unauthorized {
-                if SyncManager.isUserLoggedIn(), retryOnUnauthorized {
+                let loggedIn = self?.isLoggedIn() ?? false
+                if loggedIn, retryOnUnauthorized {
                     ServerSettings.invalidateAccessToken(mutableRequest.value(forHTTPHeaderField: ServerConstants.HttpHeaders.authorization)?.replacingOccurrences(of: "Bearer ", with: ""))
                     FileLog.shared.addMessage("TokenHelper: Removed syncingV2TokenKey due to 401 unauthorized retrying url: \(request.url?.absoluteString ?? "unknown")")
                     self?.performCallSecureUrl(request: request, retryOnUnauthorized: false, completion: completion)

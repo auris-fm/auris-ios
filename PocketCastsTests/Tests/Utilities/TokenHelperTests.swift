@@ -424,7 +424,7 @@ class TokenHelperTests: XCTestCase {
             default:
                 throw NSError()
             }
-        })
+        }, isLoggedIn: { false })
 
         let expectation = XCTestExpectation(description: "Waiting on asyncAcquireToken to complete")
         tokenHelper.callSecureUrl(request: URLRequest(url: .userUpdate)) { response, data, error in
