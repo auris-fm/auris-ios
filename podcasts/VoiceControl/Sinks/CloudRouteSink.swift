@@ -126,8 +126,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
 
     /// The cloud player this sink drives, so a test can reach the real producer through
     /// the chain the app builds rather than constructing its own.
-    var audioPlayerForTesting: CloudAudioPlayer? { audioPlayer }
-
     /// The PRODUCTION client factory, extracted so the assembly reuses it VERBATIM and the test seam
     /// substitutes it. Production is unchanged: the default is this same factory.
     nonisolated static func productionClientFactory() -> () -> CloudRouteClient {

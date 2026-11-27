@@ -41,6 +41,7 @@ class VoiceControlAssembly {
         inference injectedInference: (any LfmInference)? = nil,
         modelManager injectedModelManager: ModelManager? = nil,
         clientFactory injectedClientFactory: (() -> CloudRouteClient)? = nil,
+        audioPlayer injectedAudioPlayer: CloudAudioPlayer? = nil,
         playbackSink injectedPlaybackSink: VoicePlaybackSink? = nil,
         graceTimeout injectedGraceTimeout: TimeInterval? = nil,
         cloudConfig injectedCloudConfig: CloudConfig? = nil,
@@ -127,7 +128,9 @@ class VoiceControlAssembly {
             verifiedModelIdentity: deployment.identity
         )
 
-        let cloudAudioPlayer = CloudAudioPlayer()
+        // Injectable so a test can supply a player built with its own offline-rendering
+        // configuration and output judgement; production takes the default, a plain player.
+        let cloudAudioPlayer = injectedAudioPlayer ?? CloudAudioPlayer()
 
         // Classified speech, not a fixed energy level. A room whose ambient noise sits above
         // 0.020 makes every frame "speech" under the energy rule, so no silence endpoint arrives

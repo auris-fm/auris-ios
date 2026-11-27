@@ -60,6 +60,9 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         // ABOVE the player's resume threshold (5 frames): a below-threshold delivery never starts
         // the player, so it would report nothing pending and emit no stop at all.
         let audio = (0..<40).map { Data([UInt8($0)]) }
+        // The player is constructed HERE with the substituted facts this audit needs: an output
+        // the test host does not have. Constructor injection — no production test hooks.
+        let audioPlayer = CloudAudioPlayer(outputIsAvailable: { true })
         let service = VoiceControlAssembly().buildVoiceControlService(
             audioSession: auditAudioSession(),
             conditionMonitor: provenanceConditionMonitor(),
@@ -72,6 +75,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
                     audioPayloads: audio
                 ).client
             },
+            audioPlayer: audioPlayer,
             playbackSink: playback,
             cloudConfig: fixtureConfig,
             asrBackend: { FakeAsrBackend() }
@@ -88,8 +92,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         // answer's audio is genuinely still pending/playback in flight. Releasing the hold lets
         // the production drain loop finish and send the REAL `audioPlayerDidStop(drainEpoch:)`.
         await MainActor.run {
-            service.executorForTesting.cloudRouteSinkForTesting
-                .audioPlayerForTesting?.setDrainHoldForTesting(true)
+            audioPlayer.setDrainHoldForTesting(true)
         }
 
         // Open the window the way the wake callback does, and let the turn claim its allowance.
@@ -120,8 +123,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
             "the hold is still in effect at `done`"
         )
         let pendingAtDone = await MainActor.run {
-            service.executorForTesting.cloudRouteSinkForTesting
-                .audioPlayerForTesting?.hasPendingAudio ?? false
+            audioPlayer.hasPendingAudio ?? false
         }
         XCTAssertTrue(
             pendingAtDone,
@@ -142,8 +144,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         // the player then sends. Await the observable restore (playback sink resume), never the
         // route return.
         await MainActor.run {
-            service.executorForTesting.cloudRouteSinkForTesting
-                .audioPlayerForTesting?.setDrainHoldForTesting(false)
+            audioPlayer.setDrainHoldForTesting(false)
         }
         let deadline = Date().addingTimeInterval(10)
         while Date() < deadline {
@@ -204,6 +205,9 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         seedLfmAssetsForTestingForPositive(manager: modelManager)
 
         let audio = (0..<40).map { Data([UInt8($0)]) }
+        // The player is constructed HERE with the substituted facts this audit needs: an output
+        // the test host does not have. Constructor injection — no production test hooks.
+        let audioPlayer = CloudAudioPlayer(outputIsAvailable: { true })
         let service = VoiceControlAssembly().buildVoiceControlService(
             audioSession: auditAudioSession(),
             conditionMonitor: provenanceConditionMonitor(),
@@ -216,6 +220,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
                     audioPayloads: audio
                 ).client
             },
+            audioPlayer: audioPlayer,
             playbackSink: playback,
             graceTimeout: 0.5,
             cloudConfig: fixtureConfig,
@@ -230,8 +235,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         try await waitForRouter(service)
 
         await MainActor.run {
-            service.executorForTesting.cloudRouteSinkForTesting
-                .audioPlayerForTesting?.setDrainHoldForTesting(true)
+            audioPlayer.setDrainHoldForTesting(true)
         }
         service.gracePeriodSignalForTesting.onWakeWordDetected()
         let generationAtWake = service.gracePeriodSignalForTesting.currentGeneration()
@@ -262,8 +266,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         // Release the REAL drain: the production drain loop finishes and the real
         // audioPlayerDidStop(drainEpoch:) restores the held playback exactly once.
         await MainActor.run {
-            service.executorForTesting.cloudRouteSinkForTesting
-                .audioPlayerForTesting?.setDrainHoldForTesting(false)
+            audioPlayer.setDrainHoldForTesting(false)
         }
         let deadline = Date().addingTimeInterval(10)
         while Date() < deadline {
@@ -325,6 +328,9 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         )
         seedLfmAssetsForTestingForPositive(manager: modelManager)
         let audio = (0..<40).map { Data([UInt8($0)]) }
+        // The player is constructed HERE with the substituted facts this audit needs: an output
+        // the test host does not have. Constructor injection — no production test hooks.
+        let audioPlayer = CloudAudioPlayer(outputIsAvailable: { true })
         let service = VoiceControlAssembly().buildVoiceControlService(
             audioSession: auditAudioSession(),
             conditionMonitor: provenanceConditionMonitor(),
@@ -340,6 +346,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
                 stub.client.onBeforeBind = { _ in _ = gate.wait(timeout: .now() + 5) }
                 return stub.client
             },
+            audioPlayer: audioPlayer,
             playbackSink: playback,
             graceTimeout: 0.5,
             cloudConfig: fixtureConfig,
@@ -350,8 +357,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         try await waitForListening(service)
         try await waitForRouter(service)
         await MainActor.run {
-            service.executorForTesting.cloudRouteSinkForTesting
-                .audioPlayerForTesting?.setDrainHoldForTesting(true)
+            audioPlayer.setDrainHoldForTesting(true)
         }
         service.gracePeriodSignalForTesting.onWakeWordDetected()
         let gen = service.gracePeriodSignalForTesting.currentGeneration()
@@ -367,8 +373,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         try await Task.sleep(nanoseconds: 600_000_000)  // let done land; window must stay held
         XCTAssertTrue(service.gracePeriodSignalForTesting.isActive, "hold retained through done into the drain")
         await MainActor.run {
-            service.executorForTesting.cloudRouteSinkForTesting
-                .audioPlayerForTesting?.setDrainHoldForTesting(false)
+            audioPlayer.setDrainHoldForTesting(false)
         }
         let deadline = Date().addingTimeInterval(10)
         while Date() < deadline, playback.resumeCalls == 0 {
@@ -474,6 +479,9 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         seedLfmAssetsForTestingForPositive(manager: modelManager)
         let audio = (0..<40).map { Data([UInt8($0)]) }
         let gate = DispatchSemaphore(value: 0)
+        // The player is constructed HERE with the substituted facts this audit needs: an output
+        // the test host does not have. Constructor injection — no production test hooks.
+        let audioPlayer = CloudAudioPlayer(outputIsAvailable: { true })
         let service = VoiceControlAssembly().buildVoiceControlService(
             audioSession: auditAudioSession(),
             conditionMonitor: provenanceConditionMonitor(),
@@ -488,6 +496,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
                 stub.client.onBeforeBind = { _ in _ = gate.wait(timeout: .now() + 5) }
                 return stub.client
             },
+            audioPlayer: audioPlayer,
             playbackSink: playback,
             graceTimeout: 5.0,
             cloudConfig: fixtureConfig,
@@ -498,8 +507,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         try await waitForListening(service)
         try await waitForRouter(service)
         await MainActor.run {
-            service.executorForTesting.cloudRouteSinkForTesting
-                .audioPlayerForTesting?.setDrainHoldForTesting(true)
+            audioPlayer.setDrainHoldForTesting(true)
         }
         service.gracePeriodSignalForTesting.onWakeWordDetected()
         let gen = service.gracePeriodSignalForTesting.currentGeneration()
@@ -520,8 +528,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         gate.signal()  // turn completes + drain releases after the close
         try await Task.sleep(nanoseconds: 600_000_000)
         await MainActor.run {
-            service.executorForTesting.cloudRouteSinkForTesting
-                .audioPlayerForTesting?.setDrainHoldForTesting(false)
+            audioPlayer.setDrainHoldForTesting(false)
         }
         let deadline = Date().addingTimeInterval(10)
         while Date() < deadline, playback.resumeCalls == 0 { try await Task.sleep(nanoseconds: 50_000_000) }
@@ -554,6 +561,9 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         let gates = [DispatchSemaphore(value: 0), DispatchSemaphore(value: 0)]
         objc_setAssociatedObject(self, "graceauditsucc_gates", gates, .OBJC_ASSOCIATION_RETAIN)
         var gateIndex = 0
+        // The player is constructed HERE with the substituted facts this audit needs: an output
+        // the test host does not have. Constructor injection — no production test hooks.
+        let audioPlayer = CloudAudioPlayer(outputIsAvailable: { true })
         let service = VoiceControlAssembly().buildVoiceControlService(
             audioSession: auditAudioSession(),
             conditionMonitor: provenanceConditionMonitor(),
@@ -570,6 +580,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
                 stub.client.onBeforeBind = { _ in _ = gates[index].wait(timeout: .now() + 8) }
                 return stub.client
             },
+            audioPlayer: audioPlayer,
             playbackSink: playback,
             graceTimeout: 5.0,
             cloudConfig: fixtureConfig,
@@ -580,8 +591,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         try await waitForListening(service)
         try await waitForRouter(service)
         await MainActor.run {
-            service.executorForTesting.cloudRouteSinkForTesting
-                .audioPlayerForTesting?.setDrainHoldForTesting(true)
+            audioPlayer.setDrainHoldForTesting(true)
         }
         service.gracePeriodSignalForTesting.onWakeWordDetected()
         let gen1 = service.gracePeriodSignalForTesting.currentGeneration()
@@ -617,8 +627,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         gates[1].signal()  // the successor's own transport gate
         try await Task.sleep(nanoseconds: 600_000_000)
         await MainActor.run {
-            service.executorForTesting.cloudRouteSinkForTesting
-                .audioPlayerForTesting?.setDrainHoldForTesting(false)
+            audioPlayer.setDrainHoldForTesting(false)
         }
         let deadline = Date().addingTimeInterval(10)
         while Date() < deadline, playback.resumeCalls == 0 { try await Task.sleep(nanoseconds: 50_000_000) }
@@ -711,6 +720,9 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         seedLfmAssetsForTestingForPositive(manager: modelManager)
         // Frames arrive (the stub's audio payload channel), then the stream ENDS without done:
         // truncation with pending audio.
+        // The player is constructed HERE with the substituted facts this audit needs: an output
+        // the test host does not have. Constructor injection — no production test hooks.
+        let audioPlayer = CloudAudioPlayer(outputIsAvailable: { true })
         let service = VoiceControlAssembly().buildVoiceControlService(
             audioSession: auditAudioSession(),
             conditionMonitor: provenanceConditionMonitor(),
@@ -725,6 +737,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
                     audioPayloads: (0..<40).map { Data([UInt8($0)]) }
                 ).client
             },
+            audioPlayer: audioPlayer,
             playbackSink: playback,
             graceTimeout: 5.0,
             cloudConfig: fixtureConfig,
@@ -737,8 +750,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         // PIN the enqueued audio as pending: without the drain hold the player may shed the
         // tiny synthetic frames before the truncation lands, making the ordering unobservable.
         await MainActor.run {
-            service.executorForTesting.cloudRouteSinkForTesting
-                .audioPlayerForTesting?.setDrainHoldForTesting(true)
+            audioPlayer.setDrainHoldForTesting(true)
         }
         service.gracePeriodSignalForTesting.onWakeWordDetected()
         let gen = service.gracePeriodSignalForTesting.currentGeneration()
@@ -752,8 +764,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         // and therefore the identity-bound release — can only complete once the runner can leave
         // the drain park. Poll for the release instead of a fixed sleep.
         await MainActor.run {
-            service.executorForTesting.cloudRouteSinkForTesting
-                .audioPlayerForTesting?.setDrainHoldForTesting(false)
+            audioPlayer.setDrainHoldForTesting(false)
         }
         var released = false
         for _ in 0..<60 {
@@ -764,13 +775,13 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         XCTAssertTrue(released, "the hold released exactly once at the truncation, after the stop")
         XCTAssertEqual(playback.resumeCalls, 1, "the hold released exactly once at the truncation")
         let pending = await MainActor.run {
-            service.executorForTesting.cloudRouteSinkForTesting.audioPlayerForTesting?.hasPendingAudio ?? false
+            audioPlayer.hasPendingAudio ?? false
         }
         // DIRECT stop evidence: only cancel()/finish() advance the player's drain epoch. No
         // `done` arrived, so a bumped epoch proves THIS turn's owned output was stopped before
         // the host playback was released (cancel precedes restoreTransientAudioState).
         let epochAfter = await MainActor.run {
-            service.executorForTesting.cloudRouteSinkForTesting.audioPlayerForTesting?.currentDrainEpoch ?? 0
+            audioPlayer.currentDrainEpoch ?? 0
         }
         XCTAssertGreaterThan(epochAfter, 0, "owned output was stopped (cancel) before the hold/host release")
         XCTAssertFalse(pending, "no buffered owned audio survives the release")
@@ -802,11 +813,6 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
     private func waitForRouter(_ service: VoiceControlService) async throws {
         // The sink's player must see an output in the test host, or `startEngine` consumes the
         // answer silently and the drain this audit measures never happens. Instance hook, armed
-        // before any turn can flow (see CloudAudioPlayer.audioOutputIsAvailable).
-        await MainActor.run {
-            service.executorForTesting.cloudRouteSinkForTesting
-                .audioPlayerForTesting?.audioOutputAvailabilityOverrideForTesting = true
-        }
         let deadline = Date().addingTimeInterval(20)
         while Date() < deadline {
             if service.intentRouterIsReadyForTesting { return }

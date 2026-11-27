@@ -548,8 +548,35 @@ final class CloudAudioPlayer: @unchecked Sendable {
         EchoReferenceHandoff.ProducerIdentity(kind: .cloud, incarnation: nodeIncarnation)
     }
 
-    init(timingEnabled: Bool = CloudPlaybackTiming.isEnabled(environment: ProcessInfo.processInfo.environment)) {
+    /// The real output-availability judgement: on the simulator's test host there is no output
+    /// device (its audio unit asserts if a node graph is built before one exists), elsewhere there
+    /// is. Injection exists so a test can stand in for exactly this judgement; production never
+    /// overrides the default.
+    static func hasAudioOutput(environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+        #if targetEnvironment(simulator)
+        return environment["XCTestConfigurationFilePath"] == nil
+        #else
+        return true
+        #endif
+    }
+
+    /// The output-availability judgement this player consults before building any node graph —
+    /// injected so a test host that supplies an output by other means (an offline-rendering
+    /// engine) can substitute the fact without a global seam. See the default's note.
+    private let outputIsAvailable: () -> Bool
+    /// Applied to the real engine graph before `engine.start()`. Production default: nothing —
+    /// the graph comes from `startEngine` untouched. A test injects its offline-rendering setup
+    /// here rather than reaching into the player after construction.
+    private let configureEngine: (AVAudioEngine) throws -> Void
+
+    init(
+        timingEnabled: Bool = CloudPlaybackTiming.isEnabled(environment: ProcessInfo.processInfo.environment),
+        outputIsAvailable: @escaping () -> Bool = { CloudAudioPlayer.hasAudioOutput() },
+        configureEngine: @escaping (AVAudioEngine) throws -> Void = { _ in }
+    ) {
         self.timingEnabled = timingEnabled
+        self.outputIsAvailable = outputIsAvailable
+        self.configureEngine = configureEngine
         timingPlayerID = timingEnabled ? UUID().uuidString : nil
         runnerThread = Thread(target: self, selector: #selector(runnerLoop), object: nil)
         runnerThread?.name = "CloudAudioPlayer"
@@ -977,7 +1004,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // still consumed by the runner, but nothing is scheduled. Creating the
         // engine in that state trips an assertion inside CoreAudio rather than
         // throwing, so the check has to come first.
-        guard audioOutputIsAvailable else {
+        guard outputIsAvailable() else {
             // No output at all (a test host, a detached process): the deliberate design is to
             // consume frames silently, so this reads as "playing" and the turn ends normally.
             // Only an actual START FAILURE below retains and retries.
@@ -995,10 +1022,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         engine.connect(playerNode, to: engine.mainMixerNode, format: format)
 
         do {
-            // A test can supply an offline output while retaining this real engine/node graph.
-            if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
-                try configureEngineForTesting?(engine)
-            }
+            try configureEngine(engine)
             try engine.start()
         } catch {
             // ONE FileLog line per failure streak (the once-guard), carrying the FIRST
@@ -1501,53 +1525,6 @@ final class CloudAudioPlayer: @unchecked Sendable {
         )
     }
 
-    /// Whether this player instance has an audio output to render into. `AVAudioEngine`
-    /// asserts (rather than throwing) when a node graph is built without one,
-    /// so the player checks before constructing any graph.
-    ///
-    /// A test host may supply an output by other means (an offline-rendering engine); the seam
-    /// is consulted first so the decision point stays in one place. See the override's note for
-    /// why this exists instead of node injection.
-    var audioOutputIsAvailable: Bool {
-        let isTestHost = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
-        observedTestHostForTesting = isTestHost
-        if isTestHost, let override = audioOutputAvailabilityOverrideForTesting {
-            observedOutputAvailableForTesting = override
-            return override
-        }
-        #if targetEnvironment(simulator)
-        // The simulator's audio unit asserts if a node graph is built before an
-        // output device exists, which is the case in the test host.
-        return ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil
-        #else
-        return true
-        #endif
-    }
-
-    /// Seam for the availability decision above, consulted only when the process reports itself as
-    /// running under a test configuration. Set on the player instance before handing it to the
-    /// sink (`CloudRouteSink(audioPlayer:)`), so no static state is shared across players.
-    ///
-    /// Why this exists rather than a direct node injection: the queue-lead controls must drive the
-    /// producer's REAL path — `enqueue` → runner → `processFrames` → `playFrame` — because that is
-    /// where the node's position is read and published. A test that called `appendToEmittedReference`
-    /// with its own node would be supplying the very position the review comment disputes, so it
-    /// could not fail for the reason the fix cares about. What a test host genuinely cannot provide
-    /// is an output device, so the seam replaces exactly that judgement and nothing else: the graph
-    /// still comes from `startEngine`, the buffer still goes through `scheduleBuffer`, and the
-    /// position still comes from `renderPosition(of:)`. Production never sets it, so production
-    /// behaviour is unchanged.
-    var audioOutputAvailabilityOverrideForTesting: Bool? = nil
-
-    /// Test-host-only output setup, applied to the real graph before starting it.
-    var configureEngineForTesting: ((AVAudioEngine) throws -> Void)?
-    /// TEST-ONLY observation of the availability decision as the PRODUCTION call site sees it:
-    /// whether the process reported itself as a test host at all (the override is consulted only
-    /// then) and what availability was decided. A control asserts this instead of assuming the
-    /// override took effect.
-    private(set) var observedTestHostForTesting = false
-    private(set) var observedOutputAvailableForTesting = false
-
     /// Mono Int16 PCM at `sampleRate` — the shape the negotiated `pcm_s16le`
     /// codec delivers.
     static func pcmFormat(sampleRate: Double) -> AVAudioFormat? {
@@ -1698,7 +1675,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // Retrying HERE is the last chance to schedule the turn's answer before the stop drops
         // everything: a drain that finds output available but no engine gives the start bounded
         // attempts instead of silently consuming the frames through the no-engine path.
-        if playerNode == nil, !isBufferEmpty, !startFailureTerminal, audioOutputIsAvailable {
+        if playerNode == nil, !isBufferEmpty, !startFailureTerminal, outputIsAvailable() {
             var failureLogged = false
             // The SAME per-turn budget the runner spends — the bound is the budget itself,
             // not a second deadline. Once it runs out the drop is the visible failure, not

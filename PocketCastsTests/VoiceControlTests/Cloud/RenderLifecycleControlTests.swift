@@ -206,11 +206,13 @@ final class RenderLifecycleControlTests: XCTestCase {
         let reference = PlaybackEchoReference()
         let handoff = EchoReferenceHandoff(reference: reference, capacity: 16)
         defer { withExtendedLifetime(handoff) {} }
-        let player = CloudAudioPlayer(timingEnabled: timing != nil)
-        player.audioOutputAvailabilityOverrideForTesting = true
-        player.configureEngineForTesting = { engine in
-            try engine.enableManualRenderingMode(.offline, format: outputFormat, maximumFrameCount: 4_096)
-        }
+        let player = CloudAudioPlayer(
+            timingEnabled: timing != nil,
+            outputIsAvailable: { true },
+            configureEngine: { engine in
+                try engine.enableManualRenderingMode(.offline, format: outputFormat, maximumFrameCount: 4_096)
+            }
+        )
         player.emittedPCMReference = reference
         player.echoReferenceHandoff = handoff // Production assembly retains and wires both halves.
         // Retain the actual stop notification path so confirmation is observable without a sink.
