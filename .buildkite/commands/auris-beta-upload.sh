@@ -61,10 +61,9 @@ assert_toolchain() {
 # stub-shaped one, is not.
 # `replace_secrets.rb` does `line % secrets`, so every %{key} in the template
 # must exist: a missing key raises KeyError deep inside the build phase. EMPTY
-# values are accepted — the beta-feature audit of the template (task
-# #core:#116) found every credential optional: the app hides or degrades the
-# feature cleanly when the value is blank, so a credentials-less beta build
-# runs. A value that is not a string is still refused: Ruby interpolates
+# values are accepted — the beta-feature audit of the template found every
+# credential optional: the app hides or degrades the feature cleanly when the
+# value is blank, so a credentials-less beta build runs. A value that is not a string is still refused: Ruby interpolates
 # `""` for nil and `"false"` for false, so a mistyped credential would pass a
 # presence check and land in the build as a bogus literal.
 # `timestamp` is supplied by the script itself, not by the secrets file.
