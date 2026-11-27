@@ -22,8 +22,8 @@ import AVFoundation
 ///
 /// # What is real here
 ///
-/// Frames enter through `CloudRouteSink.audioPlayerForTesting.enqueue` — the sink that owns the
-/// player, and the same call the socket handler makes. The runner thread then takes them through the
+/// Frames enter through `graph.cloud.enqueue` — the very player this file injected into the sink,
+/// and the same call the socket handler makes. The runner thread then takes them through the
 /// production path: `processFrames` → `playFrame`, which builds its OWN graph in `startEngine`,
 /// appends, reads the node's position with `renderPosition(of:)`, records the block range, and
 /// publishes through the handoff. No case calls `appendToEmittedReference` with a test-supplied
@@ -34,9 +34,9 @@ import AVFoundation
 ///
 /// # How the node's counter advances without hardware
 ///
-/// `CloudAudioPlayer.audioOutputIsAvailable` is false under a test configuration, so the player would
-/// build no graph at all. The single substituted fact is that judgement, via
-/// `audioOutputAvailabilityOverrideForTesting`; everything downstream is production code. To advance
+/// A test host has no audio output, so the production judgement would make the player build no
+/// graph at all. The single substituted fact is that judgement, via the constructor-injected
+/// output-availability provider; everything downstream is production code. To advance
 /// the resulting node's counter, the harness puts the PLAYER'S OWN engine into manual offline
 /// rendering and renders through it. Measured on this host (`/tmp/probe13`, results in
 /// `notes/pr49-interleaving-machine-answers.md`):
@@ -72,15 +72,11 @@ import AVFoundation
 /// wired BY the assembly, not merely in the same shape — is reported to @spec, not hidden.
 final class CloudProducerInterleavingControls: XCTestCase {
 
-    /// The sink is main-actor isolated (its delegate conformance is), so reaching the player through
-    /// it needs the actor. Every helper that touches the graph runs here rather than on the test's
-    /// thread; the offline render calls below are synchronous and short.
+    /// The graph holds the player this file constructed and injected into the sink, so no
+    /// accessor on the sink is needed to reach it.
     @MainActor
     private func player(in graph: Graph) -> CloudAudioPlayer {
-        try! XCTUnwrap(
-            graph.sink.audioPlayerForTesting,
-            "the sink owns no player, so there is no producer to drive"
-        )
+        graph.cloud
     }
 
     /// The pipeline rate. Used as both the render format's rate and the negotiated codec's rate, so
@@ -130,7 +126,7 @@ final class CloudProducerInterleavingControls: XCTestCase {
         let reference = PlaybackEchoReference()
         let handoff = EchoReferenceHandoff(reference: reference, capacity: 16)
 
-        let cloud = CloudAudioPlayer()
+        let cloud = CloudAudioPlayer(outputIsAvailable: { true })
         cloud.emittedPCMReference = reference
         cloud.echoReferenceHandoff = handoff
         cloud.setNegotiatedCodec(try! XCTUnwrap(
@@ -149,7 +145,6 @@ final class CloudProducerInterleavingControls: XCTestCase {
             playbackPositionMs: { 0 },
             cloudPlaybackContextState: CloudPlaybackContextState()
         )
-        XCTAssert(sink.audioPlayerForTesting === cloud, "the sink must own the player under test")
 
         let engine = AVAudioEngine()
         let tap = EpisodeOutputTap(engine: engine)
@@ -170,7 +165,6 @@ final class CloudProducerInterleavingControls: XCTestCase {
     override func tearDown() {
         heldPlayer?.setDrainHoldForTesting(false)
         heldPlayer = nil
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
         super.tearDown()
     }
 
@@ -205,7 +199,6 @@ final class CloudProducerInterleavingControls: XCTestCase {
     @MainActor
     private func feed(_ blocks: [Block], to graph: Graph, waitForAnchor: Bool = true) throws -> Int {
         let cloud = player(in: graph)
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
         // A prior `feed` in the same case left the drain parked; release it first.
         cloud.setDrainHoldForTesting(false)
 
@@ -686,7 +679,6 @@ final class CloudProducerInterleavingControls: XCTestCase {
     @MainActor
     func testANodeThatHasNotRenderedPublishesNoPosition() throws {
         let graph = makeGraph()
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
         // Park the drain BEFORE crossing the resume threshold: `startEngine` runs before
         // `parkIfHeld`, so the runner builds the engine and parks with the pending frames
         // UNSCHEDULED — the node is attached but has never rendered (measured precondition).
