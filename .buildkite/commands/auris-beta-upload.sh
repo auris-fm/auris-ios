@@ -3,7 +3,9 @@
 # build-and-test step on main.
 #
 # Unlike build-and-test, this step never stubs the API credentials: a beta
-# archive must carry real ones or it refuses to build.
+# archive must carry shape-correct ones or it refuses to build (see the guard
+# below: every key present, string values, no placeholders or whitespace-only
+# values; blank is fine).
 #
 # Runs `fastlane auris_beta_build` (device archive with automatic signing
 # via the App Store Connect API key) on every main run. Publishing to
@@ -117,7 +119,9 @@ assert_real_credentials() {
       echo "$f holds unreplaced placeholder credentials; refusing to archive a build that would misbehave"
       return 1
     fi
-    if grep -qE '"[[:space:]]+"' "$f"; then
+    # Swift escape forms (`"\t"`, `"\u{00A0}"`) read back non-empty at
+    # runtime, so the raw-text grep refuses them as whitespace-only too.
+    if grep -qE '"[[:space:]]+"' "$f" || grep -qE '"\\(t|r|n|u\{[0-9A-Fa-f]+\})"' "$f"; then
       echo "$f holds whitespace-only credentials; refusing to archive a build that would misbehave"
       return 1
     fi
@@ -127,7 +131,7 @@ assert_real_credentials() {
     assert_complete_secrets "$json" || return 1
     return 0
   fi
-  echo "missing $f (or $json): a beta archive needs real API credentials, not the empty stub"
+  echo "missing $f (or $json): a beta archive needs a credentials file to shape-check, not an absent one"
   return 1
 }
 

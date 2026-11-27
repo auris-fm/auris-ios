@@ -343,9 +343,8 @@ run_env BUNDLE_CHECK_EXIT=0
 [[ "$(env_calls)" != *"bundle install"* ]] || fail "reinstalled gems that were present (calls: $(env_calls))"
 report "does not reinstall gems that are already present"
 
-# 9. A release archive must never be built from the empty credentials stub:
-#    that would ship testers an app with blank API keys. Absent file ⇒ refuse,
-#    before any archive, and never generate a stub here.
+# 9. A release archive needs A credentials file to shape-check: an absent one
+#    refuses before any archive, and this step never generates one.
 make_env_repo
 rm -f "$TMP/env/podcasts/Credentials/LocalApiCredentials.swift"
 run_env
