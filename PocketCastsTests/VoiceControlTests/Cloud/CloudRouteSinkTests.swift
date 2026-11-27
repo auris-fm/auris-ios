@@ -2878,15 +2878,6 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
         try await checkBufferedPlaybackNextAuth(drainBeforeFollowUp: true)
     }
 
-    /// THE WIRE DECIDES WHAT IS RESUMABLE. A turn that receives `connected` makes its conversation
-    /// the one later turns resume; the same turn WITHOUT the frame leaves nothing to resume, and
-    /// the next follow-up opens a fresh conversation. Both halves run through the real sink over a
-    /// scripted transport, so the assertion is on the wire mode a follow-up actually sends rather
-    /// than on manager state the test wrote itself.
-    ///
-    /// This is the client half of the conversation-lifecycle rule: `connected` is sent only after
-    /// the server admits a turn, so it — not the sending of a request — is the evidence that a
-    /// conversation exists.
     /// DETERMINISTIC SETTLE-BEFORE-WAIT: a resolution recorded while nobody is parked is
     /// returned to the next waiter immediately — the latch remembers the outcome even though
     /// the ticket it rode in on is gone. Pins the first half of the one-shot contract the
@@ -2910,7 +2901,15 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
         let waited = await token.awaitAcknowledgement(timeout: 0.05)
         XCTAssertEqual(waited, .acknowledged, "the waiter reads the first winner, not the later mark")
     }
-
+    /// THE WIRE DECIDES WHAT IS RESUMABLE. A turn that receives `connected` makes its conversation
+    /// the one later turns resume; the same turn WITHOUT the frame leaves nothing to resume, and
+    /// the next follow-up opens a fresh conversation. Both halves run through the real sink over a
+    /// scripted transport, so the assertion is on the wire mode a follow-up actually sends rather
+    /// than on manager state the test wrote itself.
+    ///
+    /// This is the client half of the conversation-lifecycle rule: `connected` is sent only after
+    /// the server admits a turn, so it — not the sending of a request — is the evidence that a
+    /// conversation exists.
     func testOnlyAnAcknowledgedConversationIsResumedByTheNextFollowUp() async throws {
         for acknowledge in [true, false] {
             let manager = CloudConversationManager()
