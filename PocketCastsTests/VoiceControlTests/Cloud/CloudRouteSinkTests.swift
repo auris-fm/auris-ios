@@ -3433,10 +3433,11 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         }
         )
         let producerRelease = DispatchSemaphore(value: 0)
-        // NINE received frames now: seven binary PCM messages, then `connected`, then `done`.
-        // The park counts RECEIVED frames, so adding the admission frame moves the boundary:
-        // leaving it at eight parked the producer on `connected` itself, before the terminal
-        // the turn must read, and the case hung rather than failing.
+        // NINE received frames: `connected` first, then seven binary PCM messages, then `done`.
+        // The park counts RECEIVED frames, so parking at nine lands after the last audio frame
+        // and before `done` — the turn can still read its terminal while the producer is held.
+        // (Under the stub's old audio-before-text order eight worked; with `connected` now
+        // leading, parking at eight would land on the last audio frame instead.)
         blockProducerAfterFrames = (9, producerRelease)
         nextTurnFixture = Self.doneOnlyFixture
         nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x11, count: 4_800 * 2) }
@@ -6765,13 +6766,18 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             let stop = player.cancel()
             _ = await player.awaitActualStop(after: stop)
         }
-        // Only log content written AFTER this point counts: the sibling case shares the log
-        // file, and its drop line must never satisfy this one's barriers.
+        // Everything this case asserts is scoped to ITS OWN two turns by request id, and to
+        // this RUN by a log offset (the simulator's log file persists across runs). The generic
+        // "never started — dropping" line carries no identity, so a sibling case's drop line in
+        // the shared log could satisfy this case's barriers; the per-turn latency record is the
+        // scoped surface — it carries `request_id=` — and `playback_failed=true dropped_frames=N`
+        // is turn one's exhaustion exactly.
         let logLengthAtStart = await FileLog.shared.logFileAsString().count
-        func dropLinesSinceStart() async -> [String] {
+        func records(_ ids: [String], failed: Bool) async -> [String] {
             await FileLog.shared.logFileAsString()
                 .dropFirst(logLengthAtStart).split(separator: "\n").map(String.init)
-                .filter { $0.contains("cloud audio engine never started — dropping") }
+                .filter { $0.contains("cloudTurnLatency") && ids.contains(where: $0.contains) }
+                .filter { $0.contains("playback_failed=\(failed)") }
         }
 
         // `connected` must be part of each turn's fixture: it is where the sink binds the
@@ -6786,7 +6792,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         let exhaustDeadline = Date().addingTimeInterval(10)
         var exhausted = false
         while !exhausted && Date() < exhaustDeadline {
-            exhausted = !(await dropLinesSinceStart()).isEmpty
+            exhausted = !(await records(["u-t17c1"], failed: true)).isEmpty
             if !exhausted { try await Task.sleep(nanoseconds: 50_000_000) }
         }
         XCTAssertTrue(exhausted, "turn one's budget never exhausted")
@@ -6808,8 +6814,13 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         try await waitUntil("turn two's audio schedules on the fresh budget", timeout: 5) {
             player.schedulingBoundaryCount > boundariesBefore
         }
-        let dropsAfterReset = await dropLinesSinceStart()
-        XCTAssertEqual(dropsAfterReset.count, 1, "exactly turn one dropped; turn two recovered")
+        // THE SCOPED VERDICT: across this case's two turns exactly one record carries the
+        // playback failure — turn one's. A neighbour's drop can never tip this either way.
+        let failedRecords = await records(["u-t17c1", "u-t17c2"], failed: true)
+        XCTAssertEqual(failedRecords.count, 1, "exactly turn one failed: \(failedRecords)")
+        XCTAssertTrue(
+            failedRecords.first?.contains("request_id=u-t17c1") ?? false,
+            "the failure is turn one's, not turn two's: \(failedRecords)")
     }
 
     /// POSITIVE CONTROL for the audio path: a turn carrying binary audio must actually put
