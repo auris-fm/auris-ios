@@ -109,9 +109,16 @@ assert_real_credentials() {
   local json="$HOME/.configure/pocketcasts-ios/secrets/pocket_casts_credentials.json"
   if [[ -f "$f" ]]; then
     # One rule with the JSON source: blanks are fine, an unreplaced %{…}
-    # placeholder is the stub shape the build phase must never ship.
+    # placeholder is the stub shape the build phase must never ship, and a
+    # whitespace-only value defeats the app's isEmpty gate. The template's
+    # only string literals are the credential values, so neither pattern can
+    # match anything else in the file.
     if grep -qE '"%\{[^}]*\}"' "$f"; then
       echo "$f holds unreplaced placeholder credentials; refusing to archive a build that would misbehave"
+      return 1
+    fi
+    if grep -qE '"[[:space:]]+"' "$f"; then
+      echo "$f holds whitespace-only credentials; refusing to archive a build that would misbehave"
       return 1
     fi
     return 0

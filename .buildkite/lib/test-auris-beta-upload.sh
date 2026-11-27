@@ -378,6 +378,19 @@ run_env
 [[ "$(env_calls)" == *"auris_beta_build"* ]] || fail "did not archive the empty-valued credentials file (calls: $(env_calls))"
 report "archives the empty-valued file make external_contributor produces"
 
+# 9c-3. The whitespace rule reaches the LOCAL file too: one value of " " in an
+#       otherwise-blank LocalApiCredentials.swift refuses — the same broken-
+#       button case the JSON row pins, through the source that wins in the
+#       build. Red against a head whose local branch greps placeholders only.
+make_env_repo
+sed 's/%{[^}]*}//g' "$TMP/env/podcasts/Credentials/ApiCredentials.tpl" \
+  | awk '{if (!done && /""/) {sub(/""/, "\" \"", $0); done=1}; print}' \
+  > "$TMP/env/podcasts/Credentials/LocalApiCredentials.swift"
+run_env
+[[ "$status" != 0 ]] || fail "archived with a whitespace-only value in the local credentials file"
+[[ "$(env_calls)" != *"auris_beta_build"* ]] || fail "archived with a local whitespace-only credential (calls: $(env_calls))"
+report "refuses a whitespace-only value in the local credentials file"
+
 
 # 9d. Real credentials present: the archive proceeds. Pins that the refusal is
 #     about the values, not a blanket ban on the file.
