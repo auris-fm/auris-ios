@@ -3336,9 +3336,6 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         XCTAssertEqual(fresh.wait(timeout: .now() + 0.5), .success, "release opens the fresh park")
     }
 
-    /// Player-notification state in this test is touched from the audio player's
-    /// stop-notification closure; run the whole test on the main actor so the captured
-    /// state has one owner (the pattern of the sibling @MainActor tests).
     @MainActor
     func testDoneKeepsTheHoldWhileOnlyScheduledAudioRemains() async throws {
         try await exerciseScheduledOnlyDone(coalesceBeforeDone: false)
@@ -5503,9 +5500,6 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// BEFORE that dispatch suppresses the successor at the service's admission gate instead, and
     /// the arm under test never runs — measured, and the reason an earlier version of this control
     /// passed without the fix.
-    /// Player-notification state in this test is touched from the audio player's
-    /// stop-notification closure; run the whole test on the main actor so the captured
-    /// state has one owner (the pattern of the sibling @MainActor tests).
     @MainActor
     func testARefusedInterruptionReleasesTheGraceHoldItsTurnTook() async throws {
         try await checkLocalInterruptionEndReleasesGraceHold(refused: true)
@@ -5513,9 +5507,6 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
     /// The same obligation when no acknowledgement can ever arrive. Production hits this on a slow or
     /// lost interrupt acknowledgement — a bad network, not a race.
-    /// Player-notification state in this test is touched from the audio player's
-    /// stop-notification closure; run the whole test on the main actor so the captured
-    /// state has one owner (the pattern of the sibling @MainActor tests).
     @MainActor
     func testAnUnacknowledgedInterruptionReleasesTheGraceHoldItsTurnTook() async throws {
         try await checkLocalInterruptionEndReleasesGraceHold(refused: false)
@@ -5528,9 +5519,6 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// waits on the token it captured BEFORE the send — not on `activeTurn` read after it.
     /// Against the unfixed sink this case fails EVERY run: the post-send read saw no active turn,
     /// skipped the acknowledgement wait, and the successor dispatched as an ordinary turn.
-    /// Player-notification state in this test is touched from the audio player's
-    /// stop-notification closure; run the whole test on the main actor so the captured
-    /// state has one owner (the pattern of the sibling @MainActor tests).
     @MainActor
     func testARefusalSettledWhileTheInterruptSendIsInFlightEndsTheSuccessorRefused() async throws {
         // Under load: every frame delayed, as in the sibling cases the ordering must survive.
@@ -6274,9 +6262,6 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// Ordering is CONTROLLED: A's output is held, the case waits on an EXPLICIT BARRIER until B
     /// has reached the transport, then releases A — so A's action arrives after A lost the turn.
     /// A's stream is fed one event per receive, so releasing A delivers its ACTION.
-    /// Player-notification state in this test is touched from the audio player's
-    /// stop-notification closure; run the whole test on the main actor so the captured
-    /// state has one owner (the pattern of the sibling @MainActor tests).
     @MainActor
     func testSupersededTurnsLateActionIsSuppressedAfterSuccessorInstallsItsToken() async throws {
         defer { self.heldTurn = nil }
@@ -6862,9 +6847,6 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// NONEMPTY audio in front of the player. Without this, "no audio pending" afterwards cannot
     /// be distinguished from "no audio ever arrived", which is exactly how the first version of
     /// the output assertion was vacuous.
-    /// Player-notification state in this test is touched from the audio player's
-    /// stop-notification closure; run the whole test on the main actor so the captured
-    /// state has one owner (the pattern of the sibling @MainActor tests).
     @MainActor
     func testATurnCarryingBinaryAudioActuallyReachesThePlayer() async throws {
         self.nextTurnFixture = Self.doneOnlyFixture
@@ -7311,9 +7293,6 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// the resumed episode. Awaiting the route's return therefore stops BEFORE restoration, which is
     /// why an earlier attempt saw the resume appear on some runs and not others. This case drives
     /// the drain event the player actually sends, so restoration is awaited rather than raced.
-    /// Player-notification state in this test is touched from the audio player's
-    /// stop-notification closure; run the whole test on the main actor so the captured
-    /// state has one owner (the pattern of the sibling @MainActor tests).
     @MainActor
     func testHeldLiveStaleRefusalOrderingIsDeterministicAndRestoresPlayback() async throws {
         self.nextTurnFixture = Self.doneOnlyFixture
@@ -7390,9 +7369,6 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// restoration, and the release of the drain lets the player's REAL stop notification run —
     /// asserted on the same turn, so a mismatch between the turn that carried the audio and the
     /// turn the assertions read would fail.
-    /// Player-notification state in this test is touched from the audio player's
-    /// stop-notification closure; run the whole test on the main actor so the captured
-    /// state has one owner (the pattern of the sibling @MainActor tests).
     @MainActor
     func testSingleOwnerPendingAudioDefersRestorationUntilItsOwnDrain() async throws {
         let manager = CloudConversationManager()

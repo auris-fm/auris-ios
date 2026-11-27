@@ -1106,7 +1106,7 @@ final class CloudAudioPlayer: @unchecked Sendable {
         // rebuilt. Re-arming there would log several "first buffer" events for a single turn, so
         // the boundary is limited to the reasons that actually end one.
         if Self.reasonEndsTurn(reason) {
-            schedulingStateLock.lock(); cloudSchedulingLogged = false; schedulingStateLock.unlock()
+            cloudSchedulingLogged = false
             // A new turn starts with nothing audible: carrying the previous turn's instant would
             // report a turn that played nothing as having played immediately.
             firstAudibleLock.lock()
@@ -1333,32 +1333,22 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     /// Whether this incarnation has already logged its first scheduled buffer. Reset when the
     /// incarnation rotates (`stopEngine` rebuilds the node), which is the boundary between turns.
-    /// Guarded by `schedulingStateLock`: `noteSchedulingBoundary` runs on the player's own
-    /// runner thread while tests and other threads read the state.
     private var cloudSchedulingLogged = false
-    private let schedulingStateLock = NSLock()
 
     /// How many first-scheduled-buffer boundaries this player has logged. Exposed so a control can
     /// assert the boundary is re-armed per turn: a flag that is never reset would log exactly once
     /// for the whole process, which is the defect this replaced.
-    private(set) var schedulingBoundaryCount: Int {
-        get { schedulingStateLock.lock(); defer { schedulingStateLock.unlock() }; return schedulingBoundaryCountStorage }
-        set { schedulingStateLock.lock(); schedulingBoundaryCountStorage = newValue; schedulingStateLock.unlock() }
-    }
-    private var schedulingBoundaryCountStorage = 0
+    private(set) var schedulingBoundaryCount = 0
 
     /// Re-arms the scheduling boundary. Called from `stopEngine`, which rebuilds the node — the
     /// real boundary between turns. Exposed so the re-arm can be controlled directly, because a
     /// test host has no audio output and therefore never schedules a buffer at all.
     func rearmSchedulingBoundaryForTesting() {
-        schedulingStateLock.lock(); cloudSchedulingLogged = false; schedulingStateLock.unlock()
+        cloudSchedulingLogged = false
     }
 
     /// Whether the next scheduled buffer would start a new turn's boundary.
-    var isSchedulingBoundaryArmedForTesting: Bool {
-        schedulingStateLock.lock(); defer { schedulingStateLock.unlock() }
-        return !cloudSchedulingLogged
-    }
+    var isSchedulingBoundaryArmedForTesting: Bool { !cloudSchedulingLogged }
 
     /// Simulates the boundary firing, without needing an output device. It calls the SAME function
     /// the production path calls, so the control cannot pass against counting logic that has
@@ -1369,11 +1359,9 @@ final class CloudAudioPlayer: @unchecked Sendable {
 
     /// The boundary's single implementation: log once per turn and count it.
     private func noteSchedulingBoundary() {
-        schedulingStateLock.lock()
-        guard !cloudSchedulingLogged else { schedulingStateLock.unlock(); return }
+        guard !cloudSchedulingLogged else { return }
         cloudSchedulingLogged = true
-        schedulingBoundaryCountStorage += 1
-        schedulingStateLock.unlock()
+        schedulingBoundaryCount += 1
         FileLog.shared.addMessage("[VoicePipeline] cloudAudioScheduled first buffer scheduled (audible latency not observed)")
     }
 
