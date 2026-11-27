@@ -59,6 +59,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
             """
         mapper.playbackSecondsForReference = [1130.0: 1200.0]
+        mapper.referenceBracketed = true
         playback.setPositionMs(500_000)
 
         let response = await makeSink().routeToCloud(
@@ -773,6 +774,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
             """
         mapper.playbackSecondsForReference = [500.0: 510.0]
+        mapper.referenceBracketed = true
         playback.setPositionMs(900_000)
 
         let response = await makeSink().routeToCloud(
@@ -887,6 +889,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
             """
         mapper.playbackSecondsForReference = [100.0: 110.0]
+        mapper.referenceBracketed = true
         playback.setPositionMs(50_000)
 
         let response = await makeSink().routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-10")
@@ -980,11 +983,12 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertEqual(rejection?.reason, OperationReason.malformedSeekTarget)
     }
 
-    /// An unmapped reference target is NOT converted by assumption. Reference time is not
-    /// playback time: falling back to the raw value seeks somewhere the server never asked for
-    /// on a mapped episode, and nothing downstream can tell that apart from a correct seek. The
-    /// operation is refused instead, and no position changes.
-    func testUnmappedReferenceSeekIsRefusedAndDoesNotMove() async {
+    /// An uncovered reference target is NOT converted by assumption, and NOT refused either:
+    /// the client cannot know the ads between here and an unmatched target, so a `seek_to`
+    /// seeks the ESTIMATE — the target plus the mapping's observed offset at the nearest
+    /// covered point before it — and corrects after matching converges (timeline-alignment.md
+    /// § Action position conversion).
+    func testUncoveredReferenceSeekSeeksTheEstimateCarryingTheObservedOffset() async {
         self.pendingFixture =
             """
             event: action
@@ -994,16 +998,944 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
 
             """
+        // Ads already observed: at the last covered point (reference 100 s) playback sat 15 s
+        // ahead. The estimate carries that offset into the uncovered target.
+        mapper.observedOffsets = [100.0: 15.0]
         let sink = makeSink()
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-15")
 
-        XCTAssertFalse(
-            playback.calls.contains { if case .seekTo = $0 { return true }; return false },
-            "an unmapped reference time must not become a playback position"
-        )
+        XCTAssertTrue(playback.calls.contains(.seekTo(215)), "the estimate is target 200 s + observed 15 s")
+        XCTAssertFalse(playback.calls.contains(.seekTo(200)), "the raw reference value is not the target")
         let unavailable = await MainActor.run { sink.unavailableReferenceSeek }
-        XCTAssertEqual(unavailable?.outcome, .refused)
-        XCTAssertEqual(unavailable?.reason, OperationReason.referenceMappingUnavailable)
+        XCTAssertNil(unavailable, "an uncovered seek_to executes as an estimate; it is not a refusal")
+    }
+
+    /// Core PR 245 pin: with NO matched anchor before the target, the estimate is the
+    /// target as-is. The mapping's only anchor sits at 1200 s (its offset +30 s), and the
+    /// target is 120 s — before the first anchor — so the offset must not be used. Red
+    /// against a mutation that drops observedOffsetSeconds' "at or before the target" filter:
+    /// that reads the first anchor's offset and seeks 150.
+    func testATargetBeforeTheFirstAnchorSeeksTheTargetAsIs() async {
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":120000}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        // The only anchor is at reference 1200 s, 30 s into playback — it does NOT precede
+        // the 120 s target, so it must not feed the estimate.
+        mapper.observedOffsets = [1200.0: 30.0]
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-245-pin")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(120)), "no anchor precedes the target: the seek is the target as-is (120 s)")
+        XCTAssertFalse(playback.calls.contains(.seekTo(150)), "the first anchor's offset must not ride the estimate (120 + 30)")
+    }
+
+    // MARK: Seek correction (timeline-alignment.md § Action position conversion)
+
+    private func uncoveredSeekFixture() {
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":200000}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+    }
+
+    /// An uncovered target is corrected once the mapping converges at the estimate: the
+    /// matched reference position differs from the target by more than 3 s, so the sink seeks
+    /// by the difference.
+    func testAnUncoveredTargetIsCorrectedOnceTheMappingConverges() async {
+        self.uncoveredSeekFixture()
+        mapper.observedOffsets = [100.0: 15.0]
+        mapper.matchedReferenceForPlayback = [215.0: 180.0]
+        let sink = makeSink()   // no scheduler: the test drives each tick
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-1")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(215)), "premise: the estimate seek ran (200 + 15 observed)")
+        // Matching converged at the estimate: the head sits at reference 180 s, the target is
+        // 200 s — a 20 s difference, over the 3 s bound. The match table is set BEFORE makeSink:
+        // the mapper is a struct and the sink holds its own copy.
+        playback.setPositionMs(215_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        // The head at 215 s matches reference 180 s; the target is reference 200 s, so the
+        // correction advances by the difference: 215 + 20 = 235.
+        XCTAssertTrue(playback.calls.contains(.seekTo(235)), "the correction seeks by the difference (200 − 180)")
+    }
+
+    /// A convergence that lands ON the target ends the session without seeking: the mapped
+    /// target sits within 3 s of the head from below and no more than 3 s ahead, so playback
+    /// reached the target on its own between the estimate seek and convergence. Red against a
+    /// mutation that seeks anyway (treats the in-band convergence as still-ahead).
+    func testAConvergenceOnTheTargetEndsTheSessionWithoutSeeking() async {
+        self.uncoveredSeekFixture()
+        mapper.observedOffsets = [100.0: 15.0]
+        // The estimate seeks 215 s; at convergence the head sits at reference 199.5 s with the
+        // target at 200 s — in band (not overshot, not still ahead by more than 3 s).
+        mapper.matchedReferenceForPlayback = [215.0: 199.5]
+        let sink = makeSink()   // no scheduler: the test drives each tick
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-reached")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(215)), "premise: the estimate seek ran (200 + 15 observed)")
+        let seeksBefore = playback.calls.filter { $0 == .seekTo(215) }.count
+        playback.setPositionMs(215_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        XCTAssertEqual(playback.calls.filter { $0 == .seekTo(215) }.count, seeksBefore,
+                       "the on-target convergence must not seek")
+        func straySeeks() -> [Int] {
+            playback.calls.compactMap { if case let .seekTo(position) = $0, position != 215 { return position }; return nil }
+        }
+        XCTAssertTrue(straySeeks().isEmpty, "no corrective seek: playback already reached the target (got \(straySeeks()))")
+        // And the session is over: a later poll seeks nothing either.
+        await MainActor.run { sink.pollSeekCorrection() }
+        XCTAssertTrue(straySeeks().isEmpty, "the session ended: a later poll must not resurrect a correction")
+    }
+
+    /// Corrections are capped at two per action: a third convergence that still differs by
+    /// more than 3 s produces no further seek.
+    func testCorrectionsAreCappedAtTwo() async {
+        self.uncoveredSeekFixture()
+        // Every convergence still misses by 20 s. Set BEFORE makeSink — the mapper is a struct
+        // and the sink holds its own copy.
+        mapper.matchedReferenceForPlayback = [200.0: 180.0, 220.0: 160.0, 260.0: 140.0]
+        let sink = makeSink()   // no offset: estimate is the target as-is
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-2")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(200)), "premise: estimate ran with no mapping")
+        // The head is where the estimate seek put it.
+        playback.setPositionMs(200_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        XCTAssertTrue(playback.calls.contains(.seekTo(220)), "correction 1: 200 + (200 − 180)")
+        playback.setPositionMs(220_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        XCTAssertTrue(playback.calls.contains(.seekTo(260)), "correction 2: 220 + (200 − 160)")
+        playback.setPositionMs(260_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        let third = playback.calls.contains(.seekTo(320)) // a third correction would be 260 + (200 − 140)
+        XCTAssertFalse(third, "at most two corrections: the third over-bound convergence must not seek")
+    }
+
+    /// Normal playback between ticks must NOT cancel the correction: the tolerance measures
+    /// the jump since the PREVIOUS tick, not since the seek. The head advances 1 s per tick for
+    /// 11 ticks before matching converges, and the correction still fires.
+    func testOrdinaryPlaybackBetweenTicksDoesNotCancelTheCorrection() async {
+        self.uncoveredSeekFixture()
+        mapper.observedOffsets = [100.0: 0.0]
+        // After 11 ticks of 1 s the head sits at 211 s matching reference 191 s: a 9 s gap,
+        // so the correction advances to 220.
+        mapper.matchedReferenceForPlayback = [211.0: 191.0]
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-4")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(200)), "premise: the estimate seek ran (200 + 0 observed)")
+        for tick in 1...11 {
+            playback.setPositionMs(Int64(200 + tick) * 1000)
+            await MainActor.run { sink.pollSeekCorrection() }
+        }
+        XCTAssertTrue(playback.calls.contains(.seekTo(220)), "the correction still fires after 11 ticks of ordinary playback (211 + (200 − 191))")
+    }
+
+    /// A target PAST the last committed anchor is uncovered even though the reverse map happily
+    /// extrapolates a playback position for it: the estimate carries the observed offset and the
+    /// session corrects on convergence. Gating on the reverse map alone would have taken that
+    /// extrapolation as a match and seeked an assumed position with no correction at all.
+    func testATargetPastTheLastAnchorEstimatesAndCorrectsEvenThoughTheMapExtrapolates() async {
+        self.uncoveredSeekFixture()
+        // The map answers for the target anyway — that is what makes this case discriminating.
+        mapper.playbackSecondsForReference = [200.0: 215.0]
+        mapper.referenceBracketed = false
+        // Ads already observed: 15 s of load at the last covered point before the target.
+        mapper.observedOffsets = [100.0: 15.0]
+        // After the estimate the head matches reference 180 s: a 20 s gap, over the 3 s bound.
+        mapper.matchedReferenceForPlayback = [215.0: 180.0]
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-10")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(215)), "the estimate is target 200 s + observed 15 s — the same destination, reached as an estimate")
+        // The correction is what proves it was an ESTIMATE: if the map's answer counted as
+        // coverage, no session would have opened and this tick could seek nothing.
+        playback.setPositionMs(215_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        XCTAssertTrue(playback.calls.contains(.seekTo(235)), "the session opened and corrects on convergence (215 + (200 − 180))")
+    }
+
+    /// A correction that has not converged within 60 seconds of the action's seek gives up:
+    /// no correction seek, and the session's timer is stopped.
+    func testAnUnconvergedCorrectionGivesUpAfterSixtySeconds() async {
+        self.uncoveredSeekFixture()
+        var now: TimeInterval = 0
+        let clockLock = NSLock()
+        var liveTokens: [ObjectIdentifier] = []
+        var cancelledTokens: [ObjectIdentifier] = []
+        let lock = NSLock()
+        let scheduler: (TimeInterval, @escaping () -> Void) -> Any? = { _, _ in
+            let token = NSObject()
+            lock.lock(); liveTokens.append(ObjectIdentifier(token)); lock.unlock()
+            return token
+        }
+        let canceller: (Any?) -> Void = { token in
+            guard let token else { return }
+            lock.lock(); cancelledTokens.append(ObjectIdentifier(token as AnyObject)); lock.unlock()
+        }
+        // Converges only AFTER the window expires: reference 150 s sits 50 s off the target —
+        // well over the bound. Without the window check this poll would correct; with it, nothing.
+        mapper.matchedReferenceForPlayback = [260.0: 150.0]
+        let sink = makeSink(
+            seekCorrectionScheduler: scheduler,
+            seekCorrectionTickCanceller: canceller,
+            seekCorrectionNow: { clockLock.lock(); defer { clockLock.unlock() }; return now }
+        )
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-6")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(200)), "premise: the estimate seek ran")
+        // PLAYING through the window: one second of playback per one second of clock. At the
+        // 60th tick the accumulated playing time reaches the window and the session gives up.
+        // The head passes 260 s on the way, so a removed bound would correct — the no-seek
+        // assertion carries the mutant, and the timer-stop assertion pins the give-up path.
+        // Clear BEFORE the final poll and assert straight after it: the double's seekTo does
+        // not move positionMs, so a later poll would cancel on the jump and hide the seek.
+        for tick in 1...61 {
+            playback.setPositionMs(Int64(200 + tick) * 1000)
+            clockLock.lock(); now += 1; clockLock.unlock()
+            // Clear BEFORE the poll where the window fires (60), so a removed bound's seek at
+            // that very poll is still on record when the assertions run.
+            if tick == 60 { playback.clearCalls() }
+            await MainActor.run { sink.pollSeekCorrection() }
+        }
+        let anySeek = playback.calls.contains { if case .seekTo = $0 { return true }; return false }
+        XCTAssertFalse(anySeek, "no correction after the window expires")
+        lock.lock(); let cancelled = cancelledTokens.count; lock.unlock()
+        XCTAssertEqual(cancelled, 1, "the session's timer is stopped when the window expires")
+    }
+
+    /// Pin the window from BELOW: a convergence after 58 PLAYING seconds still corrects.
+    /// Shortening the window to 30 s must fail this test.
+    func testAConvergenceJustBeforeTheWindowStillCorrects() async {
+        self.uncoveredSeekFixture()
+        var now: TimeInterval = 0
+        let clockLock = NSLock()
+        mapper.matchedReferenceForPlayback = [258.0: 180.0]
+        let sink = makeSink(seekCorrectionNow: { clockLock.lock(); defer { clockLock.unlock() }; return now })
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-7")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(200)), "premise: the estimate seek ran")
+        // 58 seconds of PLAYING time (one second of head per one second of clock), then the
+        // mapping converges at the head: 258 s matches reference 180 s, a 20 s gap.
+        for tick in 1...58 {
+            playback.setPositionMs(Int64(200 + tick) * 1000)
+            clockLock.lock(); now += 1; clockLock.unlock()
+            if tick < 58 { await MainActor.run { sink.pollSeekCorrection() } }
+        }
+        await MainActor.run { sink.pollSeekCorrection() }
+        XCTAssertTrue(playback.calls.contains(.seekTo(278)), "a convergence at 58 playing-seconds is inside the window and must correct (258 + (200 − 180))")
+    }
+
+    /// The window measures PLAYING time, not wall-clock time: the sink holds episode playback
+    /// paused for the rest of the turn's answer, and matching cannot converge while paused, so
+    /// a long pause must not spend the budget. Wall clock runs 65 s here, but only 58 of those
+    /// seconds have the head advancing — the convergence at 58 playing-seconds still corrects.
+    func testTheWindowDoesNotRunWhilePlaybackIsPaused() async {
+        self.uncoveredSeekFixture()
+        var now: TimeInterval = 0
+        let clockLock = NSLock()
+        mapper.matchedReferenceForPlayback = [258.0: 180.0]
+        let sink = makeSink(seekCorrectionNow: { clockLock.lock(); defer { clockLock.unlock() }; return now })
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-11")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(200)), "premise: the estimate seek ran")
+        // 10 seconds of playing time (head and clock together)...
+        for tick in 1...10 {
+            playback.setPositionMs(Int64(200 + tick) * 1000)
+            clockLock.lock(); now += 1; clockLock.unlock()
+            await MainActor.run { sink.pollSeekCorrection() }
+        }
+        // ...then 55 seconds of PAUSE: the clock runs, the head does not. A wall-clock window
+        // would expire here (65 s total before the last poll) and cancel the session.
+        for _ in 1...55 {
+            clockLock.lock(); now += 1; clockLock.unlock()
+            await MainActor.run { sink.pollSeekCorrection() }
+        }
+        // Resume: the head advances again and the mapping converges at 58 playing-seconds —
+        // inside the window, so the correction must fire (258 + (200 − 180)).
+        for tick in 11...58 {
+            playback.setPositionMs(Int64(200 + tick) * 1000)
+            clockLock.lock(); now += 1; clockLock.unlock()
+            if tick < 58 { await MainActor.run { sink.pollSeekCorrection() } }
+        }
+        playback.clearCalls()
+        await MainActor.run { sink.pollSeekCorrection() }
+        XCTAssertTrue(playback.calls.contains(.seekTo(278)), "a convergence at 58 playing-seconds must correct even though the wall clock passed 60 (258 + (200 − 180))")
+    }
+
+    /// A correction session opened while the episode stays PAUSED never fills its playing-time
+    /// window — the wall-clock cap on the session's total age must still end it.
+    /// An answer hold still ACTIVE past 120 s must not expire the session: the cap counts
+    /// from the hold's release, so while the hold is held the anchor keeps moving. The
+    /// production timer polls during the hold; here the injected scheduler's tick is fired
+    /// from the episode-identity read (inside `startSeekCorrection`, just after the session
+    /// opens) with the clock advanced 130 s past the seek. On the pre-fix head the session
+    /// expires at that in-turn tick and the release re-anchor lands on nothing.
+    func testAHeldAnswerPastOneTwentyStillCorrects() async {
+        self.uncoveredSeekFixture()
+        mapper.observedOffsets = [100.0: 15.0]
+        mapper.matchedReferenceForPlayback = [216.0: 190.0]
+        let clockLock = NSLock()
+        var clockArmed = false
+        var clockBase: TimeInterval = 130
+        var tickFired = false
+        // The production scheduler ticks DURING the held answer. The session opens and the
+        // first tick is scheduled with the hold still active, so a scheduler that fires
+        // synchronously lands the in-turn poll exactly there: the clock reads 130 s past
+        // the seek, still held, cap otherwise already over.
+        let scheduler: (TimeInterval, @escaping () -> Void) -> Any? = { _, action in
+            clockLock.lock()
+            clockArmed = true
+            tickFired = true
+            clockLock.unlock()
+            action()
+            return NSObject()
+        }
+        let sink = makeSink(
+            seekCorrectionScheduler: scheduler,
+            seekCorrectionNow: { clockLock.lock(); defer { clockLock.unlock() }; return clockArmed ? clockBase : 0 }
+        )
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-16")
+
+        clockLock.lock()
+        let fired = tickFired
+        clockLock.unlock()
+        XCTAssertTrue(fired, "premise: the in-turn tick ran while the hold was active")
+        XCTAssertTrue(playback.calls.contains(.seekTo(215)), "premise: estimate seek ran")
+        clockLock.lock(); clockBase = 131; clockLock.unlock()
+        playback.setPositionMs(216_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        XCTAssertTrue(playback.calls.contains(.seekTo(226)), "the cap counts from the hold's release: the session survives a 130 s held answer and corrects (216 + (200 - 190))")
+    }
+
+    /// Ordinary playback between checks is not a playback change, at any speed and however
+    /// late the timer fires: a tick delayed 2 s at 3x playback moves the head 6 s - over
+    /// the old fixed 5 s budget - and must NOT cancel the correction.
+    func testALateTickAtThreeTimesDoesNotCancel() async {
+        self.uncoveredSeekFixture()
+        mapper.observedOffsets = [100.0: 15.0]
+        // Convergence 6 s of playback after the landing: playback 221 matches reference
+        // 190, so the target sits at 231 - more than 3 s ahead of the head.
+        mapper.matchedReferenceForPlayback = [221.0: 190.0]
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-17")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(215)), "premise: estimate seek ran")
+        // One tick, 2 s late, at 3x: the head moved 6 s past the landing. No seek event was
+        // posted, so nothing but ordinary playback happened.
+        playback.setPositionMs(221_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        XCTAssertTrue(playback.calls.contains(.seekTo(231)), "a 6 s advance from a 2 s-late tick at 3x is ordinary playback; the correction still lands (221 + (200 - 190))")
+    }
+
+    /// THE one user-seek surface: every position change funnels through
+    /// `PlaybackManager.seekTo`, which posts `playbackSeekPerformed`. The sink cancels a
+    /// pending correction on that event when it did not issue the seek itself.
+    func testAUserSeekEventCancelsTheCorrection() async {
+        self.uncoveredSeekFixture()
+        mapper.observedOffsets = [100.0: 15.0]
+        // At the post-seek head (300 matching 180) the mapped target is 320 - more than 3 s
+        // ahead - so WITHOUT the event-cancel the correction would seek 320. Only the
+        // cancellation makes this pass.
+        mapper.matchedReferenceForPlayback = [300.0: 180.0]
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-18")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(215)), "premise: estimate seek ran")
+        // The user seeks elsewhere through the manager; the event names the target.
+        NotificationCenter.default.post(
+            name: Constants.Notifications.playbackSeekPerformed,
+            object: nil,
+            userInfo: [Constants.Notifications.playbackSeekTargetSecondsKey: TimeInterval(300)]
+        )
+        playback.clearCalls()
+        playback.setPositionMs(300_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        let anySeek = playback.calls.contains { if case .seekTo = $0 { return true }; return false }
+        XCTAssertFalse(anySeek, "a user seek through the manager cancels the pending correction")
+    }
+
+    /// Delivery through the real observer is SYNCHRONOUS: an event posted inside the sink's
+    /// own seek is handled before the call returns. A foreign target posted there is still
+    /// ignored, which holds only while delivery stays inside the in-flight window — if the
+    /// observer ever queued it (delivering after the flag lifted), this fails. No time
+    /// involved.
+    func testAForeignEventInsideTheSinksOwnSeekIsIgnored() async {
+        self.uncoveredSeekFixture()
+        mapper.observedOffsets = [100.0: 15.0]
+        mapper.matchedReferenceForPlayback = [216.0: 190.0, 230.0: 180.0]
+        playback.postsSeekEventOnSeekTo = true
+        playback.seekEventOverrideTarget = 999
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-25")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(215)), "premise: the estimate seek ran")
+        playback.setPositionMs(216_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        XCTAssertTrue(playback.calls.contains(.seekTo(226)), "delivery is synchronous inside the in-flight window: the foreign event is ignored and the first correction lands (216 + (200 - 190))")
+        playback.setPositionMs(230_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        XCTAssertTrue(playback.calls.contains(.seekTo(250)), "and the second correction lands (230 + (200 - 180))")
+    }
+
+    /// The sink clamps destinations against the episode duration one layer down: a seek past
+    /// the end posts an event for the CLAMPED value, not the destination the sink commanded.
+    /// The own-seek mark is the in-flight call, not the value, so that event must not cancel.
+    func testAClampChangedOwnSeekEventDoesNotCancel() async {
+        self.uncoveredSeekFixture()
+        mapper.observedOffsets = [100.0: 15.0]
+        mapper.matchedReferenceForPlayback = [216.0: 190.0, 230.0: 180.0]
+        playback.postsSeekEventOnSeekTo = true
+        playback.postsSeekEventClampedToDuration = true
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-23")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(215)), "premise: estimate seek ran")
+        playback.setPositionMs(216_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        XCTAssertTrue(playback.calls.contains(.seekTo(226)), "the estimate seek's clamped event does not cancel the session; the first correction lands (216 + (200 - 190))")
+        playback.setPositionMs(230_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        XCTAssertTrue(playback.calls.contains(.seekTo(250)), "the corrective seek's clamped event does not cancel either; the second correction lands (230 + (200 - 180))")
+    }
+
+    /// A user seek right after the sink's own estimate seek - outside the in-flight window -
+    /// cancels the session, stops the only correction timer, and no later poll resurrects
+    /// either. (A seek in the SAME instant posts inside the in-flight window and merges with
+    /// the own seek - the design's documented cost, same as Android's ownSeekInFlight.)
+    func testAUserSeekRightAfterTheEstimateSeekCancelsAndLeavesNoTimer() async {
+        self.uncoveredSeekFixture()
+        mapper.observedOffsets = [100.0: 15.0]
+        mapper.matchedReferenceForPlayback = [216.0: 190.0]
+        var liveTokens: [ObjectIdentifier] = []
+        var cancelledTokens: [ObjectIdentifier] = []
+        let lock = NSLock()
+        let scheduler: (TimeInterval, @escaping () -> Void) -> Any? = { _, _ in
+            let token = NSObject()
+            lock.lock(); liveTokens.append(ObjectIdentifier(token)); lock.unlock()
+            return token
+        }
+        let canceller: (Any?) -> Void = { token in
+            guard let token else { return }
+            lock.lock(); cancelledTokens.append(ObjectIdentifier(token as AnyObject)); lock.unlock()
+        }
+        let sink = makeSink(seekCorrectionScheduler: scheduler, seekCorrectionTickCanceller: canceller)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-24")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(215)), "premise: the estimate seek ran")
+        NotificationCenter.default.post(
+            name: Constants.Notifications.playbackSeekPerformed,
+            object: nil,
+            userInfo: [Constants.Notifications.playbackSeekTargetSecondsKey: TimeInterval(999)]
+        )
+        playback.setPositionMs(216_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        playback.clearCalls()
+        playback.setPositionMs(216_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        let anySeek = playback.calls.contains { if case .seekTo = $0 { return true }; return false }
+        XCTAssertFalse(anySeek, "the user seek cancels the session before any correction")
+        lock.lock()
+        let live = liveTokens.count
+        let cancelled = cancelledTokens
+        lock.unlock()
+        XCTAssertEqual(live, 1, "the session opened exactly one timer")
+        XCTAssertEqual(cancelled.count, 1, "the cancellation stopped that timer")
+        XCTAssertEqual(cancelled.first, liveTokens.first, "the stopped timer is the session's own")
+    }
+
+    func testAUserSeekTwoSecondsFromTheLandingCancels() async {
+        self.uncoveredSeekFixture()
+        mapper.observedOffsets = [100.0: 15.0]
+        // Convergence off the landing: playback 217 matches reference 190, so the target
+        // sits at 227 — more than 3 s ahead, a correction is owed.
+        mapper.matchedReferenceForPlayback = [217.0: 190.0]
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-20")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(215)), "premise: estimate seek ran")
+        // The user seeks to 217 - only 2 s off the estimate the sink commanded.
+        NotificationCenter.default.post(
+            name: Constants.Notifications.playbackSeekPerformed,
+            object: nil,
+            userInfo: [Constants.Notifications.playbackSeekTargetSecondsKey: TimeInterval(217)]
+        )
+        playback.clearCalls()
+        playback.setPositionMs(217_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        let anySeek = playback.calls.contains { if case .seekTo = $0 { return true }; return false }
+        XCTAssertFalse(anySeek, "a user seek 2 s from the landing is a real seek: the correction cancels")
+    }
+
+    /// The sink's own seek posts the event from INSIDE the seek call, like the real
+    /// PlaybackManager does; the session must recognise that event as its own and survive
+    /// to spend its second correction.
+    func testTheCorrectiveSeekEventPostedInsideTheSeekDoesNotCancel() async {
+        self.uncoveredSeekFixture()
+        mapper.observedOffsets = [100.0: 15.0]
+        // First convergence at 216 -> target 226; second at 230 -> target 250.
+        mapper.matchedReferenceForPlayback = [216.0: 190.0, 230.0: 180.0]
+        playback.postsSeekEventOnSeekTo = true
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-21")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(215)), "premise: estimate seek ran")
+        playback.setPositionMs(216_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        XCTAssertTrue(playback.calls.contains(.seekTo(226)), "premise: the first correction ran")
+        playback.setPositionMs(230_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        XCTAssertTrue(playback.calls.contains(.seekTo(250)), "the session survives its own inline-posted seek event and spends its second correction (230 + (200 - 180))")
+    }
+
+    /// A pause and resume IN PLACE moves no position and commands no new destination: it
+    /// must not cancel the correction. (A pause-and-resume from elsewhere manifests on iOS
+    /// as a sync seek - seekToFromSync - which cancels via the seek event.)
+    func testAPauseAndResumeInPlaceDoesNotCancel() async {
+        self.uncoveredSeekFixture()
+        mapper.observedOffsets = [100.0: 15.0]
+        mapper.matchedReferenceForPlayback = [216.0: 190.0]
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-22")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(215)), "premise: estimate seek ran")
+        NotificationCenter.default.post(name: Constants.Notifications.playbackPaused, object: nil)
+        NotificationCenter.default.post(name: Constants.Notifications.playbackStarted, object: nil)
+        playback.setPositionMs(216_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        XCTAssertTrue(playback.calls.contains(.seekTo(226)), "pause and resume in place leave the correction pending (216 + (200 - 190))")
+    }
+
+    func testAPausedCorrectionSessionStillEndsOnItsWallClockCap() async {
+        self.uncoveredSeekFixture()
+        var now: TimeInterval = 0
+        let clockLock = NSLock()
+        var cancelledTokens: [ObjectIdentifier] = []
+        let lock = NSLock()
+        let scheduler: (TimeInterval, @escaping () -> Void) -> Any? = { _, _ in NSObject() }
+        let canceller: (Any?) -> Void = { token in
+            guard let token else { return }
+            lock.lock(); cancelledTokens.append(ObjectIdentifier(token as AnyObject)); lock.unlock()
+        }
+        // Nothing ever matches, and the head never moves: pure pause.
+        let sink = makeSink(
+            seekCorrectionScheduler: scheduler,
+            seekCorrectionTickCanceller: canceller,
+            seekCorrectionNow: { clockLock.lock(); defer { clockLock.unlock() }; return now }
+        )
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-13")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(200)), "premise: the estimate seek ran")
+        // The head sits at the estimate so every poll sees no discontinuity — a paused but
+        // still-open session — while the wall clock runs. Nothing is mapped, so a live session
+        // would never seek; only the cap ends it.
+        playback.setPositionMs(200_000)
+        // 121 seconds of wall clock, one poll per second. Clear before the poll where the cap
+        // fires (120) so an absent cap's seek in that same poll is still on record.
+        for tick in 1...121 {
+            clockLock.lock(); now += 1; clockLock.unlock()
+            if tick == 120 { playback.clearCalls() }
+            await MainActor.run { sink.pollSeekCorrection() }
+        }
+        let anySeek = playback.calls.contains { if case .seekTo = $0 { return true }; return false }
+        XCTAssertFalse(anySeek, "no correction — the session expired on the wall-clock cap")
+        lock.lock(); let cancelled = cancelledTokens.count; lock.unlock()
+        XCTAssertEqual(cancelled, 1, "the session's timer is stopped when the cap fires")
+    }
+
+    /// A NEGATIVE reference target is an offset back from the episode end and can estimate
+    /// before the start; a negative value handed to the duration-aware seekTo would resolve
+    /// back from the END and jump the listener near the end. The estimate clamps to the start,
+    /// and no correction session opens: the target itself is unreachable.
+    func testANegativeTargetEstimateClampsToTheEpisodeStartAndOpensNoCorrection() async {
+        self.pendingFixture = """
+            event: action
+            data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":-60000}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-14")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(0)), "the negative estimate clamps to the episode start, not an offset back from the end")
+        // No session: a later poll must not seek again — the plain seek was the whole answer.
+        playback.clearCalls()
+        await MainActor.run { sink.pollSeekCorrection() }
+        let anySeek = playback.calls.contains { if case .seekTo = $0 { return true }; return false }
+        XCTAssertFalse(anySeek, "no correction session follows a clamped negative-target seek")
+    }
+
+    /// A correction whose destination computes before the episode start must clamp to 0 —
+    /// a negative value handed to the duration-aware seekTo resolves back from the END.
+    func testACorrectionBeforeTheEpisodeStartClampsToZero() async {
+        self.uncoveredSeekFixture()
+        // The head converges at 215 s against reference 450 s; the target is 200 s, so the
+        // correction's difference is 200 − 450 = −250 and the destination is 215 − 250 < 0.
+        mapper.observedOffsets = [100.0: 15.0]
+        mapper.matchedReferenceForPlayback = [215.0: 450.0]
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-15")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(215)), "premise: the estimate seek ran")
+        playback.setPositionMs(215_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        XCTAssertTrue(playback.calls.contains(.seekTo(0)), "the correction clamps to the episode start (215 − 250 < 0)")
+    }
+
+
+
+    /// A `play_quote` on an uncovered target is REFUSED and moves nothing, so it must not
+    /// cancel a correction an earlier action in the same turn opened: the seek stays an
+    /// estimate only until matching converges, and that convergence still corrects.
+    func testARefusedUncoveredPlayQuoteDoesNotCancelTheCorrectionItFollows() async {
+        self.pendingFixture = """
+            event: action
+            data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":200000}}
+
+            event: action
+            data: {"tool":"playback","action":"play_quote","params":{"reference_position_ms":200000}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        // Ads already observed: 15 s of load at the last covered point before the target.
+        mapper.observedOffsets = [100.0: 15.0]
+        // After the estimate the head matches reference 180 s: a 20 s gap, over the 3 s bound.
+        mapper.matchedReferenceForPlayback = [215.0: 180.0]
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-12")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(215)), "premise: the estimate seek ran (200 + 15 observed)")
+        let unavailable = await MainActor.run { sink.unavailableReferenceSeek }
+        XCTAssertNotNil(unavailable, "premise: the uncovered play_quote was refused, moving nothing")
+        // The refused quote must NOT have scrapped the session: the poll after the turn still
+        // corrects the seek the earlier action opened.
+        playback.setPositionMs(215_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        XCTAssertTrue(playback.calls.contains(.seekTo(235)), "the session opened by the seek survives the refused quote and corrects on convergence (215 + (200 − 180))")
+    }
+
+
+    /// An episode change cancels the correction even when the new episode's position sits
+    /// close enough to the expected one to converge numerically: only the episode-identity
+    /// check rejects the poll, so a correction must never seek another episode.
+    func testAnEpisodeChangeCancelsTheCorrection() async {
+        self.uncoveredSeekFixture()
+        var episodeId: String? = "ep-a"
+        let epLock = NSLock()
+        // The NEW episode's position also matches (reference 180 s): without the identity
+        // check the poll would correct and seek the wrong episode.
+        mapper.matchedReferenceForPlayback = [201.0: 180.0]
+        let sink = makeSink(seekCorrectionEpisodeId: { epLock.lock(); defer { epLock.unlock() }; return episodeId })
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-8")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(200)), "premise: the estimate seek ran")
+        // The user switches episodes; the new episode happens to sit 1 s from the expected
+        // position — close enough that only the episode-identity check can reject the poll.
+        epLock.lock(); episodeId = "ep-b"; epLock.unlock()
+        playback.setPositionMs(201_000)
+        // Clear BEFORE the poll under test and assert straight after it: the double's seekTo
+        // does not move positionMs, so a later poll would cancel on the jump and hide the seek.
+        playback.clearCalls()
+        await MainActor.run { sink.pollSeekCorrection() }
+        let anySeek = playback.calls.contains { if case .seekTo = $0 { return true }; return false }
+        XCTAssertFalse(anySeek, "the correction belongs to the old episode and must not seek the new one")
+    }
+
+    /// A newer voice TURN supersedes a pending correction even when its action does not move
+    /// playback itself (a pause): the old session must not survive to correct under the new turn.
+    func testANewerVoiceTurnSupersedesThePendingCorrection() async {
+        self.uncoveredSeekFixture()
+        mapper.matchedReferenceForPlayback = [200.0: 180.0]
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-9")
+        XCTAssertTrue(playback.calls.contains(.seekTo(200)), "premise: the estimate seek ran")
+
+        // A newer identified PAUSE arrives while the correction is pending: it moves nothing,
+        // so only the turn-level supersede can cancel the old session.
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"op-pause-1","capability_version":"v1","tool":"playback","action":"pause","params":{}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        _ = await sink.routeToCloud(request: "pause", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-9b")
+        XCTAssertTrue(playback.calls.contains(.pause), "premise: the newer pause executed")
+        playback.clearCalls()
+        playback.setPositionMs(200_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        let anySeek = playback.calls.contains { if case .seekTo = $0 { return true }; return false }
+        XCTAssertFalse(anySeek, "the superseded correction must not seek under the newer turn")
+    }
+
+    /// A newer voice action supersedes a pending correction: a relative seek during the window
+    /// cancels it, and no later convergence corrects.
+    func testANewerRelativeSeekSupersedesThePendingCorrection() async {
+        self.uncoveredSeekFixture()
+        mapper.matchedReferenceForPlayback = [200.0: 180.0]
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-9")
+        XCTAssertTrue(playback.calls.contains(.seekTo(200)), "premise: the estimate seek ran")
+
+        // A newer identified relative seek arrives while the correction is pending.
+        self.pendingFixture = """
+            event: action
+            data: {"operation_id":"op-rel-1","capability_version":"v1","tool":"playback","action":"seek_relative","params":{"delta_seconds":30}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        _ = await sink.routeToCloud(request: "skip ahead", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-9b")
+        XCTAssertTrue(playback.calls.contains(.seekRelative(30, .forward)), "premise: the newer relative seek executed")
+        playback.clearCalls()
+        playback.setPositionMs(200_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        let anySeek = playback.calls.contains { if case .seekTo = $0 { return true }; return false }
+        XCTAssertFalse(anySeek, "the superseded correction must not seek after the newer action")
+    }
+
+    /// The correction runs on ONE repeating timer: repeated polls add no live timers, and a
+    /// cancellation stops the only one.
+    func testRepeatedPollsKeepASingleLiveCorrectionTimerAndCancelStopsIt() async {
+        self.uncoveredSeekFixture()
+        var liveTokens: [ObjectIdentifier] = []
+        var cancelledTokens: [ObjectIdentifier] = []
+        let lock = NSLock()
+        let scheduler: (TimeInterval, @escaping () -> Void) -> Any? = { _, _ in
+            let token = NSObject()
+            lock.lock(); liveTokens.append(ObjectIdentifier(token)); lock.unlock()
+            return token
+        }
+        let canceller: (Any?) -> Void = { token in
+            guard let token else { return }
+            lock.lock(); cancelledTokens.append(ObjectIdentifier(token as AnyObject)); lock.unlock()
+        }
+        mapper.matchedReferenceForPlayback = [:]   // never converges: every poll keeps waiting
+        let sink = makeSink(seekCorrectionScheduler: scheduler, seekCorrectionTickCanceller: canceller)
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-5")
+
+        lock.lock(); let afterStart = liveTokens.count; lock.unlock()
+        XCTAssertEqual(afterStart, 1, "the session opens exactly one timer")
+        // Sit at the estimate point so every poll takes the keep-waiting branch (matched nil,
+        // no discontinuity) — the branch that must not create more timers.
+        playback.setPositionMs(200_000)
+        for _ in 1...5 {
+            await MainActor.run { sink.pollSeekCorrection() }
+        }
+        lock.lock(); let afterPolls = liveTokens.count; lock.unlock()
+        XCTAssertEqual(afterPolls, 1, "polls that keep waiting must not add timers")
+        // A user seek through the manager cancels the session and stops the only timer.
+        NotificationCenter.default.post(
+            name: Constants.Notifications.playbackSeekPerformed,
+            object: nil,
+            userInfo: [Constants.Notifications.playbackSeekTargetSecondsKey: TimeInterval(400)]
+        )
+        await MainActor.run { sink.pollSeekCorrection() }
+        lock.lock(); let cancelled = cancelledTokens; lock.unlock()
+        XCTAssertEqual(cancelled.count, 1, "cancellation stops the one live timer")
+        XCTAssertEqual(cancelled.first, liveTokens.first, "the cancelled token is the timer the session opened")
+    }
+
+    /// Any later playback change cancels a pending correction: a user seek during the pending
+    /// window produces no correction, and nothing further seeks.
+    func testAUserSeekDuringThePendingWindowCancelsTheCorrection() async {
+        self.uncoveredSeekFixture()
+        mapper.matchedReferenceForPlayback = [300.0: 280.0]
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-3")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(200)), "premise: estimate seek ran")
+        // The user seeks elsewhere between ticks: the head is far from where the action put it.
+        // (The match entry is set before makeSink — the mapper is a struct.)
+        playback.setPositionMs(300_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        playback.clearCalls()
+        // Even a later convergence must not correct: the session is cancelled.
+        await MainActor.run { sink.pollSeekCorrection() }
+        let anySeek = playback.calls.contains { if case .seekTo = $0 { return true }; return false }
+        XCTAssertFalse(anySeek, "a correction only ever adjusts the position its action produced")
+    }
+
+    // MARK: Position rule (plan step 2): seek only when the mapped target leaves the window
+
+    /// The rule measures the mapped target `T = p + (target − r)` against where the action's
+    /// LAST seek landed (overshoot, more than 3 s back) or against the current head (still
+    /// ahead, more than 3 s on) — never against elapsed time. A correct estimate converging
+    /// later must NOT correct: the elapsed-difference rule it replaces would seek by the drift.
+    func testACorrectEstimateConvergingTenSecondsLaterDoesNotCorrect() async {
+        self.uncoveredSeekFixture()
+        // Estimate: observed offset 15 s at reference 100 s → seek 215 for target 200.
+        mapper.observedOffsets = [100.0: 15.0]
+        // The offset holds: playback 225 matches reference 210, so target 200 sits at
+        // playback 215 — exactly where the estimate landed. Convergence confirms it.
+        mapper.matchedReferenceForPlayback = [225.0: 210.0]
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-10")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(215)), "premise: estimate seek ran")
+        playback.setPositionMs(225_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        let seekCount = playback.calls.filter { if case .seekTo = $0 { return true }; return false }.count
+        XCTAssertEqual(seekCount, 1, "convergence confirms a correct estimate; playback reached the target on its own")
+    }
+
+    /// The estimate stopped short of a 20 s unplayed ad: convergence 30 s after the seek maps
+    /// the target past the ad, more than 3 s ahead of the head — the correction seeks FORWARD.
+    func testAnUnplayedAdBetweenEstimateAndTargetSeeksForwardOnConvergence() async {
+        self.uncoveredSeekFixture()
+        // No offset observed yet: the estimate is the raw target.
+        mapper.observedOffsets = [100.0: 0.0]
+        // The unobserved ad turned out to be 20 s: at the landing the fingerprint matches
+        // reference 182 — the target sits 18 s of reference ahead. Playback 202 matches
+        // reference 182, so target 200 sits at playback 220 — more than 3 s ahead of the head.
+        mapper.matchedReferenceForPlayback = [202.0: 182.0]
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-11")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(200)), "premise: estimate seek ran")
+        playback.setPositionMs(202_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        XCTAssertTrue(playback.calls.contains(.seekTo(220)), "the correction carries the ad across: 202 + (200 − 182)")
+    }
+
+    /// The estimate overshot because the observed offset shrank: convergence maps the target
+    /// MORE than 3 s behind where the action landed — the correction seeks BACK.
+    func testAShrunkObservedOffsetSeeksBackOnConvergence() async {
+        self.uncoveredSeekFixture()
+        // Estimate: observed offset 20 s at reference 100 s → seek 220 for target 200.
+        mapper.observedOffsets = [100.0: 20.0]
+        // The offset ran NEGATIVE at the landing: the fingerprint at playback 220 matches
+        // reference 228, so target 200 sits at playback 192 — more than 3 s behind the
+        // landing itself. The rule's overshoot branch, with the head still at the landing.
+        mapper.matchedReferenceForPlayback = [220.0: 228.0]
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-12")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(220)), "premise: estimate seek ran")
+        playback.setPositionMs(220_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        XCTAssertTrue(playback.calls.contains(.seekTo(192)), "the correction seeks back to 220 + (200 − 228)")
+    }
+
+    /// The window edges are exclusive in both directions: a mapped target within 3 s of the
+    /// landing (here 2 s behind it) is reached-on-its-own even though the matched reference
+    /// differs from the target by more than 3 — the elapsed-difference rule this replaces
+    /// would seek by that difference.
+    func testASmallDriftPastTheTargetDoesNotCorrect() async {
+        self.uncoveredSeekFixture()
+        mapper.observedOffsets = [100.0: 15.0]
+        // Playback 218 (3 s past the landing at 215) matches reference 205: the target sits
+        // at 218 − 5 = 213 — 2 s behind the landing, inside the window on both sides.
+        mapper.matchedReferenceForPlayback = [218.0: 205.0]
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-13")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(215)), "premise: estimate seek ran")
+        playback.setPositionMs(218_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        let seekCount = playback.calls.filter { if case .seekTo = $0 { return true }; return false }.count
+        XCTAssertEqual(seekCount, 1, "a target 2 s behind the landing needs no correction, whatever the elapsed difference says")
+    }
+
+    /// Item 1 through the seek path: a target inside a 60 s inserted ad's reference span is
+    /// UNCOVERED even though the reference clock alone brackets it tightly (4 s reference gap
+    /// = 64 s playback gap). The estimate carries the nearest observed offset; it never
+    /// interpolates across the ad, and convergence lands reached-on-its-own, not mid-ad.
+    func testAMidAdUncoveredTargetSeeksTheEstimateNotTheInterpolation() async {
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":102000}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        // Anchors (100,100) and (104,164): the ad. Only reference 100 is covered.
+        mapper.observedOffsets = [100.0: 0.0]
+        // Convergence at the ad's far edge: playback 104 matches reference 100, so the
+        // target (reference 102) maps to 106 — inside the window, reached-on-its-own.
+        mapper.matchedReferenceForPlayback = [104.0: 100.0]
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-14")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(102)), "the estimate is the target plus the observed offset (0): 102")
+        playback.setPositionMs(104_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        XCTAssertFalse(playback.calls.contains(.seekTo(132)), "no interpolation across the ad (naive midpoint 132)")
+        XCTAssertFalse(playback.calls.contains(.seekTo(166)), "no leap to the ad's far edge (166)")
+        let seekCount = playback.calls.filter { if case .seekTo = $0 { return true }; return false }.count
+        XCTAssertEqual(seekCount, 1, "exactly the estimate seek; no correction across the ad")
+    }
+
+    /// The 120 s session cap counts from the ANSWER HOLD'S RELEASE, not the seek: matching
+    /// cannot converge while the sink pauses playback for the spoken answer, so that pause
+    /// must not spend the cap. Here the answer streamed for 100 s of session clock between
+    /// the seek (t=0) and the release (t=100); 21 s after the release the correction must
+    /// still land — counting from the seek would have expired the session at t=120.
+    func testTheSessionCapCountsFromTheAnswerHoldRelease() async {
+        self.uncoveredSeekFixture()
+        mapper.observedOffsets = [100.0: 15.0]
+        // Convergence past the ad: playback 216 matches reference 190, target 200 sits at
+        // playback 226 — more than 3 s ahead of the head.
+        mapper.matchedReferenceForPlayback = [216.0: 190.0]
+        var now: TimeInterval = 0
+        let clockLock = NSLock()
+        func advanceClock(_ seconds: TimeInterval) {
+            clockLock.lock(); now += seconds; clockLock.unlock()
+        }
+        // The answer streams while playback is paused: the clock runs on between the seek
+        // (session start, t=0) and the turn-end release (t=100). The episode-identity read
+        // sits INSIDE startSeekCorrection just after the session start is read — the
+        // observable point between the two. Later reads (the poll loop's episode guard)
+        // must not move the clock.
+        var episodeReadAdvanced = false
+        let sink = makeSink(
+            seekCorrectionNow: { clockLock.lock(); defer { clockLock.unlock() }; return now },
+            seekCorrectionEpisodeId: {
+                if !episodeReadAdvanced {
+                    episodeReadAdvanced = true
+                    advanceClock(100)
+                }
+                return nil
+            }
+        )
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-corr-15")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(215)), "premise: estimate seek ran")
+        XCTAssertTrue(playback.calls.contains(.resume), "premise: the answer hold released and playback resumed")
+        // Polls during the pause: the head sits exactly where the action put it, so no
+        // playing time accumulates and (no match at 215) no correction fires yet.
+        playback.clearCalls()
+        playback.setPositionMs(215_000)
+        for _ in 0..<20 {
+            advanceClock(1)
+            await MainActor.run { sink.pollSeekCorrection() }
+        }
+        XCTAssertFalse(playback.calls.contains { if case .seekTo = $0 { return true }; return false },
+                       "premise: nothing corrected during the pause (t=120, cap not yet reached from the release)")
+        // 21 s past the release: the session is alive and the correction lands.
+        advanceClock(1)
+        playback.setPositionMs(216_000)
+        await MainActor.run { sink.pollSeekCorrection() }
+        XCTAssertTrue(playback.calls.contains(.seekTo(226)), "the cap counts from the release: the session survives and corrects (216 + (200 − 190))")
     }
 
     /// The same gap through `play_quote`, which shares the conversion path.
@@ -1480,7 +2412,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         fatalError("expected an owner disposition")
     }
 
-    private func makeSinkWithConsumer(_ consumer: RecordingResultConsumer, conversationManager: CloudConversationManager? = nil, operationJournal: OperationJournal? = nil, audioPayloads: [Data] = [], episodeAvailable: (() -> Bool)? = nil, playbackManager: PlaybackManager? = nil, audioPlayer: CloudAudioPlayer? = nil) -> CloudRouteSink {
+    private func makeSinkWithConsumer(_ consumer: CloudOperationResultConsuming = RecordingResultConsumer(), conversationManager: CloudConversationManager? = nil, operationJournal: OperationJournal? = nil, audioPayloads: [Data] = [], episodeAvailable: (() -> Bool)? = nil, playbackManager: PlaybackManager? = nil, seekCorrectionScheduler: ((TimeInterval, @escaping () -> Void) -> Any?)? = nil, seekCorrectionTickCanceller: ((Any?) -> Void)? = nil, seekCorrectionNow: (() -> TimeInterval)? = nil, seekCorrectionEpisodeId: (() -> String?)? = nil, audioPlayer: CloudAudioPlayer? = nil) -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
         let producerHold = pendingProducerHold
         pendingProducerHold = nil
@@ -1536,17 +2468,23 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             analytics: VoiceAnalytics(analytics: analytics),
             operationResultConsumer: consumer,
             operationJournal: operationJournal,
-            conversationManager: conversationManager ?? testConversationManager()
+            conversationManager: conversationManager ?? testConversationManager(),
+            seekCorrectionScheduler: seekCorrectionScheduler,
+            seekCorrectionTickCanceller: seekCorrectionTickCanceller,
+            seekCorrectionNow: seekCorrectionNow,
+            seekCorrectionEpisodeId: seekCorrectionEpisodeId
         )
     }
 
     /// An unmapped reference seek must reach the injected consumer with the refused outcome and
     /// the mapping-unavailable reason — the production read of the outcome that previously only
     /// landed in a test-only stored field.
-    func testUnmappedReferenceSeekReachesTheOperationResultConsumer() async {
+    func testUnmappedReferencePlayQuoteReachesTheOperationResultConsumer() async {
+        // `play_quote` on an uncovered reference stays refused under the seek-correction spec
+        // (only `seek_to` self-corrects); this pins the refusal through the consumer.
         self.pendingFixture = """
             event: action
-            data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":200000}}
+            data: {"tool":"playback","action":"play_quote","params":{"reference_position_ms":200000}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -1557,7 +2495,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-17")
 
         let refusals = consumer.consumed.filter { $0.result.outcome == .refused }
-        XCTAssertEqual(refusals.count, 1, "exactly one refused app_operation_result for one unmapped seek; got \(consumer.consumed)")
+        XCTAssertEqual(refusals.count, 1, "exactly one refused app_operation_result for one unmapped play_quote; got \(consumer.consumed)")
         XCTAssertEqual(refusals.first?.result.reason, OperationReason.referenceMappingUnavailable)
     }
 
@@ -1582,10 +2520,12 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     /// THROUGH-TRANSPORT control: an IDENTIFIED unmapped reference seek must send the
     /// `app_operation_result` frame on the turn's own captured socket, correlated to the
     /// server-issued operation id, with the refused outcome and mapping-unavailable reason.
-    func testIdentifiedUnmappedSeekSendsRefusedResultFrameThroughTheSocket() async throws {
+    func testIdentifiedUnmappedPlayQuoteSendsRefusedResultFrameThroughTheSocket() async throws {
+        // `play_quote` on an uncovered reference stays refused under the seek-correction spec
+        // (only `seek_to` self-corrects); this pins the refused frame through the turn socket.
         self.pendingFixture = """
             event: action
-            data: {"operation_id":"op-seek-1","capability_version":"v1","tool":"playback","action":"seek_to","params":{"reference_position_ms":200000}}
+            data: {"operation_id":"op-seek-1","capability_version":"v1","tool":"playback","action":"play_quote","params":{"reference_position_ms":200000}}
 
             event: done
             data: {"usage":{"input_tokens":1,"output_tokens":0}}
@@ -2041,6 +2981,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
             """
         mapper.playbackSecondsForReference = [200.0: 215.0]
+        mapper.referenceBracketed = true
         let sink = makeSink()
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-33")
 
@@ -2063,6 +3004,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
             """
         mapper.playbackSecondsForReference = [200.0: 215.0]
+        mapper.referenceBracketed = true
         let sink = makeSink()
         _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-34")
 
@@ -2075,6 +3017,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     func testStopQuoteWithoutPlayQuoteInLaterTurnDoesNotUseStalePosition() async {
         // RecordingFingerprintMapper is a struct — configure it before the sink copies it.
         mapper.playbackSecondsForReference = [500.0: 510.0]
+        mapper.referenceBracketed = true
         playback.setPositionMs(900_000)
         let sink = makeSink()
 
@@ -2287,6 +3230,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     /// parsed" — and the first three versions of the control below were vacuous for exactly that.
     func testLateActionReachesThePlayerWithoutABargeIn() async {
         mapper.playbackSecondsForReference = [1130.0: 1200.0]
+        mapper.referenceBracketed = true
         playback.setPositionMs(500_000)
         self.pendingFixture = """
         event: action
@@ -2319,6 +3263,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     /// would satisfy a log assertion and fail this one.
     func testARealBargeInDoesNotExecuteTheInterruptedTurnsLateAction() async {
         mapper.playbackSecondsForReference = [1130.0: 1200.0]
+        mapper.referenceBracketed = true
         playback.setPositionMs(500_000)
         self.pendingFixture = """
         event: action
@@ -2381,6 +3326,10 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     private func makeSink(
         rendersStructuredResults: Bool = false,
         routeHint: CloudRouteHint? = nil,
+        seekCorrectionScheduler: ((TimeInterval, @escaping () -> Void) -> Any?)? = nil,
+        seekCorrectionTickCanceller: ((Any?) -> Void)? = nil,
+        seekCorrectionNow: (() -> TimeInterval)? = nil,
+        seekCorrectionEpisodeId: (() -> String?)? = nil,
         audioPlayer: CloudAudioPlayer? = nil
     ) -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
@@ -2402,7 +3351,11 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             analytics: voiceAnalytics,
             rendersStructuredResults: rendersStructuredResults,
             routeHintProvider: { routeHint },
-            conversationManager: testConversationManager()
+            conversationManager: testConversationManager(),
+            seekCorrectionScheduler: seekCorrectionScheduler,
+            seekCorrectionTickCanceller: seekCorrectionTickCanceller,
+            seekCorrectionNow: seekCorrectionNow,
+            seekCorrectionEpisodeId: seekCorrectionEpisodeId
         )
     }
 
@@ -3198,6 +4151,17 @@ private final class RecordingPlaybackSink: VoicePlaybackSink, @unchecked Sendabl
         lock.lock(); storedPositionMs = value; lock.unlock()
     }
 
+    /// When true, every seekTo posts the user-seek event inline, like the real
+    /// PlaybackManager does.
+    var postsSeekEventOnSeekTo = false
+    /// With `postsSeekEventOnSeekTo`, posts the event clamped to the duration handed to the
+    /// seek — what PlaybackManagerSink's clamp does to a destination past the episode end,
+    /// so the posted target differs from the value the sink commanded.
+    var postsSeekEventClampedToDuration = false
+    /// With `postsSeekEventOnSeekTo`, posts THIS target instead of the seek destination —
+    /// a user seek landing in the same instant as the sink's own seek.
+    var seekEventOverrideTarget: Int?
+
     func clearCalls() {
         lock.lock(); storedCalls = []; lock.unlock()
     }
@@ -3248,13 +4212,28 @@ private final class RecordingPlaybackSink: VoicePlaybackSink, @unchecked Sendabl
         return .silent
     }
 
-    /// A negative position resolves back from the episode end, as the real sink
-    /// does; the double records the resolved absolute position.
+    /// The double records the value it was HANDED, unresolved: resolving a negative back from
+    /// the episode end is PlaybackManagerSink's contract, so a negative in the record means a
+    /// caller handed one over — exactly what the correction clamps must never do.
     func seekTo(positionSeconds: Int, episodeDurationSeconds: Int) -> VoiceResponse {
-        let resolved = positionSeconds < 0
-            ? max(episodeDurationSeconds + positionSeconds, 0)
-            : positionSeconds
-        record(.seekTo(resolved))
+        record(.seekTo(positionSeconds))
+        // Models the REAL path: PlaybackManagerSink's seek lands in
+        // PlaybackManager.seekTo, which posts the seek event from inside the call.
+        if postsSeekEventOnSeekTo {
+            let target: Double
+            if postsSeekEventClampedToDuration {
+                target = Double(min(max(positionSeconds, 0), max(episodeDurationSeconds, 0)))
+            } else if let override = seekEventOverrideTarget {
+                target = Double(override)
+            } else {
+                target = Double(positionSeconds)
+            }
+            NotificationCenter.default.post(
+                name: Constants.Notifications.playbackSeekPerformed,
+                object: nil,
+                userInfo: [Constants.Notifications.playbackSeekTargetSecondsKey: target]
+            )
+        }
         return .silent
     }
 
@@ -3266,11 +4245,33 @@ private final class RecordingPlaybackSink: VoicePlaybackSink, @unchecked Sendabl
 
 private struct RecordingFingerprintMapper: FingerprintMappingProviding {
     var playbackSecondsForReference: [TimeInterval: TimeInterval] = [:]
+    /// Observed offsets (playback − reference) keyed by the covered point they were seen at.
+    var observedOffsets: [TimeInterval: TimeInterval] = [:]
+    /// Matched reference answers for the correction poll, keyed by playback position.
+    var matchedReferenceForPlayback: [TimeInterval: TimeInterval] = [:]
+    /// The mapping's own coverage answer: nil means "this double cannot tell". Set on the cases
+    /// that ask the coverage question; a case that leaves it nil exercises the unverifiable
+    /// mapping (which the sink must treat as uncovered, never as covered).
+    /// The test double's answer to the coverage question. Defaults to false: an unknown
+    /// mapping must never read as covered.
+    var referenceBracketed = false
 
-    func matchedReferenceTime(forPlaybackTime playbackTime: TimeInterval) -> TimeInterval? { nil }
+    func matchedReferenceTime(forPlaybackTime playbackTime: TimeInterval) -> TimeInterval? {
+        matchedReferenceForPlayback[playbackTime]
+    }
 
     func playbackTime(forReferenceTime referenceTime: TimeInterval) -> TimeInterval? {
         playbackSecondsForReference[referenceTime]
+    }
+
+    func observedOffsetSeconds(beforeReferenceTime referenceTime: TimeInterval) -> Double? {
+        let covered = observedOffsets.keys.filter { $0 <= referenceTime }
+        guard let nearest = covered.max() else { return nil }
+        return observedOffsets[nearest]
+    }
+
+    func isBracketedReference(_ referenceTime: TimeInterval) -> Bool {
+        referenceBracketed
     }
 }
 
@@ -3487,6 +4488,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x11, count: 4_800 * 2) }
         playback.setPlaying(true)
         mapper.playbackSecondsForReference = [1130.0: 1200.0, 1500.0: 1600.0]
+        mapper.referenceBracketed = true
         let sink = makeSink(
             audioPlayer: hookedPlayer
         )
@@ -6270,6 +7272,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// late-action assertion could not discriminate.
     func testTheLateActionFixtureActuallySeeksWhenNotSuperseded() async throws {
         mapper.playbackSecondsForReference = [100.0: 110.0]
+        mapper.referenceBracketed = true
         self.nextTurnFixture = Self.actionThenDoneFixture
         let sink = makeSink()
         _ = await sink.routeToCloud(
@@ -6294,6 +7297,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
         // A VALID mapping, so the action would seek if it were allowed to run.
         mapper.playbackSecondsForReference = [100.0: 110.0]
+        mapper.referenceBracketed = true
         self.nextTurnFixture = Self.actionThenDoneFixture
         let gate = holdNextTurn()
         let sink = makeSink()

@@ -565,6 +565,48 @@ final class FingerprintPreparationTests: XCTestCase {
         )
     }
 
+    /// Core PR 245 pin on the REAL filter: `observedOffsetSeconds(beforeReferenceTime:)`
+    /// reads the nearest anchor AT OR BEFORE the target and is nil when none precedes it.
+    /// A wholly cached mapping is adopted verbatim (one anchor per second, each carrying
+    /// offset exactly +30: reference r maps to playback r + 30), so the manager is in
+    /// `.active` with no live fingerprinting. A probe at reference 30 reads the +30;
+    /// a probe at −1 has no anchor at or before it and must be nil. Red against a
+    /// mutation that drops the `entry.referenceTime <= referenceTime` filter: the probe
+    /// would then read the last anchor's +30 and stop being nil.
+    func testObservedOffsetIsNilWhenNoAnchorPrecedesTheTarget() async throws {
+        try prepareFixture(duration: Self.episodeDuration) { fixture in
+            try fixture.writeAudio(seconds: Self.episodeDuration)
+            try fixture.writeReference()
+        }
+        let fixture = try XCTUnwrap(self.fixture)
+        let stored = stride(from: 0.0, through: Self.episodeDuration - 1, by: 1.0).map {
+            FingerprintTimingManager.TimeMappingEntry(
+                playbackTime: $0 + 30, referenceTime: $0, score: 0.9
+            )
+        }
+        FingerprintMappingCache.save(
+            stored,
+            audioFilePath: fixture.audioURL.path,
+            referenceFilePath: fixture.referenceURL.path,
+            referenceData: try Data(contentsOf: fixture.referenceURL),
+            referenceDuration: Self.episodeDuration
+        )
+        manager.prepareForCurrentEpisode()
+        await waitForPass(manager)
+
+        guard case .active = manager.state else {
+            XCTFail("expected the cached mapping to be adopted, got \(manager.state)")
+            return
+        }
+        let entries = manager.debugMappingSnapshot()
+        XCTAssertGreaterThanOrEqual(entries.count, 10, "the cached mapping was not adopted")
+
+        let observed = manager.observedOffsetSeconds(beforeReferenceTime: 30)
+        XCTAssertEqual(try XCTUnwrap(observed), 30, accuracy: 0.5, "the nearest anchor at or before the target carries the ad offset")
+        let noneBefore = manager.observedOffsetSeconds(beforeReferenceTime: -1)
+        XCTAssertNil(noneBefore, "no anchor precedes the target: no offset to observe")
+    }
+
     private func prepareFixture(
         duration: Double,
         writeFiles: (FingerprintEpisodeFixture) throws -> Void
