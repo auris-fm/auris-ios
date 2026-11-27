@@ -6782,6 +6782,12 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         self.nextTurnFixture = connectedFixture
         self.nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x33, count: 4_800 * 2) }
         let boundariesBefore = player.schedulingBoundaryCount
+        // THE RESET IS BOUND HERE, BEFORE TURN TWO'S FRAMES: the stub delivers audio ahead
+        // of the fixture text, so relying on `connected` to bind the budget races the first
+        // frames (the runner's terminal discard can eat them before the reset lands). A
+        // player-level reset before the route makes the case deterministic; turn two's
+        // `connected` still binds again, as a no-op.
+        player.beginTurn()
         let second = await sink.routeToCloud(
             request: "audio two", tier: .free, context: sampleContext(),
             origin: cloudTestOrigin, selection: .wakeWord, utteranceId: "u-t17c2")
