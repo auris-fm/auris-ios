@@ -1010,6 +1010,31 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         XCTAssertNil(unavailable, "an uncovered seek_to executes as an estimate; it is not a refusal")
     }
 
+    /// Core PR 245 pin: with NO matched anchor before the target, the estimate is the
+    /// target as-is. The mapping's only anchor sits at 1200 s (its offset +30 s), and the
+    /// target is 120 s — before the first anchor — so the offset must not be used. Red
+    /// against a mutation that drops observedOffsetSeconds' "at or before the target" filter:
+    /// that reads the first anchor's offset and seeks 150.
+    func testATargetBeforeTheFirstAnchorSeeksTheTargetAsIs() async {
+        self.pendingFixture =
+            """
+            event: action
+            data: {"tool":"playback","action":"seek_to","params":{"reference_position_ms":120000}}
+
+            event: done
+            data: {"usage":{"input_tokens":1,"output_tokens":0}}
+
+            """
+        // The only anchor is at reference 1200 s, 30 s into playback — it does NOT precede
+        // the 120 s target, so it must not feed the estimate.
+        mapper.observedOffsets = [1200.0: 30.0]
+        let sink = makeSink()
+        _ = await sink.routeToCloud(request: "x", tier: .free, context: sampleContext(), origin: cloudTestOrigin, selection: nil, utteranceId: "u-245-pin")
+
+        XCTAssertTrue(playback.calls.contains(.seekTo(120)), "no anchor precedes the target: the seek is the target as-is (120 s)")
+        XCTAssertFalse(playback.calls.contains(.seekTo(150)), "the first anchor's offset must not ride the estimate (120 + 30)")
+    }
+
     // MARK: Seek correction (timeline-alignment.md § Action position conversion)
 
     private func uncoveredSeekFixture() {
