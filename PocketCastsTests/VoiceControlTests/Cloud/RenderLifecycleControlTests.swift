@@ -10,11 +10,6 @@ import AVFoundation
 /// new anchor.
 final class RenderLifecycleControlTests: XCTestCase {
 
-    override func tearDown() {
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
-        CloudAudioPlayer.configureEngineForTesting = nil
-        super.tearDown()
-    }
 
     /// `done` ends network delivery, not scheduled playback. The real engine renders offline so
     /// its counter advances only when this fixture renders actual scheduled PCM, without hardware.
@@ -207,15 +202,17 @@ final class RenderLifecycleControlTests: XCTestCase {
         rendersInitialQuantum: Bool = true,
         _ body: (CloudAudioPlayer, AVAudioEngine, AVAudioPlayerNode, AVAudioPCMBuffer, Int) throws -> Void
     ) throws {
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
         let outputFormat = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1))
-        CloudAudioPlayer.configureEngineForTesting = { engine in
-            try engine.enableManualRenderingMode(.offline, format: outputFormat, maximumFrameCount: 4_096)
-        }
         let reference = PlaybackEchoReference()
         let handoff = EchoReferenceHandoff(reference: reference, capacity: 16)
         defer { withExtendedLifetime(handoff) {} }
-        let player = CloudAudioPlayer(timingEnabled: timing != nil)
+        let player = CloudAudioPlayer(
+            timingEnabled: timing != nil,
+            outputIsAvailable: { true },
+            configureEngine: { engine in
+                try engine.enableManualRenderingMode(.offline, format: outputFormat, maximumFrameCount: 4_096)
+            }
+        )
         player.emittedPCMReference = reference
         player.echoReferenceHandoff = handoff // Production assembly retains and wires both halves.
         // Retain the actual stop notification path so confirmation is observable without a sink.

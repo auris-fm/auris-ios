@@ -124,10 +124,6 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// recently, which is the wrong subject for an identity comparison.
     typealias PreparedObserver = @MainActor (CloudPreparedConversation) -> Void
 
-    /// The cloud player this sink drives, so a test can reach the real producer through
-    /// the chain the app builds rather than constructing its own.
-    var audioPlayerForTesting: CloudAudioPlayer? { audioPlayer }
-
     /// The PRODUCTION client factory, extracted so the assembly reuses it VERBATIM and the test seam
     /// substitutes it. Production is unchanged: the default is this same factory.
     nonisolated static func productionClientFactory() -> () -> CloudRouteClient {
