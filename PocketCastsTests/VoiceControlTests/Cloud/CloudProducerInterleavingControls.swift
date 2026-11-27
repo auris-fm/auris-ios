@@ -170,7 +170,6 @@ final class CloudProducerInterleavingControls: XCTestCase {
     override func tearDown() {
         heldPlayer?.setDrainHoldForTesting(false)
         heldPlayer = nil
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
         super.tearDown()
     }
 
@@ -205,7 +204,7 @@ final class CloudProducerInterleavingControls: XCTestCase {
     @MainActor
     private func feed(_ blocks: [Block], to graph: Graph, waitForAnchor: Bool = true) throws -> Int {
         let cloud = player(in: graph)
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        cloud.audioOutputAvailabilityOverrideForTesting = true
         // A prior `feed` in the same case left the drain parked; release it first.
         cloud.setDrainHoldForTesting(false)
 
@@ -686,11 +685,11 @@ final class CloudProducerInterleavingControls: XCTestCase {
     @MainActor
     func testANodeThatHasNotRenderedPublishesNoPosition() throws {
         let graph = makeGraph()
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
         // Park the drain BEFORE crossing the resume threshold: `startEngine` runs before
         // `parkIfHeld`, so the runner builds the engine and parks with the pending frames
         // UNSCHEDULED — the node is attached but has never rendered (measured precondition).
         let cloud = player(in: graph)
+        cloud.audioOutputAvailabilityOverrideForTesting = true
         cloud.setDrainHoldForTesting(true)
         heldPlayer = cloud
         for _ in 0..<Self.resumeThreshold {

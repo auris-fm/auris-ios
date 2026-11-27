@@ -20,16 +20,8 @@ import XCTest
 final class GracePlaybackLifetimeAudit: XCTestCase {
     override func setUp() {
         super.setUp()
-        // The player only builds its node graph (and therefore only reports pending/rendered
-        // audio) when an output exists. Under a test host this seam is the single substituted
-        // fact; everything downstream is production code.
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
     }
 
-    override func tearDown() {
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
-        super.tearDown()
-    }
 
     private final class RecordingPlaybackSink: VoicePlaybackSink {
         private(set) var pauseCalls = 0
@@ -808,6 +800,13 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
 
     @MainActor
     private func waitForRouter(_ service: VoiceControlService) async throws {
+        // The sink's player must see an output in the test host, or `startEngine` consumes the
+        // answer silently and the drain this audit measures never happens. Instance hook, armed
+        // before any turn can flow (see CloudAudioPlayer.audioOutputIsAvailable).
+        await MainActor.run {
+            service.executorForTesting.cloudRouteSinkForTesting
+                .audioPlayerForTesting?.audioOutputAvailabilityOverrideForTesting = true
+        }
         let deadline = Date().addingTimeInterval(20)
         while Date() < deadline {
             if service.intentRouterIsReadyForTesting { return }

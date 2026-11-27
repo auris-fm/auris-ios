@@ -38,7 +38,6 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
 
     override func tearDown() {
         CloudRouteTestURLProtocol.reset()
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
         defaults.removePersistentDomain(forName: suiteName)
         super.tearDown()
     }
@@ -149,8 +148,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     func testAnAudioFixtureTurnReportsItsOwnLineWithoutClaimingAudio() async throws {
         // Unique per RUN: the app log persists, so a fixed id would read the previous run's line.
         let utteranceId = "u-\(UUID().uuidString.prefix(12))-audible"
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
-        defer { CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil }
+        let hookedPlayer = CloudAudioPlayer()
+        hookedPlayer.audioOutputAvailabilityOverrideForTesting = true
         self.pendingFixture =
             """
             event: done
@@ -159,7 +158,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             """
         let sink = makeSinkWithConsumer(
             RecordingResultConsumer(),
-            audioPayloads: (0..<40).map { Data([UInt8($0)]) }
+            audioPayloads: (0..<40).map { Data([UInt8($0)]) },
+            audioPlayer: hookedPlayer
         )
         let context = TurnLatencyContext()
         context.endOfSpeech = 0
@@ -198,16 +198,13 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     @MainActor
     func testAShortReplyHoldsItsLatencyRecordUntilPlaybackSettles() async throws {
         let utteranceId = "u-\(UUID().uuidString.prefix(12))-short"
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        let hookedPlayer = CloudAudioPlayer()
+        hookedPlayer.audioOutputAvailabilityOverrideForTesting = true
         let fmt = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1))
         let engineBox = OfflineEngineBox()
-        CloudAudioPlayer.configureEngineForTesting = { engine in
+        hookedPlayer.configureEngineForTesting = { engine in
             try engine.enableManualRenderingMode(.offline, format: fmt, maximumFrameCount: 4_096)
             engineBox.engine = engine
-        }
-        defer {
-            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
-            CloudAudioPlayer.configureEngineForTesting = nil
         }
         self.pendingFixture =
             """
@@ -218,7 +215,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         let sink = makeSinkWithConsumer(
             RecordingResultConsumer(),
             // Whole 16-bit samples, enough frames to start the engine.
-            audioPayloads: (0..<8).map { _ in Data(repeating: 0x10, count: 4_800) }
+            audioPayloads: (0..<8).map { _ in Data(repeating: 0x10, count: 4_800) },
+            audioPlayer: hookedPlayer
         )
         // Production wires the echo reference and its handoff; the player counts the audio it
         // scheduled (what the drain waits on) only through them.
@@ -285,16 +283,13 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     @MainActor
     func testAnErrorAfterAudibleAudioStillReportsWhenItWasHeard() async throws {
         let utteranceId = "u-\(UUID().uuidString.prefix(12))-errheard"
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        let hookedPlayer = CloudAudioPlayer()
+        hookedPlayer.audioOutputAvailabilityOverrideForTesting = true
         let fmt = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1))
         let engineBox = OfflineEngineBox()
-        CloudAudioPlayer.configureEngineForTesting = { engine in
+        hookedPlayer.configureEngineForTesting = { engine in
             try engine.enableManualRenderingMode(.offline, format: fmt, maximumFrameCount: 4_096)
             engineBox.engine = engine
-        }
-        defer {
-            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
-            CloudAudioPlayer.configureEngineForTesting = nil
         }
         self.pendingFixture =
             """
@@ -308,7 +303,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         pendingDeclaredParkAfterFrames = 8
         let sink = makeSinkWithConsumer(
             RecordingResultConsumer(),
-            audioPayloads: (0..<8).map { _ in Data(repeating: 0x10, count: 4_800) }
+            audioPayloads: (0..<8).map { _ in Data(repeating: 0x10, count: 4_800) },
+            audioPlayer: hookedPlayer
         )
         let reference = PlaybackEchoReference()
         let handoff = EchoReferenceHandoff(reference: reference, capacity: 16)
@@ -372,8 +368,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
     @MainActor
     func testAnEarlierDrainsStopDoesNotWriteAHeldLatencyRecord() async throws {
         let utteranceId = "u-\(UUID().uuidString.prefix(12))-stale"
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
-        defer { CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil }
+        let hookedPlayer = CloudAudioPlayer()
+        hookedPlayer.audioOutputAvailabilityOverrideForTesting = true
         self.pendingFixture =
             """
             event: done
@@ -382,7 +378,8 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
             """
         let sink = makeSinkWithConsumer(
             RecordingResultConsumer(),
-            audioPayloads: (0..<40).map { Data([UInt8($0)]) }
+            audioPayloads: (0..<40).map { Data([UInt8($0)]) },
+            audioPlayer: hookedPlayer
         )
         let context = TurnLatencyContext()
         context.endOfSpeech = 0
@@ -1483,7 +1480,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
         fatalError("expected an owner disposition")
     }
 
-    private func makeSinkWithConsumer(_ consumer: RecordingResultConsumer, conversationManager: CloudConversationManager? = nil, operationJournal: OperationJournal? = nil, audioPayloads: [Data] = [], episodeAvailable: (() -> Bool)? = nil, playbackManager: PlaybackManager? = nil) -> CloudRouteSink {
+    private func makeSinkWithConsumer(_ consumer: RecordingResultConsumer, conversationManager: CloudConversationManager? = nil, operationJournal: OperationJournal? = nil, audioPayloads: [Data] = [], episodeAvailable: (() -> Bool)? = nil, playbackManager: PlaybackManager? = nil, audioPlayer: CloudAudioPlayer? = nil) -> CloudRouteSink {
         let cloudConfig = CloudConfig(defaults: defaults)
         let producerHold = pendingProducerHold
         pendingProducerHold = nil
@@ -1529,6 +1526,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
                 return built.client
             },
             isConfigured: { !cloudConfig.baseUrl.isEmpty },
+            audioPlayer: audioPlayer,
             playbackManager: playbackManager,
             playbackSink: playback,
             fingerprintMapper: mapper,
@@ -2392,6 +2390,7 @@ final class CloudRouteSinkTests: SocketCapturingTestCase {
                 return built.client
             },
             isConfigured: { !cloudConfig.baseUrl.isEmpty },
+            audioPlayer: audioPlayer,
             playbackSink: playback,
             fingerprintMapper: mapper,
             playbackPositionMs: { self.playback.positionMs },
@@ -3019,8 +3018,8 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
         // player consumes frames silently, `hasPendingAudio` is false, and `done` correctly binds
         // nothing (measured — the first version of this control failed for exactly that reason and
         // was reporting on the silent-consume case, not the buffered-playback one).
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
-        defer { CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil }
+        let hookedPlayer = CloudAudioPlayer()
+        hookedPlayer.audioOutputAvailabilityOverrideForTesting = true
         // `connected` is what makes the conversation real — it is sent after admission — so the
         // scripted turn carries it, as the protocol does. Without it the follow-up below would be
         // naming a conversation the server never acknowledged, which is the case the change is for.
@@ -3034,7 +3033,8 @@ func testOwnerTaskCancelDuringIdentifiedOperationEffectOnceAndRecoveryByRecordSt
             """
         let sink = makeSinkWithConsumer(
             RecordingResultConsumer(),
-            audioPayloads: (0..<40).map { Data([UInt8($0)]) }
+            audioPayloads: (0..<40).map { Data([UInt8($0)]) },
+            audioPlayer: hookedPlayer
         )
         // Turn A is a WAKE that opens the conversation. Stated as one because it is: a turn that
         // does not say it is a follow-up is not continuing anything, and after this change it no
@@ -3326,14 +3326,14 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
     @MainActor
     private func exerciseScheduledOnlyDone(coalesceBeforeDone: Bool) async throws {
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        let hookedPlayer = CloudAudioPlayer()
+        hookedPlayer.audioOutputAvailabilityOverrideForTesting = true
         let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1))
-        CloudAudioPlayer.configureEngineForTesting = { engine in
+        hookedPlayer.configureEngineForTesting = { engine in
             try engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: 4_096)
         }
         addTeardownBlock {
-            CloudAudioPlayer.configureEngineForTesting = nil
-            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
+            hookedPlayer.configureEngineForTesting = nil
         }
         let producerRelease = DispatchSemaphore(value: 0)
         blockProducerAfterFrames = (8, producerRelease) // Seven binary PCM messages, then park before done.
@@ -3341,7 +3341,9 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x11, count: 4_800 * 2) }
         holdCounters = (AtomicInteger(), AtomicInteger())
         playback.setPlaying(true)
-        let sink = makeSink(withHoldCounters: true)
+        let sink = makeSink(withHoldCounters: true,
+            audioPlayer: hookedPlayer
+        )
         let player = try XCTUnwrap(sink.audioPlayerForTesting)
         let reference = PlaybackEchoReference()
         let handoff = EchoReferenceHandoff(reference: reference, capacity: 16)
@@ -3422,14 +3424,14 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
     @MainActor
     private func exerciseThirdUtteranceOverAFinishedTurnsTail(thirdUtterance: Bool) async throws -> ThirdUtteranceOutcome {
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        let hookedPlayer = CloudAudioPlayer()
+        hookedPlayer.audioOutputAvailabilityOverrideForTesting = true
         let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1))
-        CloudAudioPlayer.configureEngineForTesting = { engine in
+        hookedPlayer.configureEngineForTesting = { engine in
             try engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: 4_096)
         }
         addTeardownBlock {
-            CloudAudioPlayer.configureEngineForTesting = nil
-            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
+            hookedPlayer.configureEngineForTesting = nil
         }
         let producerRelease = DispatchSemaphore(value: 0)
         // NINE received frames now: seven binary PCM messages, then `connected`, then `done`.
@@ -3441,7 +3443,9 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x11, count: 4_800 * 2) }
         playback.setPlaying(true)
         mapper.playbackSecondsForReference = [1130.0: 1200.0, 1500.0: 1600.0]
-        let sink = makeSink()
+        let sink = makeSink(
+            audioPlayer: hookedPlayer
+        )
         let player = try XCTUnwrap(sink.audioPlayerForTesting)
         let reference = PlaybackEchoReference()
         let handoff = EchoReferenceHandoff(reference: reference, capacity: 16)
@@ -3622,14 +3626,14 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// that wait: its frames must not be counted as this turn's.
     @MainActor
     func testLatencyRecordDoesNotCountASuccessorsFramesEnqueuedDuringTheTerminalsStopWait() async throws {
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        let hookedPlayer = CloudAudioPlayer()
+        hookedPlayer.audioOutputAvailabilityOverrideForTesting = true
         let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1))
-        CloudAudioPlayer.configureEngineForTesting = { engine in
+        hookedPlayer.configureEngineForTesting = { engine in
             try engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: 4_096)
         }
         addTeardownBlock {
-            CloudAudioPlayer.configureEngineForTesting = nil
-            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
+            hookedPlayer.configureEngineForTesting = nil
         }
         let id = "u-wait-\(UUID().uuidString)"
         nextTurnAudioPayloads = (0..<3).map { _ in Data(repeating: 0x33, count: 4_800 * 2) }
@@ -3639,7 +3643,9 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             data: {"code":"provider_error","message":"upstream failed"}
 
             """
-        let sink = makeSink()
+        let sink = makeSink(
+            audioPlayer: hookedPlayer
+        )
         let player = try XCTUnwrap(sink.audioPlayerForTesting)
         player.armPhysicalStopGateForTesting(allow: 0)
         addTeardownBlock { @MainActor in player.openPhysicalStopGateForTesting() }
@@ -3675,21 +3681,23 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// must start a new scheduling boundary.
     @MainActor
     func testASuccessorOverAFinishedTurnsTailPlaysItsOwnAudio() async throws {
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        let hookedPlayer = CloudAudioPlayer()
+        hookedPlayer.audioOutputAvailabilityOverrideForTesting = true
         let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1))
-        CloudAudioPlayer.configureEngineForTesting = { engine in
+        hookedPlayer.configureEngineForTesting = { engine in
             try engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: 4_096)
         }
         addTeardownBlock {
-            CloudAudioPlayer.configureEngineForTesting = nil
-            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
+            hookedPlayer.configureEngineForTesting = nil
         }
         let producerRelease = DispatchSemaphore(value: 0)
         blockProducerAfterFrames = (8, producerRelease)
         nextTurnFixture = Self.doneOnlyFixture
         nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x11, count: 4_800 * 2) }
         playback.setPlaying(true)
-        let sink = makeSink()
+        let sink = makeSink(
+            audioPlayer: hookedPlayer
+        )
         let player = try XCTUnwrap(sink.audioPlayerForTesting)
         let reference = PlaybackEchoReference()
         let handoff = EchoReferenceHandoff(reference: reference, capacity: 16)
@@ -3775,16 +3783,18 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// count unchanged, so the gate barrier itself fails.
     @MainActor
     func testASuccessorsAudioIsNeverLostToAPredecessorsStop() async throws {
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        let hookedPlayer = CloudAudioPlayer()
+        hookedPlayer.audioOutputAvailabilityOverrideForTesting = true
         addTeardownBlock {
-            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
         }
         let producerRelease = DispatchSemaphore(value: 0)
         blockProducerAfterFrames = (8, producerRelease)
         nextTurnFixture = Self.doneOnlyFixture
         nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x11, count: 4_800 * 2) }
         playback.setPlaying(true)
-        let sink = makeSink()
+        let sink = makeSink(
+            audioPlayer: hookedPlayer
+        )
         let player = try XCTUnwrap(sink.audioPlayerForTesting)
         addTeardownBlock { @MainActor in
             producerRelease.signal()
@@ -4386,7 +4396,9 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
             """
         self.nextTurnAudioPayloads = (0..<40).map { Data([UInt8($0)]) }
-        let sink = makeSink()
+        let hookedPlayer = CloudAudioPlayer()
+        hookedPlayer.audioOutputAvailabilityOverrideForTesting = true
+        let sink = makeSink(audioPlayer: hookedPlayer)
         hookedSink = sink
         final class Flag: @unchecked Sendable {
             private let lock = NSLock()
@@ -4396,7 +4408,6 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         }
         let bDone = Flag()
         playback.setPlaying(true)
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
         // Arm the gate FIRST: the very next physical stop parks.
         await MainActor.run { sink.audioPlayerForTesting?.armPhysicalStopGateForTesting(allow: 0) }
         // A's drain hold keeps the runner away from A's stop until the cancel has landed.
@@ -4519,7 +4530,8 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
             """
         self.nextTurnAudioPayloads = (0..<40).map { Data([UInt8($0)]) }
-        let sink = makeSink()
+        let sink = makeSink(
+        )
         final class Box: @unchecked Sendable {
             private let lock = NSLock()
             private var deliveries: [() -> Void] = []
@@ -6080,6 +6092,7 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
                 return built.client
             },
             isConfigured: { !cloudConfig.baseUrl.isEmpty },
+            audioPlayer: audioPlayer,
             playbackSink: playback,
             fingerprintMapper: mapper,
             playbackPositionMs: { self.playback.positionMs },
@@ -6409,7 +6422,8 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// fires because the frames were consumed with no engine at all.
     @MainActor
     func testAFailedEngineStartIsRetriedAndTheAudioStillSchedules() async throws {
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        let hookedPlayer = CloudAudioPlayer()
+        hookedPlayer.audioOutputAvailabilityOverrideForTesting = true
         // THROW ONCE: the first attempt fails the way a contended or halted audio server fails;
         // later attempts install a real offline-rendering engine so the retry can succeed.
         final class ThrowOnce: @unchecked Sendable {
@@ -6423,15 +6437,16 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             }
         }
         let throwOnce = ThrowOnce()
-        CloudAudioPlayer.configureEngineForTesting = { engine in try throwOnce.arm(engine) }
+        hookedPlayer.configureEngineForTesting = { engine in try throwOnce.arm(engine) }
         addTeardownBlock {
-            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
-            CloudAudioPlayer.configureEngineForTesting = nil
+            hookedPlayer.configureEngineForTesting = nil
         }
         self.nextTurnFixture = Self.doneOnlyFixture
         self.nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x33, count: 4_800 * 2) }
         playback.setPlaying(true)
-        let sink = makeSink()
+        let sink = makeSink(
+            audioPlayer: hookedPlayer
+        )
         let player = try XCTUnwrap(sink.audioPlayerForTesting)
         let boundariesBefore = player.schedulingBoundaryCount
         addTeardownBlock { @MainActor in
@@ -6459,7 +6474,8 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// of a contended audio server.
     @MainActor
     func testAThirdFailedStartEndsTheTurnAsAVisibleFailureWithNoFourthAttempt() async throws {
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        let hookedPlayer = CloudAudioPlayer()
+        hookedPlayer.audioOutputAvailabilityOverrideForTesting = true
         // ALWAYS throws: every attempt this turn fails, and the count below proves the
         // budget stopped at three.
         final class AlwaysThrow: @unchecked Sendable {
@@ -6475,15 +6491,16 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             }
         }
         let attempts = AlwaysThrow()
-        CloudAudioPlayer.configureEngineForTesting = { engine in try attempts.arm(engine) }
+        hookedPlayer.configureEngineForTesting = { engine in try attempts.arm(engine) }
         addTeardownBlock {
-            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
-            CloudAudioPlayer.configureEngineForTesting = nil
+            hookedPlayer.configureEngineForTesting = nil
         }
         self.nextTurnFixture = Self.doneOnlyFixture
         self.nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x33, count: 4_800 * 2) }
         playback.setPlaying(true)
-        let sink = makeSink()
+        let sink = makeSink(
+            audioPlayer: hookedPlayer
+        )
         let player = try XCTUnwrap(sink.audioPlayerForTesting)
         let boundariesBefore = player.schedulingBoundaryCount
         addTeardownBlock { @MainActor in
@@ -6552,13 +6569,13 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// the discard assertion catches the loss — the route's completion proves nothing.
     @MainActor
     func testAStragglerFrameBelowTheResumeThresholdIsStillDiscarded() async throws {
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
-        CloudAudioPlayer.configureEngineForTesting = { _ in
+        let hookedPlayer = CloudAudioPlayer()
+        hookedPlayer.audioOutputAvailabilityOverrideForTesting = true
+        hookedPlayer.configureEngineForTesting = { _ in
             throw NSError(domain: "t17", code: 5)
         }
         addTeardownBlock {
-            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
-            CloudAudioPlayer.configureEngineForTesting = nil
+            hookedPlayer.configureEngineForTesting = nil
         }
         // The park fires on the Nth RECEIVED frame, before delivering it: with no connected
         // frame ahead of the audio (matching the streamed-frames sibling), parking at 7
@@ -6573,7 +6590,9 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         self.nextTurnFixture = Self.doneOnlyFixture
         self.nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x55, count: 4_800 * 2) }
         playback.setPlaying(true)
-        let sink = makeSink()
+        let sink = makeSink(
+            audioPlayer: hookedPlayer
+        )
         let player = try XCTUnwrap(sink.audioPlayerForTesting)
         let boundariesBefore = player.schedulingBoundaryCount
         addTeardownBlock { @MainActor in
@@ -6633,7 +6652,8 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// exactly 3 attempts total, the later frames discarded and counted, never a 4th start.
     @MainActor
     func testAFramesStreamingAfterTheDropGetNoFourthStart() async throws {
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        let hookedPlayer = CloudAudioPlayer()
+        hookedPlayer.audioOutputAvailabilityOverrideForTesting = true
         final class AttemptCounter: @unchecked Sendable {
             private let lock = NSLock()
             private var n = 0
@@ -6641,13 +6661,12 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             func value() -> Int { lock.lock(); defer { lock.unlock() }; return n }
         }
         let attempts = AttemptCounter()
-        CloudAudioPlayer.configureEngineForTesting = { engine in
+        hookedPlayer.configureEngineForTesting = { engine in
             attempts.bump()
             throw NSError(domain: "t17", code: 4)
         }
         addTeardownBlock {
-            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
-            CloudAudioPlayer.configureEngineForTesting = nil
+            hookedPlayer.configureEngineForTesting = nil
         }
         let producerRelease = DispatchSemaphore(value: 0)
         // Eleven binary PCM messages, then park before done: the first 7 exhaust the budget
@@ -6657,7 +6676,9 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         self.nextTurnFixture = Self.doneOnlyFixture
         self.nextTurnAudioPayloads = (0..<12).map { _ in Data(repeating: 0x44, count: 4_800 * 2) }
         playback.setPlaying(true)
-        let sink = makeSink()
+        let sink = makeSink(
+            audioPlayer: hookedPlayer
+        )
         let player = try XCTUnwrap(sink.audioPlayerForTesting)
         let boundariesBefore = player.schedulingBoundaryCount
         addTeardownBlock { @MainActor in
@@ -6716,7 +6737,8 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     /// delay (250 ms) again.
     @MainActor
     func testAStartFailureStreakInALaterTurnStartsTheBudgetFresh() async throws {
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        let hookedPlayer = CloudAudioPlayer()
+        hookedPlayer.audioOutputAvailabilityOverrideForTesting = true
         // The counter is SHARED across both turns: turn one burns calls 1-3 (its whole
         // budget). Turn two therefore throws on calls 4-5 — twice, recovering on its THIRD
         // and last attempt. That depth is the point: a partial reset (a budget restored to
@@ -6733,16 +6755,17 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
             }
         }
         let phase = TwoPhase()
-        CloudAudioPlayer.configureEngineForTesting = { engine in try phase.arm(engine) }
+        hookedPlayer.configureEngineForTesting = { engine in try phase.arm(engine) }
         addTeardownBlock {
-            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
-            CloudAudioPlayer.configureEngineForTesting = nil
+            hookedPlayer.configureEngineForTesting = nil
         }
         playback.setPlaying(true)
         // ONE sink, TWO sequential turns (as in a real conversation): the per-turn budget
         // lives on the turn's player, and only a reset at `connected` lets turn two recover.
         // Each turn gets its own fixture — a turn built with none gets an empty script.
-        let sink = makeSink()
+        let sink = makeSink(
+            audioPlayer: hookedPlayer
+        )
         let player = try XCTUnwrap(sink.audioPlayerForTesting)
         addTeardownBlock { @MainActor in
             let stop = player.cancel()
@@ -6863,14 +6886,14 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
 
     @MainActor
     private func exerciseInterruptedDoneDrainsOrDiscards(outcome: String) async throws {
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        let hookedPlayer = CloudAudioPlayer()
+        hookedPlayer.audioOutputAvailabilityOverrideForTesting = true
         let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1))
-        CloudAudioPlayer.configureEngineForTesting = { engine in
+        hookedPlayer.configureEngineForTesting = { engine in
             try engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: 4_096)
         }
         addTeardownBlock {
-            CloudAudioPlayer.configureEngineForTesting = nil
-            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
+            hookedPlayer.configureEngineForTesting = nil
         }
         // Seven binary frames then the terminal, so the producer can be parked AFTER its audio
         // is enqueued and BEFORE `done` is read.
@@ -6883,7 +6906,9 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         """
         nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x11, count: 4_800 * 2) }
         playback.setPlaying(true)
-        let sink = makeSink()
+        let sink = makeSink(
+            audioPlayer: hookedPlayer
+        )
         let player = try XCTUnwrap(sink.audioPlayerForTesting)
         // The reference counts samples the player actually SCHEDULED, which is what separates
         // "played out" from "shed": both leave the buffer empty.
@@ -6974,8 +6999,8 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     @MainActor
     func testAnInterruptedTurnEmitsItsOwnLatencyRecord() async throws {
         let utteranceId = "u-\(UUID().uuidString.prefix(12))-int-record"
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
-        addTeardownBlock { CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil }
+        let hookedPlayer = CloudAudioPlayer()
+        hookedPlayer.audioOutputAvailabilityOverrideForTesting = true
         let release = DispatchSemaphore(value: 0)
         blockProducerAfterFrames = (8, release)
         nextTurnFixture = """
@@ -6985,7 +7010,9 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         """
         nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x11, count: 4_800 * 2) }
         playback.setPlaying(true)
-        let sink = makeSink()
+        let sink = makeSink(
+            audioPlayer: hookedPlayer
+        )
         addTeardownBlock { release.signal() }
         let turn = Task {
             await sink.routeToCloud(request: "answer", tier: .free, context: sampleContext(),
@@ -7047,16 +7074,16 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
     @MainActor
     func testAnInterruptedTurnKeepsTheAudibleInstantItMeasuredBeforeTheStop() async throws {
         let utteranceId = "u-\(UUID().uuidString.prefix(12))-int-audible"
-        CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = true
+        let hookedPlayer = CloudAudioPlayer()
+        hookedPlayer.audioOutputAvailabilityOverrideForTesting = true
         let fmt = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1))
         let engineBox = OfflineEngineBox()
-        CloudAudioPlayer.configureEngineForTesting = { engine in
+        hookedPlayer.configureEngineForTesting = { engine in
             try engine.enableManualRenderingMode(.offline, format: fmt, maximumFrameCount: 4_096)
             engineBox.engine = engine
         }
         addTeardownBlock {
-            CloudAudioPlayer.configureEngineForTesting = nil
-            CloudAudioPlayer.audioOutputAvailabilityOverrideForTesting = nil
+            hookedPlayer.configureEngineForTesting = nil
         }
         let release = DispatchSemaphore(value: 0)
         blockProducerAfterFrames = (8, release)
@@ -7067,7 +7094,9 @@ final class CloudRouteSupersedeTests: SocketCapturingTestCase {
         """
         nextTurnAudioPayloads = (0..<7).map { _ in Data(repeating: 0x11, count: 4_800 * 2) }
         playback.setPlaying(true)
-        let sink = makeSink()
+        let sink = makeSink(
+            audioPlayer: hookedPlayer
+        )
         let player = try XCTUnwrap(sink.audioPlayerForTesting)
         let reference = PlaybackEchoReference()
         let handoff = EchoReferenceHandoff(reference: reference, capacity: 16)
