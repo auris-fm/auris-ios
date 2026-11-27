@@ -18,9 +18,6 @@ import XCTest
 /// Explicit non-goals (kept open, reported): journal/bind discrimination, typed success-envelope
 /// replay, per-action refusal coverage, outcome propagation completeness.
 final class GracePlaybackLifetimeAudit: XCTestCase {
-    override func setUp() {
-        super.setUp()
-    }
 
 
     private final class RecordingPlaybackSink: VoicePlaybackSink {
@@ -123,7 +120,7 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
             "the hold is still in effect at `done`"
         )
         let pendingAtDone = await MainActor.run {
-            audioPlayer.hasPendingAudio ?? false
+            audioPlayer.hasPendingAudio
         }
         XCTAssertTrue(
             pendingAtDone,
@@ -775,13 +772,13 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
         XCTAssertTrue(released, "the hold released exactly once at the truncation, after the stop")
         XCTAssertEqual(playback.resumeCalls, 1, "the hold released exactly once at the truncation")
         let pending = await MainActor.run {
-            audioPlayer.hasPendingAudio ?? false
+            audioPlayer.hasPendingAudio
         }
         // DIRECT stop evidence: only cancel()/finish() advance the player's drain epoch. No
         // `done` arrived, so a bumped epoch proves THIS turn's owned output was stopped before
         // the host playback was released (cancel precedes restoreTransientAudioState).
         let epochAfter = await MainActor.run {
-            audioPlayer.currentDrainEpoch ?? 0
+            audioPlayer.currentDrainEpoch
         }
         XCTAssertGreaterThan(epochAfter, 0, "owned output was stopped (cancel) before the hold/host release")
         XCTAssertFalse(pending, "no buffered owned audio survives the release")
@@ -811,8 +808,8 @@ final class GracePlaybackLifetimeAudit: XCTestCase {
 
     @MainActor
     private func waitForRouter(_ service: VoiceControlService) async throws {
-        // The sink's player must see an output in the test host, or `startEngine` consumes the
-        // answer silently and the drain this audit measures never happens. Instance hook, armed
+        // The sink's player was constructed with an output the test host lacks, so `startEngine`
+        // schedules the answer instead of dropping it. This wait only covers the router coming up.
         let deadline = Date().addingTimeInterval(20)
         while Date() < deadline {
             if service.intentRouterIsReadyForTesting { return }

@@ -22,8 +22,8 @@ import AVFoundation
 ///
 /// # What is real here
 ///
-/// Frames enter through `CloudRouteSink.audioPlayerForTesting.enqueue` — the sink that owns the
-/// player, and the same call the socket handler makes. The runner thread then takes them through the
+/// Frames enter through `graph.cloud.enqueue` — the very player this file injected into the sink,
+/// and the same call the socket handler makes. The runner thread then takes them through the
 /// production path: `processFrames` → `playFrame`, which builds its OWN graph in `startEngine`,
 /// appends, reads the node's position with `renderPosition(of:)`, records the block range, and
 /// publishes through the handoff. No case calls `appendToEmittedReference` with a test-supplied
@@ -34,9 +34,9 @@ import AVFoundation
 ///
 /// # How the node's counter advances without hardware
 ///
-/// `CloudAudioPlayer.audioOutputIsAvailable` is false under a test configuration, so the player would
-/// build no graph at all. The single substituted fact is that judgement, via
-/// the injected output-availability provider; everything downstream is production code. To advance
+/// A test host has no audio output, so the production judgement would make the player build no
+/// graph at all. The single substituted fact is that judgement, via the constructor-injected
+/// output-availability provider; everything downstream is production code. To advance
 /// the resulting node's counter, the harness puts the PLAYER'S OWN engine into manual offline
 /// rendering and renders through it. Measured on this host (`/tmp/probe13`, results in
 /// `notes/pr49-interleaving-machine-answers.md`):
