@@ -402,20 +402,8 @@ class TokenHelperTests: XCTestCase {
 
     func testCallSecureURL() {
 
-        ServerSettings.setSyncingEmail(email: "test@test.com")
-        ServerSettings.saveSyncingPassword("1234")
-
         let tokenHelper = TokenHelper(urlConnection: URLConnection { request in
             switch request.url {
-            case URL.userLogin:
-                let response = HTTPURLResponse(url: .userLogin, statusCode: 200, httpVersion: nil, headerFields: nil)
-                XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json; charset=UTF8")
-                let body = try XCTUnwrap(request.httpBody)
-                let decoded = try JSONSerialization.jsonObject(with: body) as? [String: String]
-                XCTAssertEqual(decoded?["email"], "test@test.com")
-                XCTAssertEqual(decoded?["password"], "1234")
-                let data = try JSONSerialization.data(withJSONObject: ["accessToken": "1234", "refreshToken": "refresh-1234", "uuid": "uuid-test", "email": "test@test.com"])
-                return (data, response)
             case URL.userUpdate:
                 let response = HTTPURLResponse(url: .userUpdate, statusCode: 200, httpVersion: nil, headerFields: nil)
                 // Any data will do here, just to see if it makes it through
@@ -426,10 +414,36 @@ class TokenHelperTests: XCTestCase {
             }
         }, isLoggedIn: { false })
 
-        let expectation = XCTestExpectation(description: "Waiting on asyncAcquireToken to complete")
+        let expectation = XCTestExpectation(description: "Waiting on callSecureUrl to complete")
         tokenHelper.callSecureUrl(request: URLRequest(url: .userUpdate)) { response, data, error in
             if let error {
                 XCTFail("Failed async acquire with error: \(error)")
+            } else {
+                XCTAssertNotNil(response, "Should have received response")
+                XCTAssertNotNil(data, "Should have received data")
+            }
+            expectation.fulfill()
+        }
+        wait(for: [expectation])
+    }
+
+    /// End-to-end logged-in request path: a stored access token is attached as Bearer by
+    /// performCallSecureUrl and the request reaches the connection without an acquire. Keeps
+    /// the isLoggedIn branch covered now that testCallSecureURL injects the logged-out check.
+    func testCallSecureURLAttachesStoredTokenWhenLoggedIn() throws {
+        ServerSettings.syncingV2Token = "stored-access"
+
+        let tokenHelper = TokenHelper(urlConnection: URLConnection { request in
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer stored-access",
+                           "the stored token rides as the Bearer credential")
+            let response = HTTPURLResponse(url: .userUpdate, statusCode: 200, httpVersion: nil, headerFields: nil)
+            return ("Test".data(using: .utf8), response)
+        }, isLoggedIn: { true })
+
+        let expectation = XCTestExpectation(description: "Waiting on logged-in callSecureUrl to complete")
+        tokenHelper.callSecureUrl(request: URLRequest(url: .userUpdate)) { response, data, error in
+            if let error {
+                XCTFail("Failed logged-in call with error: \(error)")
             } else {
                 XCTAssertNotNil(response, "Should have received response")
                 XCTAssertNotNil(data, "Should have received data")
