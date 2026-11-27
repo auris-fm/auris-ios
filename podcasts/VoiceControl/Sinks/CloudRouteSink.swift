@@ -635,15 +635,17 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     return
                 }
                 ticket.continuation = continuation
-                acknowledgementTicket = ticket
-                lock.unlock()
-                // Arm the bound OUTSIDE the lock; the timer resumes through the same one-shot
-                // transition, so a terminal landing at the same instant cannot double-resume.
+                // Arm the bound under the lock, so its field write cannot race a settlement
+                // reading the ticket's fields (a TSan-reported race lived exactly here). The
+                // bound only sleeps and then re-enters the one-shot transition below, so a
+                // terminal landing at the same instant still cannot double-resume.
                 ticket.timer = Task { [weak self] in
                     try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
                     guard !Task.isCancelled else { return }
                     _ = self?.settleAcknowledgement(.failed)
                 }
+                acknowledgementTicket = ticket
+                lock.unlock()
             }
         }
 
@@ -651,6 +653,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         /// resumed with, or nil when another path already settled it.
         @discardableResult
         private func settleAcknowledgement(_ outcome: InterruptionResolution) -> InterruptionResolution? {
+            // Collect and CLEAR the ticket's fields under the lock: both sides touch them from
+            // different executors (the wait parks on the route's task, the terminal lands on
+            // main), and the unlocked tail was the other half of the TSan-reported race. The
+            // resume itself still happens outside the lock — resuming under a lock risks a
+            // deadlock if the resumed task re-enters synchronously.
             lock.lock()
             // FIRST settlement wins, and it is recorded even with nobody waiting, so a waiter that
             // parks later reads it immediately.
@@ -661,10 +668,11 @@ final class CloudRouteSink: VoiceCloudRouteSink,
             resolution = outcome
             let ticket = acknowledgementTicket
             acknowledgementTicket = nil
-            lock.unlock()
             ticket?.timer?.cancel()
-            ticket?.continuation?.resume(returning: outcome)
+            let parkedContinuation = ticket?.continuation
             ticket?.continuation = nil
+            lock.unlock()
+            parkedContinuation?.resume(returning: outcome)
             return outcome
         }
 
