@@ -23,6 +23,12 @@ struct Constants {
         static let playbackEnded = NSNotification.Name(rawValue: "SJPlaybackEnd")
         static let playbackFailed = NSNotification.Name(rawValue: "playbackFailed")
         static let playbackPositionSaved = NSNotification.Name(rawValue: "SJPlayPosSaved")
+        /// A seek was performed on the playing episode — the ONE funnel every position
+        /// change goes through (`PlaybackManager.seekTo`): scrubber, skip buttons, chapter
+        /// jumps, remote commands, CarPlay, Watch, bookmarks, shortcuts, sync. `userInfo`
+        /// key `playbackSeekTargetSecondsKey` carries the target as a `TimeInterval`.
+        static let playbackSeekPerformed = NSNotification.Name(rawValue: "SJPlaybackSeek")
+        static let playbackSeekTargetSecondsKey = "PCPlaybackSeekTargetSeconds"
         static let viewWillTransitionToSize = NSNotification.Name(rawValue: "SJViewSizeChange")
         static let googleCastStatusChanged = NSNotification.Name(rawValue: "SJGCStatusChanged")
         static let googleCastMultiZoneStatusChanged = NSNotification.Name(rawValue: "SJGCMultiStatusChanged")

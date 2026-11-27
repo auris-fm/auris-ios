@@ -571,6 +571,11 @@ class PlaybackManager: ServerPlaybackDelegate {
 
         let currentTime = playingEpisode.playedUpTo
         seekingTo = time
+        NotificationCenter.postOnMainThread(
+            notification: Constants.Notifications.playbackSeekPerformed,
+            object: playingEpisode.uuid,
+            userInfo: [Constants.Notifications.playbackSeekTargetSecondsKey: time]
+        )
         FileLog.shared.addMessage("seek to \(time) startPlaybackAfterSeek \(startPlaybackAfterSeek)")
 
         if let player, player.isReadyToPlay() {
