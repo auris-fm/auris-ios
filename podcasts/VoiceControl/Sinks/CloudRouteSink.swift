@@ -446,8 +446,14 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         guard let held = heldLatencyRecord else { return }
         heldLatencyRecord = nil
         heldLatencyDrainEpoch = nil
+        latencyPlaybackFailureStamp = nil
         held(firstAudible)
     }
+
+    /// Set while THIS sink's turn holds a latency record: stamps `playback_failed` /
+    /// `dropped_frames` onto that record when the player reports a failed answer. Bound when
+    /// the record is held, cleared when it settles any other way.
+    private var latencyPlaybackFailureStamp: ((Int) -> Void)?
     /// THIS sink's live playback hold. Acquired at the turn's admitted dispatch; ownership
     /// TRANSFERS atomically (begin-successor before end-predecessor) when a new turn is admitted,
     /// so a successor never runs hold-free between turns. Released at every terminal: error,
@@ -1602,6 +1608,15 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         // captures a local declared before it, so the state lives in an explicit box.
         let audioCountersAtStart = audioPlayer.audioCountersSnapshot
         let latencyState = TurnLatencyState(record: latencyRecord, emitted: false, audioCounters: audioCountersAtStart)
+        // The player-failure stamp lives on the SINK (the delegate callback runs on the main
+        // queue, outside this scope). Bound NOW, not at `done`: a streamed answer exhausts
+        // the start budget about 1.25 s after its first frames, while the stream is still
+        // running — the callback then arrives before any record is held, and the failure
+        // must already be on the record the terminal will emit.
+        latencyPlaybackFailureStamp = { dropped in
+            latencyState.record.playbackFailed = true
+            latencyState.record.droppedFrames = dropped
+        }
         let snapshotAudioCounters: () -> Void = {
             latencyState.audioCountersAtLastTouch = self.audioPlayer.audioCountersSnapshot
         }
@@ -1615,6 +1630,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
         let emitLatencyRecord: (String) -> Void = { outcome in
             guard !latencyState.emitted else { return }
             latencyState.emitted = true
+            // This turn's record has settled: a late player-failure callback must not stamp
+            // the NEXT turn's record.
+            self.latencyPlaybackFailureStamp = nil
             // The send instant is read at the TERMINAL, from the sink's own record, because the
             // transport reports it asynchronously: binding it earlier would sometimes report the
             // reply's arrival instead.
@@ -1648,6 +1666,9 @@ final class CloudRouteSink: VoiceCloudRouteSink,
                     // The server names the codec for this turn's binary frames;
                     // the player decodes at that rate rather than the hardware's.
                     audioPlayer.setNegotiatedCodec(codec)
+                    // A NEW TURN for the audio player too: its failed-start budget and any
+                    // terminal failure left by an earlier turn must not shadow this one.
+                    audioPlayer.beginTurn()
                     // THE CONVERSATION BECAME REAL. `connected` is sent only after admission, so
                     // this frame — not the send that preceded it — is the client's only evidence
                     // that the server holds the conversation this turn named. Recorded where the
@@ -2068,7 +2089,7 @@ final class CloudRouteSink: VoiceCloudRouteSink,
     /// One turn's latency bookkeeping. A reference type because the request instant and the
     /// emission guard are written and read across the turn's stream loop and its terminals.
     private final class TurnLatencyState {
-        let record: CloudTurnLatencyRecord
+        var record: CloudTurnLatencyRecord
         var emitted: Bool
         /// The player's first-audible instant, snapshotted the FIRST time this turn is seen to have
         /// played audio.
@@ -2930,6 +2951,28 @@ extension CloudRouteSink {
 
     func audioPlayerDidTakeFirstAudible(at instant: Double) {
         writeHeldLatencyRecord(firstAudible: instant)
+    }
+
+    func audioPlayerDidFailPlayback(droppedFrameCount: Int) {
+        // The turn's buffered answer was dropped because the audio engine never started.
+        // The held latency record is stamped and written as it stands (no first audible —
+        // there was none), so a failed answer is countable from the records and the turn's
+        // playback state is never left waiting for audio that will not come. The hold
+        // release itself still rides `audioPlayerDidStop`, which fires when the drain
+        // quiesces after this drop.
+        FileLog.shared.addMessage(
+            "[VoicePipeline] cloud playback FAILED — audio engine never started, "
+            + "\(droppedFrameCount) frame(s) of the turn's answer discarded")
+        // STAMP the record for this turn whether or not one is held yet: the usual failure
+        // lands mid-stream, before `done` holds anything, and the terminal's emission must
+        // carry it. A held record is written EARLY here (the answer ends as a failure; it
+        // will never become audible), with the same once-only emit guard the terminal uses.
+        latencyPlaybackFailureStamp?(droppedFrameCount)
+        if let held = heldLatencyRecord {
+            heldLatencyRecord = nil
+            heldLatencyDrainEpoch = nil
+            held(nil)
+        }
     }
 
     func audioPlayerDidStop(drainEpoch: Int) {
