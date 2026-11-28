@@ -378,6 +378,12 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
             await MainActor.run { sink.activeResultSocketForTesting?.requestId == "u-prior" }
         }
         XCTAssertTrue(priorLive, "premise: turn 1 must be in flight")
+        // A socket existing is not enough: an un-authenticated turn is ABANDONED (early_close)
+        // when the next utterance begins, not interrupted — measured in BK #259, where the barge
+        // replaced turn 1 outright and no follow-up was ever held. The barge-in premise needs
+        // turn 1 authenticated first.
+        let priorAuthenticated = await waitUntil(timeout: 15) { !self.authFrames(for: "u-prior").isEmpty }
+        XCTAssertTrue(priorAuthenticated, "premise: turn 1 must be authenticated before the barge-in")
         speak(service, "play the next one", "u-barge")
         let held = await waitUntil(timeout: 15) {
             await MainActor.run { state.heldFollowUpForTesting?.utteranceId == "u-barge" }
@@ -416,6 +422,11 @@ final class ServiceInterruptionBridgeControl: XCTestCase {
             await MainActor.run { sink.activeResultSocketForTesting?.requestId == "u-prior" }
         }
         XCTAssertTrue(priorLive, "premise: turn 1 must be in flight")
+        // Same premise as the resubmitted case: turn 1 must be AUTHENTICATED, or the barge-in
+        // abandons it (early_close) instead of interrupting it, and this case's barriers change
+        // meaning (BK #259).
+        let priorAuthenticated = await waitUntil(timeout: 15) { !self.authFrames(for: "u-prior").isEmpty }
+        XCTAssertTrue(priorAuthenticated, "premise: turn 1 must be authenticated before the barge-in")
 
         speak(service, "play the next one", "u-barge")
         let interrupted = await waitUntil(timeout: 15) { !self.interruptFrames().isEmpty }
