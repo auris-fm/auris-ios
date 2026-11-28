@@ -3,7 +3,9 @@
 # build-and-test step on main.
 #
 # Unlike build-and-test, this step never stubs the API credentials: a beta
-# archive must carry real ones or it refuses to build.
+# archive must carry shape-correct ones or it refuses to build (see the guard
+# below: every key present, string values, no placeholders or whitespace-only
+# values; blank is fine).
 #
 # Runs `fastlane auris_beta_build` (device archive with automatic signing
 # via the App Store Connect API key) on every main run. Publishing to
@@ -49,20 +51,21 @@ assert_toolchain() {
 # Inputs the archive needs that a fresh checkout does not carry. Each is
 # created here rather than assumed present: the sibling job builds them into
 # its own checkout, and this step runs in a different one.
-# A release archive must carry REAL API credentials. `make external_contributor`
-# writes the template with every placeholder stripped to an empty string, which
-# is right for build-and-test and wrong here: a TestFlight build from it would
-# reach testers with blank keys. So this step never generates the file — it
-# refuses, before any archive, unless the file exists AND holds non-empty values.
-# Two sources are legitimate. A local LocalApiCredentials.swift wins in the
-# build phase; otherwise scripts/build-phases/generate-credentials.sh generates
-# from CREDENTIALS_JSON_PATH (config/PocketCasts.base.xcconfig), which is how an
-# internal contributor's machine is provisioned. Either is fine; neither, or a
-# stub-shaped one, is not.
-# `replace_secrets.rb` does `line % secrets`, so every %{key} in the template
-# must exist AND be non-empty: a missing key raises KeyError deep inside the
-# build phase, and an empty one substitutes "" as readily as a real value —
-# producing exactly the blank-credentials build this step exists to refuse.
+# A release archive must carry SHAPE-CORRECT credentials; whether each value is
+# populated is a provisioning call, not a build gate — the beta-feature audit of
+# the template found every credential optional, and the app hides or degrades
+# the feature cleanly when a value is blank, so a credentials-less beta runs.
+# The guard checks SHAPE only, identically for both sources (a local
+# LocalApiCredentials.swift wins in the build phase; otherwise
+# scripts/build-phases/generate-credentials.sh generates from
+# CREDENTIALS_JSON_PATH — config/PocketCasts.base.xcconfig — on an internal
+# contributor's machine): every template key present, every value a string,
+# no unreplaced %{placeholder}, no whitespace-only value. Blank (`""`) is fine;
+# whitespace-only is refused as a provisioning typo — the app gates on
+# `isEmpty`, which a `" "` defeats, so the feature would surface broken.
+# `replace_secrets.rb` does `line % secrets`, so a missing key raises KeyError
+# deep inside the build phase; a non-string (`null`, `false`) interpolates ""
+# or "false", landing in the build as a bogus literal.
 # `timestamp` is supplied by the script itself, not by the secrets file.
 assert_complete_secrets() {
   local json="$1" tpl=podcasts/Credentials/ApiCredentials.tpl
@@ -81,16 +84,24 @@ if not isinstance(secrets, dict):
 # with a digit or capital must not escape the check.
 keys = set(re.findall(r'%\{([^}]*)\}', open(tpl_path).read())) - {'timestamp'}
 missing = sorted(k for k in keys if k not in secrets)
-# A credential is a non-empty STRING. `null` interpolates to "" and `false` to
-# "false" in Ruby, and str(None) == "None" would pass a truthiness check.
-empty = sorted(k for k in keys
-               if k in secrets and not (isinstance(secrets[k], str) and secrets[k].strip()))
-if missing or empty:
+# A credential is a STRING — empty is fine, a wrong type is not. `null`
+# interpolates to "" and `false` to "false" in Ruby, and str(None) == "None"
+# would pass a truthiness check, so the TYPE is what the check pins.
+wrong_type = sorted(k for k in keys
+                    if k in secrets and not isinstance(secrets[k], str))
+# Exactly "" is the audited blank; " " defeats the app's isEmpty gate, so it
+# is a provisioning typo, not a deliberate blank.
+whitespace = sorted(k for k in keys
+                    if k in secrets and isinstance(secrets[k], str)
+                    and secrets[k] != "" and secrets[k].strip() == "")
+if missing or wrong_type or whitespace:
     if missing:
         print(f"{json_path} is missing credentials: {', '.join(missing)}")
-    if empty:
-        print(f"{json_path} has empty credentials: {', '.join(empty)}")
-    print("refusing to archive a build testers cannot use")
+    if wrong_type:
+        print(f"{json_path} has non-string credentials: {', '.join(wrong_type)}")
+    if whitespace:
+        print(f"{json_path} has whitespace-only credentials: {', '.join(whitespace)}")
+    print("refusing to archive a build that would fail or misbehave")
     sys.exit(1)
 PYSECRETS
 }
@@ -99,9 +110,19 @@ assert_real_credentials() {
   local f=podcasts/Credentials/LocalApiCredentials.swift
   local json="$HOME/.configure/pocketcasts-ios/secrets/pocket_casts_credentials.json"
   if [[ -f "$f" ]]; then
-    # Empty-valued (the stub) or still-placeholder (the raw template) both fail.
-    if grep -qE '"(%\{[^}]*\})?"' "$f"; then
-      echo "$f holds empty or placeholder credentials; refusing to archive a build testers cannot use"
+    # One rule with the JSON source: blanks are fine, an unreplaced %{…}
+    # placeholder is the stub shape the build phase must never ship, and a
+    # whitespace-only value defeats the app's isEmpty gate. The template's
+    # only string literals are the credential values, so neither pattern can
+    # match anything else in the file.
+    if grep -qE '"%\{[^}]*\}"' "$f"; then
+      echo "$f holds unreplaced placeholder credentials; refusing to archive a build that would misbehave"
+      return 1
+    fi
+    # Swift escape forms (`"\t"`, `"\u{00A0}"`) read back non-empty at
+    # runtime, so the raw-text grep refuses them as whitespace-only too.
+    if grep -qE '"[[:space:]]+"' "$f" || grep -qE '"\\(t|r|n|u\{[0-9A-Fa-f]+\})"' "$f"; then
+      echo "$f holds whitespace-only credentials; refusing to archive a build that would misbehave"
       return 1
     fi
     return 0
@@ -110,7 +131,7 @@ assert_real_credentials() {
     assert_complete_secrets "$json" || return 1
     return 0
   fi
-  echo "missing $f (or $json): a beta archive needs real API credentials, not the empty stub"
+  echo "missing $f (or $json): a beta archive needs a credentials file to shape-check, not an absent one"
   return 1
 }
 
